@@ -946,6 +946,58 @@ test_long_busy_validation_is_not_zero_progress_startup() {
   pass "ordinary long busy validations are outside the dedicated MCP-startup detector"
 }
 
+# The detector is gated on the task meta's recorded codex harness: another
+# harness's pane showing the same startup-shaped text must never trip it.
+test_non_codex_harness_is_outside_mcp_startup_detector() {
+  local dir state fakebin out capture_file window sig pid
+  dir=$(make_case non-codex-startup-text); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-claude-crew"
+  printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/claude-crew.meta"
+  printf 'working: editing the watcher tests\n' > "$state/claude-crew.status"
+  sig=$(seen_sig "$state/claude-crew.status"); printf '%s' "$sig" > "$state/.seen-claude-crew_status"
+  printf 'Starting MCP servers (4/5): shared_memory (0s - esc to interrupt)\n  gpt-5.5 xhigh - Context 100%% left\n' > "$capture_file"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_ZERO_PROGRESS_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 25; then
+    reap "$pid"; fail "a non-codex task tripped the codex MCP-startup detector: $(cat "$out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "a non-codex task enqueued a zero-progress wake"; }
+  reap "$pid"
+  pass "the MCP-startup detector is gated to tasks whose meta records the codex harness"
+}
+
+# The detector matches only the pane's footer lines: a startup-shaped string in
+# displayed content (a diff, a log, an edited test) must never spoof startup state.
+test_displayed_startup_text_outside_footer_does_not_spoof_detector() {
+  local dir state fakebin out capture_file window sig pid
+  dir=$(make_case displayed-startup-text); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-editing-watch"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/editing-watch.meta"
+  printf 'working: editing fm-watch.sh fixtures\n' > "$state/editing-watch.status"
+  sig=$(seen_sig "$state/editing-watch.status"); printf '%s' "$sig" > "$state/.seen-editing-watch_status"
+  {
+    printf 'Starting MCP servers (4/5): shared_memory (0s - esc to interrupt)\n'
+    printf 'fixture line %s of the file being displayed\n' 1 2 3 4 5 6
+    printf 'esc to interrupt\n  gpt-5.5 xhigh - Context 72%% left\n'
+  } > "$capture_file"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_ZERO_PROGRESS_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 25; then
+    reap "$pid"; fail "startup-shaped displayed content above the footer spoofed the detector: $(cat "$out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "displayed startup text enqueued a zero-progress wake"; }
+  reap "$pid"
+  pass "startup-shaped text outside the pane footer never spoofs the MCP-startup detector"
+}
+
 test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
   local dir state fakebin out capture_file window key pane_hash sig pid since
   dir=$(make_case nonterminal-stale-timer-repair); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1181,6 +1233,8 @@ test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_codex_mcp_startup_timer_churn_escalates_zero_progress
 test_long_busy_validation_is_not_zero_progress_startup
+test_non_codex_harness_is_outside_mcp_startup_detector
+test_displayed_startup_text_outside_footer_does_not_spoof_detector
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_secondmate_paused_resurfaces_in_normal_mode

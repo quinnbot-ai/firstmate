@@ -134,9 +134,10 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # A Codex MCP startup spinner contains the ordinary busy signature and updates
 # its elapsed timer continuously. Neither generic busy detection nor pane-hash
 # staleness can catch a startup wedged at one server, so a dedicated cheap parser
-# tracks only the meaningful "completed/total server" identity from the tail40
-# capture the watcher already reads. The marker survives watcher restarts and is
-# reset by any stage/server advance. No fm-crew-state or backend call is added.
+# tracks only the meaningful "completed/total server" identity from the footer of
+# the tail40 capture the watcher already reads, and only for tasks whose meta
+# records harness=codex. The marker survives watcher restarts and is reset by any
+# stage/server advance. No fm-crew-state or backend call is added.
 BUSY_ZERO_PROGRESS_ESCALATE_SECS=${FM_BUSY_ZERO_PROGRESS_ESCALATE_SECS:-300}
 case "$BUSY_ZERO_PROGRESS_ESCALATE_SECS" in
   ''|*[!0-9]*) BUSY_ZERO_PROGRESS_ESCALATE_SECS=300 ;;
@@ -189,13 +190,17 @@ hash_pane() {
 # discarding its volatile spinner and elapsed-time suffix. An empty result means
 # the pane is outside this dedicated startup phase. Server ids are one token in
 # Codex's UI; restricting to that token also keeps runtime marker contents safe.
+# Like window_is_busy's regex fallback, only the last 6 non-blank lines (the TUI
+# footer area, where Codex renders the startup spinner) are matched, so a
+# startup-looking string in displayed content cannot spoof startup state.
 codex_mcp_startup_progress() {  # <tail40>
-  local tail40=$1 line stage completed total rest server
-  case "$tail40" in
+  local tail40=$1 footer line stage completed total rest server
+  footer=$(printf '%s\n' "$tail40" | grep -v '^[[:space:]]*$' | tail -6)
+  case "$footer" in
     *'Starting MCP servers ('*) ;;
     *) return 1 ;;
   esac
-  line=$(printf '%s\n' "$tail40" | grep -F 'Starting MCP servers (' | tail -1)
+  line=$(printf '%s\n' "$footer" | grep -F 'Starting MCP servers (' | tail -1)
   stage=${line#*Starting MCP servers (}
   stage=${stage%%)*}
   completed=${stage%%/*}
@@ -223,8 +228,9 @@ write_busy_zero_progress_marker() {  # <marker> <epoch> <progress>
 }
 
 # Track Codex MCP startup progress independently of pane hashes. This runs once
-# per recorded non-secondmate window per poll, but only shell-matches the already
-# captured tail and touches a marker while the dedicated startup line is present.
+# per recorded non-secondmate codex-harness window per poll, but only
+# shell-matches the already captured tail's footer and touches a marker while
+# the dedicated startup line is present.
 # A `check:` wake is deliberate: it is unconditionally actionable in normal and
 # away-mode supervision, and preserves the decorated diagnostic instead of asking
 # stale classification to reinterpret a busy pane.
@@ -288,6 +294,22 @@ window_kind() {
     [ -n "$kind" ] || kind=ship
     echo "$kind"
     return 0
+  fi
+  echo unknown
+}
+
+# window_harness: the harness recorded in the meta whose window= matches <w>,
+# or "unknown" when no matching meta carries the field. Gates harness-specific
+# detectors such as the Codex MCP-startup fingerprint.
+window_harness() {
+  local w=$1 meta harness
+  meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
+  if [ -n "$meta" ]; then
+    harness=$(grep '^harness=' "$meta" | cut -d= -f2- || true)
+    if [ -n "$harness" ]; then
+      echo "$harness"
+      return 0
+    fi
   fi
   echo unknown
 }
@@ -811,7 +833,7 @@ EOF
       continue
     fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
-    if [ "$kind" != secondmate ]; then
+    if [ "$kind" != secondmate ] && [ "$(window_harness "$w")" = codex ]; then
       busy_zero_progress_check "$w" "$tail40"
     fi
     h=$(printf '%s' "$tail40" | hash_pane)
