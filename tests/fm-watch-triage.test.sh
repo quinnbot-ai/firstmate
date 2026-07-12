@@ -887,7 +887,7 @@ test_wedge_escalation_resets_when_pane_becomes_active() {
 # MCP startup stage and surface an actionable, distinct reason when that stage does
 # not advance within the configured zero-progress threshold.
 test_codex_mcp_startup_timer_churn_escalates_zero_progress() {
-  local dir state fakebin out drain_out capture_file window sig pid updater i
+  local dir state fakebin out drain_out capture_file window sig pid updater i elapsed
   dir=$(make_case codex-mcp-startup-wedge); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
   window="test:fm-mcp-wedged"
@@ -898,7 +898,13 @@ test_codex_mcp_startup_timer_churn_escalates_zero_progress() {
   i=0
   (
     while [ "$i" -lt 40 ]; do
-      printf 'Starting MCP servers (4/5): shared_memory (%ss - esc to interrupt)\n  gpt-5.5 xhigh · Context 100%% left\n' "$i" > "$capture_file"
+      case $((i % 4)) in
+        0) elapsed='59s' ;;
+        1) elapsed='1m 00s' ;;
+        2) elapsed='5m 01s' ;;
+        *) elapsed='1h 00m 00s' ;;
+      esac
+      printf '• Starting MCP servers (4/5): shared_memory (%s • esc to interrupt)\n  gpt-5.5 xhigh · ~/firstmate\n' "$elapsed" > "$capture_file"
       i=$((i + 1))
       sleep 0.2
     done
@@ -931,7 +937,7 @@ test_codex_secondmate_mcp_startup_escalates_zero_progress() {
   printf 'window=%s\nkind=secondmate\nharness=codex\n' "$window" > "$state/codex-secondmate.meta"
   printf 'working: starting secondmate\n' > "$state/codex-secondmate.status"
   sig=$(seen_sig "$state/codex-secondmate.status"); printf '%s' "$sig" > "$state/.seen-codex-secondmate_status"
-  printf 'Starting MCP servers (4/5): shared_memory (0s - esc to interrupt)\n  gpt-5.5 xhigh · Context 100%% left\n' > "$capture_file"
+  printf '• Booting MCP server: shared_memory (5m 01s • esc to interrupt)\n  gpt-5.5 xhigh · ~/firstmate\n' > "$capture_file"
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_BUSY_ZERO_PROGRESS_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
@@ -950,7 +956,7 @@ test_busy_zero_progress_queue_failure_preserves_throttle_timestamp() {
   printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/queue-failure.meta"
   printf 'working: starting MCP servers\n' > "$state/queue-failure.status"
   sig=$(seen_sig "$state/queue-failure.status"); printf '%s' "$sig" > "$state/.seen-queue-failure_status"
-  printf 'Starting MCP servers (4/5): shared_memory (0s - esc to interrupt)\n  gpt-5.5 xhigh · Context 100%% left\n' > "$capture_file"
+  printf 'Starting MCP servers (4/5): shared_memory (5m 01s • esc to interrupt)\n  gpt-5.5 xhigh · ~/firstmate\n' > "$capture_file"
   key=$(printf '%s' "$window" | tr ':/.' '___'); marker="$state/.busy-zero-progress-$key"
   before=$(( $(date +%s) - 30 ))
   printf '%s\n4/5 shared_memory\n' "$before" > "$marker"
@@ -1003,7 +1009,7 @@ test_non_codex_harness_is_outside_mcp_startup_detector() {
   printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/claude-crew.meta"
   printf 'working: editing the watcher tests\n' > "$state/claude-crew.status"
   sig=$(seen_sig "$state/claude-crew.status"); printf '%s' "$sig" > "$state/.seen-claude-crew_status"
-  printf 'Starting MCP servers (4/5): shared_memory (0s - esc to interrupt)\n  gpt-5.5 xhigh · Context 100%% left\n' > "$capture_file"
+  printf 'Starting MCP servers (4/5): shared_memory (5m 01s • esc to interrupt)\n  gpt-5.5 xhigh · ~/firstmate\n' > "$capture_file"
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_BUSY_ZERO_PROGRESS_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
@@ -1028,9 +1034,9 @@ test_displayed_startup_text_near_footer_does_not_spoof_detector() {
   printf 'working: editing fm-watch.sh fixtures\n' > "$state/editing-watch.status"
   sig=$(seen_sig "$state/editing-watch.status"); printf '%s' "$sig" > "$state/.seen-editing-watch_status"
   {
-    printf 'Starting MCP servers (4/5): shared_memory (0s - esc to interrupt)\n'
+    printf 'Starting MCP servers (4/5): shared_memory (5m 01s • esc to interrupt)\n'
     printf 'tool output continues after the displayed fixture\n'
-    printf '›\n  gpt-5.5 xhigh · Context 72%% left\n'
+    printf '›\n  gpt-5.5 xhigh · ~/firstmate\n'
   } > "$capture_file"
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -1052,7 +1058,7 @@ assert_malformed_startup_line_not_detected() {
   printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/$name.meta"
   printf 'working: displaying malformed startup text\n' > "$state/$name.status"
   sig=$(seen_sig "$state/$name.status"); printf '%s' "$sig" > "$state/.seen-${name}_status"
-  printf '%s\n  gpt-5.5 xhigh · Context 100%% left\n' "$line" > "$capture_file"
+  printf '%s\n  gpt-5.5 xhigh · ~/firstmate\n' "$line" > "$capture_file"
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_BUSY_ZERO_PROGRESS_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
@@ -1065,10 +1071,40 @@ assert_malformed_startup_line_not_detected() {
 }
 
 test_malformed_mcp_startup_counters_and_delimiter_are_rejected() {
-  assert_malformed_startup_line_not_detected malformed-completed 'Starting MCP servers (/5): shared_memory (0s - esc to interrupt)'
-  assert_malformed_startup_line_not_detected malformed-total 'Starting MCP servers (4/): shared_memory (0s - esc to interrupt)'
-  assert_malformed_startup_line_not_detected malformed-delimiter 'Starting MCP servers (4-5): shared_memory (0s - esc to interrupt)'
+  assert_malformed_startup_line_not_detected malformed-completed 'Starting MCP servers (/5): shared_memory (5m 01s • esc to interrupt)'
+  assert_malformed_startup_line_not_detected malformed-total 'Starting MCP servers (4/): shared_memory (5m 01s • esc to interrupt)'
+  assert_malformed_startup_line_not_detected malformed-delimiter 'Starting MCP servers (4-5): shared_memory (5m 01s • esc to interrupt)'
+  assert_malformed_startup_line_not_detected malformed-duration 'Starting MCP servers (4/5): shared_memory (5m 60s • esc to interrupt)'
   pass "malformed MCP-startup counters and delimiters are outside the detector"
+}
+
+assert_default_threshold_startup_shape_escalates() {
+  local name=$1 line=$2 progress=$3 dir state fakebin out capture_file window sig pid key marker before
+  dir=$(make_case "$name"); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-$name"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/$name.meta"
+  printf 'working: starting MCP servers\n' > "$state/$name.status"
+  sig=$(seen_sig "$state/$name.status"); printf '%s' "$sig" > "$state/.seen-${name}_status"
+  printf '%s\n  gpt-5.5 xhigh · ~/firstmate\n' "$line" > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___'); marker="$state/.busy-zero-progress-$key"
+  before=$(( $(date +%s) - 301 ))
+  printf '%s\n%s\n' "$before" "$progress" > "$marker"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 60 || fail "default threshold did not recognize production startup shape ($line)"
+  grep -F "MCP startup $progress" "$out" >/dev/null \
+    || fail "production startup shape lost its progress identity ($line): $(cat "$out")"
+}
+
+test_production_duration_shapes_survive_default_threshold() {
+  assert_default_threshold_startup_shape_escalates production-minute-startup \
+    '• Starting MCP servers (4/5): shared_memory (5m 01s • esc to interrupt)' '4/5 shared_memory'
+  assert_default_threshold_startup_shape_escalates production-hour-startup \
+    '• Booting MCP server: shared_memory (1h 00m 00s • esc to interrupt)' '0/1 shared_memory'
+  pass "current Codex minute and hour startup shapes remain detectable past the default threshold"
 }
 
 test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
@@ -1311,6 +1347,7 @@ test_long_busy_validation_is_not_zero_progress_startup
 test_non_codex_harness_is_outside_mcp_startup_detector
 test_displayed_startup_text_near_footer_does_not_spoof_detector
 test_malformed_mcp_startup_counters_and_delimiter_are_rejected
+test_production_duration_shapes_survive_default_threshold
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_secondmate_paused_resurfaces_in_normal_mode

@@ -190,15 +190,22 @@ hash_pane() {
 # discarding its volatile spinner and elapsed-time suffix. An empty result means
 # the pane is outside this dedicated startup phase. Server ids are one token in
 # Codex's UI; restricting to that token also keeps runtime marker contents safe.
-# Codex renders the startup spinner immediately above its context footer.
+# Codex renders the startup spinner immediately above its status footer.
 codex_mcp_startup_progress() {  # <tail40>
-  local tail40=$1 footer line context parsed completed total server extra
+  local tail40=$1 footer line status parsed completed total server extra elapsed_re
   footer=$(printf '%s\n' "$tail40" | grep -v '^[[:space:]]*$' | tail -2)
   [ "$(printf '%s\n' "$footer" | wc -l | tr -d ' ')" = 2 ] || return 1
   line=$(printf '%s\n' "$footer" | sed -n '1p')
-  context=$(printf '%s\n' "$footer" | sed -n '2p')
-  printf '%s\n' "$context" | grep -Eq '^[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+·[[:space:]]+Context[[:space:]]+[0-9]+%[[:space:]]+left([[:space:]]+·[[:space:]]+.*)?$' || return 1
-  parsed=$(printf '%s\n' "$line" | sed -nE 's/^[[:space:]]*Starting MCP servers \(([0-9]+)\/([0-9]+)\): ([A-Za-z0-9_.-]+) \([0-9]+s - esc to interrupt\)$/\1 \2 \3/p')
+  status=$(printf '%s\n' "$footer" | sed -n '2p')
+  printf '%s\n' "$status" | grep -Eq '^[[:space:]]+[^[:space:]]+[[:space:]]+(minimal|low|medium|high|xhigh)[[:space:]]+·[[:space:]]+((Context[[:space:]]+[0-9]+%[[:space:]]+left)|((~|\.|\.\.)?\/[^[:space:]]+))([[:space:]]+·[[:space:]]+.*)?$' || return 1
+  elapsed_re='([0-9]+s|[0-9]+m [0-5][0-9]s|[0-9]+h [0-5][0-9]m [0-5][0-9]s)'
+  if printf '%s\n' "$line" | grep -Eq "^[[:space:]]*(•[[:space:]]+)?Starting MCP servers \\([0-9]+/[0-9]+\\): [A-Za-z0-9_.-]+ \\($elapsed_re • esc to interrupt\\)$"; then
+    parsed=$(printf '%s\n' "$line" | sed -nE 's/^[[:space:]]*(•[[:space:]]+)?Starting MCP servers \(([0-9]+)\/([0-9]+)\): ([A-Za-z0-9_.-]+) .*/\2 \3 \4/p')
+  elif printf '%s\n' "$line" | grep -Eq "^[[:space:]]*(•[[:space:]]+)?Booting MCP server: [A-Za-z0-9_.-]+ \\($elapsed_re • esc to interrupt\\)$"; then
+    parsed=$(printf '%s\n' "$line" | sed -nE 's/^[[:space:]]*(•[[:space:]]+)?Booting MCP server: ([A-Za-z0-9_.-]+) .*/0 1 \2/p')
+  else
+    return 1
+  fi
   [ -n "$parsed" ] || return 1
   IFS=' ' read -r completed total server extra <<EOF
 $parsed
@@ -211,6 +218,7 @@ EOF
     ''|*[!0-9]*) return 1 ;;
   esac
   [ -n "$server" ] || return 1
+  [ "$total" -gt 0 ] && [ "$completed" -le "$total" ] || return 1
   printf '%s/%s %s' "$completed" "$total" "$server"
 }
 
