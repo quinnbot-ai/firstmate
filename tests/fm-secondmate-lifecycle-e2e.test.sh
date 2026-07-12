@@ -151,10 +151,12 @@ phase_send() {
 }
 
 phase_handoff() {
-  # The move is delegated to `tasks-axi mv`; skip cleanly when it is absent (the
-  # downstream recovery and teardown phases do not depend on this phase).
-  if ! command -v tasks-axi >/dev/null 2>&1; then
-    echo "skip: tasks-axi not found (backlog handoff delegates to it)"
+  # The move is delegated to `tasks-axi mv`; skip cleanly when it is unavailable
+  # or incompatible (the later recovery and teardown phases do not depend on it).
+  # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
+  . "$ROOT/bin/fm-tasks-axi-lib.sh"
+  if ! fm_tasks_axi_compatible; then
+    echo "skip: compatible tasks-axi not found (backlog handoff requires atomic multi-ID mv)"
     return 0
   fi
   cat > "$HOME_DIR/data/backlog.md" <<'EOF'
