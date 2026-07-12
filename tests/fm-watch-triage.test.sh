@@ -898,7 +898,7 @@ test_codex_mcp_startup_timer_churn_escalates_zero_progress() {
   i=0
   (
     while [ "$i" -lt 40 ]; do
-      printf 'Starting MCP servers (4/5): shared_memory (%ss - esc to interrupt)\n  gpt-5.5 xhigh - Context 100%% left\n' "$i" > "$capture_file"
+      printf 'Starting MCP servers (4/5): shared_memory (%ss - esc to interrupt)\n  gpt-5.5 xhigh · Context 100%% left\n' "$i" > "$capture_file"
       i=$((i + 1))
       sleep 0.2
     done
@@ -924,6 +924,53 @@ test_codex_mcp_startup_timer_churn_escalates_zero_progress() {
   pass "Codex MCP startup timer churn escalates when the meaningful startup stage makes zero progress"
 }
 
+test_codex_secondmate_mcp_startup_escalates_zero_progress() {
+  local dir state fakebin out capture_file window sig pid
+  dir=$(make_case codex-secondmate-mcp-startup); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-codex-secondmate"
+  printf 'window=%s\nkind=secondmate\nharness=codex\n' "$window" > "$state/codex-secondmate.meta"
+  printf 'working: starting secondmate\n' > "$state/codex-secondmate.status"
+  sig=$(seen_sig "$state/codex-secondmate.status"); printf '%s' "$sig" > "$state/.seen-codex-secondmate_status"
+  printf 'Starting MCP servers (4/5): shared_memory (0s - esc to interrupt)\n  gpt-5.5 xhigh · Context 100%% left\n' > "$capture_file"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_ZERO_PROGRESS_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 60 || fail "watcher did not escalate a Codex secondmate wedged during MCP startup"
+  grep -F "check: busy-zero-progress: $window" "$out" >/dev/null \
+    || fail "Codex secondmate MCP startup did not emit the dedicated wedge check: $(cat "$out")"
+  pass "Codex secondmates receive the dedicated MCP-startup zero-progress check"
+}
+
+test_busy_zero_progress_queue_failure_preserves_throttle_timestamp() {
+  local dir state fakebin out capture_file window sig pid rc key marker before
+  dir=$(make_case busy-zero-progress-queue-failure); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-queue-failure"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/queue-failure.meta"
+  printf 'working: starting MCP servers\n' > "$state/queue-failure.status"
+  sig=$(seen_sig "$state/queue-failure.status"); printf '%s' "$sig" > "$state/.seen-queue-failure_status"
+  printf 'Starting MCP servers (4/5): shared_memory (0s - esc to interrupt)\n  gpt-5.5 xhigh · Context 100%% left\n' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___'); marker="$state/.busy-zero-progress-$key"
+  before=$(( $(date +%s) - 30 ))
+  printf '%s\n4/5 shared_memory\n' "$before" > "$marker"
+  mkdir "$state/.wake-queue"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_ZERO_PROGRESS_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>&1 &
+  pid=$!
+  if wait_for_exit "$pid" 30; then
+    fail "watcher succeeded despite the forced durable wake append failure"
+  else
+    rc=$?
+    [ "$rc" -ne 124 ] || fail "watcher did not stop after the durable wake append failure"
+  fi
+  [ "$(sed -n '1p' "$marker")" = "$before" ] \
+    || fail "failed durable wake append advanced the busy-zero-progress throttle timestamp"
+  pass "a failed durable wake append leaves the zero-progress throttle timestamp unchanged"
+}
+
 test_long_busy_validation_is_not_zero_progress_startup() {
   local dir state fakebin out capture_file window sig pid
   dir=$(make_case busy-validation-progress); state="$dir/state"; fakebin="$dir/fakebin"
@@ -932,7 +979,7 @@ test_long_busy_validation_is_not_zero_progress_startup() {
   printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/validating.meta"
   printf 'working: running the full validation pipeline\n' > "$state/validating.status"
   sig=$(seen_sig "$state/validating.status"); printf '%s' "$sig" > "$state/.seen-validating_status"
-  printf 'reviewing tests 87/100\nesc to interrupt\n  gpt-5.5 xhigh - Context 72%% left\n' > "$capture_file"
+  printf 'reviewing tests 87/100\nesc to interrupt\n  gpt-5.5 xhigh · Context 72%% left\n' > "$capture_file"
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_BUSY_ZERO_PROGRESS_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
@@ -956,7 +1003,7 @@ test_non_codex_harness_is_outside_mcp_startup_detector() {
   printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/claude-crew.meta"
   printf 'working: editing the watcher tests\n' > "$state/claude-crew.status"
   sig=$(seen_sig "$state/claude-crew.status"); printf '%s' "$sig" > "$state/.seen-claude-crew_status"
-  printf 'Starting MCP servers (4/5): shared_memory (0s - esc to interrupt)\n  gpt-5.5 xhigh - Context 100%% left\n' > "$capture_file"
+  printf 'Starting MCP servers (4/5): shared_memory (0s - esc to interrupt)\n  gpt-5.5 xhigh · Context 100%% left\n' > "$capture_file"
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_BUSY_ZERO_PROGRESS_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
@@ -970,9 +1017,9 @@ test_non_codex_harness_is_outside_mcp_startup_detector() {
   pass "the MCP-startup detector is gated to tasks whose meta records the codex harness"
 }
 
-# The detector matches only the pane's footer lines: a startup-shaped string in
-# displayed content (a diff, a log, an edited test) must never spoof startup state.
-test_displayed_startup_text_outside_footer_does_not_spoof_detector() {
+# The detector matches the startup line only when it immediately precedes the
+# Codex context footer: nearby displayed content must never spoof startup state.
+test_displayed_startup_text_near_footer_does_not_spoof_detector() {
   local dir state fakebin out capture_file window sig pid
   dir=$(make_case displayed-startup-text); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"
@@ -982,8 +1029,8 @@ test_displayed_startup_text_outside_footer_does_not_spoof_detector() {
   sig=$(seen_sig "$state/editing-watch.status"); printf '%s' "$sig" > "$state/.seen-editing-watch_status"
   {
     printf 'Starting MCP servers (4/5): shared_memory (0s - esc to interrupt)\n'
-    printf 'fixture line %s of the file being displayed\n' 1 2 3 4 5 6
-    printf 'esc to interrupt\n  gpt-5.5 xhigh - Context 72%% left\n'
+    printf 'tool output continues after the displayed fixture\n'
+    printf '›\n  gpt-5.5 xhigh · Context 72%% left\n'
   } > "$capture_file"
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -991,11 +1038,37 @@ test_displayed_startup_text_outside_footer_does_not_spoof_detector() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   if ! wait_live "$pid" 25; then
-    reap "$pid"; fail "startup-shaped displayed content above the footer spoofed the detector: $(cat "$out")"
+    reap "$pid"; fail "startup-shaped displayed content near the footer spoofed the detector: $(cat "$out")"
   fi
   [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "displayed startup text enqueued a zero-progress wake"; }
   reap "$pid"
-  pass "startup-shaped text outside the pane footer never spoofs the MCP-startup detector"
+  pass "startup-shaped displayed content near the footer never spoofs the MCP-startup detector"
+}
+
+assert_malformed_startup_line_not_detected() {
+  local name=$1 line=$2 dir state fakebin out capture_file window sig pid key
+  dir=$(make_case "$name"); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-$name"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/$name.meta"
+  printf 'working: displaying malformed startup text\n' > "$state/$name.status"
+  sig=$(seen_sig "$state/$name.status"); printf '%s' "$sig" > "$state/.seen-${name}_status"
+  printf '%s\n  gpt-5.5 xhigh · Context 100%% left\n' "$line" > "$capture_file"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_ZERO_PROGRESS_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 25 || fail "malformed startup line tripped the detector ($line): $(cat "$out")"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  [ ! -e "$state/.busy-zero-progress-$key" ] || { reap "$pid"; fail "malformed startup line created a progress marker ($line)"; }
+  reap "$pid"
+}
+
+test_malformed_mcp_startup_counters_and_delimiter_are_rejected() {
+  assert_malformed_startup_line_not_detected malformed-completed 'Starting MCP servers (/5): shared_memory (0s - esc to interrupt)'
+  assert_malformed_startup_line_not_detected malformed-total 'Starting MCP servers (4/): shared_memory (0s - esc to interrupt)'
+  assert_malformed_startup_line_not_detected malformed-delimiter 'Starting MCP servers (4-5): shared_memory (0s - esc to interrupt)'
+  pass "malformed MCP-startup counters and delimiters are outside the detector"
 }
 
 test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
@@ -1232,9 +1305,12 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_codex_mcp_startup_timer_churn_escalates_zero_progress
+test_codex_secondmate_mcp_startup_escalates_zero_progress
+test_busy_zero_progress_queue_failure_preserves_throttle_timestamp
 test_long_busy_validation_is_not_zero_progress_startup
 test_non_codex_harness_is_outside_mcp_startup_detector
-test_displayed_startup_text_outside_footer_does_not_spoof_detector
+test_displayed_startup_text_near_footer_does_not_spoof_detector
+test_malformed_mcp_startup_counters_and_delimiter_are_rejected
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_secondmate_paused_resurfaces_in_normal_mode

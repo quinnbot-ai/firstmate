@@ -190,28 +190,26 @@ hash_pane() {
 # discarding its volatile spinner and elapsed-time suffix. An empty result means
 # the pane is outside this dedicated startup phase. Server ids are one token in
 # Codex's UI; restricting to that token also keeps runtime marker contents safe.
-# Like window_is_busy's regex fallback, only the last 6 non-blank lines (the TUI
-# footer area, where Codex renders the startup spinner) are matched, so a
-# startup-looking string in displayed content cannot spoof startup state.
+# Codex renders the startup spinner immediately above its context footer.
 codex_mcp_startup_progress() {  # <tail40>
-  local tail40=$1 footer line stage completed total rest server
-  footer=$(printf '%s\n' "$tail40" | grep -v '^[[:space:]]*$' | tail -6)
-  case "$footer" in
-    *'Starting MCP servers ('*) ;;
-    *) return 1 ;;
-  esac
-  line=$(printf '%s\n' "$footer" | grep -F 'Starting MCP servers (' | tail -1)
-  stage=${line#*Starting MCP servers (}
-  stage=${stage%%)*}
-  completed=${stage%%/*}
-  total=${stage#*/}
-  [ "$completed" != "$stage" ] || return 1
-  case "$completed$total" in
+  local tail40=$1 footer line context parsed completed total server extra
+  footer=$(printf '%s\n' "$tail40" | grep -v '^[[:space:]]*$' | tail -2)
+  [ "$(printf '%s\n' "$footer" | wc -l | tr -d ' ')" = 2 ] || return 1
+  line=$(printf '%s\n' "$footer" | sed -n '1p')
+  context=$(printf '%s\n' "$footer" | sed -n '2p')
+  printf '%s\n' "$context" | grep -Eq '^[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+·[[:space:]]+Context[[:space:]]+[0-9]+%[[:space:]]+left([[:space:]]+·[[:space:]]+.*)?$' || return 1
+  parsed=$(printf '%s\n' "$line" | sed -nE 's/^[[:space:]]*Starting MCP servers \(([0-9]+)\/([0-9]+)\): ([A-Za-z0-9_.-]+) \([0-9]+s - esc to interrupt\)$/\1 \2 \3/p')
+  [ -n "$parsed" ] || return 1
+  IFS=' ' read -r completed total server extra <<EOF
+$parsed
+EOF
+  [ -z "$extra" ] || return 1
+  case "$completed" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  rest=${line#*Starting MCP servers ("$stage"):}
-  rest=${rest#"${rest%%[![:space:]]*}"}
-  server=${rest%%[[:space:]]*}
+  case "$total" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
   [ -n "$server" ] || return 1
   printf '%s/%s %s' "$completed" "$total" "$server"
 }
@@ -228,7 +226,7 @@ write_busy_zero_progress_marker() {  # <marker> <epoch> <progress>
 }
 
 # Track Codex MCP startup progress independently of pane hashes. This runs once
-# per recorded non-secondmate codex-harness window per poll, but only
+# per recorded codex-harness window per poll, but only
 # shell-matches the already captured tail's footer and touches a marker while
 # the dedicated startup line is present.
 # A `check:` wake is deliberate: it is unconditionally actionable in normal and
@@ -259,10 +257,8 @@ busy_zero_progress_check() {  # <window> <tail40>
   age=$((now - since))
   [ "$age" -ge "$BUSY_ZERO_PROGRESS_ESCALATE_SECS" ] || return 0
   reason="check: busy-zero-progress: $win (Codex MCP startup $progress unchanged ${age}s despite busy spinner/timer churn; demand-deep-inspection: startup may be wedged before any model context is used)"
-  # Re-anchor before waking so a watcher restart cannot repeat the same finding
-  # every poll. An unchanged wedge re-surfaces once per bounded threshold.
-  write_busy_zero_progress_marker "$marker" "$now" "$progress" || exit 1
   fm_wake_append check "$win" "$reason" || exit 1
+  write_busy_zero_progress_marker "$marker" "$now" "$progress" || exit 1
   wake "$reason"
 }
 
@@ -829,12 +825,12 @@ EOF
     if ! status_is_paused "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$w"
     fi
+    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    if [ "$(window_harness "$w")" = codex ]; then
+      busy_zero_progress_check "$w" "$tail40"
+    fi
     if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
       continue
-    fi
-    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
-    if [ "$kind" != secondmate ] && [ "$(window_harness "$w")" = codex ]; then
-      busy_zero_progress_check "$w" "$tail40"
     fi
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
