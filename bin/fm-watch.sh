@@ -32,6 +32,10 @@
 #                          closer look instead of another routine supervision
 #                          resume. Unless afk is active.
 #   check: <script>: <out> per-task check output, always actionable
+#   check: busy-zero-progress: <window> ...
+#                          Codex MCP startup stage stayed unchanged past its
+#                          threshold despite spinner/timer pane churn; always
+#                          actionable and explicitly demands deep inspection
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
 # For normal supervision, resume the session-start primary-harness protocol
@@ -127,6 +131,16 @@ BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'}
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read.
 STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
+# A Codex MCP startup spinner contains the ordinary busy signature and updates
+# its elapsed timer continuously. Neither generic busy detection nor pane-hash
+# staleness can catch a startup wedged at one server, so a dedicated cheap parser
+# tracks only the meaningful "completed/total server" identity from the tail40
+# capture the watcher already reads. The marker survives watcher restarts and is
+# reset by any stage/server advance. No fm-crew-state or backend call is added.
+BUSY_ZERO_PROGRESS_ESCALATE_SECS=${FM_BUSY_ZERO_PROGRESS_ESCALATE_SECS:-300}
+case "$BUSY_ZERO_PROGRESS_ESCALATE_SECS" in
+  ''|*[!0-9]*) BUSY_ZERO_PROGRESS_ESCALATE_SECS=300 ;;
+esac
 # A crew that DECLARED a pause (paused: <reason>, fm-classify-lib.sh) is idling on
 # a known external wait, so its stale pane is absorbed rather than wedge-escalated;
 # it re-surfaces once for a recheck every PAUSE_RESURFACE_SECS - far longer than the
@@ -169,6 +183,81 @@ triage_log() {
 
 hash_pane() {
   if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi
+}
+
+# Print the meaningful progress identity from Codex's MCP startup line while
+# discarding its volatile spinner and elapsed-time suffix. An empty result means
+# the pane is outside this dedicated startup phase. Server ids are one token in
+# Codex's UI; restricting to that token also keeps runtime marker contents safe.
+codex_mcp_startup_progress() {  # <tail40>
+  local tail40=$1 line stage completed total rest server
+  case "$tail40" in
+    *'Starting MCP servers ('*) ;;
+    *) return 1 ;;
+  esac
+  line=$(printf '%s\n' "$tail40" | grep -F 'Starting MCP servers (' | tail -1)
+  stage=${line#*Starting MCP servers (}
+  stage=${stage%%)*}
+  completed=${stage%%/*}
+  total=${stage#*/}
+  [ "$completed" != "$stage" ] || return 1
+  case "$completed$total" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  rest=${line#*Starting MCP servers ("$stage"):}
+  rest=${rest#"${rest%%[![:space:]]*}"}
+  server=${rest%%[[:space:]]*}
+  [ -n "$server" ] || return 1
+  printf '%s/%s %s' "$completed" "$total" "$server"
+}
+
+write_busy_zero_progress_marker() {  # <marker> <epoch> <progress>
+  local marker=$1 epoch=$2 progress=$3
+  if ! {
+    printf '%s\n' "$epoch"
+    printf '%s\n' "$progress"
+  } > "$marker.tmp" || ! mv -f "$marker.tmp" "$marker"; then
+    rm -f "$marker.tmp" 2>/dev/null || true
+    return 1
+  fi
+}
+
+# Track Codex MCP startup progress independently of pane hashes. This runs once
+# per recorded non-secondmate window per poll, but only shell-matches the already
+# captured tail and touches a marker while the dedicated startup line is present.
+# A `check:` wake is deliberate: it is unconditionally actionable in normal and
+# away-mode supervision, and preserves the decorated diagnostic instead of asking
+# stale classification to reinterpret a busy pane.
+busy_zero_progress_check() {  # <window> <tail40>
+  local win=$1 tail40=$2 key marker progress recorded since now age reason
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  marker="$STATE/.busy-zero-progress-$key"
+  progress=$(codex_mcp_startup_progress "$tail40" || true)
+  if [ -z "$progress" ]; then
+    rm -f "$marker"
+    return 0
+  fi
+
+  recorded=$(sed -n '2p' "$marker" 2>/dev/null || true)
+  since=$(sed -n '1p' "$marker" 2>/dev/null || true)
+  now=$(date +%s)
+  case "$since" in
+    ''|*[!0-9]*) since= ;;
+  esac
+  if [ "$recorded" != "$progress" ] || [ -z "$since" ]; then
+    write_busy_zero_progress_marker "$marker" "$now" "$progress" || exit 1
+    triage_log "tracking Codex MCP startup progress ($progress): $win"
+    return 0
+  fi
+
+  age=$((now - since))
+  [ "$age" -ge "$BUSY_ZERO_PROGRESS_ESCALATE_SECS" ] || return 0
+  reason="check: busy-zero-progress: $win (Codex MCP startup $progress unchanged ${age}s despite busy spinner/timer churn; demand-deep-inspection: startup may be wedged before any model context is used)"
+  # Re-anchor before waking so a watcher restart cannot repeat the same finding
+  # every poll. An unchanged wedge re-surfaces once per bounded threshold.
+  write_busy_zero_progress_marker "$marker" "$now" "$progress" || exit 1
+  fm_wake_append check "$win" "$reason" || exit 1
+  wake "$reason"
 }
 
 # window_is_busy: 0 (busy) iff the task's harness is actively working. Prefers
@@ -722,6 +811,9 @@ EOF
       continue
     fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    if [ "$kind" != secondmate ]; then
+      busy_zero_progress_check "$w" "$tail40"
+    fi
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"

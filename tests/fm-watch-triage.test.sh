@@ -881,6 +881,71 @@ test_wedge_escalation_resets_when_pane_becomes_active() {
   pass "a pane becoming active again resets the consecutive wedge-escalation counter"
 }
 
+# A Codex startup spinner is a special busy phase: its ticking elapsed timer changes
+# the pane hash forever, while "esc to interrupt" makes the generic busy detector
+# suppress stale detection forever. The watcher must instead track the meaningful
+# MCP startup stage and surface an actionable, distinct reason when that stage does
+# not advance within the configured zero-progress threshold.
+test_codex_mcp_startup_timer_churn_escalates_zero_progress() {
+  local dir state fakebin out drain_out capture_file window sig pid updater i
+  dir=$(make_case codex-mcp-startup-wedge); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-mcp-wedged"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/mcp-wedged.meta"
+  printf 'working: implementing watcher fix\n' > "$state/mcp-wedged.status"
+  sig=$(seen_sig "$state/mcp-wedged.status"); printf '%s' "$sig" > "$state/.seen-mcp-wedged_status"
+
+  i=0
+  (
+    while [ "$i" -lt 40 ]; do
+      printf 'Starting MCP servers (4/5): shared_memory (%ss - esc to interrupt)\n  gpt-5.5 xhigh - Context 100%% left\n' "$i" > "$capture_file"
+      i=$((i + 1))
+      sleep 0.2
+    done
+  ) &
+  updater=$!
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_ZERO_PROGRESS_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_for_exit "$pid" 60; then
+    reap "$pid"; kill "$updater" 2>/dev/null || true; wait "$updater" 2>/dev/null || true
+    fail "watcher did not escalate a Codex MCP startup stage stuck behind timer churn"
+  fi
+  kill "$updater" 2>/dev/null || true; wait "$updater" 2>/dev/null || true
+  grep -F "check: busy-zero-progress: $window" "$out" >/dev/null \
+    || fail "MCP startup escalation did not carry the distinct busy-zero-progress reason: $(cat "$out")"
+  grep -F "MCP startup 4/5 shared_memory" "$out" >/dev/null \
+    || fail "MCP startup escalation omitted the unchanged progress identity: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after busy-zero-progress escalation failed"
+  grep "$(printf '\tcheck\t')" "$drain_out" | grep -F "$window" >/dev/null \
+    || fail "busy-zero-progress escalation was not queued as an actionable check"
+  pass "Codex MCP startup timer churn escalates when the meaningful startup stage makes zero progress"
+}
+
+test_long_busy_validation_is_not_zero_progress_startup() {
+  local dir state fakebin out capture_file window sig pid
+  dir=$(make_case busy-validation-progress); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-validating"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/validating.meta"
+  printf 'working: running the full validation pipeline\n' > "$state/validating.status"
+  sig=$(seen_sig "$state/validating.status"); printf '%s' "$sig" > "$state/.seen-validating_status"
+  printf 'reviewing tests 87/100\nesc to interrupt\n  gpt-5.5 xhigh - Context 72%% left\n' > "$capture_file"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_ZERO_PROGRESS_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 25; then
+    reap "$pid"; fail "ordinary busy validation was misclassified as a zero-progress MCP startup: $(cat "$out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "ordinary busy validation enqueued a zero-progress wake"; }
+  reap "$pid"
+  pass "ordinary long busy validations are outside the dedicated MCP-startup detector"
+}
+
 test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
   local dir state fakebin out capture_file window key pane_hash sig pid since
   dir=$(make_case nonterminal-stale-timer-repair); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1114,6 +1179,8 @@ test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
+test_codex_mcp_startup_timer_churn_escalates_zero_progress
+test_long_busy_validation_is_not_zero_progress_startup
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_secondmate_paused_resurfaces_in_normal_mode
