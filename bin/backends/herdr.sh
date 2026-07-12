@@ -666,6 +666,9 @@ fm_backend_herdr_strip_ansi() {  # <text>
 
 # fm_backend_herdr_composer_state: classify the composer's own row as
 # empty|pending|unknown, scanning a generous tail-window capture of <target>.
+# The optional post-submit mode is private to send verification: it adds only
+# evidence that is unsafe for the away-mode guard (a busy footer below Codex's
+# transcript echo, or a returned bare shell prompt after a just-sent Enter).
 # herdr's CLI exposes no cursor-row primitive (unlike tmux's #{cursor_y}), so
 # this locates the composer row structurally, recognizing TWO row shapes and
 # keeping whichever match comes LAST (scanning forward), so a shape earlier in
@@ -731,8 +734,8 @@ FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-'^Type a message\.\.\.$'}
 # recognized after a bordered composer row has already been structurally found.
 FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^[❯›]'}
 
-fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
-  local target=$1 cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped
+fm_backend_herdr_composer_state() {  # <target> [guard|post-submit] -> empty|pending|unknown
+  local target=$1 mode=${2:-guard} cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped after_match="" last_nonblank="" verdict
   cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES" 2>/dev/null \
     || fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES") || { printf 'unknown'; return 0; }
   # Structural scan: locate the bottom-most composer row and remember its RAW
@@ -744,22 +747,40 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
     trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
     trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
     [ -n "$trimmed" ] || continue
+    last_nonblank=$trimmed
     case "$trimmed" in
       '│'*'│'|'┃'*'┃'|'|'*'|')
         shape=bordered
         raw_match=$line
         found=1
+        after_match=""
         ;;
       *)
         if printf '%s' "$trimmed" | grep -qE "$FM_BACKEND_HERDR_BARE_PROMPT_RE"; then
           shape=bare
           raw_match=$line
           found=1
+          after_match=""
+        elif [ "$found" -eq 1 ]; then
+          after_match="${after_match}${trimmed}"$'\n'
         fi
         ;;
     esac
   done < <(printf '%s\n' "$cap")
-  [ "$found" -eq 1 ] || { printf 'unknown'; return 0; }
+  if [ "$found" -ne 1 ]; then
+    # A bare shell is never an empty agent composer for the away-mode guard,
+    # but after we have just sent Enter it can affirmatively acknowledge a
+    # command: a prompt by itself means the shell consumed it, while prompt +
+    # text means the Enter was swallowed and the command is still editable.
+    if [ "$mode" = post-submit ]; then
+      case "$last_nonblank" in
+        '>'|'$'|'%'|'#') printf 'empty'; return 0 ;;
+        '>'[[:space:]]*|'$'[[:space:]]*|'%'[[:space:]]*|'#'[[:space:]]*) printf 'pending'; return 0 ;;
+      esac
+    fi
+    printf 'unknown'
+    return 0
+  fi
   # Content: extract the real typed text from the raw row with the shared,
   # fleet-wide ghost stripper (bin/fm-composer-lib.sh), which drops dim/faint AND
   # dark-truecolor ghost/placeholder runs. This replaces the former herdr-only
@@ -783,7 +804,19 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
   # shape only ever starts with an AGENT glyph (FM_BACKEND_HERDR_BARE_PROMPT_RE
   # is '^[❯›]'), so a bare shell prompt never reaches here - it stays 'unknown'
   # via the no-composer-row path above, exactly as before.
-  fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE"
+  verdict=$(fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE")
+  # Codex redraws a submitted prompt into its transcript while a turn is busy.
+  # The transcript row starts with the same bare `›` glyph as the composer, so
+  # the structural reader cannot tell the two apart from the row alone. In a
+  # post-submit read only, a busy footer BELOW that row proves it is transcript,
+  # not still-editable composer text. Keep guard reads strict: the away-mode
+  # injector must never infer that a live human draft is safe to overwrite.
+  if [ "$mode" = post-submit ] && [ "$shape" = bare ] && [ "$verdict" = pending ] \
+    && printf '%s' "$after_match" | grep -qiE "${FM_BUSY_REGEX:-esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel}"; then
+    printf 'empty'
+    return 0
+  fi
+  printf '%s' "$verdict"
 }
 
 # fm_backend_herdr_send_text_submit: type <text> into <target> once (raw,
@@ -862,7 +895,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
         "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS")
     else
       sleep "$sleep_s"
-      verdict=$(fm_backend_herdr_composer_state "$target")
+      verdict=$(fm_backend_herdr_composer_state "$target" post-submit)
     fi
     case "$verdict" in
       busy) printf 'empty'; return 0 ;;

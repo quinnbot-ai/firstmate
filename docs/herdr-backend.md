@@ -183,7 +183,7 @@ Herdr tasks additionally record:
 | Send literal (unsubmitted) | `herdr pane send-text <pane> <text>` | Does NOT auto-submit, contrary to the original design addendum's guess. Verified directly: a unique marker sent this way sits unexecuted in the composer until a separate Enter. Behaves exactly like tmux's `send-keys -l`. |
 | Send + submit atomically | `herdr pane run <pane> <command>` | Runs and submits a command in one call; used for the two fixed spawn-time commands (`treehouse get`, the `GOTMPDIR` export) exactly where tmux used one `send-keys ... Enter` call. |
 | Send key | `herdr pane send-keys <pane> <key>` | Verified names: `enter`, `escape` (alias `esc`), `ctrl+c` (aliases `C-c`, `c-c`). `ctrl+c` verified to interrupt a running foreground process immediately. |
-| Submit confirmation (idle baseline) | `herdr agent get <pane>` -> `.result.agent.agent_status` after Enter | `fm_backend_herdr_send_text_submit` records the pre-Enter status and, when it is idle/done, confirms delivery by polling for `working`/`blocked` across the Enter attempt's confirmation budget. Composer-state reads remain the affirmative-empty pre-injection guard and the conservative fallback for preexisting submit-active or unreadable baselines; see "Native agent-state submit confirmation". |
+| Submit confirmation (idle baseline) | `herdr agent get <pane>` -> `.result.agent.agent_status` after Enter | `fm_backend_herdr_send_text_submit` records the pre-Enter status and, when it is idle/done, confirms delivery by polling for `working`/`blocked` across the Enter attempt's confirmation budget. Composer-state reads remain the affirmative-empty pre-injection guard and the post-submit-aware fallback for preexisting submit-active or unreadable baselines; see "Native agent-state submit confirmation". |
 | Bounded capture | `herdr pane read <pane> --source recent --lines N` | See "Verified bug" below - N is never passed through directly. |
 | ANSI capture | `herdr pane read <pane> --source recent --lines N --format ansi` | Herdr 0.7.3 preserves composer de-emphasis styling, letting the shared `fm_composer_strip_ghost` extractor treat dim/faint and dark-TRUECOLOR ghost/placeholder text as empty while retaining real typed input. The same small-`--lines` workaround applies. |
 | Busy state | `herdr agent get <pane>` -> `.result.agent.agent_status` | Verified live against an interactive `claude` session: reports `working` while generating, `done` once idle. Mapped: `working` -> busy; `idle`/`done` -> idle; `blocked` -> idle (surfaced like a stale pane, not suppressed as busy - a blocked agent is stuck waiting on the human, not grinding); anything else -> unknown (the cue for the shared tail-regex fallback). |
@@ -519,7 +519,7 @@ The unit regression coverage is `tests/fm-backend-herdr.test.sh`'s `test_compose
 `fm_backend_herdr_send_text_submit` now records a pre-Enter native agent-state baseline before choosing the confirmation signal.
 When that baseline is legibly idle or done, it confirms a submit by polling herdr's own semantic agent-state (`agent get`) for a submit-active transition (`working` or `blocked`), via the new `fm_backend_herdr_wait_for_working` helper.
 Composer content (`fm_backend_herdr_composer_state`) is still used for the pre-injection empty-box guard (`bin/fm-supervise-daemon.sh`'s `inject_msg`, which reads `fm_backend_composer_state` directly and requires an affirmatively-`empty` verdict; see "Composer-emptiness safety" below).
-It is also the conservative fallback for submit attempts whose pre-Enter baseline is already submit-active or unreadable, because a preexisting `working`/`blocked` status cannot prove that this Enter landed.
+Its post-submit mode is also the fallback for submit attempts whose pre-Enter baseline is already submit-active or unreadable, because a preexisting `working`/`blocked` status cannot prove that this Enter landed.
 This makes the normal idle-baseline confirmation path cross-agent: it no longer depends on what a harness's idle composer happens to display.
 
 This originally fixed the practical submit-confirmation effect of the Codex idle-tip gap left open by the 2026-07-07 incident above.
@@ -576,6 +576,45 @@ The composer-guard regression for the 2026-07-08 AFK delivery bug lives in `test
 `tests/fm-afk-inject-herdr-e2e.test.sh`'s synthetic supervisor-pane fixture was updated alongside this fix: since confirmation is no longer composer-content-based, a bash script that only DRAWS composer text without being a registered herdr agent would read `agent_not_found` forever and never confirm a submission - discovered when the pre-existing (composer-only) fixture version of that test regressed against the new confirmation code (Scenario B: 0 digests instead of exactly 1, since the daemon treated every injection as unconfirmed and kept retyping it every housekeeping tick, which is exactly the duplicate-send failure mode this design change exists to prevent).
 The fix: the fixture now registers itself as a real herdr agent via `herdr pane report-agent <pane> --source <id> --agent <label> --state idle|working|blocked|unknown` (herdr's own documented integration-protocol primitive for a non-built-in-harness process to report its own agent state, verified empirically here) and reports an idle->working->idle cycle around each submission, exactly as a real harness would.
 With that fix, all four scenarios (A: partial-input deferral, B: swallowed-Enter retry, C: normal digest, D: max-defer wedge alarm) pass against the real binary.
+
+## Incident (2026-07-08 and 2026-07-12): submitted Herdr sends falsely reported as swallowed
+
+On 2026-07-08, three `fm-send` calls to Codex crewmates on Herdr falsely failed after the recipient had processed the message and its composer was empty.
+Two were `$no-mistakes` sends and one was a plain steer.
+On 2026-07-12, the same false failure occurred after `fm-send` submitted a long shell command to a Herdr pane running plain zsh: the command had already executed and launched Codex before `fm-send` returned.
+The exact failure output preserved by the incident record was:
+
+```text
+error: text not submitted to <target> (Enter swallowed; text left in composer; tried <resolution>)
+```
+
+The incident reports did not retain the message payloads or target selectors, so this record deliberately does not fabricate them as evidence.
+
+**Root cause.** `fm_backend_herdr_send_text_submit` correctly refuses to use a preexisting `working`/`blocked` agent state as proof that a new Enter landed.
+Its fallback then called the guard-mode structural composer reader, which has a different safety contract: it treats every bare `› <text>` row as editable input and every bare shell prompt as not an agent composer.
+During a Codex busy redraw, a submitted user message remains in the transcript with the same bare `›` glyph as its composer, followed by the busy footer, so the fallback falsely read transcript text as pending input.
+The same fallback could not use a freshly returned zsh prompt as proof that a shell command had run, even though prompt-plus-command-text remains a true swallowed-Enter shape.
+
+**Fix.** `fm_backend_herdr_composer_state` now has a private `post-submit` mode used only by `fm_backend_herdr_send_text_submit`'s already-active/unreadable-baseline fallback.
+Guard mode remains unchanged and conservative for away-mode injection.
+Post-submit mode accepts a bare Codex `› <text>` row only when a later busy footer proves the row is transcript rather than the editable composer, continues to strip ANSI faint Codex ghost suggestions, and treats a bare zsh prompt as submitted while prompt plus editable command text remains pending.
+The 2026-07-03 popup-placeholder regression remains guard-mode `pending`, so its structural row classification is not relaxed.
+
+**Verification evidence (2026-07-12, macOS aarch64).**
+
+```text
+$ herdr --version
+herdr 0.7.3
+$ codex --version
+codex-cli 0.142.5
+$ bash tests/fm-backend-herdr.test.sh 2>/dev/null | rg 'Codex busy redraw|Codex ghost|bare zsh prompt|bare shell with command text'
+ok - fm_backend_herdr_send_text_submit: a Codex busy redraw's submitted transcript is not misread as a pending composer
+ok - fm_backend_herdr_send_text_submit: a faint Codex ghost is empty in the preexisting-working fallback
+ok - fm_backend_herdr_send_text_submit: a bare zsh prompt after Enter confirms a submitted shell command
+ok - fm_backend_herdr_send_text_submit: a bare shell with command text still reports a swallowed Enter
+```
+
+The focused regressions are `test_send_text_submit_confirms_codex_busy_redraw_transcript`, `test_send_text_submit_confirms_codex_ghost_after_preexisting_working`, `test_send_text_submit_confirms_bare_shell_prompt_after_command`, and `test_send_text_submit_bare_shell_swallow_stays_pending` in `tests/fm-backend-herdr.test.sh`.
 
 ## Composer-emptiness safety (2026-07-10, fleet-wide across all four backends)
 

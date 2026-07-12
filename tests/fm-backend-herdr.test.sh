@@ -1263,6 +1263,77 @@ test_send_text_submit_preexisting_working_does_not_false_confirm_swallowed_enter
   pass "fm_backend_herdr_send_text_submit: preexisting working is not accepted as submit proof when the composer still holds the message"
 }
 
+# Regression for the 2026-07-08 false-negative sends.  During a Codex busy
+# redraw, the submitted user message remains on screen as a bare `› <text>`
+# transcript row.  It is followed by the live busy footer, but the old
+# bottom-most-prompt heuristic mistook that transcript row for an editable
+# composer and declared a swallowed Enter after every retry.
+test_send_text_submit_confirms_codex_busy_redraw_transcript() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-codex-busy-redraw"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # 2: pre-Enter agent get is already working, so confirmation must use the
+  # post-submit composer read rather than treating the old status as proof.
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  # 4: the prompt is now transcript above Codex's busy footer, not composer.
+  printf '\xe2\x80\xba ship the fix\n\n\xe2\x80\xa2 Working...\n  esc to interrupt\n' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "ship the fix" 3 0.01 0.01' "$ROOT" )
+  [ "$out" = empty ] || fail "a submitted Codex transcript above its busy footer must confirm empty, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "a busy redraw transcript must not provoke retry Enters, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: a Codex busy redraw's submitted transcript is not misread as a pending composer"
+}
+
+# The same fallback must accept the real Codex idle suggestion shape when ANSI
+# styling marks it as ghost text.  This runs through submit verification, not
+# only the away-mode guard's direct composer-state fixture.
+test_send_text_submit_confirms_codex_ghost_after_preexisting_working() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-codex-ghost-preexisting-working"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  printf '\x1b[0m\x1b[1m\xe2\x80\xba \x1b[0m\x1b[2mSummarize recent commits\x1b[0m\n\n  gpt-5.5 xhigh\n' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "ship the fix" 3 0.01 0.01' "$ROOT" )
+  [ "$out" = empty ] || fail "a faint Codex ghost after a submitted Enter must confirm empty, got '$out'"
+  pass "fm_backend_herdr_send_text_submit: a faint Codex ghost is empty in the preexisting-working fallback"
+}
+
+# A herdr pane can be an ordinary zsh shell with no registered agent.  It has no
+# agent_status and no agent-composer row, yet it can still execute an fm-send
+# command.  Post-submit verification may treat only the returned bare shell
+# prompt as confirmation; the generic guard remains unknown for that same row.
+test_send_text_submit_confirms_bare_shell_prompt_after_command() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-bare-shell"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '1\n' > "$resp/2.exit"
+  printf '%% \n' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "printf shell-ok" 3 0.01 0.01' "$ROOT" )
+  [ "$out" = empty ] || fail "a bare zsh prompt after Enter must confirm the shell consumed the command, got '$out'"
+  pass "fm_backend_herdr_send_text_submit: a bare zsh prompt after Enter confirms a submitted shell command"
+}
+
+# The bare-shell allowance is intentionally post-submit and exact: prompt plus
+# editable text is still a positive swallowed-Enter signal, so fm-send remains
+# loud for a real shell swallow.
+test_send_text_submit_bare_shell_swallow_stays_pending() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-bare-shell-swallow"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '1\n' > "$resp/2.exit"
+  printf '%% printf shell-ok\n' > "$resp/4.out"
+  printf '%% printf shell-ok\n' > "$resp/6.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "printf shell-ok" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = pending ] || fail "a bare zsh prompt with editable command text must remain pending, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 2 ] || fail "a real shell swallow must retry Enter through the configured budget, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: a bare shell with command text still reports a swallowed Enter"
+}
+
 # Regression for the submit-confirmation side of the 2026-07-07 incident:
 # even if a Codex idle composer displays suggestion text, an idle-baseline
 # submit must confirm from native agent-state rather than composer scraping.
@@ -2042,6 +2113,10 @@ test_send_text_submit_detects_swallowed_enter
 test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_text_submit_confirms_blocked_after_enter
 test_send_text_submit_preexisting_working_does_not_false_confirm_swallowed_enter
+test_send_text_submit_confirms_codex_busy_redraw_transcript
+test_send_text_submit_confirms_codex_ghost_after_preexisting_working
+test_send_text_submit_confirms_bare_shell_prompt_after_command
+test_send_text_submit_bare_shell_swallow_stays_pending
 test_send_text_submit_confirms_despite_codex_idle_tip_composer
 test_composer_state_codex_dynamic_idle_tip_reads_empty_when_faint
 test_composer_state_guard_still_refuses_real_pending_text_after_submit_confirmation_change
