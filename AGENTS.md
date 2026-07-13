@@ -600,6 +600,7 @@ Each task's backend live-task inventory is the ground truth: tmux when `backend=
 For `kind=secondmate`, an idle pane is healthy.
 A secondmate may be sitting on its own watcher with no visible pane changes, so parent supervision uses status writes plus heartbeat review, not pane-staleness.
 `fm-watch.sh` therefore skips stale-pane wakes for windows whose meta records `kind=secondmate`.
+The separate Codex MCP-startup progress check still covers Codex secondmates because a busy startup stage is distinct from healthy idle-pane staleness.
 This exception is narrow: ordinary crewmates still trip stale detection when their pane stops changing without a busy signature.
 
 **Watcher liveness is guarded, not just disciplined.**
