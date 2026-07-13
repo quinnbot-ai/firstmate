@@ -197,7 +197,7 @@ codex_mcp_startup_progress() {  # <tail40>
   [ "$(printf '%s\n' "$footer" | wc -l | tr -d ' ')" = 2 ] || return 1
   line=$(printf '%s\n' "$footer" | sed -n '1p')
   status=$(printf '%s\n' "$footer" | sed -n '2p')
-  printf '%s\n' "$status" | grep -Eq '^[[:space:]]+[^[:space:]]+[[:space:]]+(minimal|low|medium|high|xhigh)[[:space:]]+·[[:space:]]+((Context[[:space:]]+[0-9]+%[[:space:]]+left)|((~|\.|\.\.)?\/[^[:space:]]+))([[:space:]]+·[[:space:]]+.*)?$' || return 1
+  printf '%s\n' "$status" | grep -Eq '^[[:space:]]+[^[:space:]]+[[:space:]]+(minimal|low|medium|high|xhigh)[[:space:]]+·[[:space:]]+((Context[[:space:]]+[0-9]+%[[:space:]]+left)|((~|\.|\.\.)?\/[^[:cntrl:]]*[^[:space:]]))([[:space:]]+·[[:space:]]+.*)?$' || return 1
   elapsed_re='([0-9]+s|[0-9]+m [0-5][0-9]s|[0-9]+h [0-5][0-9]m [0-5][0-9]s)'
   if printf '%s\n' "$line" | grep -Eq "^[[:space:]]*(•[[:space:]]+)?Starting MCP servers \\([0-9]+/[0-9]+\\): [A-Za-z0-9_.-]+ \\($elapsed_re • esc to interrupt\\)$"; then
     parsed=$(printf '%s\n' "$line" | sed -nE 's/^[[:space:]]*(•[[:space:]]+)?Starting MCP servers \(([0-9]+)\/([0-9]+)\): ([A-Za-z0-9_.-]+) .*/\2 \3 \4/p')
@@ -231,6 +231,12 @@ write_busy_zero_progress_marker() {  # <marker> <epoch> <progress>
     rm -f "$marker.tmp" 2>/dev/null || true
     return 1
   fi
+}
+
+clear_busy_zero_progress_tracking() {  # <window>
+  local key
+  key=$(printf '%s' "$1" | tr ':/.' '___')
+  rm -f "$STATE/.busy-zero-progress-$key"
 }
 
 # Track Codex MCP startup progress independently of pane hashes. This runs once
@@ -833,8 +839,15 @@ EOF
     if ! status_is_paused "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$w"
     fi
+    harness=$(window_harness "$w")
+    if [ "$harness" != codex ]; then
+      clear_busy_zero_progress_tracking "$w"
+      if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
+        continue
+      fi
+    fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
-    if [ "$(window_harness "$w")" = codex ]; then
+    if [ "$harness" = codex ]; then
       busy_zero_progress_check "$w" "$tail40"
     fi
     if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then

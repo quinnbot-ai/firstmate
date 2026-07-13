@@ -65,6 +65,20 @@ wait_numeric_file() {
   return 1
 }
 
+wait_numeric_first_line() {
+  local file=$1 limit=${2:-30} i=0 value
+  while [ "$i" -lt "$limit" ]; do
+    value=$(sed -n '1p' "$file" 2>/dev/null || true)
+    case "$value" in
+      ''|*[!0-9]*) ;;
+      *) return 0 ;;
+    esac
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
 # Portable mtime in epoch seconds. Platform-detected, never the `stat -f || stat -c`
 # fallback (which writes a partial filesystem dump on Linux; see fm-watch.sh).
 file_mtime() {
@@ -1024,6 +1038,60 @@ test_non_codex_harness_is_outside_mcp_startup_detector() {
   pass "the MCP-startup detector is gated to tasks whose meta records the codex harness"
 }
 
+test_non_codex_harness_clears_mcp_startup_progress() {
+  local dir state fakebin out capture_file window sig pid key marker before after
+  dir=$(make_case non-codex-clears-startup-progress); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-harness-change"
+  printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/harness-change.meta"
+  printf 'working: switching harnesses\n' > "$state/harness-change.status"
+  sig=$(seen_sig "$state/harness-change.status"); printf '%s' "$sig" > "$state/.seen-harness-change_status"
+  printf 'Starting MCP servers (4/5): shared_memory (5m 01s • esc to interrupt)\n  gpt-5.5 xhigh · ~/firstmate\n' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___'); marker="$state/.busy-zero-progress-$key"
+  before=$(( $(date +%s) - 30 ))
+  printf '%s\n4/5 shared_memory\n' "$before" > "$marker"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_ZERO_PROGRESS_ESCALATE_SECS=10 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 25 || fail "watcher exited while clearing a non-Codex task's stale startup marker"
+  [ ! -e "$marker" ] || { reap "$pid"; fail "non-Codex task retained a stale startup progress marker"; }
+  reap "$pid"
+
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/harness-change.meta"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_ZERO_PROGRESS_ESCALATE_SECS=10 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+  pid=$!
+  wait_numeric_first_line "$marker" 30 || { reap "$pid"; fail "Codex task did not start fresh progress tracking after a harness change"; }
+  after=$(sed -n '1p' "$marker")
+  [ "$after" -gt "$before" ] || { reap "$pid"; fail "Codex task reused a stale pre-harness-change timestamp"; }
+  wait_live "$pid" 15 || fail "Codex task immediately escalated after reusing a stale harness timestamp"
+  reap "$pid"
+  pass "a non-Codex interval clears startup progress before the target returns to Codex"
+}
+
+test_non_codex_idle_secondmate_skips_pane_capture() {
+  local dir state fakebin out capture_file capture_log window sig pid
+  dir=$(make_case non-codex-secondmate-capture); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; capture_log="$dir/capture.log"
+  window="test:fm-claude-secondmate"
+  printf 'window=%s\nkind=secondmate\nharness=claude\n' "$window" > "$state/claude-secondmate.meta"
+  printf 'working: idle until routed work arrives\n' > "$state/claude-secondmate.status"
+  sig=$(seen_sig "$state/claude-secondmate.status"); printf '%s' "$sig" > "$state/.seen-claude-secondmate_status"
+  printf 'idle secondmate\n' > "$capture_file"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CAPTURE_LOG="$capture_log" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 25 || fail "watcher exited while supervising an idle non-Codex secondmate"
+  [ ! -s "$capture_log" ] || { reap "$pid"; fail "idle non-Codex secondmate incurred a pane capture"; }
+  reap "$pid"
+  pass "idle non-Codex secondmates skip pane capture"
+}
+
 # The detector matches the startup line only when it immediately precedes the
 # Codex context footer: nearby displayed content must never spoof startup state.
 test_displayed_startup_text_near_footer_does_not_spoof_detector() {
@@ -1080,13 +1148,13 @@ test_malformed_mcp_startup_counters_and_delimiter_are_rejected() {
 }
 
 assert_default_threshold_startup_shape_escalates() {
-  local name=$1 line=$2 progress=$3 dir state fakebin out capture_file window sig pid key marker before
+  local name=$1 line=$2 progress=$3 footer=${4:-'  gpt-5.5 xhigh · ~/firstmate'} dir state fakebin out capture_file window sig pid key marker before
   dir=$(make_case "$name"); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-$name"
   printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/$name.meta"
   printf 'working: starting MCP servers\n' > "$state/$name.status"
   sig=$(seen_sig "$state/$name.status"); printf '%s' "$sig" > "$state/.seen-${name}_status"
-  printf '%s\n  gpt-5.5 xhigh · ~/firstmate\n' "$line" > "$capture_file"
+  printf '%s\n%s\n' "$line" "$footer" > "$capture_file"
   key=$(printf '%s' "$window" | tr ':/.' '___'); marker="$state/.busy-zero-progress-$key"
   before=$(( $(date +%s) - 301 ))
   printf '%s\n%s\n' "$before" "$progress" > "$marker"
@@ -1105,7 +1173,9 @@ test_production_duration_shapes_survive_default_threshold() {
     '• Starting MCP servers (4/5): shared_memory (5m 01s • esc to interrupt)' '4/5 shared_memory'
   assert_default_threshold_startup_shape_escalates production-hour-startup \
     '• Booting MCP server: shared_memory (1h 00m 00s • esc to interrupt)' '0/1 shared_memory'
-  pass "current Codex minute and hour startup shapes remain detectable past the default threshold"
+  assert_default_threshold_startup_shape_escalates whitespace-cwd-startup \
+    '• Starting MCP servers (4/5): shared_memory (5m 01s • esc to interrupt)' '4/5 shared_memory' '  gpt-5.5 xhigh · ~/Firstmate Fleet'
+  pass "current Codex duration shapes and whitespace-containing working directories remain detectable"
 }
 
 test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
@@ -1346,6 +1416,8 @@ test_codex_secondmate_mcp_startup_escalates_zero_progress
 test_busy_zero_progress_queue_failure_preserves_throttle_timestamp
 test_long_busy_validation_is_not_zero_progress_startup
 test_non_codex_harness_is_outside_mcp_startup_detector
+test_non_codex_harness_clears_mcp_startup_progress
+test_non_codex_idle_secondmate_skips_pane_capture
 test_displayed_startup_text_near_footer_does_not_spoof_detector
 test_malformed_mcp_startup_counters_and_delimiter_are_rejected
 test_production_duration_shapes_survive_default_threshold
