@@ -206,6 +206,7 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
     printf 'empty'; return 0
   fi
   # Strip a leading prompt glyph, then re-judge the remainder.
+  # Keep the UTF-8 agent glyph prefixes literal because `?` removes one byte under LC_ALL=C and corrupts them.
   case "$content" in
     '❯ '*) content=${content#'❯ '} ;;
     '› '*) content=${content#'› '} ;;

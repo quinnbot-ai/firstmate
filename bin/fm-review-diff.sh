@@ -10,6 +10,7 @@
 # cannot be resolved, the script falls back to the local branch with a warning.
 # Usage: fm-review-diff.sh <task-id> [--stat]
 #   --stat prints only the stat summary; default prints stat summary plus full diff.
+# Full-diff output bypasses external diff drivers and textconv and disables color so ambient Git customization cannot rewrite the review surface.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

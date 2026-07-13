@@ -381,7 +381,7 @@ classify_stale() {  # <window> <state>
   printf 'self|transient stale (%s): %s' "$win" "${last:-no status}"
 }
 
-classify_check() {  # <full reason>  — check scripts print only when firstmate should wake
+classify_check() {  # <full reason> - checks are always actionable
   printf 'escalate|%s' "$1"
 }
 
