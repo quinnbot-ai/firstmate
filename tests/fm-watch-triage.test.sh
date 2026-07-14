@@ -201,8 +201,8 @@ test_status_is_paused_classifier() {
 # (surface it) - so the watcher's stale path gets both for one bounded call.
 # crew_is_paused delegates to it exactly as crew_is_provably_working does.
 test_crew_absorb_class_classifier() {
-  local dir fakebin
-  dir=$(make_case absorb-class); fakebin="$dir/fakebin"
+  local dir fakebin state
+  dir=$(make_case absorb-class); fakebin="$dir/fakebin"; state="$dir/state"
   export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
   export FM_FAKE_CREW_STATE
   FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
@@ -218,6 +218,8 @@ test_crew_absorb_class_classifier() {
   FM_FAKE_CREW_STATE='state: unknown · source: none · worktree gone'
   [ "$(crew_absorb_class a)" = none ] || fail "unknown crew classed absorbable"
   ! crew_is_paused a || fail "unknown crew classed paused"
+  printf 'paused: awaiting upstream\n' > "$state/a.status"
+  [ "$(STATE="$state" crew_absorb_class a)" = none ] || fail "unknown/none with a stale paused status was suppressed"
   [ "$(crew_absorb_class "")" = none ] || fail "empty id not classed none"
   unset FM_FAKE_CREW_STATE
   pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
@@ -612,7 +614,7 @@ test_settled_pause_survives_watcher_restart_without_pause_marker() {
   printf '1\n' > "$state/.count-$key"
   # Simulate a fresh watcher after volatile pause tracking was lost.
   rm -f "$state/.paused-$key" "$state/.paused-rechecked-$key" "$state/.stale-$key"
-  export FM_FAKE_CREW_STATE='state: unknown · source: none · watcher restart has no live current-state result'
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream release'
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \

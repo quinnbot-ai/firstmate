@@ -224,22 +224,6 @@ signal_reason_is_actionable() {  # <file> ...
   return 1
 }
 
-# 0 if <id>'s durable final status event declares a pause.
-#
-# Current-state evidence normally outranks the append-only status log: an active
-# run after a pause must classify as working, and a completed or failed run must
-# not be hidden by an old pause event.  A watcher restart can briefly leave the
-# current-state reader with only `unknown · source: none`, however, while the task
-# status file still durably records the settled pause.  This narrow fallback lets
-# the shared classifier rebuild pause tracking without one plain stale wake per
-# restart.  Callers still surface the initial paused status signal normally,
-# because `crew_is_provably_working` accepts only the working class.
-crew_status_declares_pause() {  # <id> [state-dir]
-  local id=$1 state=${2:-${STATE:-${FM_STATE_OVERRIDE:-}}}
-  [ -n "$id" ] && [ -n "$state" ] || return 1
-  status_is_paused "$(last_status_line "$state/$id.status")"
-}
-
 # Classify WHY an idle/stale crew MIGHT be safely absorbed instead of surfaced,
 # from bin/fm-crew-state.sh's one authoritative current-state line
 # ("state: <s> · source: <src> · <detail>"). Prints exactly one token:
@@ -253,9 +237,6 @@ crew_status_declares_pause() {  # <id> [state-dir]
 # One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
 # authoritatively (not the status log) is what keeps run-step precedence: a crew
 # that appended paused: but then STARTED a run reports working, never paused.
-# Only when that reader has no source at all does the classifier recover a final
-# paused: event from the durable task status log, so a watcher restart does not
-# depend on a warm .paused-* marker.
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
@@ -269,13 +250,6 @@ crew_absorb_class() {  # <id>
   if [ "$state" = working ]; then
     src=${line#*source: }; src=${src%% *}
     case "$src" in run-step|pane) printf 'working'; return ;; esac
-  fi
-  if [ "$state" = unknown ]; then
-    src=${line#*source: }; src=${src%% *}
-    if [ "$src" = none ] && crew_status_declares_pause "$id"; then
-      printf 'paused'
-      return
-    fi
   fi
   printf 'none'
 }
