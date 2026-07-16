@@ -200,6 +200,8 @@ ORCA_ABORT_CLEANUP_FAILED=0
 FAILED_ENDPOINT_CLEANUP=0
 TREEHOUSE_ABORT_CLEANUP=0
 CODEX_CREWMATE_HOME=
+CODEX_ACTIVATION_RESULT=
+SPAWN_META_WRITTEN=0
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -327,6 +329,9 @@ spawn_abort_cleanup() {
     CODEX_CREWMATE_HOME=
   fi
   [ "$orca_cleanup_failed" -eq 0 ] || write_failed_treehouse_spawn_meta
+  if [ "$status" -ne 0 ] && [ "$SPAWN_META_WRITTEN" = 1 ] && [ "$FAILED_ENDPOINT_CLEANUP" != 1 ] && [ "$preserve_codex_home" -eq 0 ] && [ "$orca_cleanup_failed" -eq 0 ] && [ -z "$CODEX_CREWMATE_HOME" ]; then
+    rm -f "$STATE/$ID.meta"
+  fi
   return "$status"
 }
 trap spawn_abort_cleanup EXIT
@@ -450,6 +455,11 @@ raw_launch_word_is_codex() {
   raw_launch_word_is "$1" codex
 }
 
+raw_launch_word_is_dynamic_dispatcher() {
+  local word=$1
+  raw_launch_word_is "$word" find || raw_launch_word_is "$word" xargs || raw_launch_word_is "$word" parallel
+}
+
 raw_launch_mentions_codex() {
   local raw=$1 status
   while [ -n "$raw" ]; do
@@ -546,6 +556,8 @@ raw_launch_starts_codex() {
               state=timeout
             elif raw_launch_word_is "$word" sudo; then
               state=sudo
+            elif raw_launch_word_is_dynamic_dispatcher "$word"; then
+              return 2
             elif raw_launch_word_is "$word" nohup || raw_launch_word_is "$word" time || raw_launch_word_is "$word" stdbuf || raw_launch_word_is "$word" setsid || raw_launch_word_is "$word" chrt || raw_launch_word_is "$word" ionice || raw_launch_word_is "$word" taskset || raw_launch_word_is "$word" script; then
               state=wrapper
             else
@@ -566,20 +578,17 @@ raw_launch_starts_codex() {
           -S|--split-string)
             raw_launch_read_word "$raw" || return 2
             nested=$RAW_LAUNCH_WORD
-            raw_launch_starts_codex "$nested"
-            return $?
+            if raw_launch_starts_codex "$nested"; then return 0; else return $?; fi
             ;;
           --unset=*|--chdir=*) ;;
           --split-string=*)
             nested=${word#*=}
-            raw_launch_starts_codex "$nested"
-            return $?
+            if raw_launch_starts_codex "$nested"; then return 0; else return $?; fi
             ;;
           --) state=env-command ;;
           -*) return 2 ;;
           *)
-            raw_launch_starts_codex "$word$raw"
-            return $?
+            if raw_launch_starts_codex "$word$raw"; then return 0; else return $?; fi
             ;;
         esac
         ;;
@@ -588,14 +597,12 @@ raw_launch_starts_codex() {
           --) state=command-command ;;
           -*) ;;
           *)
-            raw_launch_starts_codex "$word$raw"
-            return $?
+            if raw_launch_starts_codex "$word$raw"; then return 0; else return $?; fi
             ;;
         esac
         ;;
       env-command|command-command)
-        raw_launch_starts_codex "$word$raw"
-        return $?
+        if raw_launch_starts_codex "$word$raw"; then return 0; else return $?; fi
         ;;
       nice)
         case "$word" in
@@ -670,10 +677,7 @@ raw_launch_starts_codex() {
             status=$?
             [ "$status" -eq 0 ] || return 2
             nested=$RAW_LAUNCH_WORD
-            raw_launch_starts_codex "$nested"
-            status=$?
-            [ "$status" -ne 0 ] || return 2
-            return "$status"
+            if raw_launch_starts_codex "$nested"; then return 2; else return $?; fi
             ;;
           -*) ;;
           *) return 1 ;;
@@ -701,13 +705,34 @@ refresh_codex_crewmate_home() {
   CODEX_CREWMATE_HOME="$DATA/codex-crewmate/$name"
 }
 
+wait_for_codex_home_activation() {
+  local result=$1 deadline status
+  deadline=$(( $(date +%s) + 10 ))
+  while [ "$(date +%s)" -le "$deadline" ]; do
+    if [ -f "$result" ]; then
+      status=$(cat "$result" 2>/dev/null || true)
+      rm -f "$result"
+      [ "$status" = ready ] && return 0
+      echo "error: isolated Codex home activation failed" >&2
+      return 1
+    fi
+    sleep 0.1
+  done
+  echo "error: isolated Codex home activation did not report ready within 10s" >&2
+  return 1
+}
+
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
-    if raw_launch_starts_codex "$ARG3"; then
-      raw_codex_status=0
-    else
-      raw_codex_status=$?
+    set +e
+    raw_launch_starts_codex "$ARG3"
+    raw_codex_status=$?
+    if [ "$raw_codex_status" -eq 1 ]; then
+      raw_launch_mentions_codex "$ARG3"
+      raw_codex_mentions=$?
+      [ "$raw_codex_mentions" -eq 1 ] || raw_codex_status=2
     fi
+    set -e
     if [ "$KIND" != secondmate ] && [ "$raw_codex_status" -eq 2 ]; then
       echo "error: unsafe raw launch command at executable position; use --harness codex for Codex" >&2
       exit 1
@@ -1264,6 +1289,17 @@ fi
 # targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
 TASK_TMP="/tmp/fm-$ID"
 mkdir -p "$TASK_TMP/gotmp"
+[ -z "$CODEX_CREWMATE_HOME" ] || CODEX_ACTIVATION_RESULT="$TASK_TMP/codex-home-activation"
+if [ -n "$CODEX_ACTIVATION_RESULT" ]; then
+  rm -f "$CODEX_ACTIVATION_RESULT" || {
+    echo "error: could not clear isolated Codex home activation result" >&2
+    exit 1
+  }
+  [ ! -e "$CODEX_ACTIVATION_RESULT" ] || {
+    echo "error: isolated Codex home activation result already exists" >&2
+    exit 1
+  }
+fi
 
 # Per-harness turn-end hook: a file that touches state/<id>.turn-ended when the
 # agent finishes a turn. Worktree-resident hooks are kept out of git's view so
@@ -1426,7 +1462,7 @@ META_WINDOW=$T
     echo "projects=$SECONDMATE_PROJECTS"
   fi
 } > "$STATE/$ID.meta"
-[ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+SPAWN_META_WRITTEN=1
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
@@ -1450,7 +1486,8 @@ if [ -n "$CODEX_CREWMATE_HOME" ]; then
   sq_codex_data=$(shell_quote "$DATA")
   sq_codex_source=$(shell_quote "$HOME/.codex")
   sq_codex_worktree=$(shell_quote "$WT")
-  LAUNCH="exec python3 $sq_codex_home_helper --create-activate --data $sq_codex_data --source $sq_codex_source --profile $sq_codex_crewmate_profile --worktree $sq_codex_worktree --home $sq_codex_crewmate_home -- $LAUNCH"
+  sq_codex_activation_result=$(shell_quote "$CODEX_ACTIVATION_RESULT")
+  LAUNCH="exec python3 $sq_codex_home_helper --create-activate --data $sq_codex_data --source $sq_codex_source --profile $sq_codex_crewmate_profile --worktree $sq_codex_worktree --home $sq_codex_crewmate_home --result-file $sq_codex_activation_result -- $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
@@ -1464,6 +1501,10 @@ sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 spawn_send_key "$T" Enter
+if [ -n "$CODEX_ACTIVATION_RESULT" ]; then
+  wait_for_codex_home_activation "$CODEX_ACTIVATION_RESULT" || exit 1
+fi
 TREEHOUSE_ABORT_CLEANUP=0
+[ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"

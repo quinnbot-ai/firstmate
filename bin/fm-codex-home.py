@@ -116,6 +116,7 @@ def parse_args():
     parser.add_argument("--create-activate", action="store_true")
     parser.add_argument("--remove", action="store_true")
     parser.add_argument("--home")
+    parser.add_argument("--result-file")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     return parser.parse_args()
 
@@ -132,6 +133,21 @@ def launch_command(args):
     if not command:
         die("Codex home activation requires a command")
     return command
+
+
+def write_activation_result(args, result):
+    if not args.result_file:
+        return False
+    try:
+        fd = os.open(args.result_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            write_all(fd, result)
+            os.fchmod(fd, 0o600)
+        finally:
+            os.close(fd)
+    except OSError:
+        return False
+    return True
 
 
 def validate_data_root(data):
@@ -212,6 +228,8 @@ def create_home(args, command=None):
                     profile = "# Firstmate Codex crewmate profile.\n[projects.\"%s\"]\ntrust_level = \"untrusted\"\n" % worktree
                     write_file(home_fd, args.profile + ".config.toml", profile.encode())
                     if command:
+                        if not write_activation_result(args, b"ready\n"):
+                            die("could not record isolated Codex home activation")
                         os.set_inheritable(home_fd, True)
                         environment = os.environ.copy()
                         environment["CODEX_HOME"] = f"/dev/fd/{home_fd}"
@@ -251,8 +269,16 @@ def main():
     if args.create_activate:
         if not args.home:
             die("Codex home activation requires --home")
-        create_home(args, launch_command(args))
+        if not args.result_file:
+            die("Codex home activation requires --result-file")
+        try:
+            create_home(args, launch_command(args))
+        except BaseException:
+            write_activation_result(args, b"failed\n")
+            raise
         return
+    if args.result_file:
+        die("Codex home result files are only valid for activation")
     create_home(args)
 
 

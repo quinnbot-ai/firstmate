@@ -43,15 +43,23 @@ case "${1:-}" in
     exit 0
     ;;
   send-keys)
+    literal=
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
       for a in "$@"; do
         if [ "$prev" = "-l" ]; then
           printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
+          literal=$a
         fi
         prev=$a
       done
     fi
+    case "$literal" in
+      *'--result-file '*)
+        result=$(printf '%s\n' "$literal" | sed -n "s/.*--result-file '\\([^']*\\)'.*/\\1/p")
+        [ -z "$result" ] || printf '%s\n' "${FM_FAKE_ACTIVATION_RESULT:-ready}" > "$result"
+        ;;
+    esac
     exit 0
     ;;
 esac
@@ -127,6 +135,7 @@ run_spawn() {
     FM_FAKE_BACKEND_KILL_STATUS="${FM_FAKE_BACKEND_KILL_STATUS:-0}" \
     FM_FAKE_TARGET_QUERY_STATUS="${FM_FAKE_TARGET_QUERY_STATUS:-0}" \
     FM_FAKE_TARGET_STATE="$target_state" \
+    FM_FAKE_ACTIVATION_RESULT="${FM_FAKE_ACTIVATION_RESULT:-ready}" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     HOME="$CASE_DIR/user" \
     "$SPAWN" "$@" 2>&1
@@ -143,8 +152,10 @@ codex_home_from_launch() {
 }
 
 materialize_codex_home() {  # <home> <data> <source> <profile> <worktree>
+  local result="$1.activation"
   python3 "$ROOT/bin/fm-codex-home.py" --create-activate --data "$2" --source "$3" \
-    --profile "$4" --worktree "$5" --home "$1" -- /usr/bin/env >/dev/null
+    --profile "$4" --worktree "$5" --home "$1" --result-file "$result" -- /usr/bin/env >/dev/null
+  rm -f "$result"
 }
 
 assert_meta_profile() {
@@ -319,7 +330,7 @@ EOF
   launch=$(cat "$LAUNCH_LOG")
   crew_home=$(codex_home_from_launch "$launch")
   [ -n "$crew_home" ] || fail "Codex ship launch did not expose an isolated CODEX_HOME"
-  assert_contains "$launch" "--home '$crew_home' -- codex --profile 'fm-crewmate-$ship' --disable plugins" \
+  assert_contains "$launch" "--home '$crew_home' --result-file '/tmp/fm-$ship/codex-home-activation' -- codex --profile 'fm-crewmate-$ship' --disable plugins" \
     "Codex ship launch did not activate the isolated CODEX_HOME"
   materialize_codex_home "$crew_home" "$HOME_DIR/data" "$source_home" "fm-crewmate-$ship" "$WT_DIR"
   assert_contains "$out" "warning: Codex crewmate ignores project config" \
@@ -355,7 +366,7 @@ EOF
   launch=$(cat "$LAUNCH_LOG")
   crew_home=$(codex_home_from_launch "$launch")
   [ -n "$crew_home" ] || fail "Codex scout launch did not expose an isolated CODEX_HOME"
-  assert_contains "$launch" "--home '$crew_home' -- codex --profile 'fm-crewmate-$scout' --disable plugins" \
+  assert_contains "$launch" "--home '$crew_home' --result-file '/tmp/fm-$scout/codex-home-activation' -- codex --profile 'fm-crewmate-$scout' --disable plugins" \
     "Codex scout launch did not activate the isolated CODEX_HOME"
   materialize_codex_home "$crew_home" "$HOME_DIR/data" "$source_home" "fm-crewmate-$scout" "$WT_DIR"
   assert_no_grep 'mcp_servers' "$crew_home/config.toml" \
@@ -540,7 +551,7 @@ test_raw_codex_launch_is_normalized() {
     launch=$(cat "$LAUNCH_LOG")
     crew_home=$(codex_home_from_launch "$launch")
     [ -n "$crew_home" ] || fail "$case_name raw Codex launch did not expose an isolated CODEX_HOME"
-    assert_contains "$launch" "--home '$crew_home' -- codex --profile 'fm-crewmate-$id' --disable plugins" \
+    assert_contains "$launch" "--home '$crew_home' --result-file '/tmp/fm-$id/codex-home-activation' -- codex --profile 'fm-crewmate-$id' --disable plugins" \
       "$case_name raw Codex launch did not enforce the isolated profile"
     assert_not_contains "$launch" '/unsafe' "$case_name raw CODEX_HOME assignment survived normalization"
   done
@@ -549,7 +560,7 @@ test_raw_codex_launch_is_normalized() {
 
 test_raw_codex_execution_wrappers_fail_closed() {
   local command case_name rec id out status n=0
-  for case_name in nice nice-option shell sudo-user timeout-duration script; do
+  for case_name in nice nice-option shell sudo-user timeout-duration script find xargs unknown-wrapper; do
     n=$((n + 1))
     id="profile-raw-codex-wrapper-$n-z31"
     rec=$(make_spawn_case "profile-raw-codex-wrapper-$n" codex "$id")
@@ -561,6 +572,9 @@ test_raw_codex_execution_wrappers_fail_closed() {
       sudo-user) command='sudo -u crew CODEX_HOME=/unsafe codex' ;;
       timeout-duration) command='timeout 5 CODEX_HOME=/unsafe codex' ;;
       script) command='script -q /dev/null codex' ;;
+      find) command='find . -exec codex {} \;' ;;
+      xargs) command='xargs -a jobs codex' ;;
+      unknown-wrapper) command='custom-wrapper codex' ;;
     esac
 
     out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
@@ -675,34 +689,58 @@ test_codex_crewmate_home_uses_private_directory() {
 }
 
 test_codex_home_activation_uses_open_descriptor() {
-  local data source home out
+  local data source home result out
   data="$TMP_ROOT/codex-activation-data"
   source="$TMP_ROOT/codex-activation-source"
   mkdir -p "$data" "$source"
   home="$data/codex-crewmate/$(python3 "$ROOT/bin/fm-codex-home.py" --data "$data" --new-home-name)"
+  result="$home.activation"
   out=$(python3 "$ROOT/bin/fm-codex-home.py" --create-activate --data "$data" --source "$source" \
-    --profile fm-crewmate-activation-z42 --worktree /tmp/fm-codex-activation --home "$home" -- /usr/bin/env)
+    --profile fm-crewmate-activation-z42 --worktree /tmp/fm-codex-activation --home "$home" --result-file "$result" -- /usr/bin/env)
   assert_contains "$out" "CODEX_HOME=/dev/fd/" \
     "Codex activation must retain an opened home descriptor"
+  assert_contains "$(cat "$result")" ready "Codex activation must report readiness before launch"
+  rm -f "$result"
   python3 "$ROOT/bin/fm-codex-home.py" --remove --data "$data" --home "$home"
   assert_absent "$home" "descriptor-activated Codex home must remain removable"
   pass "Codex activation passes a descriptor-backed home"
 }
 
 test_codex_home_activation_refuses_replaced_path() {
-  local data source name home out status
+  local data source name home result out status
   data="$TMP_ROOT/codex-activation-race-data"
   source="$TMP_ROOT/codex-activation-race-source"
   mkdir -p "$data" "$source"
   name=$(python3 "$ROOT/bin/fm-codex-home.py" --data "$data" --new-home-name)
   home="$data/codex-crewmate/$name"
+  result="$home.activation"
   mkdir -p "$home"
   out=$(python3 "$ROOT/bin/fm-codex-home.py" --create-activate --data "$data" --source "$source" \
-    --profile fm-crewmate-race-z43 --worktree /tmp/fm-codex-race --home "$home" -- /usr/bin/env 2>&1)
+    --profile fm-crewmate-race-z43 --worktree /tmp/fm-codex-race --home "$home" --result-file "$result" -- /usr/bin/env 2>&1)
   status=$?
   expect_code 1 "$status" "Codex activation must reject a replaced planned home"
   assert_contains "$out" "already exists" "Codex activation did not reject the replaced planned home"
+  assert_contains "$(cat "$result")" failed "Codex activation failure must report failure"
   pass "Codex activation rejects replaced planned homes"
+}
+
+test_codex_home_activation_failure_aborts_spawn() {
+  local rec id out status
+  id=profile-codex-home-activation-z45
+  rec=$(make_spawn_case profile-codex-home-activation codex "$id")
+  read_case_record "$rec"
+
+  out=$(FM_FAKE_ACTIVATION_RESULT=failed run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "Codex spawn must fail when terminal activation fails"
+  assert_contains "$out" "isolated Codex home activation failed" \
+    "Codex spawn did not report terminal activation failure"
+  assert_absent "$HOME_DIR/state/$id.meta" "terminal activation failure must not retain task metadata"
+  assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
+    "terminal activation failure did not return its worktree"
+  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+    "terminal activation failure did not remove its task endpoint"
+  pass "Codex spawn synchronizes terminal activation failures"
 }
 
 test_codex_teardown_preserves_failed_endpoint_metadata() {
@@ -991,6 +1029,7 @@ test_quoted_raw_custom_launch_remains_supported
 test_codex_crewmate_home_uses_private_directory
 test_codex_home_activation_uses_open_descriptor
 test_codex_home_activation_refuses_replaced_path
+test_codex_home_activation_failure_aborts_spawn
 test_codex_teardown_preserves_failed_endpoint_metadata
 test_codex_teardown_refuses_symlinked_data_root
 test_codex_crewmate_home_records_failed_worktree_return
