@@ -2,6 +2,7 @@
 import argparse
 import os
 import secrets
+import signal
 import stat
 import sys
 
@@ -150,6 +151,63 @@ def write_activation_result(args, result):
     return True
 
 
+def activation_result_fd(args):
+    try:
+        fd = os.open(args.result_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        os.fchmod(fd, 0o600)
+        return fd
+    except OSError as error:
+        die(f"could not record isolated Codex home activation: {error.strerror}")
+
+
+def finish_activation_result(fd, result):
+    try:
+        write_all(fd, result)
+    finally:
+        os.close(fd)
+
+
+class ActivationExecError(Exception):
+    pass
+
+
+def activate_command(args, home_fd, command):
+    result_fd = activation_result_fd(args)
+    read_fd, write_fd = os.pipe()
+    os.set_inheritable(read_fd, False)
+    os.set_inheritable(write_fd, False)
+    pid = os.fork()
+    if pid == 0:
+        os.close(read_fd)
+        try:
+            os.set_inheritable(home_fd, True)
+            environment = os.environ.copy()
+            environment["CODEX_HOME"] = f"/dev/fd/{home_fd}"
+            os.execvpe(command[0], command, environment)
+        except BaseException:
+            try:
+                write_all(write_fd, b"failed\n")
+            finally:
+                os._exit(1)
+    os.close(write_fd)
+    try:
+        outcome = os.read(read_fd, 64)
+    finally:
+        os.close(read_fd)
+    if outcome:
+        _, status = os.waitpid(pid, 0)
+        finish_activation_result(result_fd, b"failed\n")
+        raise ActivationExecError("could not execute isolated Codex launch")
+    try:
+        finish_activation_result(result_fd, b"ready\n")
+    except BaseException:
+        os.kill(pid, signal.SIGTERM)
+        os.waitpid(pid, 0)
+        raise
+    _, status = os.waitpid(pid, 0)
+    return os.waitstatus_to_exitcode(status)
+
+
 def validate_data_root(data):
     data_fd = open_directory(os.path.abspath(data))
     try:
@@ -228,12 +286,7 @@ def create_home(args, command=None):
                     profile = "# Firstmate Codex crewmate profile.\n[projects.\"%s\"]\ntrust_level = \"untrusted\"\n" % worktree
                     write_file(home_fd, args.profile + ".config.toml", profile.encode())
                     if command:
-                        if not write_activation_result(args, b"ready\n"):
-                            die("could not record isolated Codex home activation")
-                        os.set_inheritable(home_fd, True)
-                        environment = os.environ.copy()
-                        environment["CODEX_HOME"] = f"/dev/fd/{home_fd}"
-                        os.execvpe(command[0], command, environment)
+                        return activate_command(args, home_fd, command)
                 finally:
                     os.close(home_fd)
                 print(os.path.join(data, "codex-crewmate", name))
@@ -272,10 +325,11 @@ def main():
         if not args.result_file:
             die("Codex home activation requires --result-file")
         try:
-            create_home(args, launch_command(args))
+            exit_code = create_home(args, launch_command(args))
         except BaseException:
             write_activation_result(args, b"failed\n")
             raise
+        raise SystemExit(exit_code)
         return
     if args.result_file:
         die("Codex home result files are only valid for activation")

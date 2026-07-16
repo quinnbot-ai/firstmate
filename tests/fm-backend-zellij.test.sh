@@ -789,6 +789,21 @@ test_kill_is_noop_when_session_absent() {
   pass "fm_backend_zellij_kill: never fails when the target session no longer exists"
 }
 
+test_kill_is_noop_when_target_is_malformed() {
+  local dir fb
+  dir="$TMP_ROOT/kill-malformed-target"; mkdir -p "$dir/responses"; : > "$dir/log"
+  fb=$(make_zellij_fakebin "$dir")
+  PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_kill malformed-target' "$ROOT"
+  expect_code 0 $? "non-strict kill must no-op when the Zellij target cannot be parsed"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''close-tab-by-id' \
+    "non-strict kill must not close a tab after target parsing fails"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''close-pane' \
+    "non-strict kill must not close a pane after target parsing fails"
+  pass "fm_backend_zellij_kill: non-strict cleanup skips malformed targets"
+}
+
 test_kill_is_strict_when_session_is_unqueryable() {
   local dir fb status
   dir="$TMP_ROOT/kill-strict-no-session"; mkdir -p "$dir/responses"
@@ -1065,6 +1080,7 @@ test_kill_falls_back_to_close_pane_when_tab_lookup_empty
 test_kill_closes_recorded_tab_when_pane_already_gone
 test_kill_skips_recorded_tab_when_label_mismatches
 test_kill_is_noop_when_session_absent
+test_kill_is_noop_when_target_is_malformed
 test_kill_is_strict_when_session_is_unqueryable
 test_teardown_passes_recorded_tab_id_to_zellij_kill
 test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag

@@ -706,6 +706,22 @@ test_codex_home_activation_uses_open_descriptor() {
   pass "Codex activation passes a descriptor-backed home"
 }
 
+test_codex_home_activation_reports_exec_failure() {
+  local data source home result out status
+  data="$TMP_ROOT/codex-activation-exec-failure-data"
+  source="$TMP_ROOT/codex-activation-exec-failure-source"
+  mkdir -p "$data" "$source"
+  home="$data/codex-crewmate/$(python3 "$ROOT/bin/fm-codex-home.py" --data "$data" --new-home-name)"
+  result="$home.activation"
+  out=$(python3 "$ROOT/bin/fm-codex-home.py" --create-activate --data "$data" --source "$source" \
+    --profile fm-crewmate-exec-failure-z44 --worktree /tmp/fm-codex-exec-failure --home "$home" --result-file "$result" -- /definitely/missing/codex 2>&1)
+  status=$?
+  expect_code 1 "$status" "Codex activation must fail when its launch command cannot exec"
+  assert_contains "$(cat "$result")" failed "Codex activation must report exec failures as failed"
+  assert_absent "$home" "Codex activation must remove a home after an exec failure"
+  pass "Codex activation reports exec failures before ready"
+}
+
 test_codex_home_activation_refuses_replaced_path() {
   local data source name home result out status
   data="$TMP_ROOT/codex-activation-race-data"
@@ -1028,6 +1044,7 @@ test_quoted_or_escaped_raw_codex_launch_fails_closed
 test_quoted_raw_custom_launch_remains_supported
 test_codex_crewmate_home_uses_private_directory
 test_codex_home_activation_uses_open_descriptor
+test_codex_home_activation_reports_exec_failure
 test_codex_home_activation_refuses_replaced_path
 test_codex_home_activation_failure_aborts_spawn
 test_codex_teardown_preserves_failed_endpoint_metadata
