@@ -89,6 +89,7 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
+    HOME="$CASE_DIR/user" \
     "$SPAWN" "$@" 2>&1
 }
 
@@ -240,6 +241,57 @@ test_codex_threads_model_and_effort() {
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
 
+test_codex_crewmate_home_excludes_mcp_and_plugins() {
+  local rec ship scout out status launch crew_home source_home
+  ship=profile-codex-home-ship-z17
+  scout=profile-codex-home-scout-z18
+  rec=$(make_spawn_case profile-codex-home codex "$ship" "$scout")
+  read_case_record "$rec"
+  source_home="$CASE_DIR/user/.codex"
+  mkdir -p "$source_home/plugins"
+  printf '%s\n' '{"auth_mode":"chatgpt"}' > "$source_home/auth.json"
+  printf '%s\n' '{"models":[]}' > "$source_home/models_cache.json"
+  cat > "$source_home/config.toml" <<'EOF'
+[mcp_servers.shared_memory]
+command = "broken-memory-server"
+[plugins."computer-use@openai-bundled"]
+enabled = true
+EOF
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$ship" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "Codex ship spawn should succeed with an isolated home"
+  crew_home="$HOME_DIR/data/codex-crewmate"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME='$crew_home' codex" \
+    "Codex ship launch did not set the isolated CODEX_HOME"
+  assert_present "$crew_home/config.toml" "isolated Codex config was not created"
+  assert_no_grep 'mcp_servers' "$crew_home/config.toml" \
+    "isolated Codex config retained MCP server entries"
+  assert_no_grep 'plugins' "$crew_home/config.toml" \
+    "isolated Codex config retained plugin registrations"
+  [ ! -e "$crew_home/plugins" ] || fail "isolated Codex home retained a plugins directory"
+  cmp -s "$source_home/auth.json" "$crew_home/auth.json" \
+    || fail "isolated Codex home did not refresh authentication"
+  cmp -s "$source_home/models_cache.json" "$crew_home/models_cache.json" \
+    || fail "isolated Codex home did not refresh the model catalog"
+  [ ! -L "$crew_home/auth.json" ] || fail "isolated Codex auth must not point into the captain home"
+
+  mkdir -p "$crew_home/plugins/stale-plugin"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$scout" "$PROJ_DIR" --scout)
+  status=$?
+  expect_code 0 "$status" "Codex scout spawn should use the isolated home"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME='$crew_home' codex" \
+    "Codex scout launch did not set the isolated CODEX_HOME"
+  assert_no_grep 'mcp_servers' "$crew_home/config.toml" \
+    "Codex scout refresh reintroduced MCP server entries"
+  assert_no_grep 'plugins' "$crew_home/config.toml" \
+    "Codex scout refresh reintroduced plugin registrations"
+  [ ! -e "$crew_home/plugins" ] || fail "Codex scout refresh retained stale plugins"
+  pass "Codex ship and scout launches use a firstmate-owned MCP-free home"
+}
+
 test_codex_omits_invalid_max_effort() {
   local rec id out status launch
   id=profile-codex-max-z4
@@ -380,6 +432,8 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   assert_contains "$out" "spawned $id harness=codex kind=secondmate" "secondmate launch did not use secondmate harness resolution"
   assert_grep "kind=secondmate" "$HOME_DIR/state/$id.meta" "secondmate meta missing kind=secondmate"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex default default
+  assert_not_contains "$(cat "$LAUNCH_LOG")" "CODEX_HOME=" \
+    "secondmate Codex launch must keep its existing CODEX_HOME behavior"
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
@@ -391,6 +445,7 @@ test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
+test_codex_crewmate_home_excludes_mcp_and_plugins
 test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort

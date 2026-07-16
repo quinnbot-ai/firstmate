@@ -73,6 +73,10 @@
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
+# Codex ship and scout launches receive a firstmate-managed CODEX_HOME under
+# data/codex-crewmate, refreshed with only copied auth/model catalog files and
+# an empty config.toml with no MCP servers or plugins.
+# Codex secondmate launches retain their existing home and are not changed here.
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
@@ -347,6 +351,31 @@ launch_template() {
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
     *) return 1 ;;
   esac
+}
+
+refresh_codex_crewmate_home() {
+  local source="$HOME/.codex" home="$DATA/codex-crewmate" name source_file temp_file
+  umask 077
+  mkdir -p "$home" || return 1
+  chmod 700 "$home" || return 1
+  # This directory is firstmate-owned, so each spawn can converge it on no plugins.
+  rm -rf "$home/plugins"
+  temp_file="$home/.config.toml.$$"
+  printf '%s\n' '# Firstmate Codex crewmate home.' > "$temp_file" || return 1
+  chmod 600 "$temp_file" || return 1
+  mv -f "$temp_file" "$home/config.toml" || return 1
+  for name in auth.json models_cache.json; do
+    source_file="$source/$name"
+    if [ -f "$source_file" ]; then
+      temp_file="$home/.$name.$$"
+      cp "$source_file" "$temp_file" || return 1
+      chmod 600 "$temp_file" || return 1
+      mv -f "$temp_file" "$home/$name" || return 1
+    else
+      rm -f "$home/$name"
+    fi
+  done
+  printf '%s\n' "$home"
 }
 
 case "$ARG3" in
@@ -972,6 +1001,14 @@ EOF
   esac
 fi
 
+CODEX_CREWMATE_HOME=
+if [ "$HARNESS" = codex ] && [ "$KIND" != secondmate ]; then
+  CODEX_CREWMATE_HOME=$(refresh_codex_crewmate_home) || {
+    echo "error: could not prepare isolated Codex crewmate home" >&2
+    exit 1
+  }
+fi
+
 # Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; AGENTS.md project management and task lifecycle).
 # Recorded in meta so fm-teardown's safety check and the validate/merge stages can
 # branch on them. Mode governs ship tasks; a scout's deliverable is a report, not a
@@ -1045,6 +1082,10 @@ LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
+if [ -n "$CODEX_CREWMATE_HOME" ]; then
+  sq_codex_crewmate_home=$(shell_quote "$CODEX_CREWMATE_HOME")
+  LAUNCH="CODEX_HOME=$sq_codex_crewmate_home $LAUNCH"
+fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
