@@ -283,8 +283,13 @@ orca_spawn_abort_cleanup() {
   ORCA_ABORT_CLEANUP=0
   if [ -n "${ORCA_TERMINAL:-}" ]; then
     if FM_BACKEND_KILL_STRICT=1 fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null; then
-      ORCA_TERMINAL=
-      T=
+      if fm_backend_target_absent orca "$ORCA_TERMINAL"; then
+        ORCA_TERMINAL=
+        T=
+      else
+        cleanup_failed=1
+        FAILED_ENDPOINT_CLEANUP=1
+      fi
     else
       cleanup_failed=1
       FAILED_ENDPOINT_CLEANUP=1
