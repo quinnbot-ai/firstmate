@@ -766,15 +766,24 @@ refresh_codex_crewmate_home() {
 }
 
 wait_for_codex_home_activation() {
-  local result=$1 directory=$2 deadline status
+  local result=$1 directory=$2 token=$3 deadline status read_status
   deadline=$(( $(date +%s) + 10 ))
   while [ "$(date +%s)" -le "$deadline" ]; do
-    if [ -f "$result" ]; then
-      status=$(cat "$result" 2>/dev/null || true)
+    set +e
+    status=$(python3 "$FM_ROOT/bin/fm-codex-home.py" --data "$DATA" --read-activation-result --result-file "$result" --result-token "$token" 2>&1)
+    read_status=$?
+    set -e
+    if [ "$read_status" -eq 0 ]; then
       rm -f "$result"
       rmdir "$directory" 2>/dev/null || true
       [ "$status" = ready ] && return 0
       echo "error: isolated Codex home activation failed" >&2
+      return 1
+    fi
+    if [ "$read_status" -ne 3 ]; then
+      rm -f "$result"
+      rmdir "$directory" 2>/dev/null || true
+      echo "error: isolated Codex home activation result is unsafe" >&2
       return 1
     fi
     sleep 0.1
@@ -1371,6 +1380,10 @@ if [ -n "$CODEX_CREWMATE_HOME" ]; then
   }
   chmod 700 "$CODEX_ACTIVATION_DIR" || exit 1
   CODEX_ACTIVATION_RESULT="$CODEX_ACTIVATION_DIR/result"
+  CODEX_ACTIVATION_TOKEN=$(python3 "$FM_ROOT/bin/fm-codex-home.py" --new-result-token) || {
+    echo "error: could not create isolated Codex home activation token" >&2
+    exit 1
+  }
 fi
 
 # Per-harness turn-end hook: a file that touches state/<id>.turn-ended when the
@@ -1559,7 +1572,8 @@ if [ -n "$CODEX_CREWMATE_HOME" ]; then
   sq_codex_source=$(shell_quote "$HOME/.codex")
   sq_codex_worktree=$(shell_quote "$WT_REAL")
   sq_codex_activation_result=$(shell_quote "$CODEX_ACTIVATION_RESULT")
-  LAUNCH="exec python3 $sq_codex_home_helper --create-activate --data $sq_codex_data --source $sq_codex_source --profile $sq_codex_crewmate_profile --worktree $sq_codex_worktree --home $sq_codex_crewmate_home --result-file $sq_codex_activation_result -- $LAUNCH"
+  sq_codex_activation_token=$(shell_quote "$CODEX_ACTIVATION_TOKEN")
+  LAUNCH="exec python3 $sq_codex_home_helper --create-activate --data $sq_codex_data --source $sq_codex_source --profile $sq_codex_crewmate_profile --worktree $sq_codex_worktree --home $sq_codex_crewmate_home --result-file $sq_codex_activation_result --result-token $sq_codex_activation_token -- $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
@@ -1574,9 +1588,10 @@ spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 spawn_send_key "$T" Enter
 if [ -n "$CODEX_ACTIVATION_RESULT" ]; then
-  wait_for_codex_home_activation "$CODEX_ACTIVATION_RESULT" "$CODEX_ACTIVATION_DIR" || exit 1
+  wait_for_codex_home_activation "$CODEX_ACTIVATION_RESULT" "$CODEX_ACTIVATION_DIR" "$CODEX_ACTIVATION_TOKEN" || exit 1
   CODEX_ACTIVATION_DIR=
   CODEX_ACTIVATION_RESULT=
+  CODEX_ACTIVATION_TOKEN=
 fi
 TREEHOUSE_ABORT_CLEANUP=0
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0

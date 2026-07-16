@@ -109,15 +109,18 @@ def toml_basic_string(value):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data", required=True)
+    parser.add_argument("--data")
     parser.add_argument("--source")
     parser.add_argument("--profile")
     parser.add_argument("--worktree")
     parser.add_argument("--new-home-name", action="store_true")
+    parser.add_argument("--new-result-token", action="store_true")
     parser.add_argument("--create-activate", action="store_true")
     parser.add_argument("--remove", action="store_true")
+    parser.add_argument("--read-activation-result", action="store_true")
     parser.add_argument("--home")
     parser.add_argument("--result-file")
+    parser.add_argument("--result-token")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     return parser.parse_args()
 
@@ -136,13 +139,20 @@ def launch_command(args):
     return command
 
 
+def result_token(args):
+    token = args.result_token or ""
+    if len(token) != 64 or any(char not in "0123456789abcdef" for char in token):
+        die("isolated Codex home activation token is unsafe")
+    return token.encode()
+
+
 def write_activation_result(args, result):
     if not args.result_file:
         return False
     try:
         fd = os.open(args.result_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         try:
-            write_all(fd, result)
+            write_all(fd, result + b" " + result_token(args) + b"\n")
             os.fchmod(fd, 0o600)
         finally:
             os.close(fd)
@@ -160,11 +170,43 @@ def activation_result_fd(args):
         die(f"could not record isolated Codex home activation: {error.strerror}")
 
 
-def finish_activation_result(fd, result):
+def finish_activation_result_with_token(fd, result, token):
     try:
-        write_all(fd, result)
+        write_all(fd, result + b" " + token + b"\n")
     finally:
         os.close(fd)
+
+
+def read_activation_result(args):
+    if not args.result_file:
+        die("Codex home activation result requires --result-file")
+    token = result_token(args)
+    try:
+        fd = os.open(args.result_file, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        print("pending")
+        return 3
+    except OSError as error:
+        die(f"isolated Codex home activation result is unsafe: {error.strerror}")
+    try:
+        file_stat = os.fstat(fd)
+        if (
+            not stat.S_ISREG(file_stat.st_mode)
+            or file_stat.st_uid != os.geteuid()
+            or file_stat.st_nlink != 1
+            or stat.S_IMODE(file_stat.st_mode) != 0o600
+        ):
+            die("isolated Codex home activation result is unsafe")
+        content = os.read(fd, 256)
+        if os.read(fd, 1):
+            die("isolated Codex home activation result is unsafe")
+    finally:
+        os.close(fd)
+    for state in (b"ready", b"failed"):
+        if content == state + b" " + token + b"\n":
+            print(state.decode())
+            return 0
+    die("isolated Codex home activation result is unsafe")
 
 
 class ActivationExecError(Exception):
@@ -173,6 +215,7 @@ class ActivationExecError(Exception):
 
 def activate_command(args, home_fd, command):
     result_fd = activation_result_fd(args)
+    token = result_token(args)
     read_fd, write_fd = os.pipe()
     os.set_inheritable(read_fd, False)
     os.set_inheritable(write_fd, False)
@@ -196,10 +239,10 @@ def activate_command(args, home_fd, command):
         os.close(read_fd)
     if outcome:
         _, status = os.waitpid(pid, 0)
-        finish_activation_result(result_fd, b"failed\n")
+        finish_activation_result_with_token(result_fd, b"failed", token)
         raise ActivationExecError("could not execute isolated Codex launch")
     try:
-        finish_activation_result(result_fd, b"ready\n")
+        finish_activation_result_with_token(result_fd, b"ready", token)
     except BaseException:
         os.kill(pid, signal.SIGTERM)
         os.waitpid(pid, 0)
@@ -209,6 +252,8 @@ def activate_command(args, home_fd, command):
 
 
 def validate_data_root(data):
+    if not data:
+        die("isolated Codex home requires --data")
     data_fd = open_directory(os.path.abspath(data))
     try:
         require_directory(data_fd, "firstmate data")
@@ -227,6 +272,8 @@ def validate_data_root(data):
 def remove_home(args):
     if args.create_activate or not args.home:
         die("Codex home removal requires --home")
+    if not args.data:
+        die("Codex home removal requires --data")
     data_fd = open_directory(os.path.abspath(args.data))
     try:
         require_directory(data_fd, "firstmate data")
@@ -248,6 +295,8 @@ def remove_home(args):
 def create_home(args, command=None):
     if not args.source or not args.profile or args.worktree is None:
         die("Codex home creation requires --source, --profile, and --worktree")
+    if not args.data:
+        die("Codex home creation requires --data")
     if not args.profile or any(char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-" for char in args.profile):
         die("isolated Codex profile name is unsafe")
     worktree = toml_basic_string(args.worktree)
@@ -308,8 +357,13 @@ def create_home(args, command=None):
 
 def main():
     args = parse_args()
+    if args.new_result_token:
+        if args.new_home_name or args.remove or args.create_activate or args.read_activation_result or args.home or args.result_file or args.result_token or args.command:
+            die("isolated Codex home result token generation accepts no other action")
+        print(secrets.token_hex(32))
+        return
     if args.new_home_name:
-        if args.remove or args.create_activate or args.home or args.command:
+        if args.remove or args.create_activate or args.read_activation_result or args.home or args.result_file or args.result_token or args.command:
             die("isolated Codex home name generation accepts no other action")
         try:
             validate_data_root(args.data)
@@ -317,6 +371,10 @@ def main():
             die(f"could not prepare isolated Codex home: {error.strerror}")
         print(".fm-codex-home." + secrets.token_hex(16))
         return
+    if args.read_activation_result:
+        if args.remove or args.create_activate or args.home or args.source or args.profile or args.worktree is not None or args.command:
+            die("isolated Codex home activation result read accepts only result arguments")
+        raise SystemExit(read_activation_result(args))
     if args.remove:
         remove_home(args)
         return
@@ -325,10 +383,11 @@ def main():
             die("Codex home activation requires --home")
         if not args.result_file:
             die("Codex home activation requires --result-file")
+        result_token(args)
         try:
             exit_code = create_home(args, launch_command(args))
         except BaseException:
-            write_activation_result(args, b"failed\n")
+            write_activation_result(args, b"failed")
             raise
         raise SystemExit(exit_code)
         return
