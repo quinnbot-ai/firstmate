@@ -541,6 +541,27 @@ test_target_ready_rejects_label_mismatch() {
   pass "fm_backend_cmux_target_ready: rejects a workspace id reused under a different title"
 }
 
+test_dispatch_target_absent_requires_confirmed_workspace_list() {
+  local dir fb out title target
+  target="aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"
+  title=$(cmux_expected_scoped_title fm-label)
+
+  dir="$TMP_ROOT/target-absent-confirmed"; mkdir -p "$dir/responses"
+  cmux_workspace_list_response "$dir" 1
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_target_absent cmux "$1" fm-label; printf "%s" "$?"' "$ROOT" "$target" )
+  [ "$out" = 0 ] || fail "target absence should be confirmed only when the workspace list succeeds and contains neither target nor label, got $out"
+
+  dir="$TMP_ROOT/target-absent-unqueryable"; mkdir -p "$dir/responses"
+  printf '1\n' > "$dir/responses/1.exit"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_target_absent cmux "$1" fm-label; printf "%s" "$?"' "$ROOT" "$target" )
+  [ "$out" = 2 ] || fail "an unqueryable workspace list must not be treated as absent, got $out"
+  pass "fm_backend_target_absent: cmux requires a readable workspace list"
+}
+
 test_capture_trims_locally() {
   local dir fb out
   dir="$TMP_ROOT/capture"; mkdir -p "$dir/responses"
@@ -1066,6 +1087,7 @@ test_create_task_creates_and_parses_ids
 test_target_ready_fails_when_target_absent
 test_target_ready_checks_expected_label
 test_target_ready_rejects_label_mismatch
+test_dispatch_target_absent_requires_confirmed_workspace_list
 test_capture_trims_locally
 test_capture_fails_when_read_screen_fails_empty
 test_capture_fails_when_target_not_ready

@@ -813,15 +813,24 @@ remove_codex_crewmate_home() {
 }
 
 close_recorded_endpoint() {
-  local tab_id
+  local tab_id absence_status
   tab_id=$(meta_value "$META" zellij_tab_id)
   if [ "$ENDPOINT_CLEANUP_PENDING" = 1 ]; then
     if ! FM_BACKEND_KILL_STRICT=1 fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null; then
       echo "error: failed-spawn endpoint $T could not be confirmed closed; preserving recovery metadata" >&2
       return 1
     fi
-    if fm_backend_target_exists "$BACKEND" "$T" "fm-$ID"; then
-      echo "error: failed-spawn endpoint $T remains live after cleanup; preserving recovery metadata" >&2
+    if fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
+      absence_status=0
+    else
+      absence_status=$?
+    fi
+    if [ "$absence_status" -ne 0 ]; then
+      if [ "$absence_status" -eq 1 ]; then
+        echo "error: failed-spawn endpoint $T remains live after cleanup; preserving recovery metadata" >&2
+      else
+        echo "error: failed-spawn endpoint $T could not be confirmed absent after cleanup; preserving recovery metadata" >&2
+      fi
       return 1
     fi
   else

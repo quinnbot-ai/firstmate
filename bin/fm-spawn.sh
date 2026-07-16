@@ -308,7 +308,7 @@ spawn_abort_cleanup() {
         FAILED_ENDPOINT_CLEANUP=1
         write_failed_treehouse_spawn_meta
         preserve_codex_home=1
-      elif fm_backend_target_exists "$BACKEND" "$T" "fm-$ID"; then
+      elif ! fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
         FAILED_ENDPOINT_CLEANUP=1
         write_failed_treehouse_spawn_meta
         preserve_codex_home=1
@@ -471,6 +471,9 @@ raw_launch_word_is_script_dispatcher() {
   case "$base" in
     *.sh|*.bash|*.zsh|*.command) return 0 ;;
   esac
+  case "$word" in
+    ./*|../*) return 0 ;;
+  esac
   return 1
 }
 
@@ -510,6 +513,7 @@ raw_launch_has_dynamic_execution() {
           \\) i=$((i + 1)) ;;
           '$') [ "$next" = '(' ] && return 0 ;;
           '`') return 0 ;;
+          ';'|'&'|'|'|'('|')'|$'\n'|$'\r') return 0 ;;
           '<'|'>') [ "$next" = '(' ] && return 0 ;;
         esac
         ;;
@@ -726,6 +730,7 @@ raw_launch_starts_codex() {
             status=$?
             [ "$status" -eq 0 ] || return 2
             nested=$RAW_LAUNCH_WORD
+            raw_launch_is_simple "$nested" || return 2
             raw_launch_starts_codex "$nested"
             status=$?
             [ "$status" -eq 1 ] || return 2

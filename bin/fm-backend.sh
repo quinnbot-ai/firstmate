@@ -693,6 +693,85 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
   esac
 }
 
+fm_backend_target_absent() {  # <backend> <target> [expected-label] -> 0 absent, 1 live, 2 unknown
+  local backend=$1 target=$2 expected_label=${3:-} out status state session pane wsid title
+  case "$backend" in
+    tmux)
+      out=$(tmux display-message -p -t "$target" '#{pane_id}' 2>&1)
+      status=$?
+      [ "$status" -eq 0 ] && return 1
+      case "$out" in
+        "can't find "*|"no server running on "*) return 0 ;;
+        *) return 2 ;;
+      esac
+      ;;
+    herdr)
+      fm_backend_source herdr || return 2
+      session=${target%%:*}
+      pane=${target#*:}
+      [ -n "$session" ] && [ -n "$pane" ] && [ "$pane" != "$target" ] || return 2
+      state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
+      case "$state" in
+        dead) return 0 ;;
+        live|no-agent) return 1 ;;
+        *) return 2 ;;
+      esac
+      ;;
+    zellij)
+      fm_backend_source zellij || return 2
+      fm_backend_zellij_parse_target "$target" || return 2
+      out=$(zellij list-sessions --short --no-formatting 2>/dev/null) || return 2
+      if ! printf '%s\n' "$out" | grep -qxF "$FM_BACKEND_ZELLIJ_SESSION"; then
+        return 0
+      fi
+      out=$(fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action list-panes --json 2>/dev/null) || return 2
+      printf '%s' "$out" | jq -e 'type == "array"' >/dev/null 2>&1 || return 2
+      if printf '%s' "$out" | jq -e --argjson p "$FM_BACKEND_ZELLIJ_PANE" \
+        '[.[]? | select(.id == $p and .is_plugin == false)] | length == 0' >/dev/null 2>&1; then
+        return 0
+      fi
+      return 1
+      ;;
+    cmux)
+      fm_backend_source cmux || return 2
+      fm_backend_cmux_parse_target "$target" || return 2
+      wsid=$FM_BACKEND_CMUX_WORKSPACE
+      out=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null) || return 2
+      printf '%s' "$out" | jq -e '(.workspaces | type) == "array"' >/dev/null 2>&1 || return 2
+      if [ -n "$expected_label" ]; then
+        title=$(fm_backend_cmux_scoped_title "$expected_label")
+        if printf '%s' "$out" | jq -e --arg id "$wsid" --arg title "$title" \
+          '[.workspaces[]? | select(.id == $id or .title == $title)] | length == 0' >/dev/null 2>&1; then
+          return 0
+        fi
+      elif printf '%s' "$out" | jq -e --arg id "$wsid" \
+        '[.workspaces[]? | select(.id == $id)] | length == 0' >/dev/null 2>&1; then
+        return 0
+      fi
+      return 1
+      ;;
+    orca)
+      fm_backend_source orca || return 2
+      out=$(orca terminal read --terminal "$target" --limit 1 --json 2>&1)
+      status=$?
+      printf '%s' "$out" | node -e '
+const fs = require("fs");
+let data;
+try { data = JSON.parse(fs.readFileSync(0, "utf8")); } catch { process.exit(2); }
+if (data.ok === false) {
+  const code = String((data.error && data.error.code) || "").toLowerCase();
+  process.exit(code === "terminal_not_found" || code === "not_found" ? 0 : 2);
+}
+process.exit(process.argv[1] === "0" ? 1 : 2);
+' "$status"
+      return $?
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+}
+
 # fm_backend_agent_alive: CONFIDENT liveness of a live harness-agent PROCESS
 # under <target>, distinct from fm_backend_target_exists's pane-PRESENCE-only
 # check above. A secondmate agent that has exited leaves its backend endpoint

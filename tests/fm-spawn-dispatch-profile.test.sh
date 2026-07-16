@@ -24,7 +24,10 @@ case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
   *"#{pane_id}"*)
     [ "${FM_FAKE_TARGET_QUERY_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_TARGET_QUERY_STATUS}"
-    [ "$(cat "${FM_FAKE_TARGET_STATE:?}" 2>/dev/null)" = live ] || exit 1
+    if [ "$(cat "${FM_FAKE_TARGET_STATE:?}" 2>/dev/null)" != live ]; then
+      printf '%s\n' "can't find window: ${3:-unknown}" >&2
+      exit 1
+    fi
     printf '%s\n' '@1'
     exit 0
     ;;
@@ -756,6 +759,30 @@ test_raw_custom_dynamic_execution_fails_closed() {
   pass "raw custom dynamic execution fails closed"
 }
 
+test_raw_script_dispatches_fail_closed() {
+  local command case_name rec id out status n=0
+  for case_name in shell-multicommand relative-extensionless; do
+    n=$((n + 1))
+    id="profile-raw-script-$n-z75"
+    rec=$(make_spawn_case "profile-raw-script-$n" claude "$id")
+    read_case_record "$rec"
+    case "$case_name" in
+      shell-multicommand) command="sh -c 'true; CODEX_HOME=/unsafe codex'" ;;
+      relative-extensionless) command='./launch-worker --run' ;;
+    esac
+
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" "$command")
+    status=$?
+    expect_code 1 "$status" "$case_name raw script dispatch must fail closed"
+    assert_contains "$out" "unsafe raw launch command" \
+      "$case_name raw script dispatch did not explain the refusal"
+    assert_absent "$HOME_DIR/state/$id.meta" "$case_name raw script dispatch must fail before task allocation"
+    [ ! -s "$LAUNCH_LOG" ] || fail "$case_name raw script dispatch must not launch"
+  done
+  pass "raw script dispatches fail closed"
+}
+
 test_codex_crewmate_home_uses_private_directory() {
   local rec id out status crew_home launch staging
   id=profile-codex-home-staging-z28
@@ -952,6 +979,35 @@ test_codex_teardown_preserves_metadata_when_successful_close_leaves_endpoint_liv
   [ -f "$HOME_DIR/state/$id.meta" ] || fail "unconfirmed endpoint teardown discarded recovery metadata"
   [ -d "$crew_home" ] || fail "unconfirmed endpoint teardown removed the credential home"
   pass "failed endpoint teardown verifies successful cleanup removed the endpoint"
+}
+
+test_codex_teardown_preserves_metadata_when_endpoint_query_is_unavailable() {
+  local rec id out status launch crew_home target_state
+  id=profile-codex-unqueryable-endpoint-z76
+  rec=$(make_spawn_case profile-codex-unqueryable-endpoint codex "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "Codex spawn should prepare an unqueryable-endpoint recovery case"
+  launch=$(cat "$LAUNCH_LOG")
+  crew_home=$(codex_home_from_launch "$launch")
+  materialize_codex_home "$crew_home" "$HOME_DIR/data" "$CASE_DIR/user/.codex" "fm-crewmate-$id" "$WT_DIR"
+  printf 'failed_spawn=1\nendpoint_cleanup_pending=1\n' >> "$HOME_DIR/state/$id.meta"
+  target_state="$CASE_DIR/target-state"
+  printf 'live\n' > "$target_state"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_FAKE_TARGET_STATE="$target_state" \
+    FM_FAKE_TARGET_QUERY_STATUS=75 FM_FAKE_BACKEND_LOG="$CASE_DIR/backend.log" PATH="$FAKEBIN_DIR:$PATH" \
+    "$TEARDOWN" "$id" --force 2>&1)
+  status=$?
+  expect_code 1 "$status" "teardown must retain failed-spawn metadata when endpoint absence is unqueryable"
+  assert_contains "$out" "could not be confirmed absent" \
+    "teardown did not explain the unqueryable endpoint state"
+  [ -f "$HOME_DIR/state/$id.meta" ] || fail "unqueryable endpoint teardown discarded recovery metadata"
+  [ -d "$crew_home" ] || fail "unqueryable endpoint teardown removed the credential home"
+  pass "failed endpoint teardown requires confirmed absence"
 }
 
 test_codex_teardown_refuses_malformed_task_temp_metadata() {
@@ -1242,6 +1298,7 @@ test_raw_codex_execution_wrappers_fail_closed
 test_quoted_or_escaped_raw_codex_launch_fails_closed
 test_quoted_raw_custom_launch_remains_supported
 test_raw_custom_dynamic_execution_fails_closed
+test_raw_script_dispatches_fail_closed
 test_codex_crewmate_home_uses_private_directory
 test_codex_home_activation_uses_open_descriptor
 test_codex_home_activation_reports_exec_failure
@@ -1251,6 +1308,7 @@ test_codex_home_activation_failure_aborts_spawn
 test_codex_activation_uses_private_task_temp_root
 test_codex_teardown_preserves_failed_endpoint_metadata
 test_codex_teardown_preserves_metadata_when_successful_close_leaves_endpoint_live
+test_codex_teardown_preserves_metadata_when_endpoint_query_is_unavailable
 test_codex_teardown_refuses_malformed_task_temp_metadata
 test_codex_teardown_refuses_symlinked_data_root
 test_codex_crewmate_home_records_failed_worktree_return
