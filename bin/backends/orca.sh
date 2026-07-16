@@ -332,5 +332,9 @@ fm_backend_orca_send_text_submit() {  # <terminal-id> <text> <retries> <enter-sl
 
 fm_backend_orca_kill() {  # <terminal-id>
   fm_backend_orca_tool_check || [ "${FM_BACKEND_KILL_STRICT:-0}" != 1 ] || return 1
-  orca terminal close --terminal "$1" --json >/dev/null 2>&1 || [ "${FM_BACKEND_KILL_STRICT:-0}" != 1 ]
+  if [ "${FM_BACKEND_KILL_STRICT:-0}" = 1 ]; then
+    fm_backend_orca_run_json orca terminal close --terminal "$1" --json
+  else
+    orca terminal close --terminal "$1" --json >/dev/null 2>&1 || true
+  fi
 }

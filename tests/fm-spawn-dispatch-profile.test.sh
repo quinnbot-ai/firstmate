@@ -719,7 +719,7 @@ test_quoted_or_escaped_raw_codex_launch_fails_closed() {
 
 test_quoted_raw_custom_launch_remains_supported() {
   local command case_name rec id out status launch n=0
-  for case_name in quoted shell-variable env-option env-s shell-command builtin; do
+  for case_name in quoted shell-variable env-option env-s shell-command builtin codex-model; do
     n=$((n + 1))
     id="profile-raw-custom-$n-z29"
     rec=$(make_spawn_case "profile-raw-custom-$n" claude "$id")
@@ -731,6 +731,7 @@ test_quoted_raw_custom_launch_remains_supported() {
       env-s) command="env -S 'custom-agent --prompt review'" ;;
       shell-command) command="sh -c 'custom-agent --prompt review'" ;;
       builtin) command='builtin printf review' ;;
+      codex-model) command='custom-agent --model codex' ;;
     esac
     out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
       "$id" "$PROJ_DIR" "$command" )

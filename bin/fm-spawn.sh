@@ -499,6 +499,21 @@ raw_launch_mentions_codex() {
   return 1
 }
 
+raw_launch_has_codex_dispatch_argument() {
+  local raw=$1 previous= status
+  while [ -n "$raw" ]; do
+    raw_launch_read_word "$raw"
+    status=$?
+    [ "$status" -eq 0 ] || return "$status"
+    if raw_launch_word_is_codex "$RAW_LAUNCH_WORD" && [[ "$previous" != -* ]]; then
+      return 0
+    fi
+    previous=$RAW_LAUNCH_WORD
+    raw=$RAW_LAUNCH_REST
+  done
+  return 1
+}
+
 raw_launch_has_dynamic_execution() {
   local raw=$1 len=${#1} i=0 char next quote=''
   while [ "$i" -lt "$len" ]; do
@@ -841,7 +856,7 @@ case "$ARG3" in
     raw_launch_starts_codex "$ARG3"
     raw_codex_status=$?
     if [ "$raw_codex_status" -eq 1 ]; then
-      raw_launch_mentions_codex "$ARG3"
+      raw_launch_has_codex_dispatch_argument "$ARG3"
       raw_codex_mentions=$?
       [ "$raw_codex_mentions" -ne 0 ] || raw_codex_status=2
       if [ "$raw_codex_status" -eq 1 ] && raw_launch_has_dynamic_execution "$ARG3"; then

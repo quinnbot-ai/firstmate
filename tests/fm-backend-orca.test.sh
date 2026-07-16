@@ -340,6 +340,18 @@ test_kill_fails_on_close_error_in_strict_mode() {
   pass "fm_backend_orca_kill: strict mode propagates close failures"
 }
 
+test_kill_fails_on_close_error_json_in_strict_mode() {
+  local out status
+  orca_case kill-strict-error-json
+  printf '{"ok":false,"error":{"code":"terminal_close_failed","message":"terminal close failed"}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_BACKEND_KILL_STRICT=1 \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_kill term-123' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "strict Orca kill must fail when terminal close returns ok:false"
+  assert_contains "$out" "terminal close failed" "strict kill did not surface the close error"
+  pass "fm_backend_orca_kill: strict mode rejects close error JSON"
+}
+
 test_remove_worktree_refuses_empty_id() {
   local out status
   orca_case remove-empty
@@ -1335,6 +1347,7 @@ test_send_key_refuses_unknown_key
 test_send_key_refuses_escape_until_supported
 test_kill_is_best_effort_close
 test_kill_fails_on_close_error_in_strict_mode
+test_kill_fails_on_close_error_json_in_strict_mode
 test_remove_worktree_refuses_empty_id
 test_remove_worktree_rejects_orca_error_json
 test_worktree_path_resolves_id
