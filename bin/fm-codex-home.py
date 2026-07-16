@@ -21,6 +21,27 @@ def require_directory(fd, label):
         die(f"{label} must be a directory")
 
 
+def directory_path(fd, fallback):
+    try:
+        import fcntl
+
+        getpath = getattr(fcntl, "F_GETPATH", None)
+        if getpath is not None:
+            path = fcntl.fcntl(fd, getpath, bytes(1024)).split(b"\0", 1)[0]
+            if path:
+                return os.fsdecode(path)
+    except (AttributeError, OSError):
+        pass
+    for directory in ("/proc/self/fd", "/dev/fd"):
+        try:
+            path = os.readlink(os.path.join(directory, str(fd)))
+            if os.path.isabs(path):
+                return path
+        except OSError:
+            pass
+    return fallback
+
+
 def write_all(fd, content):
     while content:
         written = os.write(fd, content)
@@ -76,6 +97,8 @@ def remove_tree(directory_fd, name):
 
 
 def toml_basic_string(value):
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
+        die("Codex worktree path contains a TOML control character")
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
@@ -92,10 +115,12 @@ def main():
     args = parse_args()
     if not args.profile or any(char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-" for char in args.profile):
         die("isolated Codex profile name is unsafe")
+    worktree = toml_basic_string(args.worktree)
     try:
-        data = os.path.realpath(args.data)
+        data = os.path.abspath(args.data)
         data_fd = open_directory(data)
         require_directory(data_fd, "firstmate data")
+        data = directory_path(data_fd, data)
         try:
             try:
                 os.mkdir("codex-crewmate", 0o700, dir_fd=data_fd)
@@ -121,7 +146,7 @@ def main():
                     write_file(home_fd, "config.toml", b"# Firstmate Codex crewmate home.\n")
                     copy_regular_file(args.source, home_fd, "auth.json")
                     copy_regular_file(args.source, home_fd, "models_cache.json")
-                    profile = "# Firstmate Codex crewmate profile.\n[projects.\"%s\"]\ntrust_level = \"untrusted\"\n" % toml_basic_string(args.worktree)
+                    profile = "# Firstmate Codex crewmate profile.\n[projects.\"%s\"]\ntrust_level = \"untrusted\"\n" % worktree
                     write_file(home_fd, args.profile + ".config.toml", profile.encode())
                 finally:
                     os.close(home_fd)

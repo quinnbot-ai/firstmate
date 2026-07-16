@@ -278,7 +278,7 @@ orca_spawn_abort_cleanup() {
   [ "$ORCA_ABORT_CLEANUP" = 1 ] || return "$status"
   ORCA_ABORT_CLEANUP=0
   if [ -n "${ORCA_TERMINAL:-}" ]; then
-    if fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null; then
+    if FM_BACKEND_KILL_STRICT=1 fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null; then
       ORCA_TERMINAL=
       T=
     else
@@ -447,6 +447,25 @@ raw_launch_word_is_codex() {
   raw_launch_word_is "$1" codex
 }
 
+raw_launch_mentions_codex() {
+  local raw=$1 status
+  while [ -n "$raw" ]; do
+    raw_launch_read_word "$raw"
+    status=$?
+    [ "$status" -eq 0 ] || return "$status"
+    raw_launch_word_is_codex "$RAW_LAUNCH_WORD" && return 0
+    raw=$RAW_LAUNCH_REST
+  done
+  return 1
+}
+
+raw_launch_wrapped_command_status() {
+  raw_launch_starts_codex "$1"
+  local status=$?
+  [ "$status" -ne 0 ] || return 2
+  return "$status"
+}
+
 raw_launch_read_word() {
   local raw=$1 len=${#1} i=0 char quote='' word=
   while [ "$i" -lt "$len" ]; do
@@ -520,7 +539,11 @@ raw_launch_starts_codex() {
               state=shell
             elif raw_launch_word_is "$word" nice; then
               state='nice'
-            elif raw_launch_word_is "$word" nohup || raw_launch_word_is "$word" time || raw_launch_word_is "$word" stdbuf || raw_launch_word_is "$word" setsid || raw_launch_word_is "$word" timeout || raw_launch_word_is "$word" chrt || raw_launch_word_is "$word" ionice || raw_launch_word_is "$word" taskset || raw_launch_word_is "$word" sudo; then
+            elif raw_launch_word_is "$word" timeout; then
+              state=timeout
+            elif raw_launch_word_is "$word" sudo; then
+              state=sudo
+            elif raw_launch_word_is "$word" nohup || raw_launch_word_is "$word" time || raw_launch_word_is "$word" stdbuf || raw_launch_word_is "$word" setsid || raw_launch_word_is "$word" chrt || raw_launch_word_is "$word" ionice || raw_launch_word_is "$word" taskset; then
               state=wrapper
             else
               raw_launch_word_is_codex "$word"
@@ -537,7 +560,18 @@ raw_launch_starts_codex() {
             raw_launch_read_word "$raw" || return 2
             raw=$RAW_LAUNCH_REST
             ;;
+          -S|--split-string)
+            raw_launch_read_word "$raw" || return 2
+            nested=$RAW_LAUNCH_WORD
+            raw_launch_starts_codex "$nested"
+            return $?
+            ;;
           --unset=*|--chdir=*) ;;
+          --split-string=*)
+            nested=${word#*=}
+            raw_launch_starts_codex "$nested"
+            return $?
+            ;;
           --) state=env-command ;;
           -*) return 2 ;;
           *)
@@ -570,23 +604,61 @@ raw_launch_starts_codex() {
           --) state=prefix ;;
           -*) ;;
           *)
-            raw_launch_starts_codex "$word$raw"
-            status=$?
-            [ "$status" -ne 0 ] || return 2
-            return "$status"
+            raw_launch_wrapped_command_status "$word$raw"
+            return $?
             ;;
         esac
         ;;
-      wrapper)
+      timeout)
         case "$word" in
+          -k|--kill-after|-s|--signal)
+            raw_launch_read_word "$raw" || return 2
+            raw=$RAW_LAUNCH_REST
+            ;;
+          --kill-after=*|--signal=*|-k*|-s*) ;;
+          --) state='timeout-duration' ;;
           -*) ;;
           *)
-            raw_launch_starts_codex "$word$raw"
+            raw_launch_read_word "$raw" || return 2
+            raw_launch_wrapped_command_status "$RAW_LAUNCH_WORD$RAW_LAUNCH_REST"
+            return $?
+            ;;
+        esac
+        ;;
+      timeout-duration)
+        raw_launch_read_word "$raw" || return 2
+        raw_launch_wrapped_command_status "$RAW_LAUNCH_WORD$RAW_LAUNCH_REST"
+        return $?
+        ;;
+      sudo)
+        case "$word" in
+          -C|-D|-g|-h|-p|-r|-t|-T|-u|--close-from|--chdir|--group|--host|--prompt|--role|--type|--command-timeout|--user)
+            raw_launch_read_word "$raw" || return 2
+            raw=$RAW_LAUNCH_REST
+            ;;
+          --close-from=*|--chdir=*|--group=*|--host=*|--prompt=*|--role=*|--type=*|--command-timeout=*|--user=*) ;;
+          --) state=sudo-command ;;
+          -*)
+            raw_launch_mentions_codex "$word$raw"
             status=$?
             [ "$status" -ne 0 ] || return 2
             return "$status"
             ;;
+          *)
+            raw_launch_wrapped_command_status "$word$raw"
+            return $?
+            ;;
         esac
+        ;;
+      sudo-command)
+        raw_launch_wrapped_command_status "$word$raw"
+        return $?
+        ;;
+      wrapper)
+        raw_launch_mentions_codex "$word$raw"
+        status=$?
+        [ "$status" -ne 0 ] || return 2
+        return "$status"
         ;;
       shell)
         case "$word" in

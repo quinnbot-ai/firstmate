@@ -438,6 +438,47 @@ test_codex_crewmate_home_refuses_symlink_escape() {
   pass "Codex spawn refuses isolated-home symlink escapes"
 }
 
+test_codex_crewmate_home_refuses_symlinked_data_root() {
+  local rec id out status data_root real_data
+  id=profile-codex-data-root-symlink-z36
+  rec=$(make_spawn_case profile-codex-data-root-symlink codex "$id")
+  read_case_record "$rec"
+  data_root="$HOME_DIR/data"
+  real_data="$CASE_DIR/real-data"
+  mv "$data_root" "$real_data"
+  ln -s "$real_data" "$data_root"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "Codex spawn must reject a symlinked data root"
+  assert_contains "$out" "could not prepare isolated Codex crewmate home" \
+    "Codex spawn did not report the data-root symlink escape"
+  assert_absent "$real_data/codex-crewmate" "data-root symlink rejection must not create a Codex home"
+  assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
+    "data-root symlink rejection did not return its worktree"
+  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+    "data-root symlink rejection did not remove its task endpoint"
+  [ ! -s "$LAUNCH_LOG" ] || fail "data-root symlink rejection must not launch Codex"
+  pass "Codex spawn refuses a symlinked data root"
+}
+
+test_codex_crewmate_profile_rejects_toml_control_characters() {
+  local data source out status worktree
+  data="$CASE_DIR/control-data"
+  source="$CASE_DIR/control-source"
+  worktree=$'safe\n[mcp_servers.injected]'
+  mkdir -p "$data" "$source"
+
+  out=$(python3 "$ROOT/bin/fm-codex-home.py" --data "$data" --source "$source" \
+    --profile fm-crewmate-control-z37 --worktree "$worktree" 2>&1)
+  status=$?
+  expect_code 1 "$status" "Codex home creation must reject TOML control characters"
+  assert_contains "$out" "TOML control character" \
+    "Codex home creation did not explain the unsafe TOML path"
+  assert_absent "$data/codex-crewmate" "unsafe TOML path must not create a Codex home"
+  pass "Codex profile rejects TOML control characters"
+}
+
 test_codex_crewmate_home_fails_when_private_home_creation_fails() {
   local rec id out status
   id=profile-codex-home-create-z23
@@ -497,7 +538,7 @@ test_raw_codex_launch_is_normalized() {
 
 test_raw_codex_execution_wrappers_fail_closed() {
   local command case_name rec id out status n=0
-  for case_name in nice nice-option shell; do
+  for case_name in nice nice-option shell sudo-user timeout-duration; do
     n=$((n + 1))
     id="profile-raw-codex-wrapper-$n-z31"
     rec=$(make_spawn_case "profile-raw-codex-wrapper-$n" codex "$id")
@@ -506,6 +547,8 @@ test_raw_codex_execution_wrappers_fail_closed() {
       nice) command='nice codex' ;;
       nice-option) command='nice -n 1 env CODEX_HOME=/unsafe codex' ;;
       shell) command='sh -c codex' ;;
+      sudo-user) command='sudo -u crew CODEX_HOME=/unsafe codex' ;;
+      timeout-duration) command='timeout 5 CODEX_HOME=/unsafe codex' ;;
     esac
 
     out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
@@ -571,7 +614,7 @@ test_quoted_or_escaped_raw_codex_launch_fails_closed() {
 
 test_quoted_raw_custom_launch_remains_supported() {
   local command case_name rec id out status launch n=0
-  for case_name in quoted env-option; do
+  for case_name in quoted env-option env-s; do
     n=$((n + 1))
     id="profile-raw-custom-$n-z29"
     rec=$(make_spawn_case "profile-raw-custom-$n" claude "$id")
@@ -579,6 +622,7 @@ test_quoted_raw_custom_launch_remains_supported() {
     case "$case_name" in
       quoted) command="custom-agent --prompt 'review this'" ;;
       env-option) command='env -i custom-agent --prompt review' ;;
+      env-s) command="env -S 'custom-agent --prompt review'" ;;
     esac
     out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
       "$id" "$PROJ_DIR" "$command" )
@@ -827,6 +871,8 @@ test_codex_crewmate_home_excludes_mcp_and_plugins
 test_codex_crewmate_home_uses_fresh_private_directory
 test_codex_crewmate_home_is_removed_at_teardown
 test_codex_crewmate_home_refuses_symlink_escape
+test_codex_crewmate_home_refuses_symlinked_data_root
+test_codex_crewmate_profile_rejects_toml_control_characters
 test_codex_crewmate_home_fails_when_private_home_creation_fails
 test_raw_codex_launch_is_normalized
 test_raw_codex_late_home_assignment_is_normalized

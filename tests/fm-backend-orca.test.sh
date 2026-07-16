@@ -326,6 +326,19 @@ test_kill_is_best_effort_close() {
   pass "fm_backend_orca_kill: calls terminal close and stays best-effort"
 }
 
+test_kill_fails_on_close_error_in_strict_mode() {
+  local out status
+  orca_case kill-strict
+  printf '1\n' > "$RESP/1.exit"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_BACKEND_KILL_STRICT=1 \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_kill term-123' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "strict Orca kill must fail when terminal close fails"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-123'$'\x1f''--json' \
+    "strict kill did not attempt terminal close"
+  pass "fm_backend_orca_kill: strict mode propagates close failures"
+}
+
 test_remove_worktree_refuses_empty_id() {
   local out status
   orca_case remove-empty
@@ -662,6 +675,12 @@ test_spawn_preserves_orca_metadata_when_abort_cleanup_fails() {
   assert_grep "orca_worktree_id=wt-cleanup-fail" "$state/$id.meta" "preserved metadata missing Orca worktree id"
   assert_no_grep "terminal=" "$state/$id.meta" "preserved metadata should not invent a terminal handle"
   pass "fm-spawn.sh --backend orca: preserves metadata when abort cleanup fails"
+}
+
+test_orca_spawn_uses_strict_terminal_cleanup() {
+  assert_grep "FM_BACKEND_KILL_STRICT=1 fm_backend_kill orca \"\$ORCA_TERMINAL\"" "$ROOT/bin/fm-spawn.sh" \
+    "Orca spawn abort cleanup must request strict terminal close failures"
+  pass "fm-spawn.sh --backend orca: requests strict terminal cleanup"
 }
 
 test_orca_partial_cleanup_metadata_reaches_codex_home() {
@@ -1314,6 +1333,7 @@ test_send_key_enter_and_interrupt
 test_send_key_refuses_unknown_key
 test_send_key_refuses_escape_until_supported
 test_kill_is_best_effort_close
+test_kill_fails_on_close_error_in_strict_mode
 test_remove_worktree_refuses_empty_id
 test_remove_worktree_rejects_orca_error_json
 test_worktree_path_resolves_id
@@ -1328,6 +1348,7 @@ test_spawn_refuses_orca_when_runtime_not_ready
 test_spawn_refuses_orca_nonisolated_worktree
 test_spawn_removes_orca_worktree_when_terminal_create_fails
 test_spawn_preserves_orca_metadata_when_abort_cleanup_fails
+test_orca_spawn_uses_strict_terminal_cleanup
 test_orca_partial_cleanup_metadata_reaches_codex_home
 test_spawn_releases_orca_resources_when_metadata_write_fails
 test_peek_send_and_crew_state_route_through_orca_meta
