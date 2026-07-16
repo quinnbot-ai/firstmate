@@ -195,6 +195,7 @@ fi
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+ORCA_WORKTREE_CLEANUP_COMPLETE=0
 TREEHOUSE_ABORT_CLEANUP=0
 CODEX_CREWMATE_HOME=
 
@@ -251,6 +252,7 @@ write_failed_treehouse_spawn_meta() {
     fi
     if [ "$BACKEND" = orca ]; then
       echo "orca_worktree_id=${ORCA_WORKTREE_ID:-}"
+      [ "${ORCA_WORKTREE_CLEANUP_COMPLETE:-0}" != 1 ] || echo "orca_worktree_cleanup_complete=1"
       [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
     fi
   } > "$STATE/$ID.meta" 2>/dev/null || true
@@ -272,17 +274,27 @@ remove_codex_crewmate_home() {
 }
 
 orca_spawn_abort_cleanup() {
-  local status=$?
+  local status=${1:-$?} cleanup_failed=0
   [ "$ORCA_ABORT_CLEANUP" = 1 ] || return "$status"
   ORCA_ABORT_CLEANUP=0
   if [ -n "${ORCA_TERMINAL:-}" ]; then
-    fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
-  fi
-  if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
-    if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
-      write_failed_treehouse_spawn_meta
+    if fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null; then
+      ORCA_TERMINAL=
+      T=
+    else
+      cleanup_failed=1
     fi
   fi
+  if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
+    if fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
+      ORCA_WORKTREE_ID=
+      ORCA_WORKTREE_CLEANUP_COMPLETE=1
+      WT=
+    else
+      cleanup_failed=1
+    fi
+  fi
+  [ "$cleanup_failed" -eq 0 ] || write_failed_treehouse_spawn_meta
   return "$status"
 }
 
@@ -304,12 +316,14 @@ spawn_abort_cleanup() {
       preserve_codex_home=1
     fi
   fi
-  [ "$ORCA_ABORT_CLEANUP" = 1 ] && clean_codex_home=1
+  if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
+    clean_codex_home=1
+    orca_spawn_abort_cleanup "$status"
+  fi
   if [ "$clean_codex_home" -eq 1 ] && [ "$preserve_codex_home" -eq 0 ] && ! remove_codex_crewmate_home; then
     echo "error: could not remove isolated Codex crewmate home" >&2
     write_failed_treehouse_spawn_meta
   fi
-  orca_spawn_abort_cleanup
   return "$status"
 }
 trap spawn_abort_cleanup EXIT
@@ -422,10 +436,6 @@ launch_template() {
   esac
 }
 
-toml_basic_string() {
-  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
-}
-
 raw_launch_word_is() {
   local word=$1 expected=$2 base lowered
   base=${word##*/}
@@ -501,14 +511,16 @@ raw_launch_starts_codex() {
           [A-Za-z_][A-Za-z0-9_]*=*) ;;
           *)
             if raw_launch_word_is "$word" env; then
-              state=env
+              state='env'
             elif raw_launch_word_is "$word" command; then
-              state=command
+              state='command'
             elif raw_launch_word_is "$word" exec; then
-              state=command
+              state='command'
             elif raw_launch_word_is "$word" sh || raw_launch_word_is "$word" bash || raw_launch_word_is "$word" zsh || raw_launch_word_is "$word" dash || raw_launch_word_is "$word" ksh; then
               state=shell
-            elif raw_launch_word_is "$word" nice || raw_launch_word_is "$word" nohup || raw_launch_word_is "$word" time || raw_launch_word_is "$word" stdbuf || raw_launch_word_is "$word" setsid || raw_launch_word_is "$word" timeout || raw_launch_word_is "$word" chrt || raw_launch_word_is "$word" ionice || raw_launch_word_is "$word" taskset || raw_launch_word_is "$word" sudo; then
+            elif raw_launch_word_is "$word" nice; then
+              state='nice'
+            elif raw_launch_word_is "$word" nohup || raw_launch_word_is "$word" time || raw_launch_word_is "$word" stdbuf || raw_launch_word_is "$word" setsid || raw_launch_word_is "$word" timeout || raw_launch_word_is "$word" chrt || raw_launch_word_is "$word" ionice || raw_launch_word_is "$word" taskset || raw_launch_word_is "$word" sudo; then
               state=wrapper
             else
               raw_launch_word_is_codex "$word"
@@ -520,6 +532,12 @@ raw_launch_starts_codex() {
       env)
         case "$word" in
           [A-Za-z_][A-Za-z0-9_]*=*) ;;
+          -i|--ignore-environment|--null) ;;
+          -u|--unset|-C|--chdir)
+            raw_launch_read_word "$raw" || return 2
+            raw=$RAW_LAUNCH_REST
+            ;;
+          --unset=*|--chdir=*) ;;
           --) state=env-command ;;
           -*) return 2 ;;
           *)
@@ -541,6 +559,23 @@ raw_launch_starts_codex() {
       env-command|command-command)
         raw_launch_starts_codex "$word$raw"
         return $?
+        ;;
+      nice)
+        case "$word" in
+          -n|--adjustment)
+            raw_launch_read_word "$raw" || return 2
+            raw=$RAW_LAUNCH_REST
+            ;;
+          --adjustment=*) ;;
+          --) state=prefix ;;
+          -*) ;;
+          *)
+            raw_launch_starts_codex "$word$raw"
+            status=$?
+            [ "$status" -ne 0 ] || return 2
+            return "$status"
+            ;;
+        esac
         ;;
       wrapper)
         case "$word" in
@@ -586,46 +621,9 @@ normalize_raw_codex_launch() {
 }
 
 refresh_codex_crewmate_home() {
-  local worktree=$1 profile=$2 source="$HOME/.codex" data_real base base_real home home_real name source_file profile_file worktree_key
-  umask 077
-  data_real=$(cd "$DATA" 2>/dev/null && pwd -P) || return 1
-  base="$DATA/codex-crewmate"
-  [ ! -L "$base" ] || { echo "error: isolated Codex home must not be a symlink: $base" >&2; return 1; }
-  mkdir -p "$base" || return 1
-  [ ! -L "$base" ] || { echo "error: isolated Codex home must not be a symlink: $base" >&2; return 1; }
-  base_real=$(cd "$base" 2>/dev/null && pwd -P) || return 1
-  [ "$base_real" = "$data_real/codex-crewmate" ] || {
-    echo "error: isolated Codex home must resolve inside firstmate data: $base" >&2
-    return 1
-  }
-  home=$(mktemp -d "$base_real/.fm-codex-home.XXXXXXXX") || return 1
-  home_real=$(cd -P "$home" 2>/dev/null && pwd -P) || return 1
-  case "$home_real" in
-    "$base_real"/.fm-codex-home.*) : ;;
-    *)
-      echo "error: isolated Codex home must resolve inside firstmate data: $home" >&2
-      return 1
-      ;;
-  esac
-  CODEX_CREWMATE_HOME=$home_real
-  chmod 700 "$home" || return 1
-  printf '%s\n' '# Firstmate Codex crewmate home.' > "$home/config.toml" || return 1
-  chmod 600 "$home/config.toml" || return 1
-  for name in auth.json models_cache.json; do
-    source_file="$source/$name"
-    if [ -f "$source_file" ]; then
-      cp "$source_file" "$home/$name" || return 1
-      chmod 600 "$home/$name" || return 1
-    fi
-  done
-  profile_file="$home/$profile.config.toml"
-  worktree_key=$(toml_basic_string "$worktree") || return 1
-  {
-    printf '%s\n' '# Firstmate Codex crewmate profile.'
-    printf '[projects."%s"]\n' "$worktree_key"
-    printf '%s\n' 'trust_level = "untrusted"'
-  } > "$profile_file" || return 1
-  chmod 600 "$profile_file" || return 1
+  local worktree=$1 profile=$2
+  CODEX_CREWMATE_HOME=$(python3 "$FM_ROOT/bin/fm-codex-home.py" \
+    --data "$DATA" --source "$HOME/.codex" --profile "$profile" --worktree "$worktree") || return 1
 }
 
 case "$ARG3" in

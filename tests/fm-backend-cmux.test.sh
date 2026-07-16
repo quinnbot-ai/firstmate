@@ -956,6 +956,21 @@ test_kill_is_strict_when_target_readiness_is_unqueryable() {
   pass "fm_backend_cmux_kill: strict cleanup propagates readiness failures"
 }
 
+test_kill_is_noop_when_reused_workspace_label_mismatches() {
+  local dir fb status title
+  dir="$TMP_ROOT/kill-reused-label"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-other)
+  cmux_workspace_list_response "$dir" 1 "aaaaaaaa-0000-0000-0000-000000000000" "$title"
+  fb=$(make_cmux_fakebin "$dir")
+  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_kill "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" "" "fm-label"' "$ROOT"
+  status=$?
+  expect_code 0 "$status" "non-strict kill should no-op when the workspace label no longer matches"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''close-workspace' \
+    "non-strict kill must not close a workspace whose id was reused under another label"
+  pass "fm_backend_cmux_kill: non-strict cleanup no-ops on a reused workspace label mismatch"
+}
+
 test_kill_recovers_stale_target_by_label() {
   local dir fb title
   dir="$TMP_ROOT/kill-stale-target"; mkdir -p "$dir/responses"
@@ -1074,6 +1089,7 @@ test_kill_closes_workspace_directly_when_not_last
 test_kill_adds_sibling_when_last_in_window
 test_kill_is_best_effort_when_close_workspace_fails
 test_kill_is_strict_when_target_readiness_is_unqueryable
+test_kill_is_noop_when_reused_workspace_label_mismatches
 test_kill_recovers_stale_target_by_label
 test_list_live_filters_by_title_prefix
 test_secondmate_spawn_refuses_cmux_backend

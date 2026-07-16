@@ -424,7 +424,7 @@ test_codex_crewmate_home_refuses_symlink_escape() {
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "Codex spawn must reject a symlinked isolated home"
-  assert_contains "$out" "isolated Codex home must not be a symlink" \
+  assert_contains "$out" "could not prepare isolated Codex crewmate home" \
     "Codex spawn did not report the symlink escape"
   assert_grep 'captain-config' "$source_home/config.toml" \
     "symlink rejection must not overwrite the captain Codex config"
@@ -443,14 +443,11 @@ test_codex_crewmate_home_fails_when_private_home_creation_fails() {
   id=profile-codex-home-create-z23
   rec=$(make_spawn_case profile-codex-home-create codex "$id")
   read_case_record "$rec"
-  cat > "$FAKEBIN_DIR/mktemp" <<'SH'
+  cat > "$FAKEBIN_DIR/python3" <<'SH'
 #!/usr/bin/env bash
-case "$*" in
-  *".fm-codex-home."*) exit 74 ;;
-  *) exec /usr/bin/mktemp "$@" ;;
-esac
+exit 74
 SH
-  chmod +x "$FAKEBIN_DIR/mktemp"
+  chmod +x "$FAKEBIN_DIR/python3"
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
@@ -500,13 +497,14 @@ test_raw_codex_launch_is_normalized() {
 
 test_raw_codex_execution_wrappers_fail_closed() {
   local command case_name rec id out status n=0
-  for case_name in nice shell; do
+  for case_name in nice nice-option shell; do
     n=$((n + 1))
     id="profile-raw-codex-wrapper-$n-z31"
     rec=$(make_spawn_case "profile-raw-codex-wrapper-$n" codex "$id")
     read_case_record "$rec"
     case "$case_name" in
       nice) command='nice codex' ;;
+      nice-option) command='nice -n 1 env CODEX_HOME=/unsafe codex' ;;
       shell) command='sh -c codex' ;;
     esac
 
@@ -572,20 +570,26 @@ test_quoted_or_escaped_raw_codex_launch_fails_closed() {
 }
 
 test_quoted_raw_custom_launch_remains_supported() {
-  local rec id out status launch
-  id=profile-raw-custom-quoted-z29
-  rec=$(make_spawn_case profile-raw-custom-quoted claude "$id")
-  read_case_record "$rec"
-
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "custom-agent --prompt 'review this'" )
-  status=$?
-  expect_code 0 "$status" "quoted raw custom launch should remain supported"
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "custom-agent --prompt 'review this'" \
-    "quoted raw custom launch was not preserved"
-  assert_not_contains "$launch" "CODEX_HOME=" \
-    "quoted raw custom launch was incorrectly normalized as Codex"
+  local command case_name rec id out status launch n=0
+  for case_name in quoted env-option; do
+    n=$((n + 1))
+    id="profile-raw-custom-$n-z29"
+    rec=$(make_spawn_case "profile-raw-custom-$n" claude "$id")
+    read_case_record "$rec"
+    case "$case_name" in
+      quoted) command="custom-agent --prompt 'review this'" ;;
+      env-option) command='env -i custom-agent --prompt review' ;;
+    esac
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" "$command" )
+    status=$?
+    expect_code 0 "$status" "$case_name raw custom launch should remain supported"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" "$command" \
+      "$case_name raw custom launch was not preserved"
+    assert_not_contains "$launch" "CODEX_HOME=" \
+      "$case_name raw custom launch was incorrectly normalized as Codex"
+  done
   pass "quoted raw custom launches retain their existing behavior"
 }
 
@@ -594,16 +598,11 @@ test_codex_crewmate_home_uses_private_directory() {
   id=profile-codex-home-staging-z28
   rec=$(make_spawn_case profile-codex-home-staging codex "$id")
   read_case_record "$rec"
-  export FM_FAKE_MKTEMP_LOG="$CASE_DIR/mktemp.log"
-
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
-  unset FM_FAKE_MKTEMP_LOG
   expect_code 0 "$status" "Codex spawn should create an isolated private home"
-  assert_contains "$(cat "$CASE_DIR/mktemp.log")" "/.fm-codex-home.XXXXXXXX" \
-    "Codex home refresh did not atomically create a private home directory"
-  assert_no_grep '\$\$' "$SPAWN" \
-    "Codex home refresh retained predictable PID staging names"
+  assert_grep 'O_NOFOLLOW' "$ROOT/bin/fm-codex-home.py" \
+    "Codex home construction must use no-follow file descriptors"
   launch=$(cat "$LAUNCH_LOG")
   crew_home=$(codex_home_from_launch "$launch")
   [ -n "$crew_home" ] || fail "Codex launch did not expose its private home"
@@ -618,14 +617,11 @@ test_codex_crewmate_home_records_failed_worktree_return() {
   rec=$(make_spawn_case profile-codex-home-return codex "$id")
   read_case_record "$rec"
   project=$(cd "$PROJ_DIR" && pwd)
-  cat > "$FAKEBIN_DIR/mktemp" <<'SH'
+  cat > "$FAKEBIN_DIR/python3" <<'SH'
 #!/usr/bin/env bash
-case "$*" in
-  *".fm-codex-home."*) exit 73 ;;
-  *) exec /usr/bin/mktemp "$@" ;;
-esac
+exit 73
 SH
-  chmod +x "$FAKEBIN_DIR/mktemp"
+  chmod +x "$FAKEBIN_DIR/python3"
 
   out=$(FM_FAKE_TREEHOUSE_RETURN_STATUS=75 \
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
@@ -650,14 +646,11 @@ test_codex_crewmate_home_records_failed_endpoint_removal() {
   rec=$(make_spawn_case profile-codex-home-kill codex "$id")
   read_case_record "$rec"
   project=$(cd "$PROJ_DIR" && pwd)
-  cat > "$FAKEBIN_DIR/mktemp" <<'SH'
+  cat > "$FAKEBIN_DIR/python3" <<'SH'
 #!/usr/bin/env bash
-case "$*" in
-  *".fm-codex-home."*) exit 73 ;;
-  *) exec /usr/bin/mktemp "$@" ;;
-esac
+exit 73
 SH
-  chmod +x "$FAKEBIN_DIR/mktemp"
+  chmod +x "$FAKEBIN_DIR/python3"
 
   out=$(FM_FAKE_TREEHOUSE_RETURN_STATUS=0 FM_FAKE_BACKEND_KILL_STATUS=76 FM_FAKE_TARGET_QUERY_STATUS=77 \
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
