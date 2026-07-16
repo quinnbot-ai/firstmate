@@ -75,7 +75,8 @@
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 # Codex ship and scout launches receive a firstmate-managed CODEX_HOME under
 # data/codex-crewmate, refreshed with only copied auth/model catalog files and
-# an empty config.toml with no MCP servers or plugins.
+# an empty config.toml with no MCP servers or plugins and a per-task profile
+# that excludes project-local Codex configuration.
 # Codex secondmate launches retain their existing home and are not changed here.
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
@@ -330,7 +331,7 @@ launch_template() {
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(cat __BRIEF__)"'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(cat __BRIEF__)"'
+        printf '%s' 'codex --profile __CODEXPROFILE__ --disable plugins __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(cat __BRIEF__)"'
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(cat __BRIEF__)"' ;;
@@ -353,29 +354,69 @@ launch_template() {
   esac
 }
 
+toml_basic_string() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
 refresh_codex_crewmate_home() {
-  local source="$HOME/.codex" home="$DATA/codex-crewmate" name source_file temp_file
+  local project=$1 profile=$2 source="$HOME/.codex" data_real base base_real home home_real name source_file temp_file profile_file project_key
   umask 077
-  mkdir -p "$home" || return 1
-  chmod 700 "$home" || return 1
-  # This directory is firstmate-owned, so each spawn can converge it on no plugins.
-  rm -rf "$home/plugins" || return 1
-  temp_file="$home/.config.toml.$$"
-  printf '%s\n' '# Firstmate Codex crewmate home.' > "$temp_file" || return 1
-  chmod 600 "$temp_file" || return 1
-  mv -f "$temp_file" "$home/config.toml" || return 1
-  for name in auth.json models_cache.json; do
-    source_file="$source/$name"
-    if [ -f "$source_file" ]; then
-      temp_file="$home/.$name.$$"
-      cp "$source_file" "$temp_file" || return 1
-      chmod 600 "$temp_file" || return 1
-      mv -f "$temp_file" "$home/$name" || return 1
-    else
-      rm -f "$home/$name" || return 1
-    fi
-  done
-  printf '%s\n' "$home"
+  data_real=$(cd "$DATA" 2>/dev/null && pwd -P) || return 1
+  base="$DATA/codex-crewmate"
+  [ ! -L "$base" ] || { echo "error: isolated Codex home must not be a symlink: $base" >&2; return 1; }
+  mkdir -p "$base" || return 1
+  [ ! -L "$base" ] || { echo "error: isolated Codex home must not be a symlink: $base" >&2; return 1; }
+  base_real=$(cd "$base" 2>/dev/null && pwd -P) || return 1
+  [ "$base_real" = "$data_real/codex-crewmate" ] || {
+    echo "error: isolated Codex home must resolve inside firstmate data: $base" >&2
+    return 1
+  }
+  home="$base/$profile"
+  (
+    cd -P "$base" 2>/dev/null || exit 1
+    [ "$(pwd -P)" = "$base_real" ] || {
+      echo "error: isolated Codex home must resolve inside firstmate data: $base" >&2
+      exit 1
+    }
+    [ ! -L "$profile" ] || { echo "error: isolated Codex home must not be a symlink: $home" >&2; exit 1; }
+    mkdir -p "$profile" || exit 1
+    [ ! -L "$profile" ] || { echo "error: isolated Codex home must not be a symlink: $home" >&2; exit 1; }
+    cd -P "$profile" 2>/dev/null || exit 1
+    home_real=$(pwd -P)
+    [ "$home_real" = "$base_real/$profile" ] || {
+      echo "error: isolated Codex home must resolve inside firstmate data: $home" >&2
+      exit 1
+    }
+    chmod 700 . || exit 1
+    rm -rf plugins || exit 1
+    temp_file=".config.toml.$$"
+    printf '%s\n' '# Firstmate Codex crewmate home.' > "$temp_file" || exit 1
+    chmod 600 "$temp_file" || exit 1
+    mv -f "$temp_file" config.toml || exit 1
+    for name in auth.json models_cache.json; do
+      source_file="$source/$name"
+      if [ -f "$source_file" ]; then
+        temp_file=".$name.$$"
+        cp "$source_file" "$temp_file" || exit 1
+        chmod 600 "$temp_file" || exit 1
+        mv -f "$temp_file" "$name" || exit 1
+      else
+        rm -f "$name" || exit 1
+      fi
+    done
+    profile_file="$profile.config.toml"
+    [ ! -L "$profile_file" ] || { echo "error: isolated Codex profile must not be a symlink: $home/$profile_file" >&2; exit 1; }
+    project_key=$(toml_basic_string "$project") || exit 1
+    temp_file=".$profile.config.toml.$$"
+    {
+      printf '%s\n' '# Firstmate Codex crewmate profile.'
+      printf '[projects."%s"]\n' "$project_key"
+      printf '%s\n' 'trust_level = "untrusted"'
+    } > "$temp_file" || exit 1
+    chmod 600 "$temp_file" || exit 1
+    mv -f "$temp_file" "$profile_file" || exit 1
+    printf '%s\n' "$home_real"
+  ) || return 1
 }
 
 case "$ARG3" in
@@ -673,6 +714,25 @@ else
   BRIEF="$DATA/$ID/brief.md"
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
+
+CODEX_CREWMATE_HOME=
+CODEX_CREWMATE_PROFILE=
+if [ "$HARNESS" = codex ] && [ "$KIND" != secondmate ]; then
+  case "$ID" in
+    ''|*[!A-Za-z0-9_-]*)
+      echo "error: Codex crewmate task id must contain only letters, digits, hyphens, or underscores" >&2
+      exit 1
+      ;;
+  esac
+  CODEX_CREWMATE_PROFILE="fm-crewmate-$ID"
+  CODEX_CREWMATE_HOME=$(refresh_codex_crewmate_home "$PROJ_ABS" "$CODEX_CREWMATE_PROFILE") || {
+    echo "error: could not prepare isolated Codex crewmate home" >&2
+    exit 1
+  }
+  if [ -f "$PROJ_ABS/.codex/config.toml" ]; then
+    echo "warning: Codex crewmate ignores project config $PROJ_ABS/.codex/config.toml to keep MCPs and plugins disabled" >&2
+  fi
+fi
 
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
 # /private/tmp) when it came from the ship/scout branch's logical `pwd` above.
@@ -1001,15 +1061,7 @@ EOF
   esac
 fi
 
-CODEX_CREWMATE_HOME=
-if [ "$HARNESS" = codex ] && [ "$KIND" != secondmate ]; then
-  CODEX_CREWMATE_HOME=$(refresh_codex_crewmate_home) || {
-    echo "error: could not prepare isolated Codex crewmate home" >&2
-    exit 1
-  }
-fi
-
-# Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; AGENTS.md project management and task lifecycle).
+# Per-project delivery mode + yolo flag (bin/fm-project-mode.sh; the project-management skill and AGENTS.md task lifecycle).
 # Recorded in meta so fm-teardown's safety check and the validate/merge stages can
 # branch on them. Mode governs ship tasks; a scout's deliverable is a report, not a
 # merge, so scout teardown ignores mode.
@@ -1084,6 +1136,8 @@ LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 if [ -n "$CODEX_CREWMATE_HOME" ]; then
   sq_codex_crewmate_home=$(shell_quote "$CODEX_CREWMATE_HOME")
+  sq_codex_crewmate_profile=$(shell_quote "$CODEX_CREWMATE_PROFILE")
+  LAUNCH=${LAUNCH//__CODEXPROFILE__/$sq_codex_crewmate_profile}
   LAUNCH="CODEX_HOME=$sq_codex_crewmate_home $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
