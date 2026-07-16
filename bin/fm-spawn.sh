@@ -405,6 +405,48 @@ toml_basic_string() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
+codex_target_must_be_regular() {
+  local target=$1
+  if [ -e "$target" ] || [ -L "$target" ]; then
+    [ -f "$target" ] && [ ! -L "$target" ] || {
+      echo "error: isolated Codex target must be a regular file: $target" >&2
+      return 1
+    }
+  fi
+}
+
+install_codex_target() {
+  local temp_file=$1 target=$2
+  codex_target_must_be_regular "$target" || return 1
+  mv -f "$temp_file" "$target" || return 1
+  [ -f "$target" ] && [ ! -L "$target" ] || {
+    echo "error: isolated Codex target must be a regular file: $target" >&2
+    return 1
+  }
+}
+
+remove_codex_target() {
+  local target=$1
+  codex_target_must_be_regular "$target" || return 1
+  rm -f "$target" || return 1
+  [ ! -e "$target" ] && [ ! -L "$target" ] || {
+    echo "error: isolated Codex target was not removed: $target" >&2
+    return 1
+  }
+}
+
+normalize_raw_codex_launch() {
+  local raw=$1 word seen_codex=0
+  for word in $raw; do
+    case "$word" in
+      [A-Za-z_][A-Za-z0-9_]*=*) [ "$seen_codex" -eq 0 ] || return 1 ;;
+      codex|*/codex) [ "$seen_codex" -eq 0 ] || return 1; seen_codex=1 ;;
+      *) return 1 ;;
+    esac
+  done
+  [ "$seen_codex" -eq 1 ]
+}
+
 refresh_codex_crewmate_home() {
   local worktree=$1 profile=$2 source="$HOME/.codex" data_real base base_real home home_real name source_file temp_file profile_file worktree_key
   umask 077
@@ -439,16 +481,16 @@ refresh_codex_crewmate_home() {
     temp_file=".config.toml.$$"
     printf '%s\n' '# Firstmate Codex crewmate home.' > "$temp_file" || exit 1
     chmod 600 "$temp_file" || exit 1
-    mv -f "$temp_file" config.toml || exit 1
+    install_codex_target "$temp_file" config.toml || exit 1
     for name in auth.json models_cache.json; do
       source_file="$source/$name"
       if [ -f "$source_file" ]; then
         temp_file=".$name.$$"
         cp "$source_file" "$temp_file" || exit 1
         chmod 600 "$temp_file" || exit 1
-        mv -f "$temp_file" "$name" || exit 1
+        install_codex_target "$temp_file" "$name" || exit 1
       else
-        rm -f "$name" || exit 1
+        remove_codex_target "$name" || exit 1
       fi
     done
     profile_file="$profile.config.toml"
@@ -461,18 +503,27 @@ refresh_codex_crewmate_home() {
       printf '%s\n' 'trust_level = "untrusted"'
     } > "$temp_file" || exit 1
     chmod 600 "$temp_file" || exit 1
-    mv -f "$temp_file" "$profile_file" || exit 1
+    install_codex_target "$temp_file" "$profile_file" || exit 1
     printf '%s\n' "$home_real"
   ) || return 1
 }
 
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
-    LAUNCH=$ARG3
-    HARNESS=""
-    for word in $LAUNCH; do
-      case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
-    done
+    if [ "$KIND" != secondmate ] && [[ "$ARG3" == *codex* ]]; then
+      normalize_raw_codex_launch "$ARG3" || {
+        echo "error: unsafe raw Codex launch command; use --harness codex for Codex options" >&2
+        exit 1
+      }
+      HARNESS=codex
+      LAUNCH=$(launch_template "$HARNESS" "$KIND")
+    else
+      LAUNCH=$ARG3
+      HARNESS=""
+      for word in $LAUNCH; do
+        case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
+      done
+    fi
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the

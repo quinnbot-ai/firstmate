@@ -417,6 +417,72 @@ test_codex_crewmate_home_refuses_symlink_escape() {
   pass "Codex spawn refuses isolated-home symlink escapes"
 }
 
+test_codex_crewmate_home_refuses_nonregular_targets() {
+  local target_kind n id rec out status source_home crew_home target
+  n=0
+  for target_kind in config.toml auth.json models_cache.json profile; do
+    n=$((n + 1))
+    id="profile-codex-home-target-$n-z23"
+    rec=$(make_spawn_case "profile-codex-home-target-$n" codex "$id")
+    read_case_record "$rec"
+    source_home="$CASE_DIR/user/.codex"
+    crew_home="$HOME_DIR/data/codex-crewmate/fm-crewmate-$id"
+    mkdir -p "$source_home" "$crew_home"
+    printf '%s\n' '{"auth_mode":"chatgpt"}' > "$source_home/auth.json"
+    printf '%s\n' '{"models":[]}' > "$source_home/models_cache.json"
+    case "$target_kind" in
+      profile) target="$crew_home/fm-crewmate-$id.config.toml" ;;
+      *) target="$crew_home/$target_kind" ;;
+    esac
+    mkdir -p "$target"
+
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 1 "$status" "Codex spawn must reject a directory at $target_kind"
+    assert_contains "$out" "isolated Codex target must be a regular file: ${target##*/}" \
+      "Codex spawn did not reject the non-regular $target_kind target"
+    assert_absent "$HOME_DIR/state/$id.meta" "non-regular $target_kind target must not create task metadata"
+    [ ! -s "$LAUNCH_LOG" ] || fail "non-regular $target_kind target must not launch Codex"
+  done
+  pass "Codex home rejects non-regular final targets"
+}
+
+test_raw_codex_launch_is_normalized() {
+  local rec id out status launch crew_home
+  id=profile-raw-codex-z24
+  rec=$(make_spawn_case profile-raw-codex codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "CODEX_HOME=/unsafe codex")
+  status=$?
+  expect_code 0 "$status" "simple raw Codex launch should be normalized"
+  assert_contains "$out" "spawned $id harness=codex" "normalized raw Codex launch did not report Codex"
+  crew_home=$(cd "$HOME_DIR/data/codex-crewmate/fm-crewmate-$id" && pwd -P)
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME='$crew_home' codex --profile 'fm-crewmate-$id' --disable plugins" \
+    "normalized raw Codex launch did not enforce the isolated profile"
+  assert_not_contains "$launch" '/unsafe' "raw CODEX_HOME assignment survived normalization"
+  pass "raw Codex launch is normalized to the isolated profile"
+}
+
+test_unsafe_raw_codex_launch_fails_closed() {
+  local rec id out status
+  id=profile-raw-codex-unsafe-z25
+  rec=$(make_spawn_case profile-raw-codex-unsafe codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "codex CODEX_HOME=/unsafe")
+  status=$?
+  expect_code 1 "$status" "unsafe raw Codex launch must fail closed"
+  assert_contains "$out" "unsafe raw Codex launch command" \
+    "unsafe raw Codex launch did not explain the refusal"
+  assert_absent "$HOME_DIR/state/$id.meta" "unsafe raw Codex launch must fail before task allocation"
+  [ ! -s "$LAUNCH_LOG" ] || fail "unsafe raw Codex launch must not launch Codex"
+  pass "unsafe raw Codex launch fails closed"
+}
+
 test_codex_crewmate_home_records_failed_worktree_return() {
   local rec id out status source_home crew_home project
   id=profile-codex-home-return-z22
@@ -609,6 +675,9 @@ test_codex_crewmate_home_excludes_mcp_and_plugins
 test_codex_crewmate_home_fails_when_plugin_cleanup_fails
 test_codex_crewmate_home_fails_when_stale_catalog_cleanup_fails
 test_codex_crewmate_home_refuses_symlink_escape
+test_codex_crewmate_home_refuses_nonregular_targets
+test_raw_codex_launch_is_normalized
+test_unsafe_raw_codex_launch_fails_closed
 test_codex_crewmate_home_records_failed_worktree_return
 test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
