@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Behavior tests for per-task GOTMPDIR support (fm-gotmp).
 #
-# fm-spawn gives each task a temp root /tmp/fm-<id>/ with Go's build temp nested at
-# gotmp/, exports GOTMPDIR into the crewmate pane, and records tasktmp= in the task's
+# fm-spawn gives each task an atomically created temp root with Go's build temp nested
+# at gotmp/, exports GOTMPDIR into the crewmate pane, and records tasktmp= in the task's
 # meta. fm-teardown reads tasktmp= and removes the whole root on cleanup.
 #
 # These tests exercise behavior directly: fm-teardown is run as a subprocess against a
@@ -96,26 +96,30 @@ META
 
 # --- fm-spawn side ---
 
-test_spawn_contract_and_mkdir_pattern() {
-  # Structural: fm-spawn must create the gotmp dir, record tasktmp in meta, and export
+test_spawn_contract_and_private_temp_pattern() {
+  # Structural: fm-spawn must create a private temp root and its gotmp dir, record tasktmp in meta, and export
   # GOTMPDIR into the pane. Assert the contract lines are present in the source.
   # shellcheck disable=SC2016  # single quotes are deliberate: these are literal source strings
-  grep -F 'mkdir -p "$TASK_TMP/gotmp"' "$SPAWN" >/dev/null \
+  grep -F 'TASK_TMP=$(mktemp -d "/tmp/fm-$ID.XXXXXXXX")' "$SPAWN" >/dev/null \
+    || fail "fm-spawn missing: private task temporary root"
+  # shellcheck disable=SC2016  # single quotes are deliberate: these are literal source strings
+  grep -F 'mkdir "$TASK_TMP/gotmp"' "$SPAWN" >/dev/null \
     || fail "fm-spawn missing: mkdir of gotmp under TASK_TMP"
   # shellcheck disable=SC2016  # single quotes are deliberate: literal source string
   grep -F 'echo "tasktmp=$TASK_TMP"' "$SPAWN" >/dev/null \
     || fail "fm-spawn missing: tasktmp= line in meta write"
   grep -F 'export GOTMPDIR=' "$SPAWN" >/dev/null \
     || fail "fm-spawn missing: GOTMPDIR export into pane"
-  # Behavioral: the mkdir + meta-write pattern spawn uses must produce a gotmp dir and
+  # Behavioral: the private-root + mkdir + meta-write pattern spawn uses must produce a gotmp dir and
   # a meta line whose value the teardown grep (tasktmp=, cut -d= -f2-) reads back whole.
   local id=spawn-sim-z1
   local sim_root="$TMP_ROOT/$id-root"
-  local task_tmp="$sim_root/tmp/fm-$id"
-  mkdir -p "$sim_root/state"
-  # Replicate spawn's exact mkdir + meta-write lines.
-  TASK_TMP="$task_tmp"
-  mkdir -p "$TASK_TMP/gotmp"
+  local task_tmp
+  mkdir -p "$sim_root/state" "$sim_root/tmp"
+  # Replicate spawn's exact private-root + mkdir + meta-write lines.
+  TASK_TMP=$(mktemp -d "$sim_root/tmp/fm-$id.XXXXXXXX")
+  task_tmp=$TASK_TMP
+  mkdir "$TASK_TMP/gotmp"
   {
     echo "tasktmp=$TASK_TMP"
   } > "$sim_root/state/$id.meta"
@@ -203,7 +207,7 @@ test_teardown_skips_gracefully_when_dir_missing() {
   pass "fm-teardown skips gracefully when tasktmp= points to a nonexistent dir"
 }
 
-test_spawn_contract_and_mkdir_pattern
+test_spawn_contract_and_private_temp_pattern
 test_teardown_removes_tasktmp_dir
 test_teardown_skips_gracefully_without_tasktmp
 test_teardown_skips_gracefully_when_dir_missing

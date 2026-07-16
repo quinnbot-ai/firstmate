@@ -160,6 +160,14 @@ codex_activation_result_from_launch() {
   printf '%s\n' "$1" | sed -n "s/.*--result-file '\\([^']*\\)'.*/\\1/p"
 }
 
+assert_private_activation_result() {  # <task-id> <result-path> <message>
+  local id=$1 result=$2 message=$3
+  case "$result" in
+    "/tmp/fm-$id."????????"/.codex-home-activation."????????"/result") : ;;
+    *) fail "$message: $result" ;;
+  esac
+}
+
 materialize_codex_home() {  # <home> <data> <source> <profile> <worktree>
   local result="$1.activation"
   python3 "$ROOT/bin/fm-codex-home.py" --create-activate --data "$2" --source "$3" \
@@ -344,7 +352,7 @@ EOF
   crew_home=$(codex_home_from_launch "$launch")
   activation_result=$(codex_activation_result_from_launch "$launch")
   [ -n "$crew_home" ] || fail "Codex ship launch did not expose an isolated CODEX_HOME"
-  case "$activation_result" in "/tmp/fm-$ship/.codex-home-activation."????????"/result") : ;; *) fail "Codex ship launch did not use a private activation result: $activation_result" ;; esac
+  assert_private_activation_result "$ship" "$activation_result" "Codex ship launch did not use a private activation result"
   assert_contains "$launch" "--home '$crew_home' --result-file '$activation_result' --result-token '" \
     "Codex ship launch did not authenticate the isolated-home activation"
   assert_contains "$launch" "-- codex --profile 'fm-crewmate-$ship' --disable plugins" \
@@ -394,7 +402,7 @@ EOF
   crew_home=$(codex_home_from_launch "$launch")
   activation_result=$(codex_activation_result_from_launch "$launch")
   [ -n "$crew_home" ] || fail "Codex scout launch did not expose an isolated CODEX_HOME"
-  case "$activation_result" in "/tmp/fm-$scout/.codex-home-activation."????????"/result") : ;; *) fail "Codex scout launch did not use a private activation result: $activation_result" ;; esac
+  assert_private_activation_result "$scout" "$activation_result" "Codex scout launch did not use a private activation result"
   assert_contains "$launch" "--home '$crew_home' --result-file '$activation_result' --result-token '" \
     "Codex scout launch did not authenticate the isolated-home activation"
   assert_contains "$launch" "-- codex --profile 'fm-crewmate-$scout' --disable plugins" \
@@ -585,7 +593,7 @@ test_raw_codex_launch_is_normalized() {
     crew_home=$(codex_home_from_launch "$launch")
     activation_result=$(codex_activation_result_from_launch "$launch")
     [ -n "$crew_home" ] || fail "$case_name raw Codex launch did not expose an isolated CODEX_HOME"
-    case "$activation_result" in "/tmp/fm-$id/.codex-home-activation."????????"/result") : ;; *) fail "$case_name raw Codex launch did not use a private activation result: $activation_result" ;; esac
+    assert_private_activation_result "$id" "$activation_result" "$case_name raw Codex launch did not use a private activation result"
     assert_contains "$launch" "--home '$crew_home' --result-file '$activation_result' --result-token '" \
       "$case_name raw Codex launch did not authenticate the isolated-home activation"
     assert_contains "$launch" "-- codex --profile 'fm-crewmate-$id' --disable plugins" \
@@ -597,7 +605,7 @@ test_raw_codex_launch_is_normalized() {
 
 test_raw_codex_execution_wrappers_fail_closed() {
   local command case_name rec id out status n=0
-  for case_name in nice nice-option shell shell-multicommand shell-script sudo-user timeout-duration script find xargs unknown-wrapper; do
+  for case_name in nice nice-option shell shell-multicommand shell-script sourced-script script-path sudo-user timeout-duration script find xargs unknown-wrapper; do
     n=$((n + 1))
     id="profile-raw-codex-wrapper-$n-z31"
     rec=$(make_spawn_case "profile-raw-codex-wrapper-$n" codex "$id")
@@ -608,6 +616,8 @@ test_raw_codex_execution_wrappers_fail_closed() {
       shell) command='sh -c codex' ;;
       shell-multicommand) command="sh -c 'true; CODEX_HOME=/unsafe codex'" ;;
       shell-script) command='sh -c ./launch-worker' ;;
+      sourced-script) command='source ./launch-worker' ;;
+      script-path) command='./launch-worker.sh --background' ;;
       sudo-user) command='sudo -u crew CODEX_HOME=/unsafe codex' ;;
       timeout-duration) command='timeout 5 CODEX_HOME=/unsafe codex' ;;
       script) command='script -q /dev/null codex' ;;
@@ -842,7 +852,7 @@ test_codex_home_activation_result_refuses_symlink() {
 }
 
 test_codex_home_activation_failure_aborts_spawn() {
-  local rec id out status
+  local rec id out status task_tmp
   id=profile-codex-home-activation-z45
   rec=$(make_spawn_case profile-codex-home-activation codex "$id")
   read_case_record "$rec"
@@ -857,7 +867,32 @@ test_codex_home_activation_failure_aborts_spawn() {
     "terminal activation failure did not return its worktree"
   assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
     "terminal activation failure did not remove its task endpoint"
+  for task_tmp in "/tmp/fm-$id".*; do
+    [ ! -e "$task_tmp" ] || fail "terminal activation failure left task temporary root: $task_tmp"
+  done
   pass "Codex spawn synchronizes terminal activation failures"
+}
+
+test_codex_activation_uses_private_task_temp_root() {
+  local rec id out status target legacy_path launch activation_result
+  id=profile-codex-activation-parent-z67
+  rec=$(make_spawn_case profile-codex-activation-parent codex "$id")
+  read_case_record "$rec"
+  target="$CASE_DIR/activation-target"
+  legacy_path="/tmp/fm-$id"
+  mkdir -p "$target"
+  rm -f "$legacy_path"
+  ln -s "$target" "$legacy_path" || fail "could not create predictable task-temp symlink"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  rm -f "$legacy_path"
+  expect_code 0 "$status" "Codex spawn must not follow a predictable task-temp symlink"
+  launch=$(cat "$LAUNCH_LOG")
+  activation_result=$(codex_activation_result_from_launch "$launch")
+  assert_private_activation_result "$id" "$activation_result" "Codex activation did not use a private task temporary root"
+  [ ! -e "$target/result" ] || fail "Codex activation followed the predictable task-temp symlink"
+  pass "Codex activation uses a private task temporary root"
 }
 
 test_codex_teardown_preserves_failed_endpoint_metadata() {
@@ -1151,6 +1186,7 @@ test_codex_home_activation_reports_exec_failure
 test_codex_home_activation_refuses_replaced_path
 test_codex_home_activation_result_refuses_symlink
 test_codex_home_activation_failure_aborts_spawn
+test_codex_activation_uses_private_task_temp_root
 test_codex_teardown_preserves_failed_endpoint_metadata
 test_codex_teardown_refuses_symlinked_data_root
 test_codex_crewmate_home_records_failed_worktree_return

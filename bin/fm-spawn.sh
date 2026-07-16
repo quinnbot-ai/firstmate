@@ -199,6 +199,7 @@ ORCA_WORKTREE_CLEANUP_COMPLETE=0
 ORCA_ABORT_CLEANUP_FAILED=0
 FAILED_ENDPOINT_CLEANUP=0
 TREEHOUSE_ABORT_CLEANUP=0
+TASK_TMP=
 CODEX_CREWMATE_HOME=
 CODEX_ACTIVATION_RESULT=
 CODEX_ACTIVATION_DIR=
@@ -331,6 +332,7 @@ spawn_abort_cleanup() {
   fi
   [ "$orca_cleanup_failed" -eq 0 ] || write_failed_treehouse_spawn_meta
   [ -z "$CODEX_ACTIVATION_DIR" ] || rm -rf -- "$CODEX_ACTIVATION_DIR"
+  [ -z "$TASK_TMP" ] || rm -rf -- "$TASK_TMP"
   if [ "$status" -ne 0 ] && [ "$SPAWN_META_WRITTEN" = 1 ] && [ "$FAILED_ENDPOINT_CLEANUP" != 1 ] && [ "$preserve_codex_home" -eq 0 ] && [ "$orca_cleanup_failed" -eq 0 ] && [ -z "$CODEX_CREWMATE_HOME" ]; then
     rm -f "$STATE/$ID.meta"
   fi
@@ -462,6 +464,16 @@ raw_launch_word_is_dynamic_dispatcher() {
   raw_launch_word_is "$word" find || raw_launch_word_is "$word" xargs || raw_launch_word_is "$word" parallel
 }
 
+raw_launch_word_is_script_dispatcher() {
+  local word=$1 base
+  raw_launch_word_is "$word" source || [ "$word" = . ] && return 0
+  base=${word##*/}
+  case "$base" in
+    *.sh|*.bash|*.zsh|*.command) return 0 ;;
+  esac
+  return 1
+}
+
 raw_launch_mentions_codex() {
   local raw=$1 status
   while [ -n "$raw" ]; do
@@ -591,6 +603,8 @@ raw_launch_starts_codex() {
               state=timeout
             elif raw_launch_word_is "$word" sudo; then
               state=sudo
+            elif raw_launch_word_is_script_dispatcher "$word"; then
+              return 2
             elif raw_launch_word_is_dynamic_dispatcher "$word"; then
               return 2
             elif raw_launch_word_is "$word" nohup || raw_launch_word_is "$word" time || raw_launch_word_is "$word" stdbuf || raw_launch_word_is "$word" setsid || raw_launch_word_is "$word" chrt || raw_launch_word_is "$word" ionice || raw_launch_word_is "$word" taskset || raw_launch_word_is "$word" script; then
@@ -1362,13 +1376,16 @@ if [ "$HARNESS" = codex ] && [ "$KIND" != secondmate ]; then
   fi
 fi
 
-# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
+# Per-task temp root is atomically created with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
-# Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
-# later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
+# Nested (not a bare /tmp/fm-<id>.<random>/gotmp) so other per-task temp can live alongside
+# later, and teardown cleans the recorded path. GOTMPDIR (not TMPDIR) is the
 # targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
-TASK_TMP="/tmp/fm-$ID"
-mkdir -p "$TASK_TMP/gotmp"
+TASK_TMP=$(mktemp -d "/tmp/fm-$ID.XXXXXXXX") || {
+  echo "error: could not create private task temporary directory" >&2
+  exit 1
+}
+mkdir "$TASK_TMP/gotmp" || exit 1
 if [ -n "$CODEX_CREWMATE_HOME" ]; then
   CODEX_ACTIVATION_DIR=$(mktemp -d "$TASK_TMP/.codex-home-activation.XXXXXXXX") || {
     echo "error: could not create private isolated Codex home activation directory" >&2
