@@ -74,8 +74,8 @@
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 # Codex ship and scout launches receive a firstmate-managed CODEX_HOME under
-# data/codex-crewmate, refreshed with only copied auth/model catalog files and
-# an empty config.toml with no MCP servers or plugins and a per-task profile
+# data/codex-crewmate, each in a fresh private directory with only copied
+# auth/model catalog files and an empty config.toml with no MCP servers or plugins and a per-task profile
 # that excludes project-local Codex configuration.
 # Codex secondmate launches retain their existing home and are not changed here.
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
@@ -283,8 +283,9 @@ spawn_abort_cleanup() {
   if [ "$TREEHOUSE_ABORT_CLEANUP" = 1 ]; then
     TREEHOUSE_ABORT_CLEANUP=0
     if ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) 2>/dev/null; then
-      fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "fm-$ID" 2>/dev/null || true
-      if fm_backend_target_exists "$BACKEND" "$T" "fm-$ID"; then
+      if ! FM_BACKEND_KILL_STRICT=1 fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "fm-$ID" 2>/dev/null; then
+        write_failed_treehouse_spawn_meta
+      elif fm_backend_target_exists "$BACKEND" "$T" "fm-$ID"; then
         write_failed_treehouse_spawn_meta
       fi
     else
@@ -408,36 +409,6 @@ toml_basic_string() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
-codex_target_must_be_regular() {
-  local target=$1
-  if [ -e "$target" ] || [ -L "$target" ]; then
-    [ -f "$target" ] && [ ! -L "$target" ] || {
-      echo "error: isolated Codex target must be a regular file: $target" >&2
-      return 1
-    }
-  fi
-}
-
-install_codex_target() {
-  local temp_file=$1 target=$2
-  codex_target_must_be_regular "$target" || return 1
-  mv -f "$temp_file" "$target" || return 1
-  [ -f "$target" ] && [ ! -L "$target" ] || {
-    echo "error: isolated Codex target must be a regular file: $target" >&2
-    return 1
-  }
-}
-
-remove_codex_target() {
-  local target=$1
-  codex_target_must_be_regular "$target" || return 1
-  rm -f "$target" || return 1
-  [ ! -e "$target" ] && [ ! -L "$target" ] || {
-    echo "error: isolated Codex target was not removed: $target" >&2
-    return 1
-  }
-}
-
 raw_launch_word_is_codex() {
   local word=$1 base lowered
   base=${word##*/}
@@ -445,20 +416,76 @@ raw_launch_word_is_codex() {
   [ "$lowered" = codex ]
 }
 
+raw_launch_read_word() {
+  local raw=$1 len=${#1} i=0 char quote='' word=
+  while [ "$i" -lt "$len" ]; do
+    char=${raw:i:1}
+    case "$char" in
+      ' '|$'\t'|$'\n'|$'\r') i=$((i + 1)) ;;
+      *) break ;;
+    esac
+  done
+  [ "$i" -lt "$len" ] || return 1
+  while [ "$i" -lt "$len" ]; do
+    char=${raw:i:1}
+    case "$quote" in
+      "'")
+        if [ "$char" = "'" ]; then quote=; else word+=$char; fi
+        ;;
+      '"')
+        case "$char" in
+          '"') quote= ;;
+          \\)
+            i=$((i + 1))
+            [ "$i" -lt "$len" ] || return 2
+            word+=${raw:i:1}
+            ;;
+          '$'|'`') return 2 ;;
+          *) word+=$char ;;
+        esac
+        ;;
+      '')
+        case "$char" in
+          ' '|$'\t'|$'\n'|$'\r') break ;;
+          "'") quote="'" ;;
+          '"') quote='"' ;;
+          \\)
+            i=$((i + 1))
+            [ "$i" -lt "$len" ] || return 2
+            word+=${raw:i:1}
+            ;;
+          '$'|'`'|';'|'&'|'|'|'('|')'|'<'|'>'|'*'|'?'|'['|']'|'{'|'}'|'!'|'~') return 2 ;;
+          *) word+=$char ;;
+        esac
+        ;;
+    esac
+    i=$((i + 1))
+  done
+  [ -z "$quote" ] || return 2
+  RAW_LAUNCH_WORD=$word
+  RAW_LAUNCH_REST=${raw:i}
+}
+
+raw_launch_starts_codex() {
+  local raw=$1 word status
+  while :; do
+    raw_launch_read_word "$raw"
+    status=$?
+    [ "$status" -eq 0 ] || return "$status"
+    word=$RAW_LAUNCH_WORD
+    raw=$RAW_LAUNCH_REST
+    case "$word" in
+      [A-Za-z_][A-Za-z0-9_]*=*) ;;
+      *) raw_launch_word_is_codex "$word"; return $? ;;
+    esac
+  done
+}
+
 raw_launch_is_simple() {
   local raw=$1
   case "$raw" in
     *[\'\"\\\`\$\;\&\|\(\)\<\>\*\?\[\]\{\}\!\~$'\n'$'\r']*) return 1 ;;
   esac
-}
-
-raw_launch_mentions_codex() {
-  local raw=$1 word
-  raw_launch_is_simple "$raw" || return 1
-  for word in $raw; do
-    raw_launch_word_is_codex "$word" && return 0
-  done
-  return 1
 }
 
 normalize_raw_codex_launch() {
@@ -478,7 +505,7 @@ normalize_raw_codex_launch() {
 }
 
 refresh_codex_crewmate_home() {
-  local worktree=$1 profile=$2 source="$HOME/.codex" data_real base base_real home home_real name source_file temp_file profile_file stage_dir worktree_key
+  local worktree=$1 profile=$2 source="$HOME/.codex" data_real base base_real home home_real name source_file profile_file worktree_key
   umask 077
   data_real=$(cd "$DATA" 2>/dev/null && pwd -P) || return 1
   base="$DATA/codex-crewmate"
@@ -490,64 +517,60 @@ refresh_codex_crewmate_home() {
     echo "error: isolated Codex home must resolve inside firstmate data: $base" >&2
     return 1
   }
-  home="$base/$profile"
   (
     cd -P "$base" 2>/dev/null || exit 1
     [ "$(pwd -P)" = "$base_real" ] || {
       echo "error: isolated Codex home must resolve inside firstmate data: $base" >&2
       exit 1
     }
-    [ ! -L "$profile" ] || { echo "error: isolated Codex home must not be a symlink: $home" >&2; exit 1; }
-    mkdir -p "$profile" || exit 1
-    [ ! -L "$profile" ] || { echo "error: isolated Codex home must not be a symlink: $home" >&2; exit 1; }
-    cd -P "$profile" 2>/dev/null || exit 1
+    home=$(mktemp -d '.fm-codex-home.XXXXXXXX') || exit 1
+    cd -P "$home" 2>/dev/null || exit 1
     home_real=$(pwd -P)
-    [ "$home_real" = "$base_real/$profile" ] || {
-      echo "error: isolated Codex home must resolve inside firstmate data: $home" >&2
-      exit 1
-    }
+    case "$home_real" in
+      "$base_real"/.fm-codex-home.*) : ;;
+      *)
+        echo "error: isolated Codex home must resolve inside firstmate data: $home" >&2
+        exit 1
+        ;;
+    esac
     chmod 700 . || exit 1
-    rm -rf plugins || exit 1
-    stage_dir=$(mktemp -d '.fm-codex-stage.XXXXXXXX') || exit 1
-    chmod 700 "$stage_dir" || exit 1
-    trap 'rm -rf "$stage_dir" >/dev/null 2>&1 || true' EXIT
-    temp_file=$(mktemp "$stage_dir/config.toml.XXXXXXXX") || exit 1
-    printf '%s\n' '# Firstmate Codex crewmate home.' > "$temp_file" || exit 1
-    chmod 600 "$temp_file" || exit 1
-    install_codex_target "$temp_file" config.toml || exit 1
+    printf '%s\n' '# Firstmate Codex crewmate home.' > config.toml || exit 1
+    chmod 600 config.toml || exit 1
     for name in auth.json models_cache.json; do
       source_file="$source/$name"
       if [ -f "$source_file" ]; then
-        temp_file=$(mktemp "$stage_dir/$name.XXXXXXXX") || exit 1
-        cp "$source_file" "$temp_file" || exit 1
-        chmod 600 "$temp_file" || exit 1
-        install_codex_target "$temp_file" "$name" || exit 1
-      else
-        remove_codex_target "$name" || exit 1
+        cp "$source_file" "$name" || exit 1
+        chmod 600 "$name" || exit 1
       fi
     done
     profile_file="$profile.config.toml"
-    [ ! -L "$profile_file" ] || { echo "error: isolated Codex profile must not be a symlink: $home/$profile_file" >&2; exit 1; }
     worktree_key=$(toml_basic_string "$worktree") || exit 1
-    temp_file=$(mktemp "$stage_dir/$profile.config.toml.XXXXXXXX") || exit 1
     {
       printf '%s\n' '# Firstmate Codex crewmate profile.'
       printf '[projects."%s"]\n' "$worktree_key"
       printf '%s\n' 'trust_level = "untrusted"'
-    } > "$temp_file" || exit 1
-    chmod 600 "$temp_file" || exit 1
-    install_codex_target "$temp_file" "$profile_file" || exit 1
+    } > "$profile_file" || exit 1
+    chmod 600 "$profile_file" || exit 1
     printf '%s\n' "$home_real"
   ) || return 1
 }
 
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
-    raw_launch_is_simple "$ARG3" || {
-      echo "error: unsafe raw launch command; quote, escape, and shell syntax are not supported - use --harness codex for Codex" >&2
+    if raw_launch_starts_codex "$ARG3"; then
+      raw_codex_status=0
+    else
+      raw_codex_status=$?
+    fi
+    if [ "$KIND" != secondmate ] && [ "$raw_codex_status" -eq 2 ]; then
+      echo "error: unsafe raw launch command at executable position; use --harness codex for Codex" >&2
       exit 1
-    }
-    if [ "$KIND" != secondmate ] && raw_launch_mentions_codex "$ARG3"; then
+    fi
+    if [ "$KIND" != secondmate ] && [ "$raw_codex_status" -eq 0 ]; then
+      raw_launch_is_simple "$ARG3" || {
+        echo "error: unsafe raw launch command; quote, escape, and shell syntax are not supported - use --harness codex for Codex" >&2
+        exit 1
+      }
       normalize_raw_codex_launch "$ARG3" || {
         echo "error: unsafe raw Codex launch command; use --harness codex for Codex options" >&2
         exit 1

@@ -521,8 +521,7 @@ fm_backend_zellij_send_text_submit() {  # <target> <text> <retries> <enter-sleep
   done
 }
 
-# fm_backend_zellij_kill: remove the task's tab, best-effort (mirrors
-# tmux-kill-window's/herdr-pane-close's `|| true` contract). Verified: unlike
+# fm_backend_zellij_kill: remove the task's tab. Verified: unlike
 # herdr, closing a zellij tab's only PANE does NOT close the tab itself (an
 # empty tab survives in list-tabs); `close-tab-by-id` on a live tab DOES
 # cleanly remove both the pane and the tab in one call, verified to need no
@@ -549,9 +548,9 @@ fm_backend_zellij_kill() {  # <target> [tab_id] [expected_label]
       ;;
   esac
   if [ -n "$tab_id" ]; then
-    fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action close-tab-by-id "$tab_id" >/dev/null 2>&1 || true
+    fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action close-tab-by-id "$tab_id" >/dev/null 2>&1 || [ "${FM_BACKEND_KILL_STRICT:-0}" != 1 ]
   elif [ -z "$expected_label" ]; then
-    fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action close-pane --pane-id "$FM_BACKEND_ZELLIJ_PANE" >/dev/null 2>&1 || true
+    fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action close-pane --pane-id "$FM_BACKEND_ZELLIJ_PANE" >/dev/null 2>&1 || [ "${FM_BACKEND_KILL_STRICT:-0}" != 1 ]
   fi
 }
 

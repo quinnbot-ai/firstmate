@@ -22,6 +22,7 @@ set -u
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
   *"#{pane_id}"*)
+    [ "${FM_FAKE_TARGET_QUERY_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_TARGET_QUERY_STATUS}"
     [ "$(cat "${FM_FAKE_TARGET_STATE:?}" 2>/dev/null)" = live ] || exit 1
     printf '%s\n' '@1'
     exit 0
@@ -123,6 +124,7 @@ run_spawn() {
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_BACKEND_LOG="$(dirname "$launchlog")/backend.log" \
     FM_FAKE_TREEHOUSE_RETURN_STATUS="${FM_FAKE_TREEHOUSE_RETURN_STATUS:-0}" \
     FM_FAKE_BACKEND_KILL_STATUS="${FM_FAKE_BACKEND_KILL_STATUS:-0}" \
+    FM_FAKE_TARGET_QUERY_STATUS="${FM_FAKE_TARGET_QUERY_STATUS:-0}" \
     FM_FAKE_TARGET_STATE="$target_state" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     HOME="$CASE_DIR/user" \
@@ -133,6 +135,10 @@ read_case_record() {
   IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR LAUNCH_LOG <<EOF
 $1
 EOF
+}
+
+codex_home_from_launch() {
+  printf '%s\n' "$1" | sed -n "s/^CODEX_HOME='\\([^']*\\)'.*/\\1/p"
 }
 
 assert_meta_profile() {
@@ -304,8 +310,9 @@ EOF
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$ship" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "Codex ship spawn should succeed with an isolated home"
-  crew_home=$(cd "$HOME_DIR/data/codex-crewmate/fm-crewmate-$ship" && pwd -P)
   launch=$(cat "$LAUNCH_LOG")
+  crew_home=$(codex_home_from_launch "$launch")
+  [ -n "$crew_home" ] || fail "Codex ship launch did not expose an isolated CODEX_HOME"
   assert_contains "$launch" "CODEX_HOME='$crew_home' codex --profile 'fm-crewmate-$ship' --disable plugins" \
     "Codex ship launch did not set the isolated CODEX_HOME"
   assert_contains "$out" "warning: Codex crewmate ignores project config" \
@@ -332,83 +339,46 @@ EOF
     || fail "isolated Codex home did not refresh the model catalog"
   [ ! -L "$crew_home/auth.json" ] || fail "isolated Codex auth must not point into the captain home"
 
-  crew_home="$HOME_DIR/data/codex-crewmate/fm-crewmate-$scout"
-  mkdir -p "$crew_home/plugins/stale-plugin"
+  mkdir -p "$HOME_DIR/data/codex-crewmate/fm-crewmate-$scout/plugins/stale-plugin"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$scout" "$PROJ_DIR" --scout)
   status=$?
   expect_code 0 "$status" "Codex scout spawn should use the isolated home"
-  crew_home=$(cd "$crew_home" && pwd -P)
   launch=$(cat "$LAUNCH_LOG")
+  crew_home=$(codex_home_from_launch "$launch")
+  [ -n "$crew_home" ] || fail "Codex scout launch did not expose an isolated CODEX_HOME"
   assert_contains "$launch" "CODEX_HOME='$crew_home' codex --profile 'fm-crewmate-$scout' --disable plugins" \
     "Codex scout launch did not set the isolated CODEX_HOME"
   assert_no_grep 'mcp_servers' "$crew_home/config.toml" \
     "Codex scout refresh reintroduced MCP server entries"
   assert_no_grep 'plugins' "$crew_home/config.toml" \
     "Codex scout refresh reintroduced plugin registrations"
-  [ ! -e "$crew_home/plugins" ] || fail "Codex scout refresh retained stale plugins"
-  pass "Codex ship and scout launches use a firstmate-owned MCP-free home"
+  [ ! -e "$crew_home/plugins" ] || fail "Codex scout home retained plugins"
+  pass "Codex ship and scout launches use fresh MCP-free homes"
 }
 
-test_codex_crewmate_home_fails_when_plugin_cleanup_fails() {
-  local rec id out status source_home crew_home
-  id=profile-codex-home-cleanup-z19
-  rec=$(make_spawn_case profile-codex-home-cleanup codex "$id")
+test_codex_crewmate_home_uses_fresh_private_directory() {
+  local rec id out status source_home legacy_home crew_home launch home_base
+  id=profile-codex-home-fresh-z19
+  rec=$(make_spawn_case profile-codex-home-fresh codex "$id")
   read_case_record "$rec"
   source_home="$CASE_DIR/user/.codex"
-  crew_home="$HOME_DIR/data/codex-crewmate/fm-crewmate-$id"
-  mkdir -p "$source_home" "$crew_home/plugins/stale-plugin"
-  cat > "$FAKEBIN_DIR/rm" <<'SH'
-#!/usr/bin/env bash
-case "$*" in
-  *"plugins"*) exit 73 ;;
-  *) exec /bin/rm "$@" ;;
-esac
-SH
-  chmod +x "$FAKEBIN_DIR/rm"
+  legacy_home="$HOME_DIR/data/codex-crewmate/fm-crewmate-$id"
+  mkdir -p "$source_home" "$legacy_home/plugins/stale-plugin" "$legacy_home/config.toml"
+  printf '%s\n' 'legacy-config' > "$legacy_home/auth.json"
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
-  expect_code 1 "$status" "Codex spawn must fail when isolated-home plugin cleanup fails"
-  assert_contains "$out" "could not prepare isolated Codex crewmate home" \
-    "Codex spawn did not report isolated-home cleanup failure"
-  assert_absent "$HOME_DIR/state/$id.meta" "failed isolated-home preparation must not create task metadata"
-  assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
-    "failed isolated-home preparation did not return its worktree"
-  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
-    "failed isolated-home preparation did not remove its task endpoint"
-  [ ! -s "$LAUNCH_LOG" ] || fail "failed isolated-home preparation must not launch Codex"
-  pass "Codex spawn fails closed when isolated-home plugin cleanup fails"
-}
-
-test_codex_crewmate_home_fails_when_stale_catalog_cleanup_fails() {
-  local rec id out status crew_home
-  id=profile-codex-home-catalog-cleanup-z20
-  rec=$(make_spawn_case profile-codex-home-catalog-cleanup codex "$id")
-  read_case_record "$rec"
-  crew_home="$HOME_DIR/data/codex-crewmate/fm-crewmate-$id"
-  mkdir -p "$crew_home"
-  printf '%s\n' '{"models":["stale"]}' > "$crew_home/models_cache.json"
-  cat > "$FAKEBIN_DIR/rm" <<'SH'
-#!/usr/bin/env bash
-case "$*" in
-  *"models_cache.json"*) exit 74 ;;
-  *) exec /bin/rm "$@" ;;
-esac
-SH
-  chmod +x "$FAKEBIN_DIR/rm"
-
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
-  status=$?
-  expect_code 1 "$status" "Codex spawn must fail when stale model-catalog cleanup fails"
-  assert_contains "$out" "could not prepare isolated Codex crewmate home" \
-    "Codex spawn did not report stale model-catalog cleanup failure"
-  assert_absent "$HOME_DIR/state/$id.meta" "failed model-catalog cleanup must not create task metadata"
-  assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
-    "failed model-catalog cleanup did not return its worktree"
-  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
-    "failed model-catalog cleanup did not remove its task endpoint"
-  [ ! -s "$LAUNCH_LOG" ] || fail "failed model-catalog cleanup must not launch Codex"
-  pass "Codex spawn fails closed when stale model-catalog cleanup fails"
+  expect_code 0 "$status" "Codex spawn should not reuse a legacy isolated home"
+  launch=$(cat "$LAUNCH_LOG")
+  crew_home=$(codex_home_from_launch "$launch")
+  [ -n "$crew_home" ] || fail "Codex launch did not expose a fresh isolated CODEX_HOME"
+  [ "$crew_home" != "$legacy_home" ] || fail "Codex launch reused the legacy isolated home"
+  home_base=$(cd "$HOME_DIR/data/codex-crewmate" && pwd -P)
+  case "$crew_home" in "$home_base"/.fm-codex-home.*) : ;; *) fail "Codex launch did not use a private per-task home: $crew_home" ;; esac
+  [ ! -e "$crew_home/plugins" ] || fail "fresh Codex home inherited legacy plugins"
+  assert_not_contains "$(cat "$crew_home/auth.json" 2>/dev/null || true)" "legacy-config" \
+    "fresh Codex home inherited legacy authentication"
+  pass "Codex spawn uses a fresh private isolated home"
 }
 
 test_codex_crewmate_home_refuses_symlink_escape() {
@@ -439,34 +409,32 @@ test_codex_crewmate_home_refuses_symlink_escape() {
   pass "Codex spawn refuses isolated-home symlink escapes"
 }
 
-test_codex_crewmate_home_refuses_nonregular_targets() {
-  local target_kind n id rec out status source_home crew_home target
-  n=0
-  for target_kind in config.toml auth.json models_cache.json profile; do
-    n=$((n + 1))
-    id="profile-codex-home-target-$n-z23"
-    rec=$(make_spawn_case "profile-codex-home-target-$n" codex "$id")
-    read_case_record "$rec"
-    source_home="$CASE_DIR/user/.codex"
-    crew_home="$HOME_DIR/data/codex-crewmate/fm-crewmate-$id"
-    mkdir -p "$source_home" "$crew_home"
-    printf '%s\n' '{"auth_mode":"chatgpt"}' > "$source_home/auth.json"
-    printf '%s\n' '{"models":[]}' > "$source_home/models_cache.json"
-    case "$target_kind" in
-      profile) target="$crew_home/fm-crewmate-$id.config.toml" ;;
-      *) target="$crew_home/$target_kind" ;;
-    esac
-    mkdir -p "$target"
+test_codex_crewmate_home_fails_when_private_home_creation_fails() {
+  local rec id out status
+  id=profile-codex-home-create-z23
+  rec=$(make_spawn_case profile-codex-home-create codex "$id")
+  read_case_record "$rec"
+  cat > "$FAKEBIN_DIR/mktemp" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *".fm-codex-home."*) exit 74 ;;
+  *) exec /usr/bin/mktemp "$@" ;;
+esac
+SH
+  chmod +x "$FAKEBIN_DIR/mktemp"
 
-    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
-    status=$?
-    expect_code 1 "$status" "Codex spawn must reject a directory at $target_kind"
-    assert_contains "$out" "isolated Codex target must be a regular file: ${target##*/}" \
-      "Codex spawn did not reject the non-regular $target_kind target"
-    assert_absent "$HOME_DIR/state/$id.meta" "non-regular $target_kind target must not create task metadata"
-    [ ! -s "$LAUNCH_LOG" ] || fail "non-regular $target_kind target must not launch Codex"
-  done
-  pass "Codex home rejects non-regular final targets"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "Codex spawn must fail when its private home cannot be created"
+  assert_contains "$out" "could not prepare isolated Codex crewmate home" \
+    "Codex spawn did not report private-home preparation failure"
+  assert_absent "$HOME_DIR/state/$id.meta" "private-home preparation failure must not create task metadata"
+  assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
+    "private-home preparation failure did not return its worktree"
+  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+    "private-home preparation failure did not remove its task endpoint"
+  [ ! -s "$LAUNCH_LOG" ] || fail "private-home preparation failure must not launch Codex"
+  pass "Codex spawn cleans up a failed private-home allocation"
 }
 
 test_raw_codex_launch_is_normalized() {
@@ -486,8 +454,9 @@ test_raw_codex_launch_is_normalized() {
     status=$?
     expect_code 0 "$status" "$case_name raw Codex launch should be normalized"
     assert_contains "$out" "spawned $id harness=codex" "$case_name raw Codex launch did not report Codex"
-    crew_home=$(cd "$HOME_DIR/data/codex-crewmate/fm-crewmate-$id" && pwd -P)
     launch=$(cat "$LAUNCH_LOG")
+    crew_home=$(codex_home_from_launch "$launch")
+    [ -n "$crew_home" ] || fail "$case_name raw Codex launch did not expose an isolated CODEX_HOME"
     assert_contains "$launch" "CODEX_HOME='$crew_home' codex --profile 'fm-crewmate-$id' --disable plugins" \
       "$case_name raw Codex launch did not enforce the isolated profile"
     assert_not_contains "$launch" '/unsafe' "$case_name raw CODEX_HOME assignment survived normalization"
@@ -540,8 +509,26 @@ test_quoted_or_escaped_raw_codex_launch_fails_closed() {
   pass "quoted and escaped raw Codex launches fail closed"
 }
 
-test_codex_crewmate_home_uses_private_staging() {
-  local rec id out status crew_home staging
+test_quoted_raw_custom_launch_remains_supported() {
+  local rec id out status launch
+  id=profile-raw-custom-quoted-z29
+  rec=$(make_spawn_case profile-raw-custom-quoted claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "custom-agent --prompt 'review this'" )
+  status=$?
+  expect_code 0 "$status" "quoted raw custom launch should remain supported"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "custom-agent --prompt 'review this'" \
+    "quoted raw custom launch was not preserved"
+  assert_not_contains "$launch" "CODEX_HOME=" \
+    "quoted raw custom launch was incorrectly normalized as Codex"
+  pass "quoted raw custom launches retain their existing behavior"
+}
+
+test_codex_crewmate_home_uses_private_directory() {
+  local rec id out status crew_home launch staging
   id=profile-codex-home-staging-z28
   rec=$(make_spawn_case profile-codex-home-staging codex "$id")
   read_case_record "$rec"
@@ -550,39 +537,38 @@ test_codex_crewmate_home_uses_private_staging() {
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   unset FM_FAKE_MKTEMP_LOG
-  expect_code 0 "$status" "Codex spawn should create isolated-home files through private staging"
-  assert_contains "$(cat "$CASE_DIR/mktemp.log")" "-d .fm-codex-stage.XXXXXXXX" \
-    "Codex home refresh did not atomically create a private staging directory"
+  expect_code 0 "$status" "Codex spawn should create an isolated private home"
+  assert_contains "$(cat "$CASE_DIR/mktemp.log")" "-d .fm-codex-home.XXXXXXXX" \
+    "Codex home refresh did not atomically create a private home directory"
   assert_no_grep '\$\$' "$SPAWN" \
     "Codex home refresh retained predictable PID staging names"
-  crew_home="$HOME_DIR/data/codex-crewmate/fm-crewmate-$id"
-  staging=$(find "$crew_home" -maxdepth 1 -type d -name '.fm-codex-stage.*' -print -quit)
-  [ -z "$staging" ] || fail "Codex home refresh left private staging behind: $staging"
-  pass "Codex home refresh uses and removes private staging"
+  launch=$(cat "$LAUNCH_LOG")
+  crew_home=$(codex_home_from_launch "$launch")
+  [ -n "$crew_home" ] || fail "Codex launch did not expose its private home"
+  staging=$(find "$HOME_DIR/data/codex-crewmate" -maxdepth 1 -type d -name '.fm-codex-stage.*' -print -quit)
+  [ -z "$staging" ] || fail "Codex home refresh left stale staging behind: $staging"
+  pass "Codex home refresh uses a private per-task directory"
 }
 
 test_codex_crewmate_home_records_failed_worktree_return() {
-  local rec id out status source_home crew_home project
+  local rec id out status project
   id=profile-codex-home-return-z22
   rec=$(make_spawn_case profile-codex-home-return codex "$id")
   read_case_record "$rec"
-  source_home="$CASE_DIR/user/.codex"
-  crew_home="$HOME_DIR/data/codex-crewmate/fm-crewmate-$id"
   project=$(cd "$PROJ_DIR" && pwd)
-  mkdir -p "$source_home" "$crew_home/plugins/stale-plugin"
-  cat > "$FAKEBIN_DIR/rm" <<'SH'
+  cat > "$FAKEBIN_DIR/mktemp" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
-  *"plugins"*) exit 73 ;;
-  *) exec /bin/rm "$@" ;;
+  *".fm-codex-home."*) exit 73 ;;
+  *) exec /usr/bin/mktemp "$@" ;;
 esac
 SH
-  chmod +x "$FAKEBIN_DIR/rm"
+  chmod +x "$FAKEBIN_DIR/mktemp"
 
   FM_FAKE_TREEHOUSE_RETURN_STATUS=75 \
     out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
-  expect_code 1 "$status" "Codex spawn must fail when isolated-home plugin cleanup fails and return fails"
+  expect_code 1 "$status" "Codex spawn must fail when private-home creation and return fail"
   assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
     "failed isolated-home cleanup did not attempt to return its worktree"
   assert_no_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
@@ -597,27 +583,24 @@ SH
 }
 
 test_codex_crewmate_home_records_failed_endpoint_removal() {
-  local rec id out status source_home crew_home project
+  local rec id out status project
   id=profile-codex-home-kill-z26
   rec=$(make_spawn_case profile-codex-home-kill codex "$id")
   read_case_record "$rec"
-  source_home="$CASE_DIR/user/.codex"
-  crew_home="$HOME_DIR/data/codex-crewmate/fm-crewmate-$id"
   project=$(cd "$PROJ_DIR" && pwd)
-  mkdir -p "$source_home" "$crew_home/plugins/stale-plugin"
-  cat > "$FAKEBIN_DIR/rm" <<'SH'
+  cat > "$FAKEBIN_DIR/mktemp" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
-  *"plugins"*) exit 73 ;;
-  *) exec /bin/rm "$@" ;;
+  *".fm-codex-home."*) exit 73 ;;
+  *) exec /usr/bin/mktemp "$@" ;;
 esac
 SH
-  chmod +x "$FAKEBIN_DIR/rm"
+  chmod +x "$FAKEBIN_DIR/mktemp"
 
-  out=$(FM_FAKE_TREEHOUSE_RETURN_STATUS=0 FM_FAKE_BACKEND_KILL_STATUS=76 \
+  out=$(FM_FAKE_TREEHOUSE_RETURN_STATUS=0 FM_FAKE_BACKEND_KILL_STATUS=76 FM_FAKE_TARGET_QUERY_STATUS=77 \
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
-  expect_code 1 "$status" "Codex spawn must fail when isolated-home cleanup and endpoint removal fail"
+  expect_code 1 "$status" "Codex spawn must fail when private-home creation and endpoint removal fail"
   assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
     "failed isolated-home cleanup did not return its worktree"
   assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
@@ -786,14 +769,14 @@ test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_crewmate_home_excludes_mcp_and_plugins
-test_codex_crewmate_home_fails_when_plugin_cleanup_fails
-test_codex_crewmate_home_fails_when_stale_catalog_cleanup_fails
+test_codex_crewmate_home_uses_fresh_private_directory
 test_codex_crewmate_home_refuses_symlink_escape
-test_codex_crewmate_home_refuses_nonregular_targets
+test_codex_crewmate_home_fails_when_private_home_creation_fails
 test_raw_codex_launch_is_normalized
 test_unsafe_raw_codex_launch_fails_closed
 test_quoted_or_escaped_raw_codex_launch_fails_closed
-test_codex_crewmate_home_uses_private_staging
+test_quoted_raw_custom_launch_remains_supported
+test_codex_crewmate_home_uses_private_directory
 test_codex_crewmate_home_records_failed_worktree_return
 test_codex_crewmate_home_records_failed_endpoint_removal
 test_codex_omits_invalid_max_effort

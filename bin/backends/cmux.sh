@@ -620,8 +620,7 @@ fm_backend_cmux_window_of_workspace() {  # <workspace_id> -> "<window_id> <count
   done < <(printf '%s' "$wins" | jq -r '.[]? | .id' 2>/dev/null)
 }
 
-# fm_backend_cmux_kill: remove the task's whole workspace, best-effort (mirrors
-# every other backend's `kill` `|| true` contract). A cmux task owns one
+# fm_backend_cmux_kill: remove the task's whole workspace. A cmux task owns one
 # workspace, so teardown reclaims that workspace and all of its surfaces.
 #
 # The selected-workspace teardown bug (docs/cmux-backend.md "Closing the last
@@ -648,9 +647,9 @@ fm_backend_cmux_kill() {  # <target> [unused] [expected-label]
   win=${wininfo%% *}
   count=${wininfo##* }
   if [ -n "$win" ] && [ "$count" = 1 ]; then
-    fm_backend_cmux_cli new-workspace --window "$win" --focus false --id-format uuids >/dev/null 2>&1 || true
+    fm_backend_cmux_cli new-workspace --window "$win" --focus false --id-format uuids >/dev/null 2>&1 || [ "${FM_BACKEND_KILL_STRICT:-0}" != 1 ] || return 1
   fi
-  fm_backend_cmux_cli close-workspace --workspace "$wsid" >/dev/null 2>&1 || true
+  fm_backend_cmux_cli close-workspace --workspace "$wsid" >/dev/null 2>&1 || [ "${FM_BACKEND_KILL_STRICT:-0}" != 1 ]
 }
 
 # fm_backend_cmux_list_live: recovery/orphan discovery. Lists every workspace
