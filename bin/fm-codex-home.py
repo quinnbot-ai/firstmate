@@ -85,6 +85,7 @@ def remove_tree(directory_fd, name):
     except FileNotFoundError:
         return
     try:
+        opened_stat = os.fstat(child_fd)
         for child in os.listdir(child_fd):
             child_stat = os.stat(child, dir_fd=child_fd, follow_symlinks=False)
             if stat.S_ISDIR(child_stat.st_mode):
@@ -93,6 +94,9 @@ def remove_tree(directory_fd, name):
                 os.unlink(child, dir_fd=child_fd)
     finally:
         os.close(child_fd)
+    current_stat = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    if (current_stat.st_dev, current_stat.st_ino) != (opened_stat.st_dev, opened_stat.st_ino):
+        raise OSError("managed Codex home changed during removal")
     os.rmdir(name, dir_fd=directory_fd)
 
 
@@ -105,14 +109,71 @@ def toml_basic_string(value):
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", required=True)
-    parser.add_argument("--source", required=True)
-    parser.add_argument("--profile", required=True)
-    parser.add_argument("--worktree", required=True)
+    parser.add_argument("--source")
+    parser.add_argument("--profile")
+    parser.add_argument("--worktree")
+    parser.add_argument("--new-home-name", action="store_true")
+    parser.add_argument("--create-activate", action="store_true")
+    parser.add_argument("--remove", action="store_true")
+    parser.add_argument("--home")
+    parser.add_argument("command", nargs=argparse.REMAINDER)
     return parser.parse_args()
 
 
-def main():
-    args = parse_args()
+def managed_home_name(home):
+    name = os.path.basename(home or "")
+    if not name.startswith(".fm-codex-home.") or len(name) <= len(".fm-codex-home."):
+        die("isolated Codex home name is unsafe")
+    return name
+
+
+def launch_command(args):
+    command = args.command[1:] if args.command[:1] == ["--"] else args.command
+    if not command:
+        die("Codex home activation requires a command")
+    return command
+
+
+def validate_data_root(data):
+    data_fd = open_directory(os.path.abspath(data))
+    try:
+        require_directory(data_fd, "firstmate data")
+        try:
+            base_fd = open_directory("codex-crewmate", data_fd)
+        except FileNotFoundError:
+            return
+        try:
+            require_directory(base_fd, "isolated Codex home")
+        finally:
+            os.close(base_fd)
+    finally:
+        os.close(data_fd)
+
+
+def remove_home(args):
+    if args.create_activate or not args.home:
+        die("Codex home removal requires --home")
+    data_fd = open_directory(os.path.abspath(args.data))
+    try:
+        require_directory(data_fd, "firstmate data")
+        try:
+            base_fd = open_directory("codex-crewmate", data_fd)
+        except FileNotFoundError:
+            return
+    finally:
+        os.close(data_fd)
+    try:
+        require_directory(base_fd, "isolated Codex home")
+        remove_tree(base_fd, managed_home_name(args.home))
+    except FileNotFoundError:
+        pass
+    finally:
+        os.close(base_fd)
+
+
+def create_home(args, command=None):
+    if not args.source or not args.profile or args.worktree is None:
+        die("Codex home creation requires --source, --profile, and --worktree")
     if not args.profile or any(char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-" for char in args.profile):
         die("isolated Codex profile name is unsafe")
     worktree = toml_basic_string(args.worktree)
@@ -132,12 +193,14 @@ def main():
             try:
                 home_created = False
                 while True:
-                    name = ".fm-codex-home." + secrets.token_hex(16)
+                    name = managed_home_name(args.home) if args.home else ".fm-codex-home." + secrets.token_hex(16)
                     try:
                         os.mkdir(name, 0o700, dir_fd=base_fd)
                         home_created = True
                         break
                     except FileExistsError:
+                        if args.home:
+                            die("isolated Codex home already exists")
                         continue
                 home_fd = open_directory(name, base_fd)
                 try:
@@ -148,6 +211,11 @@ def main():
                     copy_regular_file(args.source, home_fd, "models_cache.json")
                     profile = "# Firstmate Codex crewmate profile.\n[projects.\"%s\"]\ntrust_level = \"untrusted\"\n" % worktree
                     write_file(home_fd, args.profile + ".config.toml", profile.encode())
+                    if command:
+                        os.set_inheritable(home_fd, True)
+                        environment = os.environ.copy()
+                        environment["CODEX_HOME"] = f"/dev/fd/{home_fd}"
+                        os.execvpe(command[0], command, environment)
                 finally:
                     os.close(home_fd)
                 print(os.path.join(data, "codex-crewmate", name))
@@ -164,6 +232,28 @@ def main():
             os.close(data_fd)
     except OSError as error:
         die(f"could not prepare isolated Codex home: {error.strerror}")
+
+
+def main():
+    args = parse_args()
+    if args.new_home_name:
+        if args.remove or args.create_activate or args.home or args.command:
+            die("isolated Codex home name generation accepts no other action")
+        try:
+            validate_data_root(args.data)
+        except OSError as error:
+            die(f"could not prepare isolated Codex home: {error.strerror}")
+        print(".fm-codex-home." + secrets.token_hex(16))
+        return
+    if args.remove:
+        remove_home(args)
+        return
+    if args.create_activate:
+        if not args.home:
+            die("Codex home activation requires --home")
+        create_home(args, launch_command(args))
+        return
+    create_home(args)
 
 
 if __name__ == "__main__":

@@ -196,6 +196,8 @@ ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
 ORCA_WORKTREE_CLEANUP_COMPLETE=0
+ORCA_ABORT_CLEANUP_FAILED=0
+FAILED_ENDPOINT_CLEANUP=0
 TREEHOUSE_ABORT_CLEANUP=0
 CODEX_CREWMATE_HOME=
 
@@ -231,6 +233,8 @@ write_failed_treehouse_spawn_meta() {
     echo "mode=${MODE:-no-mistakes}"
     echo "yolo=${YOLO:-off}"
     echo "tasktmp=${TASK_TMP:-}"
+    echo "failed_spawn=1"
+    [ "$FAILED_ENDPOINT_CLEANUP" != 1 ] || echo "endpoint_cleanup_pending=1"
     [ -z "${CODEX_CREWMATE_HOME:-}" ] || echo "codex_crewmate_home=$CODEX_CREWMATE_HOME"
     echo "model=${MODEL:-default}"
     echo "effort=${EFFORT:-default}"
@@ -259,23 +263,14 @@ write_failed_treehouse_spawn_meta() {
 }
 
 remove_codex_crewmate_home() {
-  local home=${CODEX_CREWMATE_HOME:-} data_real base base_real name
+  local home=${CODEX_CREWMATE_HOME:-}
   [ -n "$home" ] || return 0
-  [ -e "$home" ] || return 0
-  [ -L "$home" ] && return 1
-  data_real=$(cd "$DATA" 2>/dev/null && pwd -P) || return 1
-  base="$DATA/codex-crewmate"
-  [ ! -L "$base" ] || return 1
-  base_real=$(cd "$base" 2>/dev/null && pwd -P) || return 1
-  [ "$base_real" = "$data_real/codex-crewmate" ] || return 1
-  name=${home##*/}
-  case "$name" in .fm-codex-home.*) : ;; *) return 1 ;; esac
-  ( cd -P "$base" 2>/dev/null && [ "$(pwd -P)" = "$base_real" ] && rm -rf -- "./$name" )
+  python3 "$FM_ROOT/bin/fm-codex-home.py" --remove --data "$DATA" --home "$home"
 }
 
 orca_spawn_abort_cleanup() {
-  local status=${1:-$?} cleanup_failed=0
-  [ "$ORCA_ABORT_CLEANUP" = 1 ] || return "$status"
+  local cleanup_failed=0
+  [ "$ORCA_ABORT_CLEANUP" = 1 ] || return 0
   ORCA_ABORT_CLEANUP=0
   if [ -n "${ORCA_TERMINAL:-}" ]; then
     if FM_BACKEND_KILL_STRICT=1 fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null; then
@@ -283,6 +278,7 @@ orca_spawn_abort_cleanup() {
       T=
     else
       cleanup_failed=1
+      FAILED_ENDPOINT_CLEANUP=1
     fi
   fi
   if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
@@ -294,36 +290,43 @@ orca_spawn_abort_cleanup() {
       cleanup_failed=1
     fi
   fi
-  [ "$cleanup_failed" -eq 0 ] || write_failed_treehouse_spawn_meta
-  return "$status"
+  ORCA_ABORT_CLEANUP_FAILED=$cleanup_failed
+  return 0
 }
 
 spawn_abort_cleanup() {
-  local status=$? preserve_codex_home=0 clean_codex_home=0
+  local status=$? preserve_codex_home=0 clean_codex_home=0 orca_cleanup_failed=0
   if [ "$TREEHOUSE_ABORT_CLEANUP" = 1 ]; then
     TREEHOUSE_ABORT_CLEANUP=0
     clean_codex_home=1
     if ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) 2>/dev/null; then
       if ! FM_BACKEND_KILL_STRICT=1 fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "fm-$ID" 2>/dev/null; then
+        FAILED_ENDPOINT_CLEANUP=1
         write_failed_treehouse_spawn_meta
         preserve_codex_home=1
       elif fm_backend_target_exists "$BACKEND" "$T" "fm-$ID"; then
+        FAILED_ENDPOINT_CLEANUP=1
         write_failed_treehouse_spawn_meta
         preserve_codex_home=1
       fi
     else
+      FAILED_ENDPOINT_CLEANUP=1
       write_failed_treehouse_spawn_meta
       preserve_codex_home=1
     fi
   fi
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
     clean_codex_home=1
-    orca_spawn_abort_cleanup "$status"
+    orca_spawn_abort_cleanup
+    orca_cleanup_failed=$ORCA_ABORT_CLEANUP_FAILED
   fi
   if [ "$clean_codex_home" -eq 1 ] && [ "$preserve_codex_home" -eq 0 ] && ! remove_codex_crewmate_home; then
     echo "error: could not remove isolated Codex crewmate home" >&2
     write_failed_treehouse_spawn_meta
+  elif [ "$clean_codex_home" -eq 1 ] && [ "$preserve_codex_home" -eq 0 ]; then
+    CODEX_CREWMATE_HOME=
   fi
+  [ "$orca_cleanup_failed" -eq 0 ] || write_failed_treehouse_spawn_meta
   return "$status"
 }
 trap spawn_abort_cleanup EXIT
@@ -543,7 +546,7 @@ raw_launch_starts_codex() {
               state=timeout
             elif raw_launch_word_is "$word" sudo; then
               state=sudo
-            elif raw_launch_word_is "$word" nohup || raw_launch_word_is "$word" time || raw_launch_word_is "$word" stdbuf || raw_launch_word_is "$word" setsid || raw_launch_word_is "$word" chrt || raw_launch_word_is "$word" ionice || raw_launch_word_is "$word" taskset; then
+            elif raw_launch_word_is "$word" nohup || raw_launch_word_is "$word" time || raw_launch_word_is "$word" stdbuf || raw_launch_word_is "$word" setsid || raw_launch_word_is "$word" chrt || raw_launch_word_is "$word" ionice || raw_launch_word_is "$word" taskset || raw_launch_word_is "$word" script; then
               state=wrapper
             else
               raw_launch_word_is_codex "$word"
@@ -693,9 +696,9 @@ normalize_raw_codex_launch() {
 }
 
 refresh_codex_crewmate_home() {
-  local worktree=$1 profile=$2
-  CODEX_CREWMATE_HOME=$(python3 "$FM_ROOT/bin/fm-codex-home.py" \
-    --data "$DATA" --source "$HOME/.codex" --profile "$profile" --worktree "$worktree") || return 1
+  local name
+  name=$(python3 "$FM_ROOT/bin/fm-codex-home.py" --data "$DATA" --new-home-name) || return 1
+  CODEX_CREWMATE_HOME="$DATA/codex-crewmate/$name"
 }
 
 case "$ARG3" in
@@ -1245,7 +1248,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 fi
 
 if [ "$HARNESS" = codex ] && [ "$KIND" != secondmate ]; then
-  refresh_codex_crewmate_home "$WT" "$CODEX_CREWMATE_PROFILE" || {
+  refresh_codex_crewmate_home || {
     echo "error: could not prepare isolated Codex crewmate home" >&2
     exit 1
   }
@@ -1443,7 +1446,11 @@ if [ -n "$CODEX_CREWMATE_HOME" ]; then
   sq_codex_crewmate_home=$(shell_quote "$CODEX_CREWMATE_HOME")
   sq_codex_crewmate_profile=$(shell_quote "$CODEX_CREWMATE_PROFILE")
   LAUNCH=${LAUNCH//__CODEXPROFILE__/$sq_codex_crewmate_profile}
-  LAUNCH="CODEX_HOME=$sq_codex_crewmate_home $LAUNCH"
+  sq_codex_home_helper=$(shell_quote "$FM_ROOT/bin/fm-codex-home.py")
+  sq_codex_data=$(shell_quote "$DATA")
+  sq_codex_source=$(shell_quote "$HOME/.codex")
+  sq_codex_worktree=$(shell_quote "$WT")
+  LAUNCH="exec python3 $sq_codex_home_helper --create-activate --data $sq_codex_data --source $sq_codex_source --profile $sq_codex_crewmate_profile --worktree $sq_codex_worktree --home $sq_codex_crewmate_home -- $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")

@@ -56,6 +56,7 @@ neutral_fm_root() {  # <dir> -> echoes a minimal root with a quiet guard
 exit 0
 SH
   chmod +x "$root/bin/fm-guard.sh"
+  ln -s "$ROOT/bin/fm-codex-home.py" "$root/bin/fm-codex-home.py"
   printf '%s\n' "$root"
 }
 
