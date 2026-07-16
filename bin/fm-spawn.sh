@@ -464,6 +464,11 @@ raw_launch_word_is_dynamic_dispatcher() {
   raw_launch_word_is "$word" find || raw_launch_word_is "$word" xargs || raw_launch_word_is "$word" parallel
 }
 
+raw_launch_word_is_indirect_dispatcher() {
+  local word=$1
+  raw_launch_word_is "$word" eval || raw_launch_word_is "$word" python || raw_launch_word_is "$word" python3 || raw_launch_word_is "$word" pypy || raw_launch_word_is "$word" perl || raw_launch_word_is "$word" ruby || raw_launch_word_is "$word" node || raw_launch_word_is "$word" nodejs || raw_launch_word_is "$word" php || raw_launch_word_is "$word" lua
+}
+
 raw_launch_word_is_script_dispatcher() {
   local word=$1 base
   raw_launch_word_is "$word" source || [ "$word" = . ] && return 0
@@ -610,6 +615,8 @@ raw_launch_starts_codex() {
             elif raw_launch_word_is_script_dispatcher "$word"; then
               return 2
             elif raw_launch_word_is_dynamic_dispatcher "$word"; then
+              return 2
+            elif raw_launch_word_is_indirect_dispatcher "$word"; then
               return 2
             elif raw_launch_word_is "$word" nohup || raw_launch_word_is "$word" time || raw_launch_word_is "$word" stdbuf || raw_launch_word_is "$word" setsid || raw_launch_word_is "$word" chrt || raw_launch_word_is "$word" ionice || raw_launch_word_is "$word" taskset || raw_launch_word_is "$word" script; then
               state=wrapper

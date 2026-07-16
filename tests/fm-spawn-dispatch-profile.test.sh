@@ -609,7 +609,7 @@ test_raw_codex_launch_is_normalized() {
 
 test_raw_codex_execution_wrappers_fail_closed() {
   local command case_name rec id out status n=0
-  for case_name in nice nice-option shell shell-multicommand shell-script sourced-script script-path sudo-user timeout-duration script find xargs unknown-wrapper; do
+  for case_name in nice nice-option shell shell-multicommand shell-script sourced-script script-path sudo-user timeout-duration script find xargs unknown-wrapper eval interpreter; do
     n=$((n + 1))
     id="profile-raw-codex-wrapper-$n-z31"
     rec=$(make_spawn_case "profile-raw-codex-wrapper-$n" codex "$id")
@@ -628,6 +628,8 @@ test_raw_codex_execution_wrappers_fail_closed() {
       find) command='find . -exec codex {} \;' ;;
       xargs) command='xargs -a jobs codex' ;;
       unknown-wrapper) command='custom-wrapper codex' ;;
+      eval) command='eval "$COMMAND"' ;;
+      interpreter) command="python3 -c 'os.execvp(\"codex\", [\"codex\"])'" ;;
     esac
 
     out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
