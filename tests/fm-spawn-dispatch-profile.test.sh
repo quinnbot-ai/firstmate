@@ -45,7 +45,16 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -z "${FM_FAKE_BACKEND_LOG:-}" ] || printf 'treehouse %s\n' "$*" >> "$FM_FAKE_BACKEND_LOG"
+case "$*" in
+  "return --force"*) exit "${FM_FAKE_TREEHOUSE_RETURN_STATUS:-0}" ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
@@ -92,6 +101,7 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_BACKEND_LOG="$(dirname "$launchlog")/backend.log" \
+    FM_FAKE_TREEHOUSE_RETURN_STATUS="${FM_FAKE_TREEHOUSE_RETURN_STATUS:-0}" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     HOME="$CASE_DIR/user" \
     "$SPAWN" "$@" 2>&1
@@ -261,8 +271,8 @@ command = "broken-memory-server"
 [plugins."computer-use@openai-bundled"]
 enabled = true
 EOF
-  mkdir -p "$PROJ_DIR/.codex"
-  cat > "$PROJ_DIR/.codex/config.toml" <<'EOF'
+  mkdir -p "$WT_DIR/.codex"
+  cat > "$WT_DIR/.codex/config.toml" <<'EOF'
 [mcp_servers.project_memory]
 command = "still-broken-memory-server"
 [plugins."project-plugin@local"]
@@ -278,7 +288,7 @@ EOF
     "Codex ship launch did not set the isolated CODEX_HOME"
   assert_contains "$out" "warning: Codex crewmate ignores project config" \
     "Codex ship launch did not warn that project Codex config was ignored"
-  assert_contains "$out" "project/.codex/config.toml to keep MCPs and plugins disabled" \
+  assert_contains "$out" "$WT_DIR/.codex/config.toml to keep MCPs and plugins disabled" \
     "Codex ship launch did not warn that project Codex config was ignored"
   assert_present "$crew_home/config.toml" "isolated Codex config was not created"
   assert_no_grep 'mcp_servers' "$crew_home/config.toml" \
@@ -289,6 +299,10 @@ EOF
     "isolated Codex profile did not disable project config trust"
   assert_grep '[projects.' "$crew_home/fm-crewmate-$ship.config.toml" \
     "isolated Codex profile did not scope untrusted trust to the project"
+  assert_grep "$WT_DIR" "$crew_home/fm-crewmate-$ship.config.toml" \
+    "isolated Codex profile did not scope untrusted trust to the worktree"
+  assert_no_grep "$PROJ_DIR" "$crew_home/fm-crewmate-$ship.config.toml" \
+    "isolated Codex profile must not scope untrusted trust to the primary project"
   [ ! -e "$crew_home/plugins" ] || fail "isolated Codex home retained a plugins directory"
   cmp -s "$source_home/auth.json" "$crew_home/auth.json" \
     || fail "isolated Codex home did not refresh authentication"
@@ -336,7 +350,10 @@ SH
   assert_contains "$out" "could not prepare isolated Codex crewmate home" \
     "Codex spawn did not report isolated-home cleanup failure"
   assert_absent "$HOME_DIR/state/$id.meta" "failed isolated-home preparation must not create task metadata"
-  [ ! -s "$CASE_DIR/backend.log" ] || fail "failed isolated-home preparation must not allocate a task backend"
+  assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
+    "failed isolated-home preparation did not return its worktree"
+  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+    "failed isolated-home preparation did not remove its task endpoint"
   [ ! -s "$LAUNCH_LOG" ] || fail "failed isolated-home preparation must not launch Codex"
   pass "Codex spawn fails closed when isolated-home plugin cleanup fails"
 }
@@ -364,7 +381,10 @@ SH
   assert_contains "$out" "could not prepare isolated Codex crewmate home" \
     "Codex spawn did not report stale model-catalog cleanup failure"
   assert_absent "$HOME_DIR/state/$id.meta" "failed model-catalog cleanup must not create task metadata"
-  [ ! -s "$CASE_DIR/backend.log" ] || fail "failed isolated-home preparation must not allocate a task backend"
+  assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
+    "failed model-catalog cleanup did not return its worktree"
+  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+    "failed model-catalog cleanup did not remove its task endpoint"
   [ ! -s "$LAUNCH_LOG" ] || fail "failed model-catalog cleanup must not launch Codex"
   pass "Codex spawn fails closed when stale model-catalog cleanup fails"
 }
@@ -389,9 +409,47 @@ test_codex_crewmate_home_refuses_symlink_escape() {
     "symlink rejection must not overwrite the captain Codex config"
   [ -d "$source_home/plugins" ] || fail "symlink rejection must not remove captain plugins"
   assert_absent "$HOME_DIR/state/$id.meta" "symlink rejection must not create task metadata"
-  [ ! -s "$CASE_DIR/backend.log" ] || fail "symlink rejection must not allocate a task backend"
+  assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
+    "symlink rejection did not return its worktree"
+  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+    "symlink rejection did not remove its task endpoint"
   [ ! -s "$LAUNCH_LOG" ] || fail "symlink rejection must not launch Codex"
   pass "Codex spawn refuses isolated-home symlink escapes"
+}
+
+test_codex_crewmate_home_records_failed_worktree_return() {
+  local rec id out status source_home crew_home project
+  id=profile-codex-home-return-z22
+  rec=$(make_spawn_case profile-codex-home-return codex "$id")
+  read_case_record "$rec"
+  source_home="$CASE_DIR/user/.codex"
+  crew_home="$HOME_DIR/data/codex-crewmate/fm-crewmate-$id"
+  project=$(cd "$PROJ_DIR" && pwd)
+  mkdir -p "$source_home" "$crew_home/plugins/stale-plugin"
+  cat > "$FAKEBIN_DIR/rm" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"plugins"*) exit 73 ;;
+  *) exec /bin/rm "$@" ;;
+esac
+SH
+  chmod +x "$FAKEBIN_DIR/rm"
+
+  FM_FAKE_TREEHOUSE_RETURN_STATUS=75 \
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "Codex spawn must fail when isolated-home plugin cleanup fails and return fails"
+  assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
+    "failed isolated-home cleanup did not attempt to return its worktree"
+  assert_no_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+    "failed worktree return must leave the endpoint for normal teardown"
+  assert_grep "window=firstmate:fm-$id" "$HOME_DIR/state/$id.meta" \
+    "failed worktree return did not record the task endpoint"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "failed worktree return did not record the worktree"
+  assert_grep "project=$project" "$HOME_DIR/state/$id.meta" \
+    "failed worktree return did not record the project"
+  pass "Codex spawn records failed worktree returns for normal teardown"
 }
 
 test_codex_omits_invalid_max_effort() {
@@ -551,6 +609,7 @@ test_codex_crewmate_home_excludes_mcp_and_plugins
 test_codex_crewmate_home_fails_when_plugin_cleanup_fails
 test_codex_crewmate_home_fails_when_stale_catalog_cleanup_fails
 test_codex_crewmate_home_refuses_symlink_escape
+test_codex_crewmate_home_records_failed_worktree_return
 test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort

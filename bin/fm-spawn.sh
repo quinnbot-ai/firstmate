@@ -195,6 +195,7 @@ fi
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+TREEHOUSE_ABORT_CLEANUP=0
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -211,6 +212,38 @@ parse_orca_worktree_result() {
   else
     ORCA_TERMINAL=
   fi
+}
+
+write_failed_treehouse_spawn_meta() {
+  mkdir -p "$STATE" 2>/dev/null || return 0
+  {
+    echo "window=$T"
+    echo "worktree=$WT"
+    echo "project=$PROJ_ABS"
+    echo "harness=$HARNESS"
+    echo "kind=$KIND"
+    echo "mode=${MODE:-no-mistakes}"
+    echo "yolo=${YOLO:-off}"
+    echo "tasktmp=${TASK_TMP:-}"
+    echo "model=${MODEL:-default}"
+    echo "effort=${EFFORT:-default}"
+    [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
+    if [ "$BACKEND" = herdr ]; then
+      echo "herdr_session=${HERDR_SES:-}"
+      echo "herdr_workspace_id=${HERDR_WORKSPACE_ID:-}"
+      echo "herdr_tab_id=${HERDR_TAB_ID:-}"
+      echo "herdr_pane_id=${HERDR_PANE_ID:-}"
+    fi
+    if [ "$BACKEND" = zellij ]; then
+      echo "zellij_session=${ZELLIJ_SES:-}"
+      echo "zellij_tab_id=${ZELLIJ_TAB_ID:-}"
+      echo "zellij_pane_id=${ZELLIJ_PANE_ID:-}"
+    fi
+    if [ "$BACKEND" = cmux ]; then
+      echo "cmux_workspace_id=${CMUX_WORKSPACE_ID:-}"
+      echo "cmux_surface_id=${CMUX_SURFACE_ID:-}"
+    fi
+  } > "$STATE/$ID.meta" 2>/dev/null || true
 }
 
 orca_spawn_abort_cleanup() {
@@ -244,7 +277,21 @@ orca_spawn_abort_cleanup() {
   fi
   return "$status"
 }
-trap orca_spawn_abort_cleanup EXIT
+
+spawn_abort_cleanup() {
+  local status=$?
+  if [ "$TREEHOUSE_ABORT_CLEANUP" = 1 ]; then
+    TREEHOUSE_ABORT_CLEANUP=0
+    if ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) 2>/dev/null; then
+      fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "fm-$ID" 2>/dev/null || true
+    else
+      write_failed_treehouse_spawn_meta
+    fi
+  fi
+  orca_spawn_abort_cleanup
+  return "$status"
+}
+trap spawn_abort_cleanup EXIT
 
 # Batch dispatch (see header): when the first positional is an `id=repo` pair, treat every
 # positional as one and spawn each by re-execing this script in single-task mode. We use
@@ -359,7 +406,7 @@ toml_basic_string() {
 }
 
 refresh_codex_crewmate_home() {
-  local project=$1 profile=$2 source="$HOME/.codex" data_real base base_real home home_real name source_file temp_file profile_file project_key
+  local worktree=$1 profile=$2 source="$HOME/.codex" data_real base base_real home home_real name source_file temp_file profile_file worktree_key
   umask 077
   data_real=$(cd "$DATA" 2>/dev/null && pwd -P) || return 1
   base="$DATA/codex-crewmate"
@@ -406,11 +453,11 @@ refresh_codex_crewmate_home() {
     done
     profile_file="$profile.config.toml"
     [ ! -L "$profile_file" ] || { echo "error: isolated Codex profile must not be a symlink: $home/$profile_file" >&2; exit 1; }
-    project_key=$(toml_basic_string "$project") || exit 1
+    worktree_key=$(toml_basic_string "$worktree") || exit 1
     temp_file=".$profile.config.toml.$$"
     {
       printf '%s\n' '# Firstmate Codex crewmate profile.'
-      printf '[projects."%s"]\n' "$project_key"
+      printf '[projects."%s"]\n' "$worktree_key"
       printf '%s\n' 'trust_level = "untrusted"'
     } > "$temp_file" || exit 1
     chmod 600 "$temp_file" || exit 1
@@ -725,13 +772,6 @@ if [ "$HARNESS" = codex ] && [ "$KIND" != secondmate ]; then
       ;;
   esac
   CODEX_CREWMATE_PROFILE="fm-crewmate-$ID"
-  CODEX_CREWMATE_HOME=$(refresh_codex_crewmate_home "$PROJ_ABS" "$CODEX_CREWMATE_PROFILE") || {
-    echo "error: could not prepare isolated Codex crewmate home" >&2
-    exit 1
-  }
-  if [ -f "$PROJ_ABS/.codex/config.toml" ]; then
-    echo "warning: Codex crewmate ignores project config $PROJ_ABS/.codex/config.toml to keep MCPs and plugins disabled" >&2
-  fi
 fi
 
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
@@ -948,6 +988,17 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+  TREEHOUSE_ABORT_CLEANUP=1
+fi
+
+if [ "$HARNESS" = codex ] && [ "$KIND" != secondmate ]; then
+  CODEX_CREWMATE_HOME=$(refresh_codex_crewmate_home "$WT" "$CODEX_CREWMATE_PROFILE") || {
+    echo "error: could not prepare isolated Codex crewmate home" >&2
+    exit 1
+  }
+  if [ -f "$WT/.codex/config.toml" ]; then
+    echo "warning: Codex crewmate ignores project config $WT/.codex/config.toml to keep MCPs and plugins disabled" >&2
+  fi
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
@@ -1152,5 +1203,6 @@ sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 spawn_send_key "$T" Enter
+TREEHOUSE_ABORT_CLEANUP=0
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"
