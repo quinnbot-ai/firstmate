@@ -218,7 +218,11 @@ parse_orca_worktree_result() {
 write_failed_treehouse_spawn_meta() {
   mkdir -p "$STATE" 2>/dev/null || return 0
   {
-    echo "window=$T"
+    if [ "$BACKEND" = orca ]; then
+      echo "window=$W"
+    else
+      echo "window=${T:-}"
+    fi
     echo "worktree=$WT"
     echo "project=$PROJ_ABS"
     echo "harness=$HARNESS"
@@ -244,6 +248,10 @@ write_failed_treehouse_spawn_meta() {
     if [ "$BACKEND" = cmux ]; then
       echo "cmux_workspace_id=${CMUX_WORKSPACE_ID:-}"
       echo "cmux_surface_id=${CMUX_SURFACE_ID:-}"
+    fi
+    if [ "$BACKEND" = orca ]; then
+      echo "orca_worktree_id=${ORCA_WORKTREE_ID:-}"
+      [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
     fi
   } > "$STATE/$ID.meta" 2>/dev/null || true
 }
@@ -272,24 +280,7 @@ orca_spawn_abort_cleanup() {
   fi
   if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
     if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
-      mkdir -p "$STATE" 2>/dev/null || true
-      if [ -d "$STATE" ]; then
-        {
-          echo "window=$W"
-          echo "worktree=${WT:-}"
-          echo "project=$PROJ_ABS"
-          echo "harness=$HARNESS"
-          echo "kind=$KIND"
-          echo "mode=${MODE:-no-mistakes}"
-          echo "yolo=${YOLO:-off}"
-          echo "tasktmp=${TASK_TMP:-}"
-          echo "model=${MODEL:-default}"
-          echo "effort=${EFFORT:-default}"
-          echo "backend=orca"
-          echo "orca_worktree_id=$ORCA_WORKTREE_ID"
-          [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
-        } > "$STATE/$ID.meta" 2>/dev/null || true
-      fi
+      write_failed_treehouse_spawn_meta
     fi
   fi
   return "$status"
@@ -435,11 +426,15 @@ toml_basic_string() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
-raw_launch_word_is_codex() {
-  local word=$1 base lowered
+raw_launch_word_is() {
+  local word=$1 expected=$2 base lowered
   base=${word##*/}
   lowered=$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]') || return 1
-  [ "$lowered" = codex ]
+  [ "$lowered" = "$expected" ]
+}
+
+raw_launch_word_is_codex() {
+  raw_launch_word_is "$1" codex
 }
 
 raw_launch_read_word() {
@@ -493,7 +488,7 @@ raw_launch_read_word() {
 }
 
 raw_launch_starts_codex() {
-  local raw=$1 word status state=prefix
+  local raw=$1 word status state=prefix nested
   while :; do
     raw_launch_read_word "$raw"
     status=$?
@@ -504,9 +499,22 @@ raw_launch_starts_codex() {
       prefix)
         case "$word" in
           [A-Za-z_][A-Za-z0-9_]*=*) ;;
-          env) state=env ;;
-          command) state=command ;;
-          *) raw_launch_word_is_codex "$word"; return $? ;;
+          *)
+            if raw_launch_word_is "$word" env; then
+              state=env
+            elif raw_launch_word_is "$word" command; then
+              state=command
+            elif raw_launch_word_is "$word" exec; then
+              state=command
+            elif raw_launch_word_is "$word" sh || raw_launch_word_is "$word" bash || raw_launch_word_is "$word" zsh || raw_launch_word_is "$word" dash || raw_launch_word_is "$word" ksh; then
+              state=shell
+            elif raw_launch_word_is "$word" nice || raw_launch_word_is "$word" nohup || raw_launch_word_is "$word" time || raw_launch_word_is "$word" stdbuf || raw_launch_word_is "$word" setsid || raw_launch_word_is "$word" timeout || raw_launch_word_is "$word" chrt || raw_launch_word_is "$word" ionice || raw_launch_word_is "$word" taskset || raw_launch_word_is "$word" sudo; then
+              state=wrapper
+            else
+              raw_launch_word_is_codex "$word"
+              return $?
+            fi
+            ;;
         esac
         ;;
       env)
@@ -514,22 +522,51 @@ raw_launch_starts_codex() {
           [A-Za-z_][A-Za-z0-9_]*=*) ;;
           --) state=env-command ;;
           -*) return 2 ;;
-          env|command) state=$word ;;
-          *) raw_launch_word_is_codex "$word"; return $? ;;
+          *)
+            raw_launch_starts_codex "$word$raw"
+            return $?
+            ;;
         esac
         ;;
       command)
         case "$word" in
           --) state=command-command ;;
           -*) ;;
-          env|command) state=$word ;;
-          *) raw_launch_word_is_codex "$word"; return $? ;;
+          *)
+            raw_launch_starts_codex "$word$raw"
+            return $?
+            ;;
         esac
         ;;
       env-command|command-command)
+        raw_launch_starts_codex "$word$raw"
+        return $?
+        ;;
+      wrapper)
         case "$word" in
-          env|command) state=$word ;;
-          *) raw_launch_word_is_codex "$word"; return $? ;;
+          -*) ;;
+          *)
+            raw_launch_starts_codex "$word$raw"
+            status=$?
+            [ "$status" -ne 0 ] || return 2
+            return "$status"
+            ;;
+        esac
+        ;;
+      shell)
+        case "$word" in
+          -c)
+            raw_launch_read_word "$raw"
+            status=$?
+            [ "$status" -eq 0 ] || return 2
+            nested=$RAW_LAUNCH_WORD
+            raw_launch_starts_codex "$nested"
+            status=$?
+            [ "$status" -ne 0 ] || return 2
+            return "$status"
+            ;;
+          -*) ;;
+          *) return 1 ;;
         esac
         ;;
     esac

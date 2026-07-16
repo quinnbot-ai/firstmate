@@ -468,7 +468,7 @@ SH
 
 test_raw_codex_launch_is_normalized() {
   local command case_name rec id out status launch crew_home n=0
-  for case_name in mixed-case absolute-mixed-case env-wrapper command-wrapper nested-wrapper; do
+  for case_name in mixed-case absolute-mixed-case env-wrapper absolute-env-wrapper command-wrapper nested-wrapper exec-wrapper; do
     n=$((n + 1))
     id="profile-raw-codex-$n-z24"
     rec=$(make_spawn_case "profile-raw-codex-$n" codex "$id")
@@ -477,8 +477,10 @@ test_raw_codex_launch_is_normalized() {
       mixed-case) command='CODEX_HOME=/unsafe Codex' ;;
       absolute-mixed-case) command='CODEX_HOME=/unsafe /opt/firstmate/Codex' ;;
       env-wrapper) command='env CODEX_HOME=/unsafe codex' ;;
+      absolute-env-wrapper) command='CODEX_HOME=/unsafe /usr/bin/env codex' ;;
       command-wrapper) command='command codex CODEX_HOME=/unsafe' ;;
       nested-wrapper) command='command env CODEX_HOME=/unsafe codex' ;;
+      exec-wrapper) command='exec codex CODEX_HOME=/unsafe' ;;
     esac
 
     out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
@@ -494,6 +496,34 @@ test_raw_codex_launch_is_normalized() {
     assert_not_contains "$launch" '/unsafe' "$case_name raw CODEX_HOME assignment survived normalization"
   done
   pass "raw Codex launch is normalized to the isolated profile"
+}
+
+test_raw_codex_execution_wrappers_fail_closed() {
+  local command case_name rec id out status n=0
+  for case_name in nice shell; do
+    n=$((n + 1))
+    id="profile-raw-codex-wrapper-$n-z31"
+    rec=$(make_spawn_case "profile-raw-codex-wrapper-$n" codex "$id")
+    read_case_record "$rec"
+    case "$case_name" in
+      nice) command='nice codex' ;;
+      shell) command='sh -c codex' ;;
+    esac
+
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" "$command")
+    status=$?
+    expect_code 1 "$status" "$case_name raw Codex wrapper must fail closed"
+    assert_contains "$out" "unsafe raw launch command" \
+      "$case_name raw Codex wrapper did not explain the refusal"
+    assert_absent "$HOME_DIR/state/$id.meta" "$case_name raw Codex wrapper must fail before task allocation"
+    if [ -e "$CASE_DIR/backend.log" ]; then
+      assert_no_grep "new-window -t firstmate" "$CASE_DIR/backend.log" \
+        "$case_name raw Codex wrapper must not allocate an endpoint"
+    fi
+    [ ! -s "$LAUNCH_LOG" ] || fail "$case_name raw Codex wrapper must not launch Codex"
+  done
+  pass "raw Codex execution wrappers fail closed"
 }
 
 test_raw_codex_late_home_assignment_is_normalized() {
@@ -807,6 +837,7 @@ test_codex_crewmate_home_refuses_symlink_escape
 test_codex_crewmate_home_fails_when_private_home_creation_fails
 test_raw_codex_launch_is_normalized
 test_raw_codex_late_home_assignment_is_normalized
+test_raw_codex_execution_wrappers_fail_closed
 test_quoted_or_escaped_raw_codex_launch_fails_closed
 test_quoted_raw_custom_launch_remains_supported
 test_codex_crewmate_home_uses_private_directory

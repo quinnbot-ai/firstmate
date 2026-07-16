@@ -664,6 +664,54 @@ test_spawn_preserves_orca_metadata_when_abort_cleanup_fails() {
   pass "fm-spawn.sh --backend orca: preserves metadata when abort cleanup fails"
 }
 
+test_spawn_preserves_orca_and_codex_metadata_when_cleanup_fails() {
+  local proj wt data state config user id out status crew_home
+  id="orcacodexcleanupleakz1"
+  proj="$TMP_ROOT/codex-cleanup-fail-project"
+  wt="$TMP_ROOT/codex-cleanup-fail-wt"
+  data="$TMP_ROOT/codex-cleanup-fail-data"
+  state="$TMP_ROOT/codex-cleanup-fail-state"
+  config="$TMP_ROOT/codex-cleanup-fail-config"
+  user="$TMP_ROOT/codex-cleanup-fail-user"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config" "$user/.codex"
+  printf 'brief\n' > "$data/$id/brief.md"
+  printf '{"auth_mode":"chatgpt"}\n' > "$user/.codex/auth.json"
+  touch "$state/.last-watcher-beat"
+  orca_case codex-cleanup-fail
+  cat > "$FB/cp" <<'SH'
+#!/usr/bin/env bash
+exit 75
+SH
+  cat > "$FB/rm" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *".fm-codex-home."*) exit 76 ;;
+  *) exec /bin/rm "$@" ;;
+esac
+SH
+  chmod +x "$FB/cp" "$FB/rm"
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-codex-cleanup-fail"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-codex-cleanup-fail","path":"%s"},"terminal":{"handle":"term-codex-cleanup-fail"}}}\n' "$wt" > "$RESP/3.out"
+  printf '{"ok":false,"error":{"code":"worktree_not_removed","message":"worktree not removed"}}\n' > "$RESP/5.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" HOME="$user" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex --backend orca 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "Orca Codex spawn should fail when home and worktree cleanup fail"
+  assert_present "$state/$id.meta" "failed Orca Codex cleanup should preserve metadata"
+  assert_grep "window=fm-$id" "$state/$id.meta" "preserved metadata missing stable Orca window alias"
+  assert_grep "backend=orca" "$state/$id.meta" "preserved metadata missing backend=orca"
+  assert_grep "orca_worktree_id=wt-codex-cleanup-fail" "$state/$id.meta" "preserved metadata missing Orca worktree id"
+  assert_grep "terminal=term-codex-cleanup-fail" "$state/$id.meta" "preserved metadata missing Orca terminal"
+  crew_home=$(sed -n 's/^codex_crewmate_home=//p' "$state/$id.meta")
+  [ -n "$crew_home" ] || fail "preserved metadata missing the isolated Codex home"
+  [ -d "$crew_home" ] || fail "failed cleanup did not retain the isolated Codex home"
+  pass "fm-spawn.sh --backend orca: preserves Orca and Codex cleanup metadata"
+}
+
 test_spawn_releases_orca_resources_when_metadata_write_fails() {
   local proj wt data state_file config id out status
   id="orcametafailz9"
@@ -1304,6 +1352,7 @@ test_spawn_refuses_orca_when_runtime_not_ready
 test_spawn_refuses_orca_nonisolated_worktree
 test_spawn_removes_orca_worktree_when_terminal_create_fails
 test_spawn_preserves_orca_metadata_when_abort_cleanup_fails
+test_spawn_preserves_orca_and_codex_metadata_when_cleanup_fails
 test_spawn_releases_orca_resources_when_metadata_write_fails
 test_peek_send_and_crew_state_route_through_orca_meta
 test_peek_and_crew_state_fail_closed_on_orca_error_json
