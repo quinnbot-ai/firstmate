@@ -782,6 +782,30 @@ safe_rm_rf_child_worktree() {
   rm -rf -- "$target"
 }
 
+validate_task_temp_for_removal() {
+  local target=$1 prefix suffix
+  [ -n "$target" ] || return 0
+  prefix="/tmp/fm-$ID."
+  case "$target" in
+    "$prefix"*) suffix=${target#"$prefix"} ;;
+    *)
+      echo "REFUSED: unsafe task temporary directory $target does not match task $ID" >&2
+      return 1
+      ;;
+  esac
+  case "$suffix" in
+    ''|*[![:alnum:]]*)
+      echo "REFUSED: unsafe task temporary directory $target does not match task $ID" >&2
+      return 1
+      ;;
+  esac
+  [ ! -e "$target" ] && [ ! -L "$target" ] && return 0
+  if [ ! -d "$target" ] || [ -L "$target" ]; then
+    echo "REFUSED: unsafe task temporary directory $target is not a private directory" >&2
+    return 1
+  fi
+}
+
 remove_codex_crewmate_home() {
   local home=$1
   [ -n "$home" ] || return 0
@@ -794,6 +818,10 @@ close_recorded_endpoint() {
   if [ "$ENDPOINT_CLEANUP_PENDING" = 1 ]; then
     if ! FM_BACKEND_KILL_STRICT=1 fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null; then
       echo "error: failed-spawn endpoint $T could not be confirmed closed; preserving recovery metadata" >&2
+      return 1
+    fi
+    if fm_backend_target_exists "$BACKEND" "$T" "fm-$ID"; then
+      echo "error: failed-spawn endpoint $T remains live after cleanup; preserving recovery metadata" >&2
       return 1
     fi
   else
@@ -965,6 +993,8 @@ if [ "$KIND" = secondmate ]; then
   fi
 fi
 
+validate_task_temp_for_removal "$TASK_TMP" || exit 1
+
 if [ "$KIND" = secondmate ] && [ "$FORCE" != "--force" ]; then
   SUB_STATE="$HOME_PATH/state"
   if [ -d "$SUB_STATE" ]; then
@@ -1067,7 +1097,7 @@ remove_grok_turnend_auth "$STATE" "$ID"
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root, including its gotmp/, recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
-[ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
+[ -z "$TASK_TMP" ] || rm -rf -- "$TASK_TMP"
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true

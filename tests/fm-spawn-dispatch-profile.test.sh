@@ -35,7 +35,7 @@ case "${1:-}" in
   kill-window)
     [ -z "${FM_FAKE_BACKEND_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_BACKEND_LOG"
     status=${FM_FAKE_BACKEND_KILL_STATUS:-0}
-    [ "$status" -ne 0 ] || printf '%s\n' gone > "${FM_FAKE_TARGET_STATE:?}"
+    [ "$status" -ne 0 ] || [ "${FM_FAKE_BACKEND_CLOSE_EFFECT:-gone}" != gone ] || printf '%s\n' gone > "${FM_FAKE_TARGET_STATE:?}"
     exit "$status"
     ;;
   has-session|new-session|new-window)
@@ -138,6 +138,7 @@ run_spawn() {
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_BACKEND_LOG="$(dirname "$launchlog")/backend.log" \
     FM_FAKE_TREEHOUSE_RETURN_STATUS="${FM_FAKE_TREEHOUSE_RETURN_STATUS:-0}" \
     FM_FAKE_BACKEND_KILL_STATUS="${FM_FAKE_BACKEND_KILL_STATUS:-0}" \
+    FM_FAKE_BACKEND_CLOSE_EFFECT="${FM_FAKE_BACKEND_CLOSE_EFFECT:-gone}" \
     FM_FAKE_TARGET_QUERY_STATUS="${FM_FAKE_TARGET_QUERY_STATUS:-0}" \
     FM_FAKE_TARGET_STATE="$target_state" \
     FM_FAKE_ACTIVATION_RESULT="${FM_FAKE_ACTIVATION_RESULT:-ready}" \
@@ -924,6 +925,67 @@ test_codex_teardown_preserves_failed_endpoint_metadata() {
   pass "failed endpoint teardown retains recovery metadata until close succeeds"
 }
 
+test_codex_teardown_preserves_metadata_when_successful_close_leaves_endpoint_live() {
+  local rec id out status launch crew_home target_state
+  id=profile-codex-unconfirmed-endpoint-z68
+  rec=$(make_spawn_case profile-codex-unconfirmed-endpoint codex "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "Codex spawn should prepare an unconfirmed-endpoint recovery case"
+  launch=$(cat "$LAUNCH_LOG")
+  crew_home=$(codex_home_from_launch "$launch")
+  materialize_codex_home "$crew_home" "$HOME_DIR/data" "$CASE_DIR/user/.codex" "fm-crewmate-$id" "$WT_DIR"
+  printf 'failed_spawn=1\nendpoint_cleanup_pending=1\n' >> "$HOME_DIR/state/$id.meta"
+  target_state="$CASE_DIR/target-state"
+  printf 'live\n' > "$target_state"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_FAKE_TARGET_STATE="$target_state" \
+    FM_FAKE_BACKEND_LOG="$CASE_DIR/backend.log" FM_FAKE_BACKEND_CLOSE_EFFECT=none PATH="$FAKEBIN_DIR:$PATH" \
+    "$TEARDOWN" "$id" --force 2>&1)
+  status=$?
+  expect_code 1 "$status" "teardown must retain failed-spawn metadata when close reports success but endpoint remains live"
+  assert_contains "$out" "remains live after cleanup" \
+    "teardown did not explain the unconfirmed endpoint cleanup"
+  [ -f "$HOME_DIR/state/$id.meta" ] || fail "unconfirmed endpoint teardown discarded recovery metadata"
+  [ -d "$crew_home" ] || fail "unconfirmed endpoint teardown removed the credential home"
+  pass "failed endpoint teardown verifies successful cleanup removed the endpoint"
+}
+
+test_codex_teardown_refuses_malformed_task_temp_metadata() {
+  local rec id out status launch crew_home unsafe_task_tmp meta
+  id=profile-codex-unsafe-tasktmp-z69
+  rec=$(make_spawn_case profile-codex-unsafe-tasktmp codex "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "Codex spawn should prepare a task-temp metadata case"
+  launch=$(cat "$LAUNCH_LOG")
+  crew_home=$(codex_home_from_launch "$launch")
+  materialize_codex_home "$crew_home" "$HOME_DIR/data" "$CASE_DIR/user/.codex" "fm-crewmate-$id" "$WT_DIR"
+  unsafe_task_tmp="$CASE_DIR/not-a-task-temp"
+  mkdir -p "$unsafe_task_tmp"
+  printf 'keep\n' > "$unsafe_task_tmp/sentinel"
+  meta="$HOME_DIR/state/$id.meta"
+  sed "s|^tasktmp=.*|tasktmp=$unsafe_task_tmp|" "$meta" > "$meta.next" && mv "$meta.next" "$meta"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_FAKE_TARGET_STATE="$CASE_DIR/target-state" \
+    FM_FAKE_BACKEND_LOG="$CASE_DIR/backend.log" PATH="$FAKEBIN_DIR:$PATH" \
+    "$TEARDOWN" "$id" --force 2>&1)
+  status=$?
+  expect_code 1 "$status" "teardown must refuse malformed task temporary metadata"
+  assert_contains "$out" "unsafe task temporary directory" \
+    "teardown did not explain the malformed task temporary metadata"
+  [ -f "$unsafe_task_tmp/sentinel" ] || fail "teardown removed a path supplied by task metadata"
+  [ -f "$meta" ] || fail "teardown discarded metadata after refusing an unsafe task temporary path"
+  [ -d "$crew_home" ] || fail "teardown performed cleanup after refusing unsafe task temporary metadata"
+  pass "teardown refuses malformed task temporary metadata"
+}
+
 test_codex_teardown_refuses_symlinked_data_root() {
   local rec id out status launch crew_home data_root real_data target_state
   id=profile-codex-teardown-data-symlink-z41
@@ -1188,6 +1250,8 @@ test_codex_home_activation_result_refuses_symlink
 test_codex_home_activation_failure_aborts_spawn
 test_codex_activation_uses_private_task_temp_root
 test_codex_teardown_preserves_failed_endpoint_metadata
+test_codex_teardown_preserves_metadata_when_successful_close_leaves_endpoint_live
+test_codex_teardown_refuses_malformed_task_temp_metadata
 test_codex_teardown_refuses_symlinked_data_root
 test_codex_crewmate_home_records_failed_worktree_return
 test_codex_crewmate_home_records_failed_endpoint_removal
