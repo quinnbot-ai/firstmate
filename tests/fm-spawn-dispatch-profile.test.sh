@@ -292,6 +292,60 @@ EOF
   pass "Codex ship and scout launches use a firstmate-owned MCP-free home"
 }
 
+test_codex_crewmate_home_fails_when_plugin_cleanup_fails() {
+  local rec id out status source_home crew_home
+  id=profile-codex-home-cleanup-z19
+  rec=$(make_spawn_case profile-codex-home-cleanup codex "$id")
+  read_case_record "$rec"
+  source_home="$CASE_DIR/user/.codex"
+  crew_home="$HOME_DIR/data/codex-crewmate"
+  mkdir -p "$source_home" "$crew_home/plugins/stale-plugin"
+  cat > "$FAKEBIN_DIR/rm" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"plugins"*) exit 73 ;;
+  *) exec /bin/rm "$@" ;;
+esac
+SH
+  chmod +x "$FAKEBIN_DIR/rm"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "Codex spawn must fail when isolated-home plugin cleanup fails"
+  assert_contains "$out" "could not prepare isolated Codex crewmate home" \
+    "Codex spawn did not report isolated-home cleanup failure"
+  assert_absent "$HOME_DIR/state/$id.meta" "failed isolated-home preparation must not create task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "failed isolated-home preparation must not launch Codex"
+  pass "Codex spawn fails closed when isolated-home plugin cleanup fails"
+}
+
+test_codex_crewmate_home_fails_when_stale_catalog_cleanup_fails() {
+  local rec id out status crew_home
+  id=profile-codex-home-catalog-cleanup-z20
+  rec=$(make_spawn_case profile-codex-home-catalog-cleanup codex "$id")
+  read_case_record "$rec"
+  crew_home="$HOME_DIR/data/codex-crewmate"
+  mkdir -p "$crew_home"
+  printf '%s\n' '{"models":["stale"]}' > "$crew_home/models_cache.json"
+  cat > "$FAKEBIN_DIR/rm" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"models_cache.json"*) exit 74 ;;
+  *) exec /bin/rm "$@" ;;
+esac
+SH
+  chmod +x "$FAKEBIN_DIR/rm"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "Codex spawn must fail when stale model-catalog cleanup fails"
+  assert_contains "$out" "could not prepare isolated Codex crewmate home" \
+    "Codex spawn did not report stale model-catalog cleanup failure"
+  assert_absent "$HOME_DIR/state/$id.meta" "failed model-catalog cleanup must not create task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "failed model-catalog cleanup must not launch Codex"
+  pass "Codex spawn fails closed when stale model-catalog cleanup fails"
+}
+
 test_codex_omits_invalid_max_effort() {
   local rec id out status launch
   id=profile-codex-max-z4
@@ -446,6 +500,8 @@ test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_crewmate_home_excludes_mcp_and_plugins
+test_codex_crewmate_home_fails_when_plugin_cleanup_fails
+test_codex_crewmate_home_fails_when_stale_catalog_cleanup_fails
 test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort

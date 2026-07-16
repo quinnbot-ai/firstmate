@@ -359,7 +359,7 @@ refresh_codex_crewmate_home() {
   mkdir -p "$home" || return 1
   chmod 700 "$home" || return 1
   # This directory is firstmate-owned, so each spawn can converge it on no plugins.
-  rm -rf "$home/plugins"
+  rm -rf "$home/plugins" || return 1
   temp_file="$home/.config.toml.$$"
   printf '%s\n' '# Firstmate Codex crewmate home.' > "$temp_file" || return 1
   chmod 600 "$temp_file" || return 1
@@ -372,7 +372,7 @@ refresh_codex_crewmate_home() {
       chmod 600 "$temp_file" || return 1
       mv -f "$temp_file" "$home/$name" || return 1
     else
-      rm -f "$home/$name"
+      rm -f "$home/$name" || return 1
     fi
   done
   printf '%s\n' "$home"
