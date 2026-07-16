@@ -136,7 +136,8 @@ test_spawn_contract_and_private_temp_pattern() {
 
 test_teardown_removes_tasktmp_dir() {
   local id=td-rm-z2
-  local task_tmp="$TMP_ROOT/fm-$id"
+  local task_tmp
+  task_tmp=$(mktemp -d "/tmp/fm-$id.XXXXXXXX")
   mkdir -p "$task_tmp/gotmp"
   printf 'leftover\n' > "$task_tmp/gotmp/build-artifact"
   local fake
@@ -196,7 +197,7 @@ META
 test_teardown_skips_gracefully_when_dir_missing() {
   # tasktmp= points to a path that does not exist. Teardown must not error.
   local id=td-missing-z4
-  local task_tmp="$TMP_ROOT/never-created-fm-$id"
+  local task_tmp="/tmp/fm-$id.missing"
   # Intentionally do NOT create $task_tmp.
   [ ! -e "$task_tmp" ] || fail "precondition: task_tmp should not exist yet"
   local fake
