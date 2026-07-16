@@ -58,10 +58,13 @@ case "${1:-}" in
       done
     fi
     case "$literal" in
-      *'--result-file '*)
-        result=$(printf '%s\n' "$literal" | sed -n "s/.*--result-file '\\([^']*\\)'.*/\\1/p")
+      *'--create-activate '*)
+        data=$(printf '%s\n' "$literal" | sed -n "s/.*--data '\\([^']*\\)'.*/\\1/p")
+        home=$(printf '%s\n' "$literal" | sed -n "s/.*--home '\\([^']*\\)'.*/\\1/p")
         token=$(printf '%s\n' "$literal" | sed -n "s/.*--result-token '\\([0-9a-f]*\\)'.*/\\1/p")
-        if [ -n "$result" ]; then
+        if [ -n "$data" ] && [ -n "$home" ]; then
+          result="$data/codex-crewmate/.fm-codex-activation.${home##*/}"
+          mkdir -p "$data/codex-crewmate"
           umask 077
           printf '%s %s\n' "${FM_FAKE_ACTIVATION_RESULT:-ready}" "$token" > "$result"
           chmod 600 "$result"
@@ -161,23 +164,26 @@ codex_home_from_launch() {
 }
 
 codex_activation_result_from_launch() {
-  printf '%s\n' "$1" | sed -n "s/.*--result-file '\\([^']*\\)'.*/\\1/p"
+  local home
+  home=$(codex_home_from_launch "$1")
+  [ -z "$home" ] || printf '%s/.fm-codex-activation.%s\n' "$(dirname "$home")" "${home##*/}"
 }
 
 assert_private_activation_result() {  # <task-id> <result-path> <message>
-  local id=$1 result=$2 message=$3
+  local id=$1 result=$2 message=$3 base
+  base=${result%/*}
   case "$result" in
-    "/tmp/fm-$id."????????"/.codex-home-activation."????????"/result") : ;;
+    */data/codex-crewmate/.fm-codex-activation..fm-codex-home.*) : ;;
     *) fail "$message: $result" ;;
   esac
+  [ -d "$base" ] && [ ! -L "$base" ] || fail "$message: unsafe parent $base"
 }
 
 materialize_codex_home() {  # <home> <data> <source> <profile> <worktree>
-  local result="$1.activation"
   python3 "$ROOT/bin/fm-codex-home.py" --create-activate --data "$2" --source "$3" \
-    --profile "$4" --worktree "$5" --home "$1" --result-file "$result" \
+    --profile "$4" --worktree "$5" --home "$1" \
     --result-token 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef -- /usr/bin/env >/dev/null
-  rm -f "$result"
+  python3 "$ROOT/bin/fm-codex-home.py" --remove-activation-result --data "$2" --home "$1"
 }
 
 assert_meta_profile() {
@@ -357,7 +363,7 @@ EOF
   activation_result=$(codex_activation_result_from_launch "$launch")
   [ -n "$crew_home" ] || fail "Codex ship launch did not expose an isolated CODEX_HOME"
   assert_private_activation_result "$ship" "$activation_result" "Codex ship launch did not use a private activation result"
-  assert_contains "$launch" "--home '$crew_home' --result-file '$activation_result' --result-token '" \
+  assert_contains "$launch" "--home '$crew_home' --result-token '" \
     "Codex ship launch did not authenticate the isolated-home activation"
   assert_contains "$launch" "-- codex --profile 'fm-crewmate-$ship' --disable plugins" \
     "Codex ship launch did not activate the isolated CODEX_HOME"
@@ -407,7 +413,7 @@ EOF
   activation_result=$(codex_activation_result_from_launch "$launch")
   [ -n "$crew_home" ] || fail "Codex scout launch did not expose an isolated CODEX_HOME"
   assert_private_activation_result "$scout" "$activation_result" "Codex scout launch did not use a private activation result"
-  assert_contains "$launch" "--home '$crew_home' --result-file '$activation_result' --result-token '" \
+  assert_contains "$launch" "--home '$crew_home' --result-token '" \
     "Codex scout launch did not authenticate the isolated-home activation"
   assert_contains "$launch" "-- codex --profile 'fm-crewmate-$scout' --disable plugins" \
     "Codex scout launch did not activate the isolated CODEX_HOME"
@@ -598,7 +604,7 @@ test_raw_codex_launch_is_normalized() {
     activation_result=$(codex_activation_result_from_launch "$launch")
     [ -n "$crew_home" ] || fail "$case_name raw Codex launch did not expose an isolated CODEX_HOME"
     assert_private_activation_result "$id" "$activation_result" "$case_name raw Codex launch did not use a private activation result"
-    assert_contains "$launch" "--home '$crew_home' --result-file '$activation_result' --result-token '" \
+    assert_contains "$launch" "--home '$crew_home' --result-token '" \
       "$case_name raw Codex launch did not authenticate the isolated-home activation"
     assert_contains "$launch" "-- codex --profile 'fm-crewmate-$id' --disable plugins" \
       "$case_name raw Codex launch did not enforce the isolated profile"
@@ -609,7 +615,7 @@ test_raw_codex_launch_is_normalized() {
 
 test_raw_codex_execution_wrappers_fail_closed() {
   local command case_name rec id out status n=0
-  for case_name in nice nice-option shell shell-multicommand shell-script sourced-script script-path sudo-user timeout-duration script find xargs unknown-wrapper eval interpreter; do
+  for case_name in nice nice-option shell shell-multicommand shell-script sourced-script script-path sudo-user timeout-duration script find xargs unknown-wrapper eval builtin-eval interpreter; do
     n=$((n + 1))
     id="profile-raw-codex-wrapper-$n-z31"
     rec=$(make_spawn_case "profile-raw-codex-wrapper-$n" codex "$id")
@@ -629,6 +635,7 @@ test_raw_codex_execution_wrappers_fail_closed() {
       xargs) command='xargs -a jobs codex' ;;
       unknown-wrapper) command='custom-wrapper codex' ;;
       eval) command='eval "$COMMAND"' ;;
+      builtin-eval) command='builtin eval "$COMMAND"' ;;
       interpreter) command="python3 -c 'os.execvp(\"codex\", [\"codex\"])'" ;;
     esac
 
@@ -712,7 +719,7 @@ test_quoted_or_escaped_raw_codex_launch_fails_closed() {
 
 test_quoted_raw_custom_launch_remains_supported() {
   local command case_name rec id out status launch n=0
-  for case_name in quoted shell-variable env-option env-s shell-command; do
+  for case_name in quoted shell-variable env-option env-s shell-command builtin; do
     n=$((n + 1))
     id="profile-raw-custom-$n-z29"
     rec=$(make_spawn_case "profile-raw-custom-$n" claude "$id")
@@ -723,6 +730,7 @@ test_quoted_raw_custom_launch_remains_supported() {
       env-option) command='env -i custom-agent --prompt review' ;;
       env-s) command="env -S 'custom-agent --prompt review'" ;;
       shell-command) command="sh -c 'custom-agent --prompt review'" ;;
+      builtin) command='builtin printf review' ;;
     esac
     out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
       "$id" "$PROJ_DIR" "$command" )
@@ -816,14 +824,14 @@ test_codex_home_activation_uses_open_descriptor() {
   source="$TMP_ROOT/codex-activation-source"
   mkdir -p "$data" "$source"
   home="$data/codex-crewmate/$(python3 "$ROOT/bin/fm-codex-home.py" --data "$data" --new-home-name)"
-  result="$home.activation"
+  result="$data/codex-crewmate/.fm-codex-activation.${home##*/}"
   token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
   out=$(python3 "$ROOT/bin/fm-codex-home.py" --create-activate --data "$data" --source "$source" \
-    --profile fm-crewmate-activation-z42 --worktree /tmp/fm-codex-activation --home "$home" --result-file "$result" --result-token "$token" -- /usr/bin/env)
+    --profile fm-crewmate-activation-z42 --worktree /tmp/fm-codex-activation --home "$home" --result-token "$token" -- /usr/bin/env)
   assert_contains "$out" "CODEX_HOME=/dev/fd/" \
     "Codex activation must retain an opened home descriptor"
   assert_contains "$(cat "$result")" ready "Codex activation must report readiness before launch"
-  rm -f "$result"
+  python3 "$ROOT/bin/fm-codex-home.py" --remove-activation-result --data "$data" --home "$home"
   python3 "$ROOT/bin/fm-codex-home.py" --remove --data "$data" --home "$home"
   assert_absent "$home" "descriptor-activated Codex home must remain removable"
   pass "Codex activation passes a descriptor-backed home"
@@ -835,10 +843,10 @@ test_codex_home_activation_reports_exec_failure() {
   source="$TMP_ROOT/codex-activation-exec-failure-source"
   mkdir -p "$data" "$source"
   home="$data/codex-crewmate/$(python3 "$ROOT/bin/fm-codex-home.py" --data "$data" --new-home-name)"
-  result="$home.activation"
+  result="$data/codex-crewmate/.fm-codex-activation.${home##*/}"
   token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
   out=$(python3 "$ROOT/bin/fm-codex-home.py" --create-activate --data "$data" --source "$source" \
-    --profile fm-crewmate-exec-failure-z44 --worktree /tmp/fm-codex-exec-failure --home "$home" --result-file "$result" --result-token "$token" -- /definitely/missing/codex 2>&1)
+    --profile fm-crewmate-exec-failure-z44 --worktree /tmp/fm-codex-exec-failure --home "$home" --result-token "$token" -- /definitely/missing/codex 2>&1)
   status=$?
   expect_code 1 "$status" "Codex activation must fail when its launch command cannot exec"
   assert_contains "$(cat "$result")" failed "Codex activation must report exec failures as failed"
@@ -853,11 +861,11 @@ test_codex_home_activation_refuses_replaced_path() {
   mkdir -p "$data" "$source"
   name=$(python3 "$ROOT/bin/fm-codex-home.py" --data "$data" --new-home-name)
   home="$data/codex-crewmate/$name"
-  result="$home.activation"
+  result="$data/codex-crewmate/.fm-codex-activation.${home##*/}"
   token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
   mkdir -p "$home"
   out=$(python3 "$ROOT/bin/fm-codex-home.py" --create-activate --data "$data" --source "$source" \
-    --profile fm-crewmate-race-z43 --worktree /tmp/fm-codex-race --home "$home" --result-file "$result" --result-token "$token" -- /usr/bin/env 2>&1)
+    --profile fm-crewmate-race-z43 --worktree /tmp/fm-codex-race --home "$home" --result-token "$token" -- /usr/bin/env 2>&1)
   status=$?
   expect_code 1 "$status" "Codex activation must reject a replaced planned home"
   assert_contains "$out" "already exists" "Codex activation did not reject the replaced planned home"
@@ -866,19 +874,41 @@ test_codex_home_activation_refuses_replaced_path() {
 }
 
 test_codex_home_activation_result_refuses_symlink() {
-  local directory result target token out status
-  directory=$(mktemp -d "$TMP_ROOT/codex-activation-result.XXXXXXXX")
-  result="$directory/result"
-  target="$directory/target"
+  local data home result target token out status
+  data=$(mktemp -d "$TMP_ROOT/codex-activation-result.XXXXXXXX")
+  home="$data/codex-crewmate/.fm-codex-home.0123456789abcdef0123456789abcdef"
+  result="$data/codex-crewmate/.fm-codex-activation.${home##*/}"
+  target="$data/codex-crewmate/target"
+  mkdir -p "$data/codex-crewmate"
   token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
   printf 'ready %s\n' "$token" > "$target"
   chmod 600 "$target"
   ln -s target "$result"
-  out=$(python3 "$ROOT/bin/fm-codex-home.py" --read-activation-result --result-file "$result" --result-token "$token" 2>&1)
+  out=$(python3 "$ROOT/bin/fm-codex-home.py" --read-activation-result --data "$data" --home "$home" --result-token "$token" 2>&1)
   status=$?
   expect_code 1 "$status" "Codex activation must reject a symlinked result"
   assert_contains "$out" "result is unsafe" "Codex activation result reader accepted a symlink"
   pass "Codex activation result reader rejects symlinks"
+}
+
+test_codex_home_activation_refuses_existing_result() {
+  local data source home result token out status
+  data=$(mktemp -d "$TMP_ROOT/codex-activation-existing-result.XXXXXXXX")
+  source="$TMP_ROOT/codex-activation-existing-result-source"
+  mkdir -p "$data/codex-crewmate" "$source"
+  home="$data/codex-crewmate/.fm-codex-home.0123456789abcdef0123456789abcdef"
+  result="$data/codex-crewmate/.fm-codex-activation.${home##*/}"
+  token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  printf 'ready %s\n' "$token" > "$result"
+  chmod 600 "$result"
+  out=$(python3 "$ROOT/bin/fm-codex-home.py" --create-activate --data "$data" --source "$source" \
+    --profile fm-crewmate-existing-result-z68 --worktree /tmp/fm-codex-existing-result --home "$home" --result-token "$token" -- /usr/bin/env 2>&1)
+  status=$?
+  expect_code 1 "$status" "Codex activation must refuse an existing result"
+  assert_contains "$out" "could not record isolated Codex home activation" \
+    "Codex activation did not report an existing result safely"
+  assert_absent "$home" "existing activation result must not create a Codex home"
+  pass "Codex activation refuses an existing managed result"
 }
 
 test_codex_home_activation_failure_aborts_spawn() {
@@ -903,7 +933,7 @@ test_codex_home_activation_failure_aborts_spawn() {
   pass "Codex spawn synchronizes terminal activation failures"
 }
 
-test_codex_activation_uses_private_task_temp_root() {
+test_codex_activation_uses_managed_data_root() {
   local rec id out status target legacy_path launch activation_result
   id=profile-codex-activation-parent-z67
   rec=$(make_spawn_case profile-codex-activation-parent codex "$id")
@@ -920,9 +950,11 @@ test_codex_activation_uses_private_task_temp_root() {
   expect_code 0 "$status" "Codex spawn must not follow a predictable task-temp symlink"
   launch=$(cat "$LAUNCH_LOG")
   activation_result=$(codex_activation_result_from_launch "$launch")
-  assert_private_activation_result "$id" "$activation_result" "Codex activation did not use a private task temporary root"
+  assert_private_activation_result "$id" "$activation_result" "Codex activation did not use the managed data root"
+  assert_not_contains "$launch" "--result-file" \
+    "Codex activation must not pass a mutable task-temporary result path"
   [ ! -e "$target/result" ] || fail "Codex activation followed the predictable task-temp symlink"
-  pass "Codex activation uses a private task temporary root"
+  pass "Codex activation uses the descriptor-validated managed data root"
 }
 
 test_codex_teardown_preserves_failed_endpoint_metadata() {
@@ -1306,8 +1338,9 @@ test_codex_home_activation_uses_open_descriptor
 test_codex_home_activation_reports_exec_failure
 test_codex_home_activation_refuses_replaced_path
 test_codex_home_activation_result_refuses_symlink
+test_codex_home_activation_refuses_existing_result
 test_codex_home_activation_failure_aborts_spawn
-test_codex_activation_uses_private_task_temp_root
+test_codex_activation_uses_managed_data_root
 test_codex_teardown_preserves_failed_endpoint_metadata
 test_codex_teardown_preserves_metadata_when_successful_close_leaves_endpoint_live
 test_codex_teardown_preserves_metadata_when_endpoint_query_is_unavailable

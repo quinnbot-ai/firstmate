@@ -201,8 +201,7 @@ FAILED_ENDPOINT_CLEANUP=0
 TREEHOUSE_ABORT_CLEANUP=0
 TASK_TMP=
 CODEX_CREWMATE_HOME=
-CODEX_ACTIVATION_RESULT=
-CODEX_ACTIVATION_DIR=
+CODEX_ACTIVATION_TOKEN=
 SPAWN_META_WRITTEN=0
 
 parse_orca_worktree_result() {
@@ -272,6 +271,12 @@ remove_codex_crewmate_home() {
   python3 "$FM_ROOT/bin/fm-codex-home.py" --remove --data "$DATA" --home "$home"
 }
 
+remove_codex_home_activation_result() {
+  local home=${CODEX_CREWMATE_HOME:-}
+  [ -n "$home" ] || return 0
+  python3 "$FM_ROOT/bin/fm-codex-home.py" --remove-activation-result --data "$DATA" --home "$home"
+}
+
 orca_spawn_abort_cleanup() {
   local cleanup_failed=0
   [ "$ORCA_ABORT_CLEANUP" = 1 ] || return 0
@@ -331,7 +336,7 @@ spawn_abort_cleanup() {
     CODEX_CREWMATE_HOME=
   fi
   [ "$orca_cleanup_failed" -eq 0 ] || write_failed_treehouse_spawn_meta
-  [ -z "$CODEX_ACTIVATION_DIR" ] || rm -rf -- "$CODEX_ACTIVATION_DIR"
+  [ -z "$CODEX_ACTIVATION_TOKEN" ] || remove_codex_home_activation_result 2>/dev/null || true
   [ -z "$TASK_TMP" ] || rm -rf -- "$TASK_TMP"
   if [ "$status" -ne 0 ] && [ "$SPAWN_META_WRITTEN" = 1 ] && [ "$FAILED_ENDPOINT_CLEANUP" != 1 ] && [ "$preserve_codex_home" -eq 0 ] && [ "$orca_cleanup_failed" -eq 0 ] && [ -z "$CODEX_CREWMATE_HOME" ]; then
     rm -f "$STATE/$ID.meta"
@@ -604,6 +609,8 @@ raw_launch_starts_codex() {
               state='command'
             elif raw_launch_word_is "$word" exec; then
               state='command'
+            elif raw_launch_word_is "$word" builtin; then
+              state='builtin'
             elif raw_launch_word_is "$word" sh || raw_launch_word_is "$word" bash || raw_launch_word_is "$word" zsh || raw_launch_word_is "$word" dash || raw_launch_word_is "$word" ksh; then
               state=shell
             elif raw_launch_word_is "$word" nice; then
@@ -663,6 +670,17 @@ raw_launch_starts_codex() {
         ;;
       env-command|command-command)
         if raw_launch_starts_codex "$word$raw"; then return 0; else return $?; fi
+        ;;
+      builtin)
+        case "$word" in
+          -p|--) ;;
+          eval|source|.) return 2 ;;
+          command|exec)
+            raw_launch_wrapped_command_status "$word$raw"
+            return $?
+            ;;
+          *) return 1 ;;
+        esac
         ;;
       nice)
         case "$word" in
@@ -792,29 +810,27 @@ refresh_codex_crewmate_home() {
 }
 
 wait_for_codex_home_activation() {
-  local result=$1 directory=$2 token=$3 deadline status read_status
+  local home=$1 token=$2 deadline status read_status
   deadline=$(( $(date +%s) + 10 ))
   while [ "$(date +%s)" -le "$deadline" ]; do
     set +e
-    status=$(python3 "$FM_ROOT/bin/fm-codex-home.py" --data "$DATA" --read-activation-result --result-file "$result" --result-token "$token" 2>&1)
+    status=$(python3 "$FM_ROOT/bin/fm-codex-home.py" --data "$DATA" --read-activation-result --home "$home" --result-token "$token" 2>&1)
     read_status=$?
     set -e
     if [ "$read_status" -eq 0 ]; then
-      rm -f "$result"
-      rmdir "$directory" 2>/dev/null || true
+      remove_codex_home_activation_result 2>/dev/null || true
       [ "$status" = ready ] && return 0
       echo "error: isolated Codex home activation failed" >&2
       return 1
     fi
     if [ "$read_status" -ne 3 ]; then
-      rm -f "$result"
-      rmdir "$directory" 2>/dev/null || true
+      remove_codex_home_activation_result 2>/dev/null || true
       echo "error: isolated Codex home activation result is unsafe" >&2
       return 1
     fi
     sleep 0.1
   done
-  rmdir "$directory" 2>/dev/null || true
+  remove_codex_home_activation_result 2>/dev/null || true
   echo "error: isolated Codex home activation did not report ready within 10s" >&2
   return 1
 }
@@ -1399,16 +1415,6 @@ TASK_TMP=$(mktemp -d "/tmp/fm-$ID.XXXXXXXX") || {
 }
 mkdir "$TASK_TMP/gotmp" || exit 1
 if [ -n "$CODEX_CREWMATE_HOME" ]; then
-  CODEX_ACTIVATION_DIR=$(mktemp -d "$TASK_TMP/.codex-home-activation.XXXXXXXX") || {
-    echo "error: could not create private isolated Codex home activation directory" >&2
-    exit 1
-  }
-  [ -d "$CODEX_ACTIVATION_DIR" ] && [ ! -L "$CODEX_ACTIVATION_DIR" ] || {
-    echo "error: isolated Codex home activation directory is unsafe" >&2
-    exit 1
-  }
-  chmod 700 "$CODEX_ACTIVATION_DIR" || exit 1
-  CODEX_ACTIVATION_RESULT="$CODEX_ACTIVATION_DIR/result"
   CODEX_ACTIVATION_TOKEN=$(python3 "$FM_ROOT/bin/fm-codex-home.py" --new-result-token) || {
     echo "error: could not create isolated Codex home activation token" >&2
     exit 1
@@ -1600,9 +1606,8 @@ if [ -n "$CODEX_CREWMATE_HOME" ]; then
   sq_codex_data=$(shell_quote "$DATA")
   sq_codex_source=$(shell_quote "$HOME/.codex")
   sq_codex_worktree=$(shell_quote "$WT_REAL")
-  sq_codex_activation_result=$(shell_quote "$CODEX_ACTIVATION_RESULT")
   sq_codex_activation_token=$(shell_quote "$CODEX_ACTIVATION_TOKEN")
-  LAUNCH="exec python3 $sq_codex_home_helper --create-activate --data $sq_codex_data --source $sq_codex_source --profile $sq_codex_crewmate_profile --worktree $sq_codex_worktree --home $sq_codex_crewmate_home --result-file $sq_codex_activation_result --result-token $sq_codex_activation_token -- $LAUNCH"
+  LAUNCH="exec python3 $sq_codex_home_helper --create-activate --data $sq_codex_data --source $sq_codex_source --profile $sq_codex_crewmate_profile --worktree $sq_codex_worktree --home $sq_codex_crewmate_home --result-token $sq_codex_activation_token -- $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
@@ -1616,10 +1621,8 @@ sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 spawn_send_key "$T" Enter
-if [ -n "$CODEX_ACTIVATION_RESULT" ]; then
-  wait_for_codex_home_activation "$CODEX_ACTIVATION_RESULT" "$CODEX_ACTIVATION_DIR" "$CODEX_ACTIVATION_TOKEN" || exit 1
-  CODEX_ACTIVATION_DIR=
-  CODEX_ACTIVATION_RESULT=
+if [ -n "$CODEX_ACTIVATION_TOKEN" ]; then
+  wait_for_codex_home_activation "$CODEX_CREWMATE_HOME" "$CODEX_ACTIVATION_TOKEN" || exit 1
   CODEX_ACTIVATION_TOKEN=
 fi
 TREEHOUSE_ABORT_CLEANUP=0

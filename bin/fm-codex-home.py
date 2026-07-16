@@ -118,8 +118,8 @@ def parse_args():
     parser.add_argument("--create-activate", action="store_true")
     parser.add_argument("--remove", action="store_true")
     parser.add_argument("--read-activation-result", action="store_true")
+    parser.add_argument("--remove-activation-result", action="store_true")
     parser.add_argument("--home")
-    parser.add_argument("--result-file")
     parser.add_argument("--result-token")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     return parser.parse_args()
@@ -146,24 +146,18 @@ def result_token(args):
     return token.encode()
 
 
-def write_activation_result(args, result):
-    if not args.result_file:
-        return False
-    try:
-        fd = os.open(args.result_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        try:
-            write_all(fd, result + b" " + result_token(args) + b"\n")
-            os.fchmod(fd, 0o600)
-        finally:
-            os.close(fd)
-    except OSError:
-        return False
-    return True
+def activation_result_name(args):
+    return ".fm-codex-activation." + managed_home_name(args.home)
 
 
-def activation_result_fd(args):
+def activation_result_fd(args, base_fd):
     try:
-        fd = os.open(args.result_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        fd = os.open(
+            activation_result_name(args),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=base_fd,
+        )
         os.fchmod(fd, 0o600)
         return fd
     except OSError as error:
@@ -178,11 +172,23 @@ def finish_activation_result_with_token(fd, result, token):
 
 
 def read_activation_result(args):
-    if not args.result_file:
-        die("Codex home activation result requires --result-file")
     token = result_token(args)
     try:
-        fd = os.open(args.result_file, os.O_RDONLY | os.O_NOFOLLOW)
+        data_fd = open_directory(os.path.abspath(args.data))
+        try:
+            require_directory(data_fd, "firstmate data")
+            base_fd = open_directory("codex-crewmate", data_fd)
+        finally:
+            os.close(data_fd)
+        try:
+            require_directory(base_fd, "isolated Codex home")
+            try:
+                fd = os.open(activation_result_name(args), os.O_RDONLY | os.O_NOFOLLOW, dir_fd=base_fd)
+            except FileNotFoundError:
+                print("pending")
+                return 3
+        finally:
+            os.close(base_fd)
     except FileNotFoundError:
         print("pending")
         return 3
@@ -209,13 +215,33 @@ def read_activation_result(args):
     die("isolated Codex home activation result is unsafe")
 
 
+def remove_activation_result(args):
+    try:
+        data_fd = open_directory(os.path.abspath(args.data))
+        try:
+            require_directory(data_fd, "firstmate data")
+            base_fd = open_directory("codex-crewmate", data_fd)
+        finally:
+            os.close(data_fd)
+        try:
+            require_directory(base_fd, "isolated Codex home")
+            try:
+                os.unlink(activation_result_name(args), dir_fd=base_fd)
+            except FileNotFoundError:
+                pass
+        finally:
+            os.close(base_fd)
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        die(f"could not remove isolated Codex home activation result: {error.strerror}")
+
+
 class ActivationExecError(Exception):
     pass
 
 
-def activate_command(args, home_fd, command):
-    result_fd = activation_result_fd(args)
-    token = result_token(args)
+def activate_command(args, home_fd, command, result_fd, token):
     read_fd, write_fd = os.pipe()
     os.set_inheritable(read_fd, False)
     os.set_inheritable(write_fd, False)
@@ -314,7 +340,12 @@ def create_home(args, command=None):
             require_directory(base_fd, "isolated Codex home")
             os.fchmod(base_fd, 0o700)
             try:
+                activation_fd = None
+                activation_token = None
                 home_created = False
+                if command:
+                    activation_fd = activation_result_fd(args, base_fd)
+                    activation_token = result_token(args)
                 while True:
                     name = managed_home_name(args.home) if args.home else ".fm-codex-home." + secrets.token_hex(16)
                     try:
@@ -336,11 +367,16 @@ def create_home(args, command=None):
                     profile = "# Firstmate Codex crewmate profile.\n[projects.\"%s\"]\ntrust_level = \"untrusted\"\n" % worktree
                     write_file(home_fd, args.profile + ".config.toml", profile.encode())
                     if command:
-                        return activate_command(args, home_fd, command)
+                        return activate_command(args, home_fd, command, activation_fd, activation_token)
                 finally:
                     os.close(home_fd)
                 print(os.path.join(data, "codex-crewmate", name))
             except BaseException:
+                if activation_fd is not None:
+                    try:
+                        finish_activation_result_with_token(activation_fd, b"failed", activation_token)
+                    except OSError:
+                        pass
                 if home_created:
                     try:
                         remove_tree(base_fd, name)
@@ -358,12 +394,12 @@ def create_home(args, command=None):
 def main():
     args = parse_args()
     if args.new_result_token:
-        if args.new_home_name or args.remove or args.create_activate or args.read_activation_result or args.home or args.result_file or args.result_token or args.command:
+        if args.new_home_name or args.remove or args.create_activate or args.read_activation_result or args.remove_activation_result or args.home or args.result_token or args.command:
             die("isolated Codex home result token generation accepts no other action")
         print(secrets.token_hex(32))
         return
     if args.new_home_name:
-        if args.remove or args.create_activate or args.read_activation_result or args.home or args.result_file or args.result_token or args.command:
+        if args.remove or args.create_activate or args.read_activation_result or args.remove_activation_result or args.home or args.result_token or args.command:
             die("isolated Codex home name generation accepts no other action")
         try:
             validate_data_root(args.data)
@@ -372,27 +408,29 @@ def main():
         print(".fm-codex-home." + secrets.token_hex(16))
         return
     if args.read_activation_result:
-        if args.remove or args.create_activate or args.home or args.source or args.profile or args.worktree is not None or args.command:
-            die("isolated Codex home activation result read accepts only result arguments")
+        if args.remove or args.create_activate or args.remove_activation_result or not args.home or not args.data or args.source or args.profile or args.worktree is not None or args.command:
+            die("isolated Codex home activation result read requires data, home, and result arguments")
         raise SystemExit(read_activation_result(args))
+    if args.remove_activation_result:
+        if args.remove or args.create_activate or args.read_activation_result or not args.home or not args.data or args.source or args.profile or args.worktree is not None or args.command:
+            die("isolated Codex home activation result removal requires data and home")
+        remove_activation_result(args)
+        return
     if args.remove:
         remove_home(args)
         return
     if args.create_activate:
         if not args.home:
             die("Codex home activation requires --home")
-        if not args.result_file:
-            die("Codex home activation requires --result-file")
+        if not args.data:
+            die("Codex home activation requires --data")
         result_token(args)
         try:
             exit_code = create_home(args, launch_command(args))
         except BaseException:
-            write_activation_result(args, b"failed")
             raise
         raise SystemExit(exit_code)
         return
-    if args.result_file:
-        die("Codex home result files are only valid for activation")
     create_home(args)
 
 
