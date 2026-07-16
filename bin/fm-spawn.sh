@@ -474,6 +474,39 @@ raw_launch_mentions_codex() {
   return 1
 }
 
+raw_launch_has_dynamic_execution() {
+  local raw=$1 len=${#1} i=0 char next quote=''
+  while [ "$i" -lt "$len" ]; do
+    char=${raw:i:1}
+    next=${raw:i+1:1}
+    case "$quote" in
+      "'")
+        [ "$char" = "'" ] && quote=
+        ;;
+      '"')
+        case "$char" in
+          '"') quote= ;;
+          \\) i=$((i + 1)) ;;
+          '$') [ "$next" = '(' ] && return 0 ;;
+          '`') return 0 ;;
+        esac
+        ;;
+      '')
+        case "$char" in
+          "'") quote="'" ;;
+          '"') quote='"' ;;
+          \\) i=$((i + 1)) ;;
+          '$') [ "$next" = '(' ] && return 0 ;;
+          '`') return 0 ;;
+          '<'|'>') [ "$next" = '(' ] && return 0 ;;
+        esac
+        ;;
+    esac
+    i=$((i + 1))
+  done
+  return 1
+}
+
 raw_launch_wrapped_command_status() {
   raw_launch_starts_codex "$1"
   local status=$?
@@ -688,8 +721,7 @@ raw_launch_starts_codex() {
             esac
             return 1
             ;;
-          -*) ;;
-          *) return 1 ;;
+          *) return 2 ;;
         esac
         ;;
     esac
@@ -761,6 +793,9 @@ case "$ARG3" in
       raw_launch_mentions_codex "$ARG3"
       raw_codex_mentions=$?
       [ "$raw_codex_mentions" -ne 0 ] || raw_codex_status=2
+      if [ "$raw_codex_status" -eq 1 ] && raw_launch_has_dynamic_execution "$ARG3"; then
+        raw_codex_status=2
+      fi
     fi
     set -e
     if [ "$KIND" != secondmate ] && [ "$raw_codex_status" -eq 2 ]; then

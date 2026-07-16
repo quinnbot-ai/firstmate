@@ -816,6 +816,43 @@ test_kill_is_strict_when_session_is_unqueryable() {
   pass "fm_backend_zellij_kill: strict cleanup propagates session readiness failures"
 }
 
+test_kill_is_strict_when_target_query_is_unqueryable() {
+  local dir fb status
+  dir="$TMP_ROOT/kill-strict-target-query"; mkdir -p "$dir/responses"
+  printf 'temporary failure\n' > "$dir/responses/1.out"
+  printf '1\n' > "$dir/responses/1.exit"
+  fb=$(make_zellij_fakebin "$dir")
+  PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" FM_BACKEND_KILL_STRICT=1 \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_kill firstmate:7' "$ROOT"
+  status=$?
+  [ "$status" -ne 0 ] || fail "strict kill must fail when the Zellij target cannot be queried"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''close-tab-by-id' \
+    "strict kill must not close a target after its pane query fails"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''close-pane' \
+    "strict kill must not close a target after its pane query fails"
+  pass "fm_backend_zellij_kill: strict cleanup propagates target query failures"
+}
+
+test_kill_is_strict_when_label_query_is_unqueryable() {
+  local dir fb status
+  dir="$TMP_ROOT/kill-strict-label-query"; mkdir -p "$dir/responses"
+  zellij_pane_response "$dir" 1 7 3
+  printf 'temporary failure\n' > "$dir/responses/2.out"
+  printf '1\n' > "$dir/responses/2.exit"
+  fb=$(make_zellij_fakebin "$dir")
+  PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" FM_BACKEND_KILL_STRICT=1 \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_kill firstmate:7 "" fm-task' "$ROOT"
+  status=$?
+  [ "$status" -ne 0 ] || fail "strict kill must fail when the Zellij label cannot be queried"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''close-tab-by-id' \
+    "strict kill must not close a target after its label query fails"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''close-pane' \
+    "strict kill must not close a target after its label query fails"
+  pass "fm_backend_zellij_kill: strict cleanup propagates label query failures"
+}
+
 test_teardown_passes_recorded_tab_id_to_zellij_kill() {
   local dir state data config project fb out status
   dir="$TMP_ROOT/teardown-zellij-ghost"; state="$dir/state"; data="$dir/data"; config="$dir/config"; project="$dir/project"
@@ -1082,6 +1119,8 @@ test_kill_skips_recorded_tab_when_label_mismatches
 test_kill_is_noop_when_session_absent
 test_kill_is_noop_when_target_is_malformed
 test_kill_is_strict_when_session_is_unqueryable
+test_kill_is_strict_when_target_query_is_unqueryable
+test_kill_is_strict_when_label_query_is_unqueryable
 test_teardown_passes_recorded_tab_id_to_zellij_kill
 test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag
 test_send_text_submit_detects_landed_send

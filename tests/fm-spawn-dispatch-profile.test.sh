@@ -708,6 +708,30 @@ test_quoted_raw_custom_launch_remains_supported() {
   pass "quoted raw custom launches retain their existing behavior"
 }
 
+test_raw_custom_dynamic_execution_fails_closed() {
+  local command case_name rec id out status n=0
+  for case_name in command-substitution backticks process-substitution; do
+    n=$((n + 1))
+    id="profile-raw-custom-dynamic-$n-z59"
+    rec=$(make_spawn_case "profile-raw-custom-dynamic-$n" claude "$id")
+    read_case_record "$rec"
+    case "$case_name" in
+      command-substitution) command='custom-agent "$(CODEX_HOME=/unsafe codex)"' ;;
+      backticks) command='custom-agent "`CODEX_HOME=/unsafe codex`"' ;;
+      process-substitution) command='custom-agent <(CODEX_HOME=/unsafe codex)' ;;
+    esac
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" "$command")
+    status=$?
+    expect_code 1 "$status" "$case_name raw custom launch must fail closed"
+    assert_contains "$out" "unsafe raw launch command" \
+      "$case_name raw custom launch did not explain the refusal"
+    assert_absent "$HOME_DIR/state/$id.meta" "$case_name raw custom launch must fail before task allocation"
+    [ ! -s "$LAUNCH_LOG" ] || fail "$case_name raw custom launch must not run Codex"
+  done
+  pass "raw custom dynamic execution fails closed"
+}
+
 test_codex_crewmate_home_uses_private_directory() {
   local rec id out status crew_home launch staging
   id=profile-codex-home-staging-z28
@@ -1088,6 +1112,7 @@ test_raw_codex_options_fail_closed
 test_raw_codex_execution_wrappers_fail_closed
 test_quoted_or_escaped_raw_codex_launch_fails_closed
 test_quoted_raw_custom_launch_remains_supported
+test_raw_custom_dynamic_execution_fails_closed
 test_codex_crewmate_home_uses_private_directory
 test_codex_home_activation_uses_open_descriptor
 test_codex_home_activation_reports_exec_failure
