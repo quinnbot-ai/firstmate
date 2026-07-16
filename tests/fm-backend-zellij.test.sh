@@ -853,6 +853,54 @@ test_kill_is_strict_when_label_query_is_unqueryable() {
   pass "fm_backend_zellij_kill: strict cleanup propagates label query failures"
 }
 
+test_kill_is_strict_when_tab_remains_after_close() {
+  local dir fb status
+  dir="$TMP_ROOT/kill-strict-tab-remains"; mkdir -p "$dir/responses"
+  zellij_pane_response "$dir" 1 7 3
+  zellij_tab_response "$dir" 3 3 fm-task
+  fb=$(make_zellij_fakebin "$dir")
+  PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" FM_BACKEND_KILL_STRICT=1 \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_kill firstmate:7' "$ROOT"
+  status=$?
+  [ "$status" -ne 0 ] || fail "strict kill must fail when close-tab-by-id leaves the task tab live"
+  zellij_assert_call_order "$dir/log" $'\x1f''close-tab-by-id' $'\x1f''list-tabs'$'\x1f''--json' \
+    "strict kill did not verify the tab was absent after close-tab-by-id"
+  pass "fm_backend_zellij_kill: strict cleanup rejects an unconfirmed tab close"
+}
+
+test_kill_strict_confirms_tab_absent_after_close() {
+  local dir fb status
+  dir="$TMP_ROOT/kill-strict-tab-absent"; mkdir -p "$dir/responses"
+  zellij_pane_response "$dir" 1 7 3
+  printf '[]\n' > "$dir/responses/3.out"
+  fb=$(make_zellij_fakebin "$dir")
+  PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" FM_BACKEND_KILL_STRICT=1 \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_kill firstmate:7' "$ROOT"
+  status=$?
+  expect_code 0 "$status" "strict kill should succeed only after the task tab is confirmed absent"
+  pass "fm_backend_zellij_kill: strict cleanup confirms a tab close"
+}
+
+test_kill_is_strict_when_pane_remains_after_close() {
+  local dir fb status close_line postcheck_line
+  dir="$TMP_ROOT/kill-strict-pane-remains"; mkdir -p "$dir/responses"
+  printf '[]\n' > "$dir/responses/1.out"
+  zellij_pane_response "$dir" 3 7 3
+  fb=$(make_zellij_fakebin "$dir")
+  PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" FM_BACKEND_KILL_STRICT=1 \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_kill firstmate:7' "$ROOT"
+  status=$?
+  [ "$status" -ne 0 ] || fail "strict kill must fail when close-pane leaves the task pane live"
+  close_line=$(grep -anF -- $'\x1f''close-pane' "$dir/log" | head -1 | cut -d: -f1)
+  postcheck_line=$(grep -anF -- $'\x1f''list-panes'$'\x1f''--json' "$dir/log" | tail -1 | cut -d: -f1)
+  [ -n "$close_line" ] && [ -n "$postcheck_line" ] && [ "$close_line" -lt "$postcheck_line" ] \
+    || fail "strict kill did not verify the pane was absent after close-pane"
+  pass "fm_backend_zellij_kill: strict cleanup rejects an unconfirmed pane close"
+}
+
 test_teardown_passes_recorded_tab_id_to_zellij_kill() {
   local dir state data config project fb out status
   dir="$TMP_ROOT/teardown-zellij-ghost"; state="$dir/state"; data="$dir/data"; config="$dir/config"; project="$dir/project"
@@ -1121,6 +1169,9 @@ test_kill_is_noop_when_target_is_malformed
 test_kill_is_strict_when_session_is_unqueryable
 test_kill_is_strict_when_target_query_is_unqueryable
 test_kill_is_strict_when_label_query_is_unqueryable
+test_kill_is_strict_when_tab_remains_after_close
+test_kill_strict_confirms_tab_absent_after_close
+test_kill_is_strict_when_pane_remains_after_close
 test_teardown_passes_recorded_tab_id_to_zellij_kill
 test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag
 test_send_text_submit_detects_landed_send

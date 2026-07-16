@@ -311,6 +311,22 @@ fm_backend_zellij_tab_matches_label() {  # <session> <tab_id> <label>
   [ "$count" = "1" ]
 }
 
+fm_backend_zellij_tab_absent() {  # <session> <tab_id>
+  local session=$1 tab_id=$2 tabs
+  tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null) || return 1
+  printf '%s' "$tabs" | jq -e 'type == "array"' >/dev/null 2>&1 || return 1
+  printf '%s' "$tabs" | jq -e --argjson t "$tab_id" \
+    '[.[]? | select(.tab_id == $t)] | length == 0' >/dev/null 2>&1
+}
+
+fm_backend_zellij_pane_absent() {  # <session> <pane_id>
+  local session=$1 pane_id=$2 panes
+  panes=$(fm_backend_zellij_cli "$session" action list-panes --json 2>/dev/null) || return 1
+  printf '%s' "$panes" | jq -e 'type == "array"' >/dev/null 2>&1 || return 1
+  printf '%s' "$panes" | jq -e --argjson p "$pane_id" \
+    '[.[]? | select(.id == $p)] | length == 0' >/dev/null 2>&1
+}
+
 # fm_backend_zellij_create_task: create the task's tab (one terminal pane) in
 # <session>, refusing an existing <label>. Zellij does NOT enforce tab-name
 # uniqueness itself (verified: two tabs can share a name), so the duplicate
@@ -586,8 +602,14 @@ fm_backend_zellij_kill() {  # <target> [tab_id] [expected_label]
   esac
   if [ -n "$tab_id" ]; then
     fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action close-tab-by-id "$tab_id" >/dev/null 2>&1 || [ "${FM_BACKEND_KILL_STRICT:-0}" != 1 ]
+    if [ "${FM_BACKEND_KILL_STRICT:-0}" = 1 ]; then
+      fm_backend_zellij_tab_absent "$FM_BACKEND_ZELLIJ_SESSION" "$tab_id" || return 1
+    fi
   elif [ -z "$expected_label" ]; then
     fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action close-pane --pane-id "$FM_BACKEND_ZELLIJ_PANE" >/dev/null 2>&1 || [ "${FM_BACKEND_KILL_STRICT:-0}" != 1 ]
+    if [ "${FM_BACKEND_KILL_STRICT:-0}" = 1 ]; then
+      fm_backend_zellij_pane_absent "$FM_BACKEND_ZELLIJ_SESSION" "$FM_BACKEND_ZELLIJ_PANE" || return 1
+    fi
   fi
 }
 
