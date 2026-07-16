@@ -284,6 +284,9 @@ spawn_abort_cleanup() {
     TREEHOUSE_ABORT_CLEANUP=0
     if ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) 2>/dev/null; then
       fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "fm-$ID" 2>/dev/null || true
+      if fm_backend_target_exists "$BACKEND" "$T" "fm-$ID"; then
+        write_failed_treehouse_spawn_meta
+      fi
     else
       write_failed_treehouse_spawn_meta
     fi

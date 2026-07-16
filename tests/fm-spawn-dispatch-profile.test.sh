@@ -21,11 +21,22 @@ make_spawn_fakebin() {
 set -u
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_id}"*)
+    [ "$(cat "${FM_FAKE_TARGET_STATE:?}" 2>/dev/null)" = live ] || exit 1
+    printf '%s\n' '@1'
+    exit 0
+    ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window)
+  kill-window)
+    [ -z "${FM_FAKE_BACKEND_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_BACKEND_LOG"
+    status=${FM_FAKE_BACKEND_KILL_STATUS:-0}
+    [ "$status" -ne 0 ] || printf '%s\n' gone > "${FM_FAKE_TARGET_STATE:?}"
+    exit "$status"
+    ;;
+  has-session|new-session|new-window)
     [ -z "${FM_FAKE_BACKEND_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_BACKEND_LOG"
     exit 0
     ;;
@@ -93,15 +104,19 @@ make_seeded_secondmate_home() {
 }
 
 run_spawn() {
-  local home=$1 wt=$2 fakebin=$3 launchlog=$4
+  local home=$1 wt=$2 fakebin=$3 launchlog=$4 target_state
   shift 4
+  target_state="$(dirname "$launchlog")/target-state"
   : > "$launchlog"
+  printf '%s\n' live > "$target_state"
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_BACKEND_LOG="$(dirname "$launchlog")/backend.log" \
     FM_FAKE_TREEHOUSE_RETURN_STATUS="${FM_FAKE_TREEHOUSE_RETURN_STATUS:-0}" \
+    FM_FAKE_BACKEND_KILL_STATUS="${FM_FAKE_BACKEND_KILL_STATUS:-0}" \
+    FM_FAKE_TARGET_STATE="$target_state" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     HOME="$CASE_DIR/user" \
     "$SPAWN" "$@" 2>&1
@@ -518,6 +533,42 @@ SH
   pass "Codex spawn records failed worktree returns for normal teardown"
 }
 
+test_codex_crewmate_home_records_failed_endpoint_removal() {
+  local rec id out status source_home crew_home project
+  id=profile-codex-home-kill-z26
+  rec=$(make_spawn_case profile-codex-home-kill codex "$id")
+  read_case_record "$rec"
+  source_home="$CASE_DIR/user/.codex"
+  crew_home="$HOME_DIR/data/codex-crewmate/fm-crewmate-$id"
+  project=$(cd "$PROJ_DIR" && pwd)
+  mkdir -p "$source_home" "$crew_home/plugins/stale-plugin"
+  cat > "$FAKEBIN_DIR/rm" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"plugins"*) exit 73 ;;
+  *) exec /bin/rm "$@" ;;
+esac
+SH
+  chmod +x "$FAKEBIN_DIR/rm"
+
+  out=$(FM_FAKE_TREEHOUSE_RETURN_STATUS=0 FM_FAKE_BACKEND_KILL_STATUS=76 \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "Codex spawn must fail when isolated-home cleanup and endpoint removal fail"
+  assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
+    "failed isolated-home cleanup did not return its worktree"
+  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+    "failed endpoint removal was not attempted"
+  assert_grep "window=firstmate:fm-$id" "$HOME_DIR/state/$id.meta" \
+    "failed endpoint removal did not record the task endpoint"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "failed endpoint removal did not record the worktree"
+  assert_grep "project=$project" "$HOME_DIR/state/$id.meta" \
+    "failed endpoint removal did not record the project"
+  [ ! -s "$LAUNCH_LOG" ] || fail "failed endpoint removal must not launch Codex"
+  pass "Codex spawn records failed endpoint removals for normal teardown"
+}
+
 test_codex_omits_invalid_max_effort() {
   local rec id out status launch
   id=profile-codex-max-z4
@@ -679,6 +730,7 @@ test_codex_crewmate_home_refuses_nonregular_targets
 test_raw_codex_launch_is_normalized
 test_unsafe_raw_codex_launch_fails_closed
 test_codex_crewmate_home_records_failed_worktree_return
+test_codex_crewmate_home_records_failed_endpoint_removal
 test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
