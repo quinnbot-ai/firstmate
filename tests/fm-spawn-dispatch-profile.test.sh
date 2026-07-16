@@ -151,6 +151,10 @@ codex_home_from_launch() {
   printf '%s\n' "$1" | sed -n "s/.*--home '\\([^']*\\)'.*/\\1/p"
 }
 
+codex_activation_result_from_launch() {
+  printf '%s\n' "$1" | sed -n "s/.*--result-file '\\([^']*\\)'.*/\\1/p"
+}
+
 materialize_codex_home() {  # <home> <data> <source> <profile> <worktree>
   local result="$1.activation"
   python3 "$ROOT/bin/fm-codex-home.py" --create-activate --data "$2" --source "$3" \
@@ -301,11 +305,14 @@ test_codex_threads_model_and_effort() {
 }
 
 test_codex_crewmate_home_excludes_mcp_and_plugins() {
-  local rec ship scout out status launch crew_home source_home
+  local rec ship scout out status launch crew_home source_home activation_result worktree_link worktree_real
   ship=profile-codex-home-ship-z17
   scout=profile-codex-home-scout-z18
   rec=$(make_spawn_case profile-codex-home codex "$ship" "$scout")
   read_case_record "$rec"
+  worktree_link="$CASE_DIR/worktree-link"
+  ln -s "$WT_DIR" "$worktree_link"
+  worktree_real=$(cd "$worktree_link" && pwd -P)
   source_home="$CASE_DIR/user/.codex"
   mkdir -p "$source_home/plugins"
   printf '%s\n' '{"auth_mode":"chatgpt"}' > "$source_home/auth.json"
@@ -324,31 +331,43 @@ command = "still-broken-memory-server"
 enabled = true
 EOF
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$ship" "$PROJ_DIR")
+  out=$(run_spawn "$HOME_DIR" "$worktree_link" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$ship" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "Codex ship spawn should succeed with an isolated home"
   launch=$(cat "$LAUNCH_LOG")
   crew_home=$(codex_home_from_launch "$launch")
+  activation_result=$(codex_activation_result_from_launch "$launch")
   [ -n "$crew_home" ] || fail "Codex ship launch did not expose an isolated CODEX_HOME"
-  assert_contains "$launch" "--home '$crew_home' --result-file '/tmp/fm-$ship/codex-home-activation' -- codex --profile 'fm-crewmate-$ship' --disable plugins" \
+  case "$activation_result" in "/tmp/fm-$ship/.codex-home-activation."????????"/result") : ;; *) fail "Codex ship launch did not use a private activation result: $activation_result" ;; esac
+  assert_contains "$launch" "--home '$crew_home' --result-file '$activation_result' -- codex --profile 'fm-crewmate-$ship' --disable plugins" \
     "Codex ship launch did not activate the isolated CODEX_HOME"
-  materialize_codex_home "$crew_home" "$HOME_DIR/data" "$source_home" "fm-crewmate-$ship" "$WT_DIR"
+  assert_contains "$launch" "--worktree '$worktree_real'" \
+    "Codex ship launch did not use the physical worktree for its trust profile"
+  assert_not_contains "$launch" "--worktree '$worktree_link'" \
+    "Codex ship launch used the logical worktree for its trust profile"
+  materialize_codex_home "$crew_home" "$HOME_DIR/data" "$source_home" "fm-crewmate-$ship" "$worktree_real"
   assert_contains "$out" "warning: Codex crewmate ignores project config" \
     "Codex ship launch did not warn that project Codex config was ignored"
-  assert_contains "$out" "$WT_DIR/.codex/config.toml to keep MCPs and plugins disabled" \
+  assert_contains "$out" "$worktree_real/.codex/config.toml to keep MCPs and plugins disabled" \
     "Codex ship launch did not warn that project Codex config was ignored"
   assert_present "$crew_home/config.toml" "isolated Codex config was not created"
   assert_grep "codex_crewmate_home=$crew_home" "$HOME_DIR/state/$ship.meta" \
     "Codex ship metadata did not retain its isolated home for cleanup"
   assert_no_grep 'mcp_servers' "$crew_home/config.toml" \
     "isolated Codex config retained MCP server entries"
-  assert_no_grep 'plugins' "$crew_home/config.toml" \
+  assert_grep 'plugins = false' "$crew_home/config.toml" \
+    "isolated Codex config did not disable plugins"
+  assert_no_grep '[plugins.' "$crew_home/config.toml" \
     "isolated Codex config retained plugin registrations"
+  assert_grep "trust_level = \"untrusted\"" "$crew_home/config.toml" \
+    "isolated Codex base config did not persist project trust"
+  assert_grep "$worktree_real" "$crew_home/config.toml" \
+    "isolated Codex base config did not scope untrusted trust to the worktree"
   assert_grep "trust_level = \"untrusted\"" "$crew_home/fm-crewmate-$ship.config.toml" \
     "isolated Codex profile did not disable project config trust"
   assert_grep '[projects.' "$crew_home/fm-crewmate-$ship.config.toml" \
     "isolated Codex profile did not scope untrusted trust to the project"
-  assert_grep "$WT_DIR" "$crew_home/fm-crewmate-$ship.config.toml" \
+  assert_grep "$worktree_real" "$crew_home/fm-crewmate-$ship.config.toml" \
     "isolated Codex profile did not scope untrusted trust to the worktree"
   assert_no_grep "$PROJ_DIR" "$crew_home/fm-crewmate-$ship.config.toml" \
     "isolated Codex profile must not scope untrusted trust to the primary project"
@@ -360,18 +379,22 @@ EOF
   [ ! -L "$crew_home/auth.json" ] || fail "isolated Codex auth must not point into the captain home"
 
   mkdir -p "$HOME_DIR/data/codex-crewmate/fm-crewmate-$scout/plugins/stale-plugin"
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$scout" "$PROJ_DIR" --scout)
+  out=$(run_spawn "$HOME_DIR" "$worktree_link" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$scout" "$PROJ_DIR" --scout)
   status=$?
   expect_code 0 "$status" "Codex scout spawn should use the isolated home"
   launch=$(cat "$LAUNCH_LOG")
   crew_home=$(codex_home_from_launch "$launch")
+  activation_result=$(codex_activation_result_from_launch "$launch")
   [ -n "$crew_home" ] || fail "Codex scout launch did not expose an isolated CODEX_HOME"
-  assert_contains "$launch" "--home '$crew_home' --result-file '/tmp/fm-$scout/codex-home-activation' -- codex --profile 'fm-crewmate-$scout' --disable plugins" \
+  case "$activation_result" in "/tmp/fm-$scout/.codex-home-activation."????????"/result") : ;; *) fail "Codex scout launch did not use a private activation result: $activation_result" ;; esac
+  assert_contains "$launch" "--home '$crew_home' --result-file '$activation_result' -- codex --profile 'fm-crewmate-$scout' --disable plugins" \
     "Codex scout launch did not activate the isolated CODEX_HOME"
-  materialize_codex_home "$crew_home" "$HOME_DIR/data" "$source_home" "fm-crewmate-$scout" "$WT_DIR"
+  materialize_codex_home "$crew_home" "$HOME_DIR/data" "$source_home" "fm-crewmate-$scout" "$worktree_real"
   assert_no_grep 'mcp_servers' "$crew_home/config.toml" \
     "Codex scout refresh reintroduced MCP server entries"
-  assert_no_grep 'plugins' "$crew_home/config.toml" \
+  assert_grep 'plugins = false' "$crew_home/config.toml" \
+    "Codex scout refresh did not disable plugins"
+  assert_no_grep '[plugins.' "$crew_home/config.toml" \
     "Codex scout refresh reintroduced plugin registrations"
   [ ! -e "$crew_home/plugins" ] || fail "Codex scout home retained plugins"
   pass "Codex ship and scout launches use fresh MCP-free homes"
@@ -527,7 +550,7 @@ SH
 }
 
 test_raw_codex_launch_is_normalized() {
-  local command case_name rec id out status launch crew_home n=0
+  local command case_name rec id out status launch crew_home activation_result n=0
   for case_name in mixed-case absolute-mixed-case env-wrapper absolute-env-wrapper command-wrapper nested-wrapper exec-wrapper; do
     n=$((n + 1))
     id="profile-raw-codex-$n-z24"
@@ -550,8 +573,10 @@ test_raw_codex_launch_is_normalized() {
     assert_contains "$out" "spawned $id harness=codex" "$case_name raw Codex launch did not report Codex"
     launch=$(cat "$LAUNCH_LOG")
     crew_home=$(codex_home_from_launch "$launch")
+    activation_result=$(codex_activation_result_from_launch "$launch")
     [ -n "$crew_home" ] || fail "$case_name raw Codex launch did not expose an isolated CODEX_HOME"
-    assert_contains "$launch" "--home '$crew_home' --result-file '/tmp/fm-$id/codex-home-activation' -- codex --profile 'fm-crewmate-$id' --disable plugins" \
+    case "$activation_result" in "/tmp/fm-$id/.codex-home-activation."????????"/result") : ;; *) fail "$case_name raw Codex launch did not use a private activation result: $activation_result" ;; esac
+    assert_contains "$launch" "--home '$crew_home' --result-file '$activation_result' -- codex --profile 'fm-crewmate-$id' --disable plugins" \
       "$case_name raw Codex launch did not enforce the isolated profile"
     assert_not_contains "$launch" '/unsafe' "$case_name raw CODEX_HOME assignment survived normalization"
   done
@@ -560,7 +585,7 @@ test_raw_codex_launch_is_normalized() {
 
 test_raw_codex_execution_wrappers_fail_closed() {
   local command case_name rec id out status n=0
-  for case_name in nice nice-option shell sudo-user timeout-duration script find xargs unknown-wrapper; do
+  for case_name in nice nice-option shell shell-script sudo-user timeout-duration script find xargs unknown-wrapper; do
     n=$((n + 1))
     id="profile-raw-codex-wrapper-$n-z31"
     rec=$(make_spawn_case "profile-raw-codex-wrapper-$n" codex "$id")
@@ -569,6 +594,7 @@ test_raw_codex_execution_wrappers_fail_closed() {
       nice) command='nice codex' ;;
       nice-option) command='nice -n 1 env CODEX_HOME=/unsafe codex' ;;
       shell) command='sh -c codex' ;;
+      shell-script) command='sh -c ./launch-worker' ;;
       sudo-user) command='sudo -u crew CODEX_HOME=/unsafe codex' ;;
       timeout-duration) command='timeout 5 CODEX_HOME=/unsafe codex' ;;
       script) command='script -q /dev/null codex' ;;
@@ -610,6 +636,23 @@ test_raw_codex_late_home_assignment_is_normalized() {
   pass "late raw CODEX_HOME assignments cannot bypass the isolated home"
 }
 
+test_raw_codex_options_fail_closed() {
+  local rec id out status
+  id=profile-raw-codex-options-z46
+  rec=$(make_spawn_case profile-raw-codex-options codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "codex --model gpt-5")
+  status=$?
+  expect_code 1 "$status" "raw Codex options must fail closed rather than being dropped"
+  assert_contains "$out" "raw Codex launch options are not supported" \
+    "raw Codex options did not explain the refusal"
+  assert_absent "$HOME_DIR/state/$id.meta" "raw Codex option refusal must happen before task allocation"
+  [ ! -s "$LAUNCH_LOG" ] || fail "raw Codex options must not launch a default Codex command"
+  pass "raw Codex options fail closed instead of being dropped"
+}
+
 test_quoted_or_escaped_raw_codex_launch_fails_closed() {
   local command case_name rec id out status n=0
   for case_name in quoted escaped; do
@@ -640,7 +683,7 @@ test_quoted_or_escaped_raw_codex_launch_fails_closed() {
 
 test_quoted_raw_custom_launch_remains_supported() {
   local command case_name rec id out status launch n=0
-  for case_name in quoted env-option env-s; do
+  for case_name in quoted env-option env-s shell-command; do
     n=$((n + 1))
     id="profile-raw-custom-$n-z29"
     rec=$(make_spawn_case "profile-raw-custom-$n" claude "$id")
@@ -649,6 +692,7 @@ test_quoted_raw_custom_launch_remains_supported() {
       quoted) command="custom-agent --prompt 'review this'" ;;
       env-option) command='env -i custom-agent --prompt review' ;;
       env-s) command="env -S 'custom-agent --prompt review'" ;;
+      shell-command) command="sh -c 'custom-agent --prompt review'" ;;
     esac
     out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
       "$id" "$PROJ_DIR" "$command" )
@@ -1039,6 +1083,7 @@ test_codex_crewmate_profile_rejects_toml_control_characters
 test_codex_crewmate_home_fails_when_private_home_creation_fails
 test_raw_codex_launch_is_normalized
 test_raw_codex_late_home_assignment_is_normalized
+test_raw_codex_options_fail_closed
 test_raw_codex_execution_wrappers_fail_closed
 test_quoted_or_escaped_raw_codex_launch_fails_closed
 test_quoted_raw_custom_launch_remains_supported

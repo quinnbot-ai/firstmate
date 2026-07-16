@@ -75,8 +75,8 @@
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 # Codex ship and scout launches receive a firstmate-managed CODEX_HOME under
 # data/codex-crewmate, each in a fresh private directory with only copied
-# auth/model catalog files and an empty config.toml with no MCP servers or plugins and a per-task profile
-# that excludes project-local Codex configuration.
+# auth/model catalog files and a config.toml with no MCP servers, disabled plugins, and a per-task
+# profile that excludes project-local Codex configuration.
 # Codex secondmate launches retain their existing home and are not changed here.
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
@@ -201,6 +201,7 @@ FAILED_ENDPOINT_CLEANUP=0
 TREEHOUSE_ABORT_CLEANUP=0
 CODEX_CREWMATE_HOME=
 CODEX_ACTIVATION_RESULT=
+CODEX_ACTIVATION_DIR=
 SPAWN_META_WRITTEN=0
 
 parse_orca_worktree_result() {
@@ -329,6 +330,7 @@ spawn_abort_cleanup() {
     CODEX_CREWMATE_HOME=
   fi
   [ "$orca_cleanup_failed" -eq 0 ] || write_failed_treehouse_spawn_meta
+  [ -z "$CODEX_ACTIVATION_DIR" ] || rm -rf -- "$CODEX_ACTIVATION_DIR"
   if [ "$status" -ne 0 ] && [ "$SPAWN_META_WRITTEN" = 1 ] && [ "$FAILED_ENDPOINT_CLEANUP" != 1 ] && [ "$preserve_codex_home" -eq 0 ] && [ "$orca_cleanup_failed" -eq 0 ] && [ -z "$CODEX_CREWMATE_HOME" ]; then
     rm -f "$STATE/$ID.meta"
   fi
@@ -677,7 +679,14 @@ raw_launch_starts_codex() {
             status=$?
             [ "$status" -eq 0 ] || return 2
             nested=$RAW_LAUNCH_WORD
-            if raw_launch_starts_codex "$nested"; then return 2; else return $?; fi
+            raw_launch_starts_codex "$nested"
+            status=$?
+            [ "$status" -eq 1 ] || return 2
+            raw_launch_read_word "$nested" || return 2
+            case "$RAW_LAUNCH_WORD" in
+              ./*|../*|*.sh|*.bash|*.zsh|*.command) return 2 ;;
+            esac
+            return 1
             ;;
           -*) ;;
           *) return 1 ;;
@@ -699,6 +708,25 @@ normalize_raw_codex_launch() {
   raw_launch_starts_codex "$1"
 }
 
+raw_codex_launch_is_normalizable() {
+  local raw=$1 seen_codex=0
+  while [ -n "$raw" ]; do
+    raw_launch_read_word "$raw" || return 1
+    raw=$RAW_LAUNCH_REST
+    if raw_launch_word_is_codex "$RAW_LAUNCH_WORD"; then
+      [ "$seen_codex" -eq 0 ] || return 1
+      seen_codex=1
+    elif [ "$seen_codex" -eq 0 ] && { raw_launch_word_is "$RAW_LAUNCH_WORD" env || raw_launch_word_is "$RAW_LAUNCH_WORD" command || raw_launch_word_is "$RAW_LAUNCH_WORD" exec; }; then
+      :
+    elif case "$RAW_LAUNCH_WORD" in CODEX_HOME=*) true ;; *) false ;; esac; then
+      :
+    else
+      return 1
+    fi
+  done
+  [ "$seen_codex" -eq 1 ]
+}
+
 refresh_codex_crewmate_home() {
   local name
   name=$(python3 "$FM_ROOT/bin/fm-codex-home.py" --data "$DATA" --new-home-name) || return 1
@@ -706,18 +734,20 @@ refresh_codex_crewmate_home() {
 }
 
 wait_for_codex_home_activation() {
-  local result=$1 deadline status
+  local result=$1 directory=$2 deadline status
   deadline=$(( $(date +%s) + 10 ))
   while [ "$(date +%s)" -le "$deadline" ]; do
     if [ -f "$result" ]; then
       status=$(cat "$result" 2>/dev/null || true)
       rm -f "$result"
+      rmdir "$directory" 2>/dev/null || true
       [ "$status" = ready ] && return 0
       echo "error: isolated Codex home activation failed" >&2
       return 1
     fi
     sleep 0.1
   done
+  rmdir "$directory" 2>/dev/null || true
   echo "error: isolated Codex home activation did not report ready within 10s" >&2
   return 1
 }
@@ -744,6 +774,10 @@ case "$ARG3" in
       }
       normalize_raw_codex_launch "$ARG3" || {
         echo "error: unsafe raw Codex launch command; use --harness codex for Codex options" >&2
+        exit 1
+      }
+      raw_codex_launch_is_normalizable "$ARG3" || {
+        echo "error: raw Codex launch options are not supported; use --harness codex with --model/--effort" >&2
         exit 1
       }
       HARNESS=codex
@@ -1040,6 +1074,7 @@ if [ "$KIND" = secondmate ]; then
 else
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
   WT=""
+  WT_REAL=""
   BRIEF="$DATA/$ID/brief.md"
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
@@ -1100,6 +1135,7 @@ validate_spawn_worktree() {  # <source> <inspect-target>
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
+  WT_REAL=$wt_real
 }
 
 W="fm-$ID"
@@ -1277,8 +1313,8 @@ if [ "$HARNESS" = codex ] && [ "$KIND" != secondmate ]; then
     echo "error: could not prepare isolated Codex crewmate home" >&2
     exit 1
   }
-  if [ -f "$WT/.codex/config.toml" ]; then
-    echo "warning: Codex crewmate ignores project config $WT/.codex/config.toml to keep MCPs and plugins disabled" >&2
+  if [ -f "$WT_REAL/.codex/config.toml" ]; then
+    echo "warning: Codex crewmate ignores project config $WT_REAL/.codex/config.toml to keep MCPs and plugins disabled" >&2
   fi
 fi
 
@@ -1289,16 +1325,17 @@ fi
 # targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
 TASK_TMP="/tmp/fm-$ID"
 mkdir -p "$TASK_TMP/gotmp"
-[ -z "$CODEX_CREWMATE_HOME" ] || CODEX_ACTIVATION_RESULT="$TASK_TMP/codex-home-activation"
-if [ -n "$CODEX_ACTIVATION_RESULT" ]; then
-  rm -f "$CODEX_ACTIVATION_RESULT" || {
-    echo "error: could not clear isolated Codex home activation result" >&2
+if [ -n "$CODEX_CREWMATE_HOME" ]; then
+  CODEX_ACTIVATION_DIR=$(mktemp -d "$TASK_TMP/.codex-home-activation.XXXXXXXX") || {
+    echo "error: could not create private isolated Codex home activation directory" >&2
     exit 1
   }
-  [ ! -e "$CODEX_ACTIVATION_RESULT" ] || {
-    echo "error: isolated Codex home activation result already exists" >&2
+  [ -d "$CODEX_ACTIVATION_DIR" ] && [ ! -L "$CODEX_ACTIVATION_DIR" ] || {
+    echo "error: isolated Codex home activation directory is unsafe" >&2
     exit 1
   }
+  chmod 700 "$CODEX_ACTIVATION_DIR" || exit 1
+  CODEX_ACTIVATION_RESULT="$CODEX_ACTIVATION_DIR/result"
 fi
 
 # Per-harness turn-end hook: a file that touches state/<id>.turn-ended when the
@@ -1485,7 +1522,7 @@ if [ -n "$CODEX_CREWMATE_HOME" ]; then
   sq_codex_home_helper=$(shell_quote "$FM_ROOT/bin/fm-codex-home.py")
   sq_codex_data=$(shell_quote "$DATA")
   sq_codex_source=$(shell_quote "$HOME/.codex")
-  sq_codex_worktree=$(shell_quote "$WT")
+  sq_codex_worktree=$(shell_quote "$WT_REAL")
   sq_codex_activation_result=$(shell_quote "$CODEX_ACTIVATION_RESULT")
   LAUNCH="exec python3 $sq_codex_home_helper --create-activate --data $sq_codex_data --source $sq_codex_source --profile $sq_codex_crewmate_profile --worktree $sq_codex_worktree --home $sq_codex_crewmate_home --result-file $sq_codex_activation_result -- $LAUNCH"
 fi
@@ -1502,7 +1539,9 @@ spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 spawn_send_key "$T" Enter
 if [ -n "$CODEX_ACTIVATION_RESULT" ]; then
-  wait_for_codex_home_activation "$CODEX_ACTIVATION_RESULT" || exit 1
+  wait_for_codex_home_activation "$CODEX_ACTIVATION_RESULT" "$CODEX_ACTIVATION_DIR" || exit 1
+  CODEX_ACTIVATION_DIR=
+  CODEX_ACTIVATION_RESULT=
 fi
 TREEHOUSE_ABORT_CLEANUP=0
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0

@@ -280,7 +280,8 @@ def create_home(args, command=None):
                 try:
                     require_directory(home_fd, "isolated Codex home")
                     os.fchmod(home_fd, 0o700)
-                    write_file(home_fd, "config.toml", b"# Firstmate Codex crewmate home.\n")
+                    base_config = "# Firstmate Codex crewmate home.\n[features]\nplugins = false\n[projects.\"%s\"]\ntrust_level = \"untrusted\"\n" % worktree
+                    write_file(home_fd, "config.toml", base_config.encode())
                     copy_regular_file(args.source, home_fd, "auth.json")
                     copy_regular_file(args.source, home_fd, "models_cache.json")
                     profile = "# Firstmate Codex crewmate profile.\n[projects.\"%s\"]\ntrust_level = \"untrusted\"\n" % worktree
