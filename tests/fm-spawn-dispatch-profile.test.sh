@@ -11,6 +11,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
+TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
 
 make_spawn_fakebin() {
@@ -320,6 +321,8 @@ EOF
   assert_contains "$out" "$WT_DIR/.codex/config.toml to keep MCPs and plugins disabled" \
     "Codex ship launch did not warn that project Codex config was ignored"
   assert_present "$crew_home/config.toml" "isolated Codex config was not created"
+  assert_grep "codex_crewmate_home=$crew_home" "$HOME_DIR/state/$ship.meta" \
+    "Codex ship metadata did not retain its isolated home for cleanup"
   assert_no_grep 'mcp_servers' "$crew_home/config.toml" \
     "isolated Codex config retained MCP server entries"
   assert_no_grep 'plugins' "$crew_home/config.toml" \
@@ -381,6 +384,32 @@ test_codex_crewmate_home_uses_fresh_private_directory() {
   pass "Codex spawn uses a fresh private isolated home"
 }
 
+test_codex_crewmate_home_is_removed_at_teardown() {
+  local rec id out status launch crew_home target_state
+  id=profile-codex-home-teardown-z30
+  rec=$(make_spawn_case profile-codex-home-teardown codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "Codex spawn should prepare a private home before teardown"
+  launch=$(cat "$LAUNCH_LOG")
+  crew_home=$(codex_home_from_launch "$launch")
+  [ -d "$crew_home" ] || fail "Codex spawn did not create the private home to be torn down"
+  target_state="$CASE_DIR/target-state"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_FAKE_TARGET_STATE="$target_state" \
+    FM_FAKE_BACKEND_LOG="$CASE_DIR/backend.log" PATH="$FAKEBIN_DIR:$PATH" \
+    "$TEARDOWN" "$id" --force 2>&1)
+  status=$?
+  expect_code 0 "$status" "teardown should remove a recorded Codex private home"
+  [ ! -e "$crew_home" ] || fail "teardown left the credential-bearing Codex private home behind"
+  assert_absent "$HOME_DIR/state/$id.meta" "teardown should remove metadata only after private-home cleanup"
+  pass "teardown removes the recorded private Codex home"
+}
+
 test_codex_crewmate_home_refuses_symlink_escape() {
   local rec id out status source_home crew_root
   id=profile-codex-home-symlink-z21
@@ -439,7 +468,7 @@ SH
 
 test_raw_codex_launch_is_normalized() {
   local command case_name rec id out status launch crew_home n=0
-  for case_name in mixed-case absolute-mixed-case; do
+  for case_name in mixed-case absolute-mixed-case env-wrapper command-wrapper nested-wrapper; do
     n=$((n + 1))
     id="profile-raw-codex-$n-z24"
     rec=$(make_spawn_case "profile-raw-codex-$n" codex "$id")
@@ -447,6 +476,9 @@ test_raw_codex_launch_is_normalized() {
     case "$case_name" in
       mixed-case) command='CODEX_HOME=/unsafe Codex' ;;
       absolute-mixed-case) command='CODEX_HOME=/unsafe /opt/firstmate/Codex' ;;
+      env-wrapper) command='env CODEX_HOME=/unsafe codex' ;;
+      command-wrapper) command='command codex CODEX_HOME=/unsafe' ;;
+      nested-wrapper) command='command env CODEX_HOME=/unsafe codex' ;;
     esac
 
     out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
@@ -464,8 +496,8 @@ test_raw_codex_launch_is_normalized() {
   pass "raw Codex launch is normalized to the isolated profile"
 }
 
-test_unsafe_raw_codex_launch_fails_closed() {
-  local rec id out status
+test_raw_codex_late_home_assignment_is_normalized() {
+  local rec id out status launch crew_home
   id=profile-raw-codex-unsafe-z25
   rec=$(make_spawn_case profile-raw-codex-unsafe codex "$id")
   read_case_record "$rec"
@@ -473,12 +505,12 @@ test_unsafe_raw_codex_launch_fails_closed() {
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" "codex CODEX_HOME=/unsafe")
   status=$?
-  expect_code 1 "$status" "unsafe raw Codex launch must fail closed"
-  assert_contains "$out" "unsafe raw Codex launch command" \
-    "unsafe raw Codex launch did not explain the refusal"
-  assert_absent "$HOME_DIR/state/$id.meta" "unsafe raw Codex launch must fail before task allocation"
-  [ ! -s "$LAUNCH_LOG" ] || fail "unsafe raw Codex launch must not launch Codex"
-  pass "unsafe raw Codex launch fails closed"
+  expect_code 0 "$status" "raw Codex launch with a late CODEX_HOME assignment should normalize"
+  launch=$(cat "$LAUNCH_LOG")
+  crew_home=$(codex_home_from_launch "$launch")
+  [ -n "$crew_home" ] || fail "late CODEX_HOME assignment bypassed the isolated home"
+  assert_not_contains "$launch" '/unsafe' "late raw CODEX_HOME assignment survived normalization"
+  pass "late raw CODEX_HOME assignments cannot bypass the isolated home"
 }
 
 test_quoted_or_escaped_raw_codex_launch_fails_closed() {
@@ -538,7 +570,7 @@ test_codex_crewmate_home_uses_private_directory() {
   status=$?
   unset FM_FAKE_MKTEMP_LOG
   expect_code 0 "$status" "Codex spawn should create an isolated private home"
-  assert_contains "$(cat "$CASE_DIR/mktemp.log")" "-d .fm-codex-home.XXXXXXXX" \
+  assert_contains "$(cat "$CASE_DIR/mktemp.log")" "/.fm-codex-home.XXXXXXXX" \
     "Codex home refresh did not atomically create a private home directory"
   assert_no_grep '\$\$' "$SPAWN" \
     "Codex home refresh retained predictable PID staging names"
@@ -565,8 +597,8 @@ esac
 SH
   chmod +x "$FAKEBIN_DIR/mktemp"
 
-  FM_FAKE_TREEHOUSE_RETURN_STATUS=75 \
-    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(FM_FAKE_TREEHOUSE_RETURN_STATUS=75 \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "Codex spawn must fail when private-home creation and return fail"
   assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
@@ -770,10 +802,11 @@ test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_crewmate_home_excludes_mcp_and_plugins
 test_codex_crewmate_home_uses_fresh_private_directory
+test_codex_crewmate_home_is_removed_at_teardown
 test_codex_crewmate_home_refuses_symlink_escape
 test_codex_crewmate_home_fails_when_private_home_creation_fails
 test_raw_codex_launch_is_normalized
-test_unsafe_raw_codex_launch_fails_closed
+test_raw_codex_late_home_assignment_is_normalized
 test_quoted_or_escaped_raw_codex_launch_fails_closed
 test_quoted_raw_custom_launch_remains_supported
 test_codex_crewmate_home_uses_private_directory

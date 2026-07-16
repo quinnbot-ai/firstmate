@@ -113,6 +113,7 @@ PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
 # (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
+CODEX_CREWMATE_HOME=$(grep '^codex_crewmate_home=' "$META" | cut -d= -f2- || true)
 ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
 ORCA_PATH_MATCH_VERIFIED=0
 
@@ -777,6 +778,38 @@ safe_rm_rf_child_worktree() {
   rm -rf -- "$target"
 }
 
+remove_codex_crewmate_home() {
+  local home=$1 data_real base base_real name
+  [ -n "$home" ] || return 0
+  [ -e "$home" ] || return 0
+  [ -L "$home" ] && {
+    echo "REFUSED: unsafe Codex crewmate home removal target $home is a symlink" >&2
+    return 1
+  }
+  data_real=$(cd "$DATA" 2>/dev/null && pwd -P) || return 1
+  base="$DATA/codex-crewmate"
+  [ ! -L "$base" ] || {
+    echo "REFUSED: unsafe Codex crewmate home base $base is a symlink" >&2
+    return 1
+  }
+  base_real=$(cd "$base" 2>/dev/null && pwd -P) || return 1
+  [ "$base_real" = "$data_real/codex-crewmate" ] || {
+    echo "REFUSED: unsafe Codex crewmate home base $base resolves outside firstmate data" >&2
+    return 1
+  }
+  name=${home##*/}
+  case "$name" in .fm-codex-home.*) : ;; *)
+    echo "REFUSED: unsafe Codex crewmate home removal target $home" >&2
+    return 1
+    ;;
+  esac
+  [ "$(cd "$(dirname "$home")" 2>/dev/null && pwd -P)" = "$base_real" ] || {
+    echo "REFUSED: unsafe Codex crewmate home removal target $home resolves outside firstmate data" >&2
+    return 1
+  }
+  ( cd -P "$base" 2>/dev/null && [ "$(pwd -P)" = "$base_real" ] && rm -rf -- "./$name" )
+}
+
 validate_firstmate_home_for_removal() {
   local home=$1 label=$2 expected_id=${3:-} abs_home_path marker_id conflict child_id child_home
   [ -n "$home" ] || return 0
@@ -1033,6 +1066,7 @@ fi
 if [ "$BACKEND" != orca ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
 fi
+remove_codex_crewmate_home "$CODEX_CREWMATE_HOME" || exit 1
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"

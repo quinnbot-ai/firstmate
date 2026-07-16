@@ -941,6 +941,21 @@ test_kill_is_best_effort_when_close_workspace_fails() {
   pass "fm_backend_cmux_kill: never fails even when close-workspace fails"
 }
 
+test_kill_is_strict_when_target_readiness_is_unqueryable() {
+  local dir fb status
+  dir="$TMP_ROOT/kill-strict-unqueryable"; mkdir -p "$dir/responses"
+  cmux_panes_empty_response "$dir" 1
+  fb=$(make_cmux_fakebin "$dir")
+  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    FM_BACKEND_KILL_STRICT=1 \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_kill "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"' "$ROOT"
+  status=$?
+  [ "$status" -ne 0 ] || fail "strict kill must fail when the cmux target cannot be queried"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''close-workspace' \
+    "strict kill must not claim to close an unqueryable cmux target"
+  pass "fm_backend_cmux_kill: strict cleanup propagates readiness failures"
+}
+
 test_kill_recovers_stale_target_by_label() {
   local dir fb title
   dir="$TMP_ROOT/kill-stale-target"; mkdir -p "$dir/responses"
@@ -1058,6 +1073,7 @@ test_window_of_workspace_empty_when_not_found
 test_kill_closes_workspace_directly_when_not_last
 test_kill_adds_sibling_when_last_in_window
 test_kill_is_best_effort_when_close_workspace_fails
+test_kill_is_strict_when_target_readiness_is_unqueryable
 test_kill_recovers_stale_target_by_label
 test_list_live_filters_by_title_prefix
 test_secondmate_spawn_refuses_cmux_backend

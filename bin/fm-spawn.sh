@@ -196,6 +196,7 @@ ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
 TREEHOUSE_ABORT_CLEANUP=0
+CODEX_CREWMATE_HOME=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -225,6 +226,7 @@ write_failed_treehouse_spawn_meta() {
     echo "mode=${MODE:-no-mistakes}"
     echo "yolo=${YOLO:-off}"
     echo "tasktmp=${TASK_TMP:-}"
+    [ -z "${CODEX_CREWMATE_HOME:-}" ] || echo "codex_crewmate_home=$CODEX_CREWMATE_HOME"
     echo "model=${MODEL:-default}"
     echo "effort=${EFFORT:-default}"
     [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
@@ -244,6 +246,21 @@ write_failed_treehouse_spawn_meta() {
       echo "cmux_surface_id=${CMUX_SURFACE_ID:-}"
     fi
   } > "$STATE/$ID.meta" 2>/dev/null || true
+}
+
+remove_codex_crewmate_home() {
+  local home=${CODEX_CREWMATE_HOME:-} data_real base base_real name
+  [ -n "$home" ] || return 0
+  [ -e "$home" ] || return 0
+  [ -L "$home" ] && return 1
+  data_real=$(cd "$DATA" 2>/dev/null && pwd -P) || return 1
+  base="$DATA/codex-crewmate"
+  [ ! -L "$base" ] || return 1
+  base_real=$(cd "$base" 2>/dev/null && pwd -P) || return 1
+  [ "$base_real" = "$data_real/codex-crewmate" ] || return 1
+  name=${home##*/}
+  case "$name" in .fm-codex-home.*) : ;; *) return 1 ;; esac
+  ( cd -P "$base" 2>/dev/null && [ "$(pwd -P)" = "$base_real" ] && rm -rf -- "./$name" )
 }
 
 orca_spawn_abort_cleanup() {
@@ -279,18 +296,27 @@ orca_spawn_abort_cleanup() {
 }
 
 spawn_abort_cleanup() {
-  local status=$?
+  local status=$? preserve_codex_home=0 clean_codex_home=0
   if [ "$TREEHOUSE_ABORT_CLEANUP" = 1 ]; then
     TREEHOUSE_ABORT_CLEANUP=0
+    clean_codex_home=1
     if ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) 2>/dev/null; then
       if ! FM_BACKEND_KILL_STRICT=1 fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "fm-$ID" 2>/dev/null; then
         write_failed_treehouse_spawn_meta
+        preserve_codex_home=1
       elif fm_backend_target_exists "$BACKEND" "$T" "fm-$ID"; then
         write_failed_treehouse_spawn_meta
+        preserve_codex_home=1
       fi
     else
       write_failed_treehouse_spawn_meta
+      preserve_codex_home=1
     fi
+  fi
+  [ "$ORCA_ABORT_CLEANUP" = 1 ] && clean_codex_home=1
+  if [ "$clean_codex_home" -eq 1 ] && [ "$preserve_codex_home" -eq 0 ] && ! remove_codex_crewmate_home; then
+    echo "error: could not remove isolated Codex crewmate home" >&2
+    write_failed_treehouse_spawn_meta
   fi
   orca_spawn_abort_cleanup
   return "$status"
@@ -467,16 +493,45 @@ raw_launch_read_word() {
 }
 
 raw_launch_starts_codex() {
-  local raw=$1 word status
+  local raw=$1 word status state=prefix
   while :; do
     raw_launch_read_word "$raw"
     status=$?
     [ "$status" -eq 0 ] || return "$status"
     word=$RAW_LAUNCH_WORD
     raw=$RAW_LAUNCH_REST
-    case "$word" in
-      [A-Za-z_][A-Za-z0-9_]*=*) ;;
-      *) raw_launch_word_is_codex "$word"; return $? ;;
+    case "$state" in
+      prefix)
+        case "$word" in
+          [A-Za-z_][A-Za-z0-9_]*=*) ;;
+          env) state=env ;;
+          command) state=command ;;
+          *) raw_launch_word_is_codex "$word"; return $? ;;
+        esac
+        ;;
+      env)
+        case "$word" in
+          [A-Za-z_][A-Za-z0-9_]*=*) ;;
+          --) state=env-command ;;
+          -*) return 2 ;;
+          env|command) state=$word ;;
+          *) raw_launch_word_is_codex "$word"; return $? ;;
+        esac
+        ;;
+      command)
+        case "$word" in
+          --) state=command-command ;;
+          -*) ;;
+          env|command) state=$word ;;
+          *) raw_launch_word_is_codex "$word"; return $? ;;
+        esac
+        ;;
+      env-command|command-command)
+        case "$word" in
+          env|command) state=$word ;;
+          *) raw_launch_word_is_codex "$word"; return $? ;;
+        esac
+        ;;
     esac
   done
 }
@@ -489,19 +544,8 @@ raw_launch_is_simple() {
 }
 
 normalize_raw_codex_launch() {
-  local raw=$1 word seen_codex=0
-  raw_launch_is_simple "$raw" || return 1
-  for word in $raw; do
-    case "$word" in
-      [A-Za-z_][A-Za-z0-9_]*=*) [ "$seen_codex" -eq 0 ] || return 1 ;;
-      *)
-        raw_launch_word_is_codex "$word" || return 1
-        [ "$seen_codex" -eq 0 ] || return 1
-        seen_codex=1
-        ;;
-    esac
-  done
-  [ "$seen_codex" -eq 1 ]
+  raw_launch_is_simple "$1" || return 1
+  raw_launch_starts_codex "$1"
 }
 
 refresh_codex_crewmate_home() {
@@ -517,42 +561,34 @@ refresh_codex_crewmate_home() {
     echo "error: isolated Codex home must resolve inside firstmate data: $base" >&2
     return 1
   }
-  (
-    cd -P "$base" 2>/dev/null || exit 1
-    [ "$(pwd -P)" = "$base_real" ] || {
-      echo "error: isolated Codex home must resolve inside firstmate data: $base" >&2
-      exit 1
-    }
-    home=$(mktemp -d '.fm-codex-home.XXXXXXXX') || exit 1
-    cd -P "$home" 2>/dev/null || exit 1
-    home_real=$(pwd -P)
-    case "$home_real" in
-      "$base_real"/.fm-codex-home.*) : ;;
-      *)
-        echo "error: isolated Codex home must resolve inside firstmate data: $home" >&2
-        exit 1
-        ;;
-    esac
-    chmod 700 . || exit 1
-    printf '%s\n' '# Firstmate Codex crewmate home.' > config.toml || exit 1
-    chmod 600 config.toml || exit 1
-    for name in auth.json models_cache.json; do
-      source_file="$source/$name"
-      if [ -f "$source_file" ]; then
-        cp "$source_file" "$name" || exit 1
-        chmod 600 "$name" || exit 1
-      fi
-    done
-    profile_file="$profile.config.toml"
-    worktree_key=$(toml_basic_string "$worktree") || exit 1
-    {
-      printf '%s\n' '# Firstmate Codex crewmate profile.'
-      printf '[projects."%s"]\n' "$worktree_key"
-      printf '%s\n' 'trust_level = "untrusted"'
-    } > "$profile_file" || exit 1
-    chmod 600 "$profile_file" || exit 1
-    printf '%s\n' "$home_real"
-  ) || return 1
+  home=$(mktemp -d "$base_real/.fm-codex-home.XXXXXXXX") || return 1
+  home_real=$(cd -P "$home" 2>/dev/null && pwd -P) || return 1
+  case "$home_real" in
+    "$base_real"/.fm-codex-home.*) : ;;
+    *)
+      echo "error: isolated Codex home must resolve inside firstmate data: $home" >&2
+      return 1
+      ;;
+  esac
+  CODEX_CREWMATE_HOME=$home_real
+  chmod 700 "$home" || return 1
+  printf '%s\n' '# Firstmate Codex crewmate home.' > "$home/config.toml" || return 1
+  chmod 600 "$home/config.toml" || return 1
+  for name in auth.json models_cache.json; do
+    source_file="$source/$name"
+    if [ -f "$source_file" ]; then
+      cp "$source_file" "$home/$name" || return 1
+      chmod 600 "$home/$name" || return 1
+    fi
+  done
+  profile_file="$home/$profile.config.toml"
+  worktree_key=$(toml_basic_string "$worktree") || return 1
+  {
+    printf '%s\n' '# Firstmate Codex crewmate profile.'
+    printf '[projects."%s"]\n' "$worktree_key"
+    printf '%s\n' 'trust_level = "untrusted"'
+  } > "$profile_file" || return 1
+  chmod 600 "$profile_file" || return 1
 }
 
 case "$ARG3" in
@@ -873,7 +909,6 @@ else
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
-CODEX_CREWMATE_HOME=
 CODEX_CREWMATE_PROFILE=
 if [ "$HARNESS" = codex ] && [ "$KIND" != secondmate ]; then
   case "$ID" in
@@ -1103,7 +1138,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 fi
 
 if [ "$HARNESS" = codex ] && [ "$KIND" != secondmate ]; then
-  CODEX_CREWMATE_HOME=$(refresh_codex_crewmate_home "$WT" "$CODEX_CREWMATE_PROFILE") || {
+  refresh_codex_crewmate_home "$WT" "$CODEX_CREWMATE_PROFILE" || {
     echo "error: could not prepare isolated Codex crewmate home" >&2
     exit 1
   }
@@ -1250,6 +1285,7 @@ META_WINDOW=$T
   echo "mode=$MODE"
   echo "yolo=$YOLO"
   echo "tasktmp=$TASK_TMP"
+  [ -z "$CODEX_CREWMATE_HOME" ] || echo "codex_crewmate_home=$CODEX_CREWMATE_HOME"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   # backend= is written only for a non-default (non-tmux) backend, so the

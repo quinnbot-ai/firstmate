@@ -530,8 +530,8 @@ fm_backend_zellij_send_text_submit() {  # <target> <text> <retries> <enter-sleep
 # passes the recorded tab id and expected tab label for already-empty ghost
 # tabs. Any tab id is verified against the expected label when one is provided.
 fm_backend_zellij_kill() {  # <target> [tab_id] [expected_label]
-  fm_backend_zellij_parse_target "$1" || return 0
-  fm_backend_zellij_session_exists "$FM_BACKEND_ZELLIJ_SESSION" || return 0
+  fm_backend_zellij_parse_target "$1" || [ "${FM_BACKEND_KILL_STRICT:-0}" != 1 ] || return 1
+  fm_backend_zellij_session_exists "$FM_BACKEND_ZELLIJ_SESSION" || [ "${FM_BACKEND_KILL_STRICT:-0}" != 1 ] || return 1
   local tab_id fallback_tab_id=${2:-} expected_label=${3:-}
   tab_id=$(fm_backend_zellij_tab_for_pane "$FM_BACKEND_ZELLIJ_SESSION" "$FM_BACKEND_ZELLIJ_PANE" 2>/dev/null)
   if [ -n "$tab_id" ] && [ -n "$expected_label" ] && ! fm_backend_zellij_tab_matches_label "$FM_BACKEND_ZELLIJ_SESSION" "$tab_id" "$expected_label"; then

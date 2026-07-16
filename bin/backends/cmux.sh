@@ -638,9 +638,11 @@ fm_backend_cmux_window_of_workspace() {  # <workspace_id> -> "<window_id> <count
 fm_backend_cmux_kill() {  # <target> [unused] [expected-label]
   local expected_label=${3:-} wsid wininfo win count
   if [ -n "$expected_label" ]; then
-    fm_backend_cmux_target_ready "$1" "$expected_label" || return 0
+    fm_backend_cmux_target_ready "$1" "$expected_label" || [ "${FM_BACKEND_KILL_STRICT:-0}" != 1 ] || return 1
+  elif [ "${FM_BACKEND_KILL_STRICT:-0}" = 1 ]; then
+    fm_backend_cmux_target_ready "$1" || return 1
   else
-    fm_backend_cmux_parse_target "$1" || return 0
+    fm_backend_cmux_parse_target "$1" || [ "${FM_BACKEND_KILL_STRICT:-0}" != 1 ] || return 1
   fi
   wsid=$FM_BACKEND_CMUX_WORKSPACE
   wininfo=$(fm_backend_cmux_window_of_workspace "$wsid")
