@@ -683,13 +683,14 @@ test_quoted_or_escaped_raw_codex_launch_fails_closed() {
 
 test_quoted_raw_custom_launch_remains_supported() {
   local command case_name rec id out status launch n=0
-  for case_name in quoted env-option env-s shell-command; do
+  for case_name in quoted shell-variable env-option env-s shell-command; do
     n=$((n + 1))
     id="profile-raw-custom-$n-z29"
     rec=$(make_spawn_case "profile-raw-custom-$n" claude "$id")
     read_case_record "$rec"
     case "$case_name" in
       quoted) command="custom-agent --prompt 'review this'" ;;
+      shell-variable) command="custom-agent --prompt \"\$PROMPT\"" ;;
       env-option) command='env -i custom-agent --prompt review' ;;
       env-s) command="env -S 'custom-agent --prompt review'" ;;
       shell-command) command="sh -c 'custom-agent --prompt review'" ;;

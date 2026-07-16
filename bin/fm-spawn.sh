@@ -760,7 +760,7 @@ case "$ARG3" in
     if [ "$raw_codex_status" -eq 1 ]; then
       raw_launch_mentions_codex "$ARG3"
       raw_codex_mentions=$?
-      [ "$raw_codex_mentions" -eq 1 ] || raw_codex_status=2
+      [ "$raw_codex_mentions" -ne 0 ] || raw_codex_status=2
     fi
     set -e
     if [ "$KIND" != secondmate ] && [ "$raw_codex_status" -eq 2 ]; then
