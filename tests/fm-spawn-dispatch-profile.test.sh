@@ -66,6 +66,13 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
+  cat > "$fakebin/mktemp" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -z "${FM_FAKE_MKTEMP_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_MKTEMP_LOG"
+exec /usr/bin/mktemp "$@"
+SH
+  chmod +x "$fakebin/mktemp"
   printf '%s\n' "$fakebin"
 }
 
@@ -505,6 +512,55 @@ test_unsafe_raw_codex_launch_fails_closed() {
   pass "unsafe raw Codex launch fails closed"
 }
 
+test_quoted_or_escaped_raw_codex_launch_fails_closed() {
+  local command case_name rec id out status n=0
+  for case_name in quoted escaped; do
+    n=$((n + 1))
+    id="profile-raw-codex-shell-$n-z27"
+    rec=$(make_spawn_case "profile-raw-codex-shell-$n" codex "$id")
+    read_case_record "$rec"
+    case "$case_name" in
+      quoted) command="CODEX_HOME=/unsafe 'codex'" ;;
+      escaped) command='CODEX_HOME=/unsafe co\de\x' ;;
+    esac
+
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" "$command")
+    status=$?
+    expect_code 1 "$status" "$case_name raw Codex launch must fail closed"
+    assert_contains "$out" "unsafe raw launch command" \
+      "$case_name raw Codex launch did not explain the refusal"
+    assert_absent "$HOME_DIR/state/$id.meta" "$case_name raw Codex launch must fail before task allocation"
+    if [ -e "$CASE_DIR/backend.log" ]; then
+      assert_no_grep "new-window -t firstmate" "$CASE_DIR/backend.log" \
+        "$case_name raw Codex launch must fail before endpoint allocation"
+    fi
+    [ ! -s "$LAUNCH_LOG" ] || fail "$case_name raw Codex launch must not launch Codex"
+  done
+  pass "quoted and escaped raw Codex launches fail closed"
+}
+
+test_codex_crewmate_home_uses_private_staging() {
+  local rec id out status crew_home staging
+  id=profile-codex-home-staging-z28
+  rec=$(make_spawn_case profile-codex-home-staging codex "$id")
+  read_case_record "$rec"
+  export FM_FAKE_MKTEMP_LOG="$CASE_DIR/mktemp.log"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  unset FM_FAKE_MKTEMP_LOG
+  expect_code 0 "$status" "Codex spawn should create isolated-home files through private staging"
+  assert_contains "$(cat "$CASE_DIR/mktemp.log")" "-d .fm-codex-stage.XXXXXXXX" \
+    "Codex home refresh did not atomically create a private staging directory"
+  assert_no_grep '\$\$' "$SPAWN" \
+    "Codex home refresh retained predictable PID staging names"
+  crew_home="$HOME_DIR/data/codex-crewmate/fm-crewmate-$id"
+  staging=$(find "$crew_home" -maxdepth 1 -type d -name '.fm-codex-stage.*' -print -quit)
+  [ -z "$staging" ] || fail "Codex home refresh left private staging behind: $staging"
+  pass "Codex home refresh uses and removes private staging"
+}
+
 test_codex_crewmate_home_records_failed_worktree_return() {
   local rec id out status source_home crew_home project
   id=profile-codex-home-return-z22
@@ -736,6 +792,8 @@ test_codex_crewmate_home_refuses_symlink_escape
 test_codex_crewmate_home_refuses_nonregular_targets
 test_raw_codex_launch_is_normalized
 test_unsafe_raw_codex_launch_fails_closed
+test_quoted_or_escaped_raw_codex_launch_fails_closed
+test_codex_crewmate_home_uses_private_staging
 test_codex_crewmate_home_records_failed_worktree_return
 test_codex_crewmate_home_records_failed_endpoint_removal
 test_codex_omits_invalid_max_effort

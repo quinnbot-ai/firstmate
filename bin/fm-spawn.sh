@@ -445,8 +445,16 @@ raw_launch_word_is_codex() {
   [ "$lowered" = codex ]
 }
 
+raw_launch_is_simple() {
+  local raw=$1
+  case "$raw" in
+    *[\'\"\\\`\$\;\&\|\(\)\<\>\*\?\[\]\{\}\!\~$'\n'$'\r']*) return 1 ;;
+  esac
+}
+
 raw_launch_mentions_codex() {
   local raw=$1 word
+  raw_launch_is_simple "$raw" || return 1
   for word in $raw; do
     raw_launch_word_is_codex "$word" && return 0
   done
@@ -455,6 +463,7 @@ raw_launch_mentions_codex() {
 
 normalize_raw_codex_launch() {
   local raw=$1 word seen_codex=0
+  raw_launch_is_simple "$raw" || return 1
   for word in $raw; do
     case "$word" in
       [A-Za-z_][A-Za-z0-9_]*=*) [ "$seen_codex" -eq 0 ] || return 1 ;;
@@ -469,7 +478,7 @@ normalize_raw_codex_launch() {
 }
 
 refresh_codex_crewmate_home() {
-  local worktree=$1 profile=$2 source="$HOME/.codex" data_real base base_real home home_real name source_file temp_file profile_file worktree_key
+  local worktree=$1 profile=$2 source="$HOME/.codex" data_real base base_real home home_real name source_file temp_file profile_file stage_dir worktree_key
   umask 077
   data_real=$(cd "$DATA" 2>/dev/null && pwd -P) || return 1
   base="$DATA/codex-crewmate"
@@ -499,14 +508,17 @@ refresh_codex_crewmate_home() {
     }
     chmod 700 . || exit 1
     rm -rf plugins || exit 1
-    temp_file=".config.toml.$$"
+    stage_dir=$(mktemp -d '.fm-codex-stage.XXXXXXXX') || exit 1
+    chmod 700 "$stage_dir" || exit 1
+    trap 'rm -rf "$stage_dir" >/dev/null 2>&1 || true' EXIT
+    temp_file=$(mktemp "$stage_dir/config.toml.XXXXXXXX") || exit 1
     printf '%s\n' '# Firstmate Codex crewmate home.' > "$temp_file" || exit 1
     chmod 600 "$temp_file" || exit 1
     install_codex_target "$temp_file" config.toml || exit 1
     for name in auth.json models_cache.json; do
       source_file="$source/$name"
       if [ -f "$source_file" ]; then
-        temp_file=".$name.$$"
+        temp_file=$(mktemp "$stage_dir/$name.XXXXXXXX") || exit 1
         cp "$source_file" "$temp_file" || exit 1
         chmod 600 "$temp_file" || exit 1
         install_codex_target "$temp_file" "$name" || exit 1
@@ -517,7 +529,7 @@ refresh_codex_crewmate_home() {
     profile_file="$profile.config.toml"
     [ ! -L "$profile_file" ] || { echo "error: isolated Codex profile must not be a symlink: $home/$profile_file" >&2; exit 1; }
     worktree_key=$(toml_basic_string "$worktree") || exit 1
-    temp_file=".$profile.config.toml.$$"
+    temp_file=$(mktemp "$stage_dir/$profile.config.toml.XXXXXXXX") || exit 1
     {
       printf '%s\n' '# Firstmate Codex crewmate profile.'
       printf '[projects."%s"]\n' "$worktree_key"
@@ -531,6 +543,10 @@ refresh_codex_crewmate_home() {
 
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
+    raw_launch_is_simple "$ARG3" || {
+      echo "error: unsafe raw launch command; quote, escape, and shell syntax are not supported - use --harness codex for Codex" >&2
+      exit 1
+    }
     if [ "$KIND" != secondmate ] && raw_launch_mentions_codex "$ARG3"; then
       normalize_raw_codex_launch "$ARG3" || {
         echo "error: unsafe raw Codex launch command; use --harness codex for Codex options" >&2
