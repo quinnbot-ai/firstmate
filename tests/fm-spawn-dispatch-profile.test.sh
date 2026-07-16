@@ -463,21 +463,28 @@ test_codex_crewmate_home_refuses_nonregular_targets() {
 }
 
 test_raw_codex_launch_is_normalized() {
-  local rec id out status launch crew_home
-  id=profile-raw-codex-z24
-  rec=$(make_spawn_case profile-raw-codex codex "$id")
-  read_case_record "$rec"
+  local command case_name rec id out status launch crew_home n=0
+  for case_name in mixed-case absolute-mixed-case; do
+    n=$((n + 1))
+    id="profile-raw-codex-$n-z24"
+    rec=$(make_spawn_case "profile-raw-codex-$n" codex "$id")
+    read_case_record "$rec"
+    case "$case_name" in
+      mixed-case) command='CODEX_HOME=/unsafe Codex' ;;
+      absolute-mixed-case) command='CODEX_HOME=/unsafe /opt/firstmate/Codex' ;;
+    esac
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "CODEX_HOME=/unsafe codex")
-  status=$?
-  expect_code 0 "$status" "simple raw Codex launch should be normalized"
-  assert_contains "$out" "spawned $id harness=codex" "normalized raw Codex launch did not report Codex"
-  crew_home=$(cd "$HOME_DIR/data/codex-crewmate/fm-crewmate-$id" && pwd -P)
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "CODEX_HOME='$crew_home' codex --profile 'fm-crewmate-$id' --disable plugins" \
-    "normalized raw Codex launch did not enforce the isolated profile"
-  assert_not_contains "$launch" '/unsafe' "raw CODEX_HOME assignment survived normalization"
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" "$command")
+    status=$?
+    expect_code 0 "$status" "$case_name raw Codex launch should be normalized"
+    assert_contains "$out" "spawned $id harness=codex" "$case_name raw Codex launch did not report Codex"
+    crew_home=$(cd "$HOME_DIR/data/codex-crewmate/fm-crewmate-$id" && pwd -P)
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" "CODEX_HOME='$crew_home' codex --profile 'fm-crewmate-$id' --disable plugins" \
+      "$case_name raw Codex launch did not enforce the isolated profile"
+    assert_not_contains "$launch" '/unsafe' "$case_name raw CODEX_HOME assignment survived normalization"
+  done
   pass "raw Codex launch is normalized to the isolated profile"
 }
 

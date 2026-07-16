@@ -438,13 +438,31 @@ remove_codex_target() {
   }
 }
 
+raw_launch_word_is_codex() {
+  local word=$1 base lowered
+  base=${word##*/}
+  lowered=$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]') || return 1
+  [ "$lowered" = codex ]
+}
+
+raw_launch_mentions_codex() {
+  local raw=$1 word
+  for word in $raw; do
+    raw_launch_word_is_codex "$word" && return 0
+  done
+  return 1
+}
+
 normalize_raw_codex_launch() {
   local raw=$1 word seen_codex=0
   for word in $raw; do
     case "$word" in
       [A-Za-z_][A-Za-z0-9_]*=*) [ "$seen_codex" -eq 0 ] || return 1 ;;
-      codex|*/codex) [ "$seen_codex" -eq 0 ] || return 1; seen_codex=1 ;;
-      *) return 1 ;;
+      *)
+        raw_launch_word_is_codex "$word" || return 1
+        [ "$seen_codex" -eq 0 ] || return 1
+        seen_codex=1
+        ;;
     esac
   done
   [ "$seen_codex" -eq 1 ]
@@ -513,7 +531,7 @@ refresh_codex_crewmate_home() {
 
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
-    if [ "$KIND" != secondmate ] && [[ "$ARG3" == *codex* ]]; then
+    if [ "$KIND" != secondmate ] && raw_launch_mentions_codex "$ARG3"; then
       normalize_raw_codex_launch "$ARG3" || {
         echo "error: unsafe raw Codex launch command; use --harness codex for Codex options" >&2
         exit 1
