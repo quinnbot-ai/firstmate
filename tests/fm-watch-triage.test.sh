@@ -1176,6 +1176,61 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
   pass "heartbeat backstop fail-safe surfaces a captain-relevant status the per-wake path missed"
 }
 
+# --- operations inbox: task-poll and heartbeat wake classification -----------
+
+seed_ops_inbox_fingerprint() {  # <home> <state>
+  local home=$1 state=$2 fingerprint
+  fingerprint=$(bash -c '. "$1"; fm_ops_inbox_fingerprint "$2" "$3"' _ \
+    "$ROOT/bin/fm-ops-inbox-lib.sh" "$home" "$home/config") \
+    || fail "could not seed operations-inbox fingerprint"
+  printf '%s\n' "$fingerprint" > "$state/.hash-ops-inbox"
+}
+
+test_ops_inbox_new_event_wakes_with_task_in_flight() {
+  local dir state fakebin out home pid
+  dir=$(make_case ops-inbox-task); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  home="$dir/home"
+  mkdir -p "$home/ops-inbox" "$home/config"
+  printf 'project=firstmate\nkind=ship\n' > "$state/ops.meta"
+  seed_ops_inbox_fingerprint "$home" "$state"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 15 || { reap "$pid"; fail "watcher exited before an operations-inbox event landed: $(cat "$out")"; }
+  printf 'P1 failure\n' > "$home/ops-inbox/new.event"
+  wait_for_exit "$pid" 40 || fail "watcher did not wake for a new operations-inbox event while a task was in flight"
+  grep -Fx 'check: ops-inbox changed - inspect the OPS INBOX session-start digest' "$out" >/dev/null \
+    || fail "operations-inbox task wake did not use the actionable check classification: $(cat "$out")"
+  grep "$(printf '\tcheck\tops-inbox\t')" "$state/.wake-queue" >/dev/null \
+    || fail "operations-inbox task wake was not durably queued as a check"
+
+  pass "a new operations-inbox event wakes immediately with a task in flight"
+}
+
+test_ops_inbox_new_event_wakes_on_heartbeat_without_tasks() {
+  local dir state fakebin out home pid
+  dir=$(make_case ops-inbox-heartbeat); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  home="$dir/home"
+  mkdir -p "$home/ops-inbox" "$home/config"
+  seed_ops_inbox_fingerprint "$home" "$state"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 FM_HEARTBEAT_MAX=1 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 15 || { reap "$pid"; fail "watcher exited before heartbeat operations-inbox event: $(cat "$out")"; }
+  printf 'P0 failure\n' > "$home/ops-inbox/new.event"
+  wait_for_exit "$pid" 40 || fail "watcher did not wake for a new operations-inbox event on its heartbeat scan"
+  grep -Fx 'check: ops-inbox changed - inspect the OPS INBOX session-start digest' "$out" >/dev/null \
+    || fail "operations-inbox heartbeat wake did not use the actionable check classification: $(cat "$out")"
+  grep "$(printf '\tcheck\tops-inbox\t')" "$state/.wake-queue" >/dev/null \
+    || fail "operations-inbox heartbeat wake was not durably queued as a check"
+
+  pass "a new operations-inbox event wakes on heartbeat when no task is in flight"
+}
+
 # --- beacon stays fresh while absorbing -------------------------------------
 
 test_beacon_stays_fresh_while_absorbing() {
@@ -1299,6 +1354,8 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
+test_ops_inbox_new_event_wakes_with_task_in_flight
+test_ops_inbox_new_event_wakes_on_heartbeat_without_tasks
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale

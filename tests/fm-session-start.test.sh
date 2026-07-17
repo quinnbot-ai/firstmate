@@ -264,16 +264,63 @@ EOF
   assert_contains "$out" "data/secondmates.md" "digest did not label the secondmates.md section"
   assert_contains "$out" "data/learnings.md" "digest did not label the learnings.md section"
 
-  # Exactly two ABSENT markers (secondmates.md, learnings.md; backlog.md is
-  # covered by its own test) - and the present-but-empty captain.md must NOT
-  # print ABSENT.
+  # Exactly five ABSENT markers (secondmates.md, captain-shared.md,
+  # learnings.md, backlog.md, and the absent home ops inbox) - and the
+  # present-but-empty captain.md must NOT print ABSENT.
   absent_count=$(printf '%s\n' "$out" | grep -c '^ABSENT$')
-  [ "$absent_count" -eq 3 ] || fail "expected 3 ABSENT markers (secondmates.md, learnings.md, backlog.md), got $absent_count: $out"
+  [ "$absent_count" -eq 4 ] || fail "expected 4 standalone ABSENT markers (secondmates.md, captain-shared.md, learnings.md, backlog.md), got $absent_count: $out"
 
   cap_section=$(printf '%s\n' "$out" | awk '/^data\/captain\.md$/{flag=1;next}/^data\//{flag=0}flag')
   assert_contains "$cap_section" "(present, empty)" "empty-but-present captain.md was not distinguished from ABSENT"
 
   pass "context digest distinguishes ABSENT, empty-but-present, and populated files"
+}
+
+# --- operations inbox digest: absent, bounded home paths, configured command --
+
+test_ops_inbox_digest_absent_bounded_and_configured() {
+  local rec root home fakebin out external
+  rec=$(new_world ops-inbox-digest)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "OPS INBOX" "digest did not include the OPS INBOX section"
+  assert_contains "$out" "home ops-inbox: ABSENT ($home/ops-inbox)" "absent home ops inbox was not explicit"
+  assert_contains "$out" "external inbox: ABSENT (config/ops-inbox-cmd)" "absent external inbox config was not explicit"
+
+  mkdir -p "$home/ops-inbox/hermes-runtime"
+  printf 'old\n' > "$home/ops-inbox/hermes-runtime/old.event"
+  printf 'middle\n' > "$home/ops-inbox/hermes-runtime/middle.event"
+  printf 'new\n' > "$home/ops-inbox/hermes-runtime/new.event"
+  touch -t 202607171100 "$home/ops-inbox/hermes-runtime/old.event"
+  touch -t 202607171200 "$home/ops-inbox/hermes-runtime/middle.event"
+  touch -t 202607171300 "$home/ops-inbox/hermes-runtime/new.event"
+  external="$fakebin/external-ops-inbox"
+  cat > "$external" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'unacked_criticals: 3' 'critical-old' 'critical-new'
+exit 1
+SH
+  chmod +x "$external"
+  printf '%s list\n' "$external" > "$home/config/ops-inbox-cmd"
+
+  out=$(FM_SESSION_START_OPS_INBOX_LIMIT=2 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "home ops-inbox: 3 event file(s); newest 2 with full paths:" "home inbox count or bound missing"
+  assert_contains "$out" "$home/ops-inbox/hermes-runtime/new.event" "newest home inbox event path missing"
+  assert_contains "$out" "$home/ops-inbox/hermes-runtime/middle.event" "second-newest home inbox event path missing"
+  assert_not_contains "$out" "$home/ops-inbox/hermes-runtime/old.event" "bounded home inbox digest leaked oldest event path"
+  assert_contains "$out" "(truncated 1 older event file(s))" "home inbox truncation was not disclosed"
+  assert_contains "$out" "external inbox: configured list command (exit 1); bounded to 2 output line(s):" "external command status or bound missing"
+  assert_contains "$out" "unacked_criticals: 3" "configured external inbox output missing its critical count"
+  assert_contains "$out" "critical-old" "configured external inbox did not print bounded output"
+  assert_not_contains "$out" "critical-new" "configured external inbox output was not bounded"
+  assert_contains "$out" "(truncated 1 additional output line(s))" "external inbox truncation was not disclosed"
+
+  pass "OPS INBOX digest distinguishes absent sources and bounds home and configured-inbox output"
 }
 
 # --- lock refusal: read-only path --------------------------------------------
@@ -741,6 +788,7 @@ EOF
 }
 
 test_context_digest_absent_empty_present
+test_ops_inbox_digest_absent_bounded_and_configured
 test_lock_refusal_read_only_path
 test_output_ordering_diagnostics_lead
 test_herdr_backend_diagnostics_follow_real_session_start
