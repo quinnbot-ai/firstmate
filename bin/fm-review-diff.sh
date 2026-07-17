@@ -128,12 +128,12 @@ git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "e
 git -C "$WT" rev-parse --verify --quiet "$COMPARE_REF^{commit}" >/dev/null || { echo "error: compare ref $COMPARE_REF does not resolve in $WT" >&2; exit 1; }
 
 echo "diff base: $BASE"
-if git -C "$WT" diff --quiet "$BASE...$COMPARE_REF" --; then
+if git -C "$WT" diff --no-ext-diff --quiet "$BASE...$COMPARE_REF" --; then
   echo "no changes vs $BASE"
   exit 0
 fi
 
-git -C "$WT" diff --stat "$BASE...$COMPARE_REF" --
+git -C "$WT" diff --no-ext-diff --stat "$BASE...$COMPARE_REF" --
 if ! "$STAT_ONLY"; then
   echo
   git -C "$WT" diff --no-ext-diff "$BASE...$COMPARE_REF" --

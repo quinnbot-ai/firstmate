@@ -270,8 +270,10 @@ fm_backend_zellij_pane_for_tab() {  # <session> <tab_id>
 # target string; the tab id is looked up fresh rather than trusted stale,
 # mirroring herdr's label-based, never-trust-a-stored-id recovery posture).
 fm_backend_zellij_tab_for_pane() {  # <session> <pane_id>
-  local session=$1 pane_id=$2
-  fm_backend_zellij_cli "$session" action list-panes --json 2>/dev/null \
+  local session=$1 pane_id=$2 panes
+  panes=$(fm_backend_zellij_cli "$session" action list-panes --json 2>/dev/null) || return 1
+  printf '%s' "$panes" | jq -e 'type == "array"' >/dev/null 2>&1 || return 1
+  printf '%s' "$panes" \
     | jq -r --argjson p "$pane_id" '.[]? | select(.id == $p and .is_plugin == false) | .tab_id' 2>/dev/null | head -1
 }
 
@@ -299,13 +301,30 @@ fm_backend_zellij_pane_exists() {  # <session> <pane_id>
 fm_backend_zellij_tab_matches_label() {  # <session> <tab_id> <label>
   local session=$1 tab_id=$2 label=$3 scoped tabs count
   scoped=$(fm_backend_zellij_scoped_title "$label")
-  tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null)
+  tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null) || return 2
+  printf '%s' "$tabs" | jq -e 'type == "array"' >/dev/null 2>&1 || return 2
   printf '%s' "$tabs" | jq -e --argjson t "$tab_id" --arg want "$scoped" \
     '[.[]? | select(.tab_id == $t and .name == $want)] | length > 0' >/dev/null 2>&1 && return 0
   printf '%s' "$tabs" | jq -e --argjson t "$tab_id" --arg want "$label" \
     '[.[]? | select(.tab_id == $t and .name == $want)] | length > 0' >/dev/null 2>&1 || return 1
   count=$(printf '%s' "$tabs" | jq -r --arg want "$label" '[.[]? | select(.name == $want)] | length' 2>/dev/null)
   [ "$count" = "1" ]
+}
+
+fm_backend_zellij_tab_absent() {  # <session> <tab_id>
+  local session=$1 tab_id=$2 tabs
+  tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null) || return 1
+  printf '%s' "$tabs" | jq -e 'type == "array"' >/dev/null 2>&1 || return 1
+  printf '%s' "$tabs" | jq -e --argjson t "$tab_id" \
+    '[.[]? | select(.tab_id == $t)] | length == 0' >/dev/null 2>&1
+}
+
+fm_backend_zellij_pane_absent() {  # <session> <pane_id>
+  local session=$1 pane_id=$2 panes
+  panes=$(fm_backend_zellij_cli "$session" action list-panes --json 2>/dev/null) || return 1
+  printf '%s' "$panes" | jq -e 'type == "array"' >/dev/null 2>&1 || return 1
+  printf '%s' "$panes" | jq -e --argjson p "$pane_id" \
+    '[.[]? | select(.id == $p)] | length == 0' >/dev/null 2>&1
 }
 
 # fm_backend_zellij_create_task: create the task's tab (one terminal pane) in
@@ -521,8 +540,7 @@ fm_backend_zellij_send_text_submit() {  # <target> <text> <retries> <enter-sleep
   done
 }
 
-# fm_backend_zellij_kill: remove the task's tab, best-effort (mirrors
-# tmux-kill-window's/herdr-pane-close's `|| true` contract). Verified: unlike
+# fm_backend_zellij_kill: remove the task's tab. Verified: unlike
 # herdr, closing a zellij tab's only PANE does NOT close the tab itself (an
 # empty tab survives in list-tabs); `close-tab-by-id` on a live tab DOES
 # cleanly remove both the pane and the tab in one call, verified to need no
@@ -531,27 +549,67 @@ fm_backend_zellij_send_text_submit() {  # <target> <text> <retries> <enter-sleep
 # passes the recorded tab id and expected tab label for already-empty ghost
 # tabs. Any tab id is verified against the expected label when one is provided.
 fm_backend_zellij_kill() {  # <target> [tab_id] [expected_label]
-  fm_backend_zellij_parse_target "$1" || return 0
-  fm_backend_zellij_session_exists "$FM_BACKEND_ZELLIJ_SESSION" || return 0
-  local tab_id fallback_tab_id=${2:-} expected_label=${3:-}
-  tab_id=$(fm_backend_zellij_tab_for_pane "$FM_BACKEND_ZELLIJ_SESSION" "$FM_BACKEND_ZELLIJ_PANE" 2>/dev/null)
-  if [ -n "$tab_id" ] && [ -n "$expected_label" ] && ! fm_backend_zellij_tab_matches_label "$FM_BACKEND_ZELLIJ_SESSION" "$tab_id" "$expected_label"; then
-    tab_id=
+  if ! fm_backend_zellij_parse_target "$1"; then
+    [ "${FM_BACKEND_KILL_STRICT:-0}" != 1 ] && return 0
+    return 1
+  fi
+  if ! fm_backend_zellij_session_exists "$FM_BACKEND_ZELLIJ_SESSION"; then
+    [ "${FM_BACKEND_KILL_STRICT:-0}" != 1 ] && return 0
+    return 1
+  fi
+  local tab_id query_status label_status fallback_tab_id=${2:-} expected_label=${3:-}
+  if tab_id=$(fm_backend_zellij_tab_for_pane "$FM_BACKEND_ZELLIJ_SESSION" "$FM_BACKEND_ZELLIJ_PANE" 2>/dev/null); then
+    query_status=0
+  else
+    query_status=$?
+  fi
+  if [ "$query_status" -ne 0 ] && [ "${FM_BACKEND_KILL_STRICT:-0}" = 1 ]; then
+    return 1
+  fi
+  if [ -n "$tab_id" ] && [ -n "$expected_label" ]; then
+    if fm_backend_zellij_tab_matches_label "$FM_BACKEND_ZELLIJ_SESSION" "$tab_id" "$expected_label"; then
+      label_status=0
+    else
+      label_status=$?
+    fi
+    if [ "$label_status" -ne 0 ]; then
+      if [ "$label_status" -eq 2 ] && [ "${FM_BACKEND_KILL_STRICT:-0}" = 1 ]; then
+        return 1
+      fi
+      tab_id=
+    fi
   fi
   case "$fallback_tab_id" in
     ''|*[!0-9]*) ;;
     *)
       if [ -z "$tab_id" ]; then
-        if [ -z "$expected_label" ] || fm_backend_zellij_tab_matches_label "$FM_BACKEND_ZELLIJ_SESSION" "$fallback_tab_id" "$expected_label"; then
+        if [ -z "$expected_label" ]; then
           tab_id=$fallback_tab_id
+        else
+          if fm_backend_zellij_tab_matches_label "$FM_BACKEND_ZELLIJ_SESSION" "$fallback_tab_id" "$expected_label"; then
+            label_status=0
+          else
+            label_status=$?
+          fi
+          if [ "$label_status" -eq 0 ]; then
+            tab_id=$fallback_tab_id
+          elif [ "$label_status" -eq 2 ] && [ "${FM_BACKEND_KILL_STRICT:-0}" = 1 ]; then
+            return 1
+          fi
         fi
       fi
       ;;
   esac
   if [ -n "$tab_id" ]; then
-    fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action close-tab-by-id "$tab_id" >/dev/null 2>&1 || true
+    fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action close-tab-by-id "$tab_id" >/dev/null 2>&1 || [ "${FM_BACKEND_KILL_STRICT:-0}" != 1 ]
+    if [ "${FM_BACKEND_KILL_STRICT:-0}" = 1 ]; then
+      fm_backend_zellij_tab_absent "$FM_BACKEND_ZELLIJ_SESSION" "$tab_id" || return 1
+    fi
   elif [ -z "$expected_label" ]; then
-    fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action close-pane --pane-id "$FM_BACKEND_ZELLIJ_PANE" >/dev/null 2>&1 || true
+    fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action close-pane --pane-id "$FM_BACKEND_ZELLIJ_PANE" >/dev/null 2>&1 || [ "${FM_BACKEND_KILL_STRICT:-0}" != 1 ]
+    if [ "${FM_BACKEND_KILL_STRICT:-0}" = 1 ]; then
+      fm_backend_zellij_pane_absent "$FM_BACKEND_ZELLIJ_SESSION" "$FM_BACKEND_ZELLIJ_PANE" || return 1
+    fi
   fi
 }
 

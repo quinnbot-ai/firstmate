@@ -56,6 +56,7 @@ neutral_fm_root() {  # <dir> -> echoes a minimal root with a quiet guard
 exit 0
 SH
   chmod +x "$root/bin/fm-guard.sh"
+  ln -s "$ROOT/bin/fm-codex-home.py" "$root/bin/fm-codex-home.py"
   printf '%s\n' "$root"
 }
 
@@ -326,6 +327,31 @@ test_kill_is_best_effort_close() {
   pass "fm_backend_orca_kill: calls terminal close and stays best-effort"
 }
 
+test_kill_fails_on_close_error_in_strict_mode() {
+  local out status
+  orca_case kill-strict
+  printf '1\n' > "$RESP/1.exit"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_BACKEND_KILL_STRICT=1 \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_kill term-123' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "strict Orca kill must fail when terminal close fails"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-123'$'\x1f''--json' \
+    "strict kill did not attempt terminal close"
+  pass "fm_backend_orca_kill: strict mode propagates close failures"
+}
+
+test_kill_fails_on_close_error_json_in_strict_mode() {
+  local out status
+  orca_case kill-strict-error-json
+  printf '{"ok":false,"error":{"code":"terminal_close_failed","message":"terminal close failed"}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_BACKEND_KILL_STRICT=1 \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_kill term-123' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "strict Orca kill must fail when terminal close returns ok:false"
+  assert_contains "$out" "terminal close failed" "strict kill did not surface the close error"
+  pass "fm_backend_orca_kill: strict mode rejects close error JSON"
+}
+
 test_remove_worktree_refuses_empty_id() {
   local out status
   orca_case remove-empty
@@ -500,11 +526,11 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
   assert_grep "worktree=$wt" "$state/$id.meta" "meta missing Orca worktree path"
   assert_not_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''create' \
     "spawn should reuse the implicit terminal returned by Orca worktree creation"
-  assert_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-spawn'$'\x1f''--text'$'\x1f''export GOTMPDIR=/tmp/fm-orcaspawnz1/gotmp'$'\x1f''--enter'$'\x1f''--json' \
-    "spawn did not export GOTMPDIR through the Orca terminal"
+  grep -Eq $'orca\x1fterminal\x1fsend\x1f--terminal\x1fterm-spawn\x1f--text\x1fexport GOTMPDIR=/tmp/fm-orcaspawnz1\\.[A-Za-z0-9]+/gotmp\x1f--enter\x1f--json' "$log" \
+    || fail "spawn did not export GOTMPDIR through the Orca terminal"
   assert_contains "$(cat "$log")" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions" \
     "spawn did not send the selected harness launch command through Orca"
-  rm -rf "/tmp/fm-$id"
+  rm -rf "/tmp/fm-$id".*
   pass "fm-spawn.sh --backend orca: reuses implicit terminal, records metadata, launches harness"
 }
 
@@ -579,6 +605,7 @@ test_spawn_refuses_orca_nonisolated_worktree() {
   printf '1\n' > "$RESP/1.exit"
   printf '{"ok":true,"result":{"repo":{"id":"repo-bad"}}}\n' > "$RESP/2.out"
   printf '{"ok":true,"result":{"worktree":{"id":"wt-bad","path":"%s"},"terminal":{"handle":"term-bad"}}}\n' "$proj" > "$RESP/3.out"
+  printf '{"ok":false,"error":{"code":"terminal_not_found","message":"terminal not found"}}\n' > "$RESP/5.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
@@ -595,6 +622,36 @@ test_spawn_refuses_orca_nonisolated_worktree() {
   assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-bad'$'\x1f''--force'$'\x1f''--json' \
     "Orca spawn should remove the worktree after validation aborts"
   pass "fm-spawn.sh --backend orca: refuses non-isolated worktrees and closes implicit terminals"
+}
+
+test_spawn_preserves_orca_metadata_when_terminal_close_is_unconfirmed() {
+  local proj data state config id out status
+  id="orcacloseunconfirmedz5"
+  proj="$TMP_ROOT/close-unconfirmed-project"
+  data="$TMP_ROOT/close-unconfirmed-data"
+  state="$TMP_ROOT/close-unconfirmed-state"
+  config="$TMP_ROOT/close-unconfirmed-config"
+  fm_git_init_commit "$proj"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'brief\n' > "$data/$id/brief.md"
+  touch "$state/.last-watcher-beat"
+  orca_case close-unconfirmed
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-close-unconfirmed"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-close-unconfirmed","path":"%s"},"terminal":{"handle":"term-still-live"}}}\n' "$proj" > "$RESP/3.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["still live"]}}}\n' > "$RESP/5.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend orca 2>&1 )
+  status=$?
+  expect_code 1 "$status" "Orca spawn should abort after rejecting a primary checkout worktree"
+  assert_present "$state/$id.meta" "an unconfirmed Orca close must preserve failed-spawn metadata"
+  assert_grep "terminal=term-still-live" "$state/$id.meta" "preserved metadata missing the still-live Orca terminal"
+  assert_grep "endpoint_cleanup_pending=1" "$state/$id.meta" "preserved metadata must mark pending endpoint cleanup"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''read'$'\x1f''--terminal'$'\x1f''term-still-live'$'\x1f''--limit'$'\x1f''1'$'\x1f''--json' \
+    "Orca spawn must query the terminal after a successful strict close"
+  pass "fm-spawn.sh --backend orca: preserves metadata when strict close is unconfirmed"
 }
 
 test_spawn_removes_orca_worktree_when_terminal_create_fails() {
@@ -664,6 +721,38 @@ test_spawn_preserves_orca_metadata_when_abort_cleanup_fails() {
   pass "fm-spawn.sh --backend orca: preserves metadata when abort cleanup fails"
 }
 
+test_orca_spawn_uses_strict_terminal_cleanup() {
+  assert_grep "FM_BACKEND_KILL_STRICT=1 fm_backend_kill orca \"\$ORCA_TERMINAL\"" "$ROOT/bin/fm-spawn.sh" \
+    "Orca spawn abort cleanup must request strict terminal close failures"
+  assert_grep "fm_backend_target_absent orca \"\$ORCA_TERMINAL\"" "$ROOT/bin/fm-spawn.sh" \
+    "Orca spawn abort cleanup must confirm the terminal is absent after close"
+  pass "fm-spawn.sh --backend orca: confirms strict terminal cleanup"
+}
+
+test_orca_partial_cleanup_metadata_reaches_codex_home() {
+  local data state config home id out status neutral
+  id="orcacodexcleanupleakz1"
+  data="$TMP_ROOT/codex-cleanup-fail-data"
+  state="$TMP_ROOT/codex-cleanup-fail-state"
+  config="$TMP_ROOT/codex-cleanup-fail-config"
+  home="$data/codex-crewmate/.fm-codex-home.partial"
+  mkdir -p "$home" "$state" "$config"
+  touch "$state/.last-watcher-beat"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "worktree=" "project=" "harness=codex" "kind=ship" \
+    "mode=no-mistakes" "yolo=off" "backend=orca" "orca_worktree_id=" \
+    "orca_worktree_cleanup_complete=1" \
+    "codex_crewmate_home=$home"
+  neutral=$(neutral_fm_root "$TMP_ROOT/codex-partial-neutral")
+  out=$( FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1 )
+  status=$?
+  expect_code 0 "$status" "Orca partial cleanup metadata should reach Codex-home removal"$'\n'"$out"
+  [ ! -e "$home" ] || fail "Orca partial cleanup teardown left the Codex home behind"
+  assert_absent "$state/$id.meta" "Orca partial cleanup teardown should remove metadata"
+  pass "fm-teardown.sh backend=orca: partial cleanup metadata reaches Codex-home removal"
+}
+
 test_spawn_releases_orca_resources_when_metadata_write_fails() {
   local proj wt data state_file config id out status
   id="orcametafailz9"
@@ -681,6 +770,7 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
   printf '{"ok":true,"result":{"repo":{"id":"repo-meta-fail"}}}\n' > "$RESP/2.out"
   printf '{"ok":true,"result":{"worktree":{"id":"wt-meta-fail","path":"%s"}}}\n' "$wt" > "$RESP/3.out"
   printf '{"ok":true,"result":{"terminal":{"handle":"term-meta-fail"}}}\n' > "$RESP/4.out"
+  printf '{"ok":false,"error":{"code":"terminal_not_found","message":"terminal not found"}}\n' > "$RESP/6.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state_file" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
@@ -771,6 +861,21 @@ test_target_exists_rejects_orca_error_json() {
   set -e
   [ "$status" -ne 0 ] || fail "fm_backend_target_exists should reject Orca ok:false read JSON"
   pass "fm_backend_target_exists: Orca ok:false read JSON is not live"
+}
+
+test_target_absent_confirms_orca_not_found() {
+  local status
+  orca_case target-absent-not-found
+  printf '{"ok":false,"error":{"code":"terminal_not_found","message":"terminal not found"}}\n' > "$RESP/1.out"
+  set +e
+  PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_target_absent orca term-gone fm-task' "$ROOT"
+  status=$?
+  set -e
+  expect_code 0 "$status" "fm_backend_target_absent should confirm Orca terminal_not_found"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''read'$'\x1f''--terminal'$'\x1f''term-gone'$'\x1f''--limit'$'\x1f''1'$'\x1f''--json' \
+    "fm_backend_target_absent should query the terminal after a strict close"
+  pass "fm_backend_target_absent: confirms an Orca terminal is absent"
 }
 
 test_scout_teardown_removes_orca_worktree_via_helper() {
@@ -1290,6 +1395,8 @@ test_send_key_enter_and_interrupt
 test_send_key_refuses_unknown_key
 test_send_key_refuses_escape_until_supported
 test_kill_is_best_effort_close
+test_kill_fails_on_close_error_in_strict_mode
+test_kill_fails_on_close_error_json_in_strict_mode
 test_remove_worktree_refuses_empty_id
 test_remove_worktree_rejects_orca_error_json
 test_worktree_path_resolves_id
@@ -1302,12 +1409,16 @@ test_spawn_writes_orca_metadata_and_launches_harness
 test_spawn_refuses_orca_secondmate_before_home_mutation
 test_spawn_refuses_orca_when_runtime_not_ready
 test_spawn_refuses_orca_nonisolated_worktree
+test_spawn_preserves_orca_metadata_when_terminal_close_is_unconfirmed
 test_spawn_removes_orca_worktree_when_terminal_create_fails
 test_spawn_preserves_orca_metadata_when_abort_cleanup_fails
+test_orca_spawn_uses_strict_terminal_cleanup
+test_orca_partial_cleanup_metadata_reaches_codex_home
 test_spawn_releases_orca_resources_when_metadata_write_fails
 test_peek_send_and_crew_state_route_through_orca_meta
 test_peek_and_crew_state_fail_closed_on_orca_error_json
 test_target_exists_rejects_orca_error_json
+test_target_absent_confirms_orca_not_found
 test_scout_teardown_removes_orca_worktree_via_helper
 test_scout_teardown_refuses_orca_id_path_mismatch
 test_teardown_removes_orca_worktree_when_path_missing

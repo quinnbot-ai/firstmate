@@ -541,6 +541,27 @@ test_target_ready_rejects_label_mismatch() {
   pass "fm_backend_cmux_target_ready: rejects a workspace id reused under a different title"
 }
 
+test_dispatch_target_absent_requires_confirmed_workspace_list() {
+  local dir fb out title target
+  target="aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"
+  title=$(cmux_expected_scoped_title fm-label)
+
+  dir="$TMP_ROOT/target-absent-confirmed"; mkdir -p "$dir/responses"
+  cmux_workspace_list_response "$dir" 1
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_target_absent cmux "$1" fm-label; printf "%s" "$?"' "$ROOT" "$target" )
+  [ "$out" = 0 ] || fail "target absence should be confirmed only when the workspace list succeeds and contains neither target nor label, got $out"
+
+  dir="$TMP_ROOT/target-absent-unqueryable"; mkdir -p "$dir/responses"
+  printf '1\n' > "$dir/responses/1.exit"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_target_absent cmux "$1" fm-label; printf "%s" "$?"' "$ROOT" "$target" )
+  [ "$out" = 2 ] || fail "an unqueryable workspace list must not be treated as absent, got $out"
+  pass "fm_backend_target_absent: cmux requires a readable workspace list"
+}
+
 test_capture_trims_locally() {
   local dir fb out
   dir="$TMP_ROOT/capture"; mkdir -p "$dir/responses"
@@ -941,6 +962,36 @@ test_kill_is_best_effort_when_close_workspace_fails() {
   pass "fm_backend_cmux_kill: never fails even when close-workspace fails"
 }
 
+test_kill_is_strict_when_target_readiness_is_unqueryable() {
+  local dir fb status
+  dir="$TMP_ROOT/kill-strict-unqueryable"; mkdir -p "$dir/responses"
+  cmux_panes_empty_response "$dir" 1
+  fb=$(make_cmux_fakebin "$dir")
+  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    FM_BACKEND_KILL_STRICT=1 \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_kill "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"' "$ROOT"
+  status=$?
+  [ "$status" -ne 0 ] || fail "strict kill must fail when the cmux target cannot be queried"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''close-workspace' \
+    "strict kill must not claim to close an unqueryable cmux target"
+  pass "fm_backend_cmux_kill: strict cleanup propagates readiness failures"
+}
+
+test_kill_is_noop_when_reused_workspace_label_mismatches() {
+  local dir fb status title
+  dir="$TMP_ROOT/kill-reused-label"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-other)
+  cmux_workspace_list_response "$dir" 1 "aaaaaaaa-0000-0000-0000-000000000000" "$title"
+  fb=$(make_cmux_fakebin "$dir")
+  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_kill "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" "" "fm-label"' "$ROOT"
+  status=$?
+  expect_code 0 "$status" "non-strict kill should no-op when the workspace label no longer matches"
+  assert_not_contains "$(cat "$dir/log")" $'\x1f''close-workspace' \
+    "non-strict kill must not close a workspace whose id was reused under another label"
+  pass "fm_backend_cmux_kill: non-strict cleanup no-ops on a reused workspace label mismatch"
+}
+
 test_kill_recovers_stale_target_by_label() {
   local dir fb title
   dir="$TMP_ROOT/kill-stale-target"; mkdir -p "$dir/responses"
@@ -1036,6 +1087,7 @@ test_create_task_creates_and_parses_ids
 test_target_ready_fails_when_target_absent
 test_target_ready_checks_expected_label
 test_target_ready_rejects_label_mismatch
+test_dispatch_target_absent_requires_confirmed_workspace_list
 test_capture_trims_locally
 test_capture_fails_when_read_screen_fails_empty
 test_capture_fails_when_target_not_ready
@@ -1058,6 +1110,8 @@ test_window_of_workspace_empty_when_not_found
 test_kill_closes_workspace_directly_when_not_last
 test_kill_adds_sibling_when_last_in_window
 test_kill_is_best_effort_when_close_workspace_fails
+test_kill_is_strict_when_target_readiness_is_unqueryable
+test_kill_is_noop_when_reused_workspace_label_mismatches
 test_kill_recovers_stale_target_by_label
 test_list_live_filters_by_title_prefix
 test_secondmate_spawn_refuses_cmux_backend
