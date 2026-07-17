@@ -15,6 +15,9 @@ Those actionable wakes are written to a durable local queue (`state/.wake-queue`
 No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when `bin/fm-crew-state.sh` reports positive evidence that the crew is still working: an actively running no-mistakes step for that crew's branch or a backend busy signature.
 A crew that declares `paused:` for a known external wait is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge.
 Its initial normal-mode status signal still surfaces through the no-verb path, while away mode self-handles that routine signal and owns the later recheck.
+When a `paused:` event is coalesced with another actionable signal, the outgoing watcher writes `state/.pause-handoff-<id>` with that task's final non-blank status line before it exits.
+A successor may rebuild pause tracking from that handoff only when `bin/fm-crew-state.sh` reports `unknown` with source `none` and the current final status line exactly matches the recorded line.
+After rebuilding the pause marker, stale triage consumes the handoff, and any later non-paused final status event clears it.
 Fresh stale panes use the same current-state read before trusting the status log, so an active run or busy pane outranks an old captain-relevant status-log line left behind before validation.
 No-change heartbeats are also benign.
 Absorbed wakes advance their suppression markers, log to `state/.watch-triage.log`, and keep the watcher blocking without a queue record or LLM turn.

@@ -219,7 +219,11 @@ test_crew_absorb_class_classifier() {
   [ "$(crew_absorb_class a)" = none ] || fail "unknown crew classed absorbable"
   ! crew_is_paused a || fail "unknown crew classed paused"
   printf 'paused: awaiting upstream\n' > "$state/a.status"
-  [ "$(STATE="$state" crew_absorb_class a)" = none ] || fail "unknown/none with a stale paused status was suppressed"
+  [ "$(STATE="$state" crew_absorb_class a)" = none ] || fail "unknown/none trusted an old paused status without a handoff"
+  printf 'paused: awaiting upstream\n' > "$state/.pause-handoff-a"
+  [ "$(STATE="$state" crew_absorb_class a)" = paused ] || fail "unknown/none did not recover a matching coalesced pause handoff"
+  printf 'paused: changed reason\n' > "$state/a.status"
+  [ "$(STATE="$state" crew_absorb_class a)" = none ] || fail "unknown/none trusted a stale coalesced pause handoff"
   [ "$(crew_absorb_class "")" = none ] || fail "empty id not classed none"
   unset FM_FAKE_CREW_STATE
   pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
@@ -630,6 +634,129 @@ test_settled_pause_survives_watcher_restart_without_pause_marker() {
   reap "$pid"
   unset FM_FAKE_CREW_STATE
   pass "a settled declared pause survives watcher restart without a .paused marker"
+}
+
+# A pause can land in the same grace-window batch as a different actionable
+# signal.
+# That first watcher must surface the batch and exit before its stale loop runs,
+# so it cannot create .paused-*.
+# The next watcher must rebuild pause tracking from the durable final paused event
+# rather than surface a bare stale wake on every re-arm while the current-state
+# reader is temporarily unavailable.
+test_coalesced_pause_signal_rebuilds_stale_pause_tracking() {
+  local dir state fakebin out drain_out capture_file statusf window key pane_hash pid
+  dir=$(make_case coalesced-pause-signal); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"; window="test:fm-coalesced-pause"
+  printf 'idle, awaiting upstream\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/held.meta"
+  statusf="$state/held.status"
+  printf 'paused: awaiting the upstream release\n' > "$statusf"
+  printf 'done: sibling task needs captain review\n' > "$state/sibling.status"
+  : > "$state/sibling.turn-ended"
+  key=${window//:/_}
+  key=${key//\//_}
+  key=${key//./_}
+  pane_hash=$(hash_text 'idle, awaiting upstream')
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state result during watcher handoff'
+
+  # The pause and sibling terminal signal coalesce.
+  # The watcher must surface the batch and exit, leaving stale pause tracking to
+  # its successor.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "coalesced pause/sibling signal did not surface"
+  grep -F "signal:" "$out" >/dev/null || fail "coalesced pause/sibling signal did not print a signal wake"
+  [ ! -e "$state/.paused-$key" ] || fail "first watcher unexpectedly reached stale pause tracking before its signal exit"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after coalesced pause/sibling signal failed"
+  [ -f "$state/.pause-handoff-held" ] || fail "coalesced pause signal did not leave a successor handoff"
+  [ "$(STATE="$state" crew_absorb_class held)" = paused ] || fail "coalesced pause handoff did not classify the successor as paused"
+
+  # Signal markers now suppress the already-surfaced batch.
+  # The stale path must use the durable pause tail to create the marker and stay
+  # quiet.
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "stale path surfaced a bare wake after a coalesced pause signal: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "stale path printed a wake after a coalesced pause signal: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "stale path enqueued a bare wake after a coalesced pause signal"; }
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "stale path did not rebuild pause tracking after a coalesced pause signal"; }
+  [ ! -e "$state/.pause-handoff-held" ] || { reap "$pid"; fail "stale path did not consume the coalesced pause handoff"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a coalesced paused signal rebuilds stale pause tracking on the successor watcher"
+}
+
+test_initial_pause_signal_rebuilds_stale_pause_tracking() {
+  local dir state fakebin out capture_file statusf window key pane_hash pid
+  dir=$(make_case initial-pause-signal); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-initial-pause"
+  printf 'idle, awaiting upstream\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/held.meta"
+  statusf="$state/held.status"
+  printf 'paused: awaiting the upstream release\n' > "$statusf"
+  key=$(printf '%s' "$window" | tr ':/. ' '____')
+  pane_hash=$(hash_text 'idle, awaiting upstream')
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state result during watcher handoff'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "initial pause signal did not surface"
+  [ -f "$state/.pause-handoff-held" ] || fail "initial pause signal did not leave a successor handoff"
+
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "stale path surfaced after an initial pause signal: $(cat "$out")"
+  fi
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "stale path did not rebuild pause tracking after an initial pause signal"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "an initial paused signal rebuilds stale pause tracking on the successor watcher"
+}
+
+test_gone_paused_target_surfaces_without_coalesced_handoff() {
+  local dir state fakebin out drain_out capture_file statusf window key pane_hash sig pid
+  dir=$(make_case gone-paused-target); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"; window="test:fm-gone-paused"
+  printf 'idle, old pause remains\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/gone-paused.meta"
+  statusf="$state/gone-paused.status"
+  printf 'paused: awaiting an upstream release\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-gone-paused_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text 'idle, old pause remains')
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · worktree gone'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "gone paused target was suppressed instead of surfaced"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "gone paused target did not print an immediate stale wake"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after gone paused target failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "gone paused target stale wake was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "a gone target with an old paused status surfaces without a coalesced handoff"
 }
 
 test_secondmate_paused_resurfaces_in_normal_mode() {
@@ -1159,6 +1286,9 @@ test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_settled_pause_survives_watcher_restart_without_pause_marker
+test_coalesced_pause_signal_rebuilds_stale_pause_tracking
+test_initial_pause_signal_rebuilds_stale_pause_tracking
+test_gone_paused_target_surfaces_without_coalesced_handoff
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking
