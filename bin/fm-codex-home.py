@@ -1,4 +1,15 @@
 #!/usr/bin/env python3
+"""Manage a firstmate-owned private Codex home for one ship or scout task.
+
+fm-spawn.sh is the sole caller.
+It creates a mode-0700 directory below data/codex-crewmate.
+It copies only the captain's auth.json and models_cache.json.
+It writes a no-plugin and no-MCP configuration.
+It launches Codex through an open directory descriptor.
+It removes only a validated managed home during abort cleanup or teardown.
+Secondmate Codex launches do not use this helper.
+"""
+
 import argparse
 import os
 import secrets

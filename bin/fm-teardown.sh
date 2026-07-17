@@ -27,7 +27,17 @@
 # for the common case where there is no remote at all.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
-# product - teardown proceeds once the report exists, and refuses without it.
+# product. Teardown proceeds only once the report exists and the shared
+# unresolved-decision completion gate verifies its captain-held inventory.
+# Before destructive cleanup, teardown validates task check artifacts and any
+# matching quarantine entries as ordinary single-link files on the state
+# device. It refuses and preserves task state when that proof fails; otherwise
+# it removes the task's check, trust record, PR sidecar, publication record, and
+# quarantine entries with the rest of the volatile state.
+# Codex ship and scout tasks record a firstmate-managed private home under
+# data/codex-crewmate in codex_crewmate_home= metadata.
+# Teardown removes that home only after endpoint cleanup succeeds.
+# When failed-spawn cleanup cannot confirm the endpoint absent, it preserves the metadata and private home for a later safe recovery attempt.
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
