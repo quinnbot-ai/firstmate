@@ -409,18 +409,7 @@ scan_signals() {
 }
 
 record_coalesced_pause_handoffs() {  # <pending-signal-rows>
-  local pending=$1 sf sig f last task has_captain_relevant=0
-  while IFS=$(printf '\t') read -r sf sig f; do
-    [ -n "$f" ] || continue
-    case "$f" in
-      *.status)
-        status_is_captain_relevant "$(last_status_line "$f")" && has_captain_relevant=1
-        ;;
-    esac
-  done <<EOF
-$pending
-EOF
-  [ "$has_captain_relevant" -eq 1 ] || return 0
+  local pending=$1 sf sig f last task
   while IFS=$(printf '\t') read -r sf sig f; do
     [ -n "$f" ] || continue
     case "$f" in

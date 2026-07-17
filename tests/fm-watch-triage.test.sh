@@ -696,6 +696,42 @@ test_coalesced_pause_signal_rebuilds_stale_pause_tracking() {
   pass "a coalesced paused signal rebuilds stale pause tracking on the successor watcher"
 }
 
+test_initial_pause_signal_rebuilds_stale_pause_tracking() {
+  local dir state fakebin out capture_file statusf window key pane_hash pid
+  dir=$(make_case initial-pause-signal); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-initial-pause"
+  printf 'idle, awaiting upstream\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/held.meta"
+  statusf="$state/held.status"
+  printf 'paused: awaiting the upstream release\n' > "$statusf"
+  key=$(printf '%s' "$window" | tr ':/. ' '____')
+  pane_hash=$(hash_text 'idle, awaiting upstream')
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state result during watcher handoff'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "initial pause signal did not surface"
+  [ -f "$state/.pause-handoff-held" ] || fail "initial pause signal did not leave a successor handoff"
+
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "stale path surfaced after an initial pause signal: $(cat "$out")"
+  fi
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "stale path did not rebuild pause tracking after an initial pause signal"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "an initial paused signal rebuilds stale pause tracking on the successor watcher"
+}
+
 test_gone_paused_target_surfaces_without_coalesced_handoff() {
   local dir state fakebin out drain_out capture_file statusf window key pane_hash sig pid
   dir=$(make_case gone-paused-target); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1251,6 +1287,7 @@ test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_settled_pause_survives_watcher_restart_without_pause_marker
 test_coalesced_pause_signal_rebuilds_stale_pause_tracking
+test_initial_pause_signal_rebuilds_stale_pause_tracking
 test_gone_paused_target_surfaces_without_coalesced_handoff
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
