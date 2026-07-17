@@ -1245,24 +1245,38 @@ test_ops_inbox_fingerprint_distinguishes_same_second_same_size_rewrite() {
 }
 
 test_ops_inbox_fingerprint_uses_directory_markers() {
-  local dir home fakebin find_log real_find before after
+  local dir home fakebin find_log find_dir_count real_find before repeat after
   dir=$(make_case ops-inbox-directory-marker); home="$dir/home"; fakebin="$dir/fakebin"
-  find_log="$dir/find.log"; real_find=$(command -v find)
-  mkdir -p "$home/ops-inbox/source" "$home/config"
-  printf 'first\n' > "$home/ops-inbox/source/event"
+  find_log="$dir/find.log"; find_dir_count="$dir/find-dir-count"; real_find=$(command -v find)
+  mkdir -p "$home/ops-inbox/source/run" "$home/config"
+  printf 'first\n' > "$home/ops-inbox/source/run/event"
   cat > "$fakebin/find" <<SH
 #!/usr/bin/env bash
 printf '%s\\n' "\$*" >> "\$FM_OPS_INBOX_FIND_LOG"
+case " \$* " in
+  *' -type d -print0 '*)
+    count=\$(cat "\$FM_OPS_INBOX_FIND_DIR_COUNT" 2>/dev/null || echo 0)
+    count=\$((count + 1))
+    printf '%s\\n' "\$count" > "\$FM_OPS_INBOX_FIND_DIR_COUNT"
+    if [ "\$count" -eq 2 ]; then
+      "$real_find" "\$@" | perl -0 -e 'print for reverse <>'
+      exit "\${PIPESTATUS[0]}"
+    fi
+    ;;
+esac
 exec "$real_find" "\$@"
 SH
   chmod +x "$fakebin/find"
-  before=$(PATH="$fakebin:$PATH" FM_OPS_INBOX_FIND_LOG="$find_log" fm_ops_inbox_fingerprint "$home" "$home/config")
-  printf 'second\n' > "$home/ops-inbox/source/new-event"
-  after=$(PATH="$fakebin:$PATH" FM_OPS_INBOX_FIND_LOG="$find_log" fm_ops_inbox_fingerprint "$home" "$home/config")
+  before=$(PATH="$fakebin:$PATH" FM_OPS_INBOX_FIND_LOG="$find_log" FM_OPS_INBOX_FIND_DIR_COUNT="$find_dir_count" fm_ops_inbox_fingerprint "$home" "$home/config")
+  repeat=$(PATH="$fakebin:$PATH" FM_OPS_INBOX_FIND_LOG="$find_log" FM_OPS_INBOX_FIND_DIR_COUNT="$find_dir_count" fm_ops_inbox_fingerprint "$home" "$home/config")
+  [ "$before" = "$repeat" ] || fail "directory traversal order changed the operations-inbox fingerprint"
+  printf 'second\n' > "$home/ops-inbox/source/run/new-event"
+  after=$(PATH="$fakebin:$PATH" FM_OPS_INBOX_FIND_LOG="$find_log" FM_OPS_INBOX_FIND_DIR_COUNT="$find_dir_count" fm_ops_inbox_fingerprint "$home" "$home/config")
   [ "$before" != "$after" ] || fail "nested operations-inbox event did not change its directory-marker fingerprint"
-  grep -F -- '-maxdepth 1' "$find_log" >/dev/null || fail "fingerprint recursively enumerated retained operations-inbox events"
-  [ "$(wc -l < "$find_log" | tr -d '[:space:]')" -eq 2 ] || fail "fingerprint performed unexpected operations-inbox scans"
-  pass "operations-inbox fingerprints use bounded directory markers"
+  grep -F -- '-type d' "$find_log" >/dev/null || fail "fingerprint did not track nested directory markers"
+  grep -F -- '-maxdepth 1 -type f' "$find_log" >/dev/null || fail "fingerprint recursively enumerated retained operations-inbox events"
+  [ "$(wc -l < "$find_log" | tr -d '[:space:]')" -eq 6 ] || fail "fingerprint performed unexpected operations-inbox scans"
+  pass "operations-inbox fingerprints use nested directory markers"
 }
 
 test_ops_inbox_external_output_is_bounded_and_timed() {
@@ -1283,6 +1297,17 @@ SH
 
   cat > "$command" <<'SH'
 #!/usr/bin/env bash
+printf 'external failure\n'
+exit 42
+SH
+  chmod +x "$command"
+  output=$(fm_ops_inbox_external_output "$home/config")
+  rc=$?
+  [ "$output" = 'external failure' ] || fail "external operations-inbox command lost its output"
+  [ "$rc" -eq 42 ] || fail "external operations-inbox command returned $rc, expected 42"
+
+  cat > "$command" <<'SH'
+#!/usr/bin/env bash
 sleep 3
 SH
   chmod +x "$command"
@@ -1293,6 +1318,19 @@ SH
   [ -z "$output" ] || fail "timed external operations-inbox command produced unexpected output"
   [ "$rc" -eq 124 ] || fail "timed external operations-inbox command returned $rc, expected 124"
   [ "$elapsed" -lt 3 ] || fail "timed external operations-inbox command exceeded its deadline (${elapsed}s)"
+
+  cat > "$command" <<'SH'
+#!/usr/bin/env bash
+sleep 3 &
+SH
+  chmod +x "$command"
+  started=$SECONDS
+  output=$(FM_OPS_INBOX_TIMEOUT=1 fm_ops_inbox_external_output "$home/config")
+  rc=$?
+  elapsed=$((SECONDS - started))
+  [ -z "$output" ] || fail "background-child external command produced unexpected output"
+  [ "$rc" -eq 124 ] || fail "background-child external command returned $rc, expected 124"
+  [ "$elapsed" -lt 3 ] || fail "background-child external command bypassed its deadline (${elapsed}s)"
   pass "external operations-inbox commands have bounded output and runtime"
 }
 

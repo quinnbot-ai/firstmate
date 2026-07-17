@@ -57,28 +57,10 @@ fm_ops_inbox_external_command() {
 # A command may use a non-zero exit to signal unacknowledged criticals, so
 # callers must inspect the output as well as this status.
 fm_ops_inbox_external_output() {
-  local config=$1 command producer limiter
-  local -a statuses
+  local config=$1 command
   command=$(fm_ops_inbox_external_command "$config") || return 127
   command -v perl >/dev/null 2>&1 || return 124
-  fm_ops_inbox_external_run "$command" 2>&1 | perl -e '
-    my $max = shift;
-    my $written = 0;
-    while (read STDIN, my $chunk, 8192) {
-      my $remaining = $max - $written;
-      if (length($chunk) > $remaining) {
-        print substr($chunk, 0, $remaining) if $remaining > 0;
-        exit 125;
-      }
-      print $chunk;
-      $written += length($chunk);
-    }
-  ' "$FM_OPS_INBOX_OUTPUT_MAX_BYTES"
-  statuses=("${PIPESTATUS[@]}")
-  producer=${statuses[0]}
-  limiter=${statuses[1]}
-  [ "$limiter" -eq 125 ] && return 125
-  return "$producer"
+  fm_ops_inbox_external_run "$command"
 }
 
 FM_OPS_INBOX_TIMEOUT=${FM_OPS_INBOX_TIMEOUT:-10}
@@ -88,15 +70,91 @@ case "$FM_OPS_INBOX_OUTPUT_MAX_BYTES" in ''|*[!0-9]*|0) FM_OPS_INBOX_OUTPUT_MAX_
 
 fm_ops_inbox_external_run() {
   local command=$1
-  if command -v perl >/dev/null 2>&1; then
-    perl -e 'my $t = shift; my $pid = fork; die "fork failed\n" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV; die "exec failed: $!\n" } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; waitpid $pid, 0; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$FM_OPS_INBOX_TIMEOUT" /bin/sh -c "$command"
-  elif command -v timeout >/dev/null 2>&1; then
-    timeout "$FM_OPS_INBOX_TIMEOUT" /bin/sh -c "$command"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "$FM_OPS_INBOX_TIMEOUT" /bin/sh -c "$command"
-  else
-    return 124
-  fi
+  perl -e '
+    use Fcntl qw(F_GETFL F_SETFL O_NONBLOCK);
+    use IO::Select;
+    use POSIX qw(WNOHANG);
+    use Time::HiRes qw(time);
+
+    my ($timeout, $max, $command) = @ARGV;
+    pipe(my $reader, my $writer) or exit 124;
+    my $pid = fork;
+    exit 124 unless defined $pid;
+    if (!$pid) {
+      close $reader;
+      setpgrp(0, 0) or exit 124;
+      open STDOUT, ">&", $writer or exit 124;
+      open STDERR, ">&", $writer or exit 124;
+      close $writer;
+      exec "/bin/sh", "-c", $command;
+      exit 127;
+    }
+
+    close $writer;
+    my $flags = fcntl($reader, F_GETFL, 0);
+    fcntl($reader, F_SETFL, $flags | O_NONBLOCK) or exit 124;
+    my $selector = IO::Select->new($reader);
+    my $deadline = time + $timeout;
+    my $kill_deadline;
+    my $eof = 0;
+    my $shell_done = 0;
+    my $shell_status = 124;
+    my $timed_out = 0;
+    my $capped = 0;
+    my $killed = 0;
+    my $written = 0;
+
+    while (!$eof || !$shell_done) {
+      my $now = time;
+      if (!$timed_out && !$capped && $now >= $deadline) {
+        kill "TERM", -$pid;
+        $timed_out = 1;
+        $kill_deadline = $now + 0.2;
+      }
+      if (($timed_out || $capped) && !$killed && $now >= $kill_deadline) {
+        kill "KILL", -$pid;
+        $killed = 1;
+      }
+
+      my $next = $deadline;
+      $next = $kill_deadline if defined $kill_deadline && $kill_deadline < $next;
+      my $wait = $next - time;
+      $wait = 0 if $wait < 0;
+      $wait = 0.05 if $wait > 0.05;
+      for my $fh ($selector->can_read($wait)) {
+        my $read = sysread($fh, my $chunk, 8192);
+        if (!defined $read) {
+          next;
+        }
+        if ($read == 0) {
+          $selector->remove($fh);
+          close $fh;
+          $eof = 1;
+          next;
+        }
+        my $remaining = $max - $written;
+        if ($read > $remaining) {
+          print substr($chunk, 0, $remaining) if $remaining > 0;
+          $written += $remaining;
+          kill "TERM", -$pid;
+          $capped = 1;
+          $kill_deadline = time + 0.2;
+          next;
+        }
+        print $chunk;
+        $written += $read;
+      }
+
+      if (!$shell_done && waitpid($pid, WNOHANG) == $pid) {
+        $shell_status = $?;
+        $shell_done = 1;
+      }
+    }
+
+    exit 125 if $capped;
+    exit 124 if $timed_out;
+    exit($shell_status >> 8);
+  ' "$FM_OPS_INBOX_TIMEOUT" "$FM_OPS_INBOX_OUTPUT_MAX_BYTES" "$command"
 }
 
 # fm_ops_inbox_home_records <home>
@@ -115,12 +173,16 @@ fm_ops_inbox_home_marker() {
   local home=$1 dir path sig
   dir=$(fm_ops_inbox_home_dir "$home")
   [ -d "$dir" ] || return 0
-  sig=$(fm_ops_inbox_stat_sig "$dir") || return 0
-  printf '%s\t%s\n' "$sig" "$dir"
-  while IFS= read -r -d '' path; do
-    sig=$(fm_ops_inbox_stat_sig "$path") || continue
-    printf '%s\t%s\n' "$sig" "$path"
-  done < <(find "$dir" -mindepth 1 -maxdepth 1 \( -type f -o -type d \) -print0 2>/dev/null) | LC_ALL=C sort
+  {
+    while IFS= read -r -d '' path; do
+      sig=$(fm_ops_inbox_stat_sig "$path") || continue
+      printf '%s\t%s\n' "$sig" "$path"
+    done < <(find "$dir" -type d -print0 2>/dev/null)
+    while IFS= read -r -d '' path; do
+      sig=$(fm_ops_inbox_stat_sig "$path") || continue
+      printf '%s\t%s\n' "$sig" "$path"
+    done < <(find "$dir" -mindepth 1 -maxdepth 1 -type f -print0 2>/dev/null)
+  } | LC_ALL=C sort
 }
 
 fm_ops_inbox_home_has_events() {
