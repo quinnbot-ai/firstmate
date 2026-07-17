@@ -155,6 +155,10 @@ Claude Code's primary watcher protocol is the lowest-friction path: run `bin/fm-
 
 ## codex (VERIFIED 2026-06-11, codex-cli 0.139.0)
 
+For ship and scout launches, `fm-spawn.sh` refreshes a firstmate-owned isolated `CODEX_HOME` with no MCP servers or plugins before starting Codex.
+It copies only the captain home's current Codex authentication and model catalog, so the captain's `~/.codex` configuration remains untouched.
+Secondmate Codex launches intentionally retain their existing home behavior.
+
 | Fact | Value |
 |---|---|
 | Busy-pane signature | `esc to interrupt` (shown as `• Working (Xs • esc to interrupt)`) |

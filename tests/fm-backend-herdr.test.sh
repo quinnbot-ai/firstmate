@@ -917,6 +917,32 @@ test_kill_is_best_effort() {
   pass "fm_backend_herdr_kill: calls pane close and stays best-effort on failure"
 }
 
+test_kill_is_noop_when_target_is_malformed() {
+  local dir log resp fb
+  dir="$TMP_ROOT/kill-malformed-target"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_kill malformed-target' "$ROOT"
+  expect_code 0 $? "non-strict kill must no-op when the Herdr target cannot be parsed"
+  assert_not_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''close' \
+    "non-strict kill must not close a malformed Herdr target"
+  pass "fm_backend_herdr_kill: non-strict cleanup skips malformed targets"
+}
+
+test_kill_is_strict_when_target_readiness_is_unqueryable() {
+  local dir log resp fb status
+  dir="$TMP_ROOT/kill-strict-unqueryable"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '1\n' > "$resp/1.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    FM_BACKEND_KILL_STRICT=1 bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_kill default:w1:p2' "$ROOT"
+  status=$?
+  [ "$status" -ne 0 ] || fail "strict kill must fail when Herdr target readiness cannot be queried"
+  assert_not_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''close' \
+    "strict kill must not claim to close an unqueryable Herdr target"
+  pass "fm_backend_herdr_kill: strict cleanup propagates readiness failures"
+}
+
 test_current_path_reads_cwd() {
   local dir log resp fb out
   dir="$TMP_ROOT/cwd"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -2250,6 +2276,8 @@ test_capture_works_around_small_lines_bug
 test_capture_preserves_pane_read_failure
 test_send_key_normalizes_and_targets_pane
 test_kill_is_best_effort
+test_kill_is_noop_when_target_is_malformed
+test_kill_is_strict_when_target_readiness_is_unqueryable
 test_current_path_reads_cwd
 test_busy_state_working_maps_to_busy
 test_busy_state_done_and_blocked_map_to_idle
