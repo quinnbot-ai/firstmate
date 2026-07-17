@@ -505,7 +505,7 @@ raw_launch_mentions_codex() {
 }
 
 raw_launch_has_codex_dispatch_argument() {
-  local raw=$1 previous= status
+  local raw=$1 previous='' status
   while [ -n "$raw" ]; do
     raw_launch_read_word "$raw"
     status=$?

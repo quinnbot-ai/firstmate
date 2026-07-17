@@ -655,8 +655,8 @@ test_raw_codex_execution_wrappers_fail_closed() {
       find) command='find . -exec codex {} \;' ;;
       xargs) command='xargs -a jobs codex' ;;
       unknown-wrapper) command='custom-wrapper codex' ;;
-      eval) command='eval "$COMMAND"' ;;
-      builtin-eval) command='builtin eval "$COMMAND"' ;;
+      eval) command="eval \"\$COMMAND\"" ;;
+      builtin-eval) command="builtin eval \"\$COMMAND\"" ;;
       interpreter) command="python3 -c 'os.execvp(\"codex\", [\"codex\"])'" ;;
     esac
 
