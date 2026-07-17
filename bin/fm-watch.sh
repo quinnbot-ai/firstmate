@@ -408,6 +408,9 @@ scan_signals() {
   return 0
 }
 
+# Persist final paused events from a signal batch that will make this watcher
+# exit, allowing its successor to rebuild pause tracking when no live
+# current-state source is available.
 record_coalesced_pause_handoffs() {  # <pending-signal-rows>
   local pending=$1 sf sig f last task
   while IFS=$(printf '\t') read -r sf sig f; do

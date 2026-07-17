@@ -7,11 +7,11 @@
 # overlapping triage policy lives in one place instead of two copies that can
 # drift apart.
 #
-# Most functions are pure, side-effect-free reads of status files: each takes
-# what it needs as arguments and touches no globals beyond the optional
-# FM_CAPTAIN_RE override. Consumers layer their own dedup/marker state on top (the
-# daemon keeps its escalation-digest seen-markers; the watcher keeps its .seen-*
-# signatures).
+# Most functions are pure, side-effect-free reads of status files or the
+# watcher-owned pause handoff record: each takes what it needs as arguments and
+# touches no globals beyond the optional FM_CAPTAIN_RE override. Consumers layer
+# their own dedup/marker state on top (the daemon keeps its escalation-digest
+# seen-markers; the watcher keeps its .seen-* signatures).
 #
 # The one exception is the absorb classification (crew_absorb_class and its
 # working/paused wrappers). It is NOT a pure status-file read: it reuses
@@ -224,12 +224,18 @@ signal_reason_is_actionable() {  # <file> ...
   return 1
 }
 
+# Return the watcher-owned, short-lived coalesced-pause handoff path for one
+# task, so successor stale triage can distinguish a pause that was surfaced in
+# an exiting signal batch from an arbitrary old paused status event.
 crew_pause_handoff_file() {  # <id> [state-dir]
   local id=$1 state=${2:-${STATE:-${FM_STATE_OVERRIDE:-}}}
   [ -n "$id" ] && [ -n "$state" ] || return 1
   printf '%s/.pause-handoff-%s' "$state" "$id"
 }
 
+# Accept a handoff only when it is a regular file whose recorded final status
+# still exactly matches the task's final paused event; this prevents recovery
+# from masking a newer status transition or following a symlinked artifact.
 crew_pause_handoff_allows_recovery() {  # <id> [state-dir]
   local id=$1 state=${2:-${STATE:-${FM_STATE_OVERRIDE:-}}} marker last recorded
   marker=$(crew_pause_handoff_file "$id" "$state") || return 1
