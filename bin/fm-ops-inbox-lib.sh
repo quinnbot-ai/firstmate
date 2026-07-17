@@ -6,9 +6,9 @@
 
 fm_ops_inbox_stat_sig() {
   if [ "$(uname)" = Darwin ]; then
-    stat -f '%z:%m' "$1" 2>/dev/null
+    stat -f '%z:%Fm' "$1" 2>/dev/null
   else
-    stat -c '%s:%Y' "$1" 2>/dev/null
+    stat -c '%s:%y' "$1" 2>/dev/null
   fi
 }
 
@@ -59,7 +59,26 @@ fm_ops_inbox_external_command() {
 fm_ops_inbox_external_output() {
   local config=$1 command
   command=$(fm_ops_inbox_external_command "$config") || return 127
-  /bin/sh -c "$command" 2>&1
+  fm_ops_inbox_external_run "$command" 2>&1 | LC_ALL=C head -c "$FM_OPS_INBOX_OUTPUT_MAX_BYTES"
+  return "${PIPESTATUS[0]}"
+}
+
+FM_OPS_INBOX_TIMEOUT=${FM_OPS_INBOX_TIMEOUT:-10}
+case "$FM_OPS_INBOX_TIMEOUT" in ''|*[!0-9]*|0) FM_OPS_INBOX_TIMEOUT=10 ;; esac
+FM_OPS_INBOX_OUTPUT_MAX_BYTES=${FM_OPS_INBOX_OUTPUT_MAX_BYTES:-32768}
+case "$FM_OPS_INBOX_OUTPUT_MAX_BYTES" in ''|*[!0-9]*|0) FM_OPS_INBOX_OUTPUT_MAX_BYTES=32768 ;; esac
+
+fm_ops_inbox_external_run() {
+  local command=$1
+  if command -v perl >/dev/null 2>&1; then
+    perl -e 'my $t = shift; my $pid = fork; die "fork failed\n" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV; die "exec failed: $!\n" } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; waitpid $pid, 0; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$FM_OPS_INBOX_TIMEOUT" /bin/sh -c "$command"
+  elif command -v timeout >/dev/null 2>&1; then
+    timeout "$FM_OPS_INBOX_TIMEOUT" /bin/sh -c "$command"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$FM_OPS_INBOX_TIMEOUT" /bin/sh -c "$command"
+  else
+    return 124
+  fi
 }
 
 # fm_ops_inbox_home_records <home>

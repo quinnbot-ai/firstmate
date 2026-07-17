@@ -21,6 +21,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$ROOT/bin/fm-classify-lib.sh"
+. "$ROOT/bin/fm-ops-inbox-lib.sh"
 
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
@@ -1231,6 +1232,49 @@ test_ops_inbox_new_event_wakes_on_heartbeat_without_tasks() {
   pass "a new operations-inbox event wakes on heartbeat when no task is in flight"
 }
 
+test_ops_inbox_fingerprint_distinguishes_same_second_same_size_rewrite() {
+  local dir home before after
+  dir=$(make_case ops-inbox-subsecond); home="$dir/home"
+  mkdir -p "$home/ops-inbox" "$home/config"
+  printf 'first\n' > "$home/ops-inbox/event"
+  before=$(fm_ops_inbox_fingerprint "$home" "$home/config")
+  printf 'other\n' > "$home/ops-inbox/event"
+  after=$(fm_ops_inbox_fingerprint "$home" "$home/config")
+  [ "$before" != "$after" ] || fail "same-size operations-inbox rewrite did not change its fingerprint"
+  pass "operations-inbox fingerprints retain sub-second rewrite resolution"
+}
+
+test_ops_inbox_external_output_is_bounded_and_timed() {
+  local dir home command output rc bytes started elapsed
+  dir=$(make_case ops-inbox-bounded-command); home="$dir/home"; command="$dir/external-inbox"
+  mkdir -p "$home/config"
+  cat > "$command" <<'SH'
+#!/usr/bin/env bash
+while :; do printf '0123456789abcdef'; done
+SH
+  chmod +x "$command"
+  printf '%s\n' "$command" > "$home/config/ops-inbox-cmd"
+  output=$(FM_OPS_INBOX_OUTPUT_MAX_BYTES=128 fm_ops_inbox_external_output "$home/config")
+  rc=$?
+  bytes=$(printf '%s' "$output" | LC_ALL=C wc -c | tr -d '[:space:]')
+  [ "$bytes" -le 128 ] || fail "external operations-inbox output exceeded its byte cap ($bytes)"
+  [ "$rc" -ne 0 ] || fail "capped external operations-inbox command unexpectedly succeeded"
+
+  cat > "$command" <<'SH'
+#!/usr/bin/env bash
+sleep 3
+SH
+  chmod +x "$command"
+  started=$SECONDS
+  output=$(FM_OPS_INBOX_TIMEOUT=1 fm_ops_inbox_external_output "$home/config")
+  rc=$?
+  elapsed=$((SECONDS - started))
+  [ -z "$output" ] || fail "timed external operations-inbox command produced unexpected output"
+  [ "$rc" -eq 124 ] || fail "timed external operations-inbox command returned $rc, expected 124"
+  [ "$elapsed" -lt 3 ] || fail "timed external operations-inbox command exceeded its deadline (${elapsed}s)"
+  pass "external operations-inbox commands have bounded output and runtime"
+}
+
 # --- beacon stays fresh while absorbing -------------------------------------
 
 test_beacon_stays_fresh_while_absorbing() {
@@ -1356,6 +1400,8 @@ test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_ops_inbox_new_event_wakes_with_task_in_flight
 test_ops_inbox_new_event_wakes_on_heartbeat_without_tasks
+test_ops_inbox_fingerprint_distinguishes_same_second_same_size_rewrite
+test_ops_inbox_external_output_is_bounded_and_timed
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale

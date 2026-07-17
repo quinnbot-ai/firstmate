@@ -28,10 +28,12 @@ Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, whil
 Each home may receive operational-failure event files under its local `ops-inbox/` directory.
 `bin/fm-session-start.sh` reports a bounded count and newest full paths from that directory without changing any event or acknowledgement state.
 Set the local, gitignored `config/ops-inbox-cmd` to one list-only shell command when this machine also has a durable machine-level inbox.
-The command must return promptly and print only its current unhandled critical listing, starting with `unacked_criticals: <count>`; its exit status is displayed but does not suppress its output because some list commands use a non-zero status when criticals exist.
+The command must print only its current unhandled critical listing, starting with `unacked_criticals: <count>`; its exit status is displayed but does not suppress its output because some list commands use a non-zero status when criticals exist.
 The command is intentionally operator-owned and generic, so firstmate does not encode a machine-specific inbox path or acknowledgement implementation.
 The watcher fingerprints both sources, wakes immediately for a changed inbox while a regular task is in flight, and checks the same fingerprint on its existing heartbeat cadence otherwise.
 `FM_SESSION_START_OPS_INBOX_LIMIT` bounds both the home-event paths and configured-command output lines in the digest, defaulting to 5.
+`FM_OPS_INBOX_TIMEOUT` bounds each configured command invocation to 10 seconds by default.
+`FM_OPS_INBOX_OUTPUT_MAX_BYTES` bounds each configured command capture to 32768 bytes by default.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
