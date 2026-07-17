@@ -163,6 +163,10 @@ codex_home_from_launch() {
   printf '%s\n' "$1" | sed -n "s/.*--home '\\([^']*\\)'.*/\\1/p"
 }
 
+codex_source_from_launch() {
+  printf '%s\n' "$1" | sed -n "s/.*--source '\\([^']*\\)'.*/\\1/p"
+}
+
 codex_activation_result_from_launch() {
   local home
   home=$(codex_home_from_launch "$1")
@@ -426,6 +430,23 @@ EOF
     "Codex scout refresh reintroduced plugin registrations"
   [ ! -e "$crew_home/plugins" ] || fail "Codex scout home retained plugins"
   pass "Codex ship and scout launches use fresh MCP-free homes"
+}
+
+test_codex_crewmate_home_honors_codex_home_override() {
+  local rec id out status launch source_home
+  id=profile-codex-home-override-z69
+  rec=$(make_spawn_case profile-codex-home-override codex "$id")
+  read_case_record "$rec"
+  source_home="$CASE_DIR/explicit-codex-home"
+  mkdir -p "$source_home"
+
+  out=$(CODEX_HOME="$source_home" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "Codex spawn should honor an explicit CODEX_HOME"
+  launch=$(cat "$LAUNCH_LOG")
+  [ "$(codex_source_from_launch "$launch")" = "$source_home" ] \
+    || fail "Codex launch did not source its isolated home from explicit CODEX_HOME"
+  pass "Codex isolated home honors an explicit CODEX_HOME source"
 }
 
 test_codex_crewmate_home_uses_fresh_private_directory() {
@@ -1320,6 +1341,7 @@ test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_crewmate_home_excludes_mcp_and_plugins
+test_codex_crewmate_home_honors_codex_home_override
 test_codex_crewmate_home_uses_fresh_private_directory
 test_codex_crewmate_home_is_removed_at_teardown
 test_codex_crewmate_home_refuses_symlink_escape

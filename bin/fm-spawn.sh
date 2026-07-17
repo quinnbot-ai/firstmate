@@ -1624,7 +1624,7 @@ if [ -n "$CODEX_CREWMATE_HOME" ]; then
   LAUNCH=${LAUNCH//__CODEXPROFILE__/$sq_codex_crewmate_profile}
   sq_codex_home_helper=$(shell_quote "$FM_ROOT/bin/fm-codex-home.py")
   sq_codex_data=$(shell_quote "$DATA")
-  sq_codex_source=$(shell_quote "$HOME/.codex")
+  sq_codex_source=$(shell_quote "${CODEX_HOME:-$HOME/.codex}")
   sq_codex_worktree=$(shell_quote "$WT_REAL")
   sq_codex_activation_token=$(shell_quote "$CODEX_ACTIVATION_TOKEN")
   LAUNCH="exec python3 $sq_codex_home_helper --create-activate --data $sq_codex_data --source $sq_codex_source --profile $sq_codex_crewmate_profile --worktree $sq_codex_worktree --home $sq_codex_crewmate_home --result-token $sq_codex_activation_token -- $LAUNCH"
