@@ -224,20 +224,20 @@ signal_reason_is_actionable() {  # <file> ...
   return 1
 }
 
-# 0 if <id>'s durable final status event declares a pause.
-#
-# Current-state evidence normally outranks the append-only status log: an active
-# run after a pause must classify as working, and a completed or failed run must
-# not be hidden by an old pause event.
-# A watcher successor can briefly have only `unknown · source: none`, however,
-# after a coalesced signal caused its predecessor to exit before stale triage
-# created .paused-*.
-# This narrow fallback lets the stale path rebuild pause tracking from the final
-# durable event instead of surfacing a bare stale wake on every re-arm.
-crew_status_declares_pause() {  # <id> [state-dir]
+crew_pause_handoff_file() {  # <id> [state-dir]
   local id=$1 state=${2:-${STATE:-${FM_STATE_OVERRIDE:-}}}
   [ -n "$id" ] && [ -n "$state" ] || return 1
-  status_is_paused "$(last_status_line "$state/$id.status")"
+  printf '%s/.pause-handoff-%s' "$state" "$id"
+}
+
+crew_pause_handoff_allows_recovery() {  # <id> [state-dir]
+  local id=$1 state=${2:-${STATE:-${FM_STATE_OVERRIDE:-}}} marker last recorded
+  marker=$(crew_pause_handoff_file "$id" "$state") || return 1
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  last=$(last_status_line "$state/$id.status")
+  status_is_paused "$last" || return 1
+  IFS= read -r recorded < "$marker" || return 1
+  [ "$recorded" = "$last" ]
 }
 
 # Classify WHY an idle/stale crew MIGHT be safely absorbed instead of surfaced,
@@ -253,9 +253,6 @@ crew_status_declares_pause() {  # <id> [state-dir]
 # One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
 # authoritatively (not the status log) is what keeps run-step precedence: a crew
 # that appended paused: but then STARTED a run reports working, never paused.
-# Only when that reader has no source at all does the classifier recover a final
-# paused: event from the durable task status log, so the stale path can rebuild a
-# missing .paused-* marker after a coalesced signal watcher exit.
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
@@ -272,7 +269,7 @@ crew_absorb_class() {  # <id>
   fi
   if [ "$state" = unknown ]; then
     src=${line#*source: }; src=${src%% *}
-    if [ "$src" = none ] && crew_status_declares_pause "$id"; then
+    if [ "$src" = none ] && crew_pause_handoff_allows_recovery "$id"; then
       printf 'paused'
       return
     fi

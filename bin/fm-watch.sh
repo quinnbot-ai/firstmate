@@ -361,7 +361,9 @@ pause_state_class() {  # <window> <task>
   fi
   class=$(crew_absorb_class "$task")
   case "$class" in
-    paused) date +%s > "$recheck_file" ;;
+    paused) date +%s > "$recheck_file"
+            rm -f "$(crew_pause_handoff_file "$task" "$STATE")"
+            ;;
     *) rm -f "$recheck_file" ;;
   esac
   printf '%s' "$class"
@@ -404,6 +406,34 @@ scan_signals() {
     fi
   done
   return 0
+}
+
+record_coalesced_pause_handoffs() {  # <pending-signal-rows>
+  local pending=$1 sf sig f last task has_captain_relevant=0
+  while IFS=$(printf '\t') read -r sf sig f; do
+    [ -n "$f" ] || continue
+    case "$f" in
+      *.status)
+        status_is_captain_relevant "$(last_status_line "$f")" && has_captain_relevant=1
+        ;;
+    esac
+  done <<EOF
+$pending
+EOF
+  [ "$has_captain_relevant" -eq 1 ] || return 0
+  while IFS=$(printf '\t') read -r sf sig f; do
+    [ -n "$f" ] || continue
+    case "$f" in
+      *.status)
+        last=$(last_status_line "$f")
+        status_is_paused "$last" || continue
+        task=$(basename "$f"); task=${task%.status}
+        printf '%s\n' "$last" > "$(crew_pause_handoff_file "$task" "$STATE")"
+        ;;
+    esac
+  done <<EOF
+$pending
+EOF
 }
 
 run_check() {
@@ -692,6 +722,7 @@ EOF
       done <<EOF
 $pending
 EOF
+      record_coalesced_pause_handoffs "$pending"
       wake "$reason"
     else
       while IFS=$(printf '\t') read -r sf sig f; do
@@ -717,6 +748,9 @@ EOF
     last=$(last_status_line "$STATE/$task.status")
     if ! status_is_paused "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$w"
+    fi
+    if ! status_is_paused "$last"; then
+      rm -f "$(crew_pause_handoff_file "$task" "$STATE")"
     fi
     if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
       continue
