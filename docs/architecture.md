@@ -17,6 +17,9 @@ A crew that declares `paused:` for a known external wait is separately absorbed 
 For an ordinary crew that has stopped, the normal-mode watcher first surfaces one stale wake, then applies that same cadence to an unchanged `paused:` or durable `captain-held` endpoint only when the backend confidently reports its agent dead.
 Live or inconclusive liveness remains fail-open at that initial surface, and the secondmate idle-endpoint exemption is unchanged.
 Its initial normal-mode status signal still surfaces through the no-verb path, while away mode self-handles that routine signal and owns the later recheck.
+When a `paused:` event is coalesced with another actionable signal, the outgoing watcher writes `state/.pause-handoff-<id>` with that task's final non-blank status line before it exits.
+A successor may rebuild pause tracking from that handoff only when `bin/fm-crew-state.sh` reports `unknown` with source `none` and the current final status line exactly matches the recorded line.
+After rebuilding the pause marker, stale triage consumes the handoff, and any later non-paused final status event clears it.
 Fresh stale panes use the same current-state read before trusting the status log, so an active run or busy pane outranks an old captain-relevant status-log line left behind before validation.
 No-change heartbeats are also benign.
 Absorbed wakes advance their suppression markers, log to `state/.watch-triage.log`, and keep the watcher blocking without a queue record or LLM turn.

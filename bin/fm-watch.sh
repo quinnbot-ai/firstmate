@@ -396,7 +396,9 @@ pause_state_class() {  # <window> <task>
   fi
   [ "$class" = none ] && [ "${agent_alive:-unknown}" = dead ] && class=paused
   case "$class" in
-    paused) date +%s > "$recheck_file" ;;
+    paused) date +%s > "$recheck_file"
+            rm -f "$(crew_pause_handoff_file "$task" "$STATE")"
+            ;;
     *) rm -f "$recheck_file" ;;
   esac
   printf '%s' "$class"
@@ -448,6 +450,26 @@ scan_signals() {
     fi
   done
   return 0
+}
+
+# Persist final paused events from a signal batch that will make this watcher
+# exit, allowing its successor to rebuild pause tracking when no live
+# current-state source is available.
+record_coalesced_pause_handoffs() {  # <pending-signal-rows>
+  local pending=$1 sf sig f last task
+  while IFS=$(printf '\t') read -r sf sig f; do
+    [ -n "$f" ] || continue
+    case "$f" in
+      *.status)
+        last=$(last_status_line "$f")
+        status_is_paused "$last" || continue
+        task=$(basename "$f"); task=${task%.status}
+        printf '%s\n' "$last" > "$(crew_pause_handoff_file "$task" "$STATE")"
+        ;;
+    esac
+  done <<EOF
+$pending
+EOF
 }
 
 run_check_process() {
@@ -855,6 +877,7 @@ EOF
       done <<EOF
 $pending
 EOF
+      record_coalesced_pause_handoffs "$pending"
       wake "$reason"
     else
       while IFS=$(printf '\t') read -r sf sig f; do
@@ -880,6 +903,9 @@ EOF
     last=$(last_status_line "$STATE/$task.status")
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$w"
+    fi
+    if ! status_is_paused "$last"; then
+      rm -f "$(crew_pause_handoff_file "$task" "$STATE")"
     fi
     if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
       continue
