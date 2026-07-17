@@ -57,10 +57,28 @@ fm_ops_inbox_external_command() {
 # A command may use a non-zero exit to signal unacknowledged criticals, so
 # callers must inspect the output as well as this status.
 fm_ops_inbox_external_output() {
-  local config=$1 command
+  local config=$1 command producer limiter
+  local -a statuses
   command=$(fm_ops_inbox_external_command "$config") || return 127
-  fm_ops_inbox_external_run "$command" 2>&1 | LC_ALL=C head -c "$FM_OPS_INBOX_OUTPUT_MAX_BYTES"
-  return "${PIPESTATUS[0]}"
+  command -v perl >/dev/null 2>&1 || return 124
+  fm_ops_inbox_external_run "$command" 2>&1 | perl -e '
+    my $max = shift;
+    my $written = 0;
+    while (read STDIN, my $chunk, 8192) {
+      my $remaining = $max - $written;
+      if (length($chunk) > $remaining) {
+        print substr($chunk, 0, $remaining) if $remaining > 0;
+        exit 125;
+      }
+      print $chunk;
+      $written += length($chunk);
+    }
+  ' "$FM_OPS_INBOX_OUTPUT_MAX_BYTES"
+  statuses=("${PIPESTATUS[@]}")
+  producer=${statuses[0]}
+  limiter=${statuses[1]}
+  [ "$limiter" -eq 125 ] && return 125
+  return "$producer"
 }
 
 FM_OPS_INBOX_TIMEOUT=${FM_OPS_INBOX_TIMEOUT:-10}
@@ -93,6 +111,25 @@ fm_ops_inbox_home_records() {
   done < <(find "$dir" -type f -print0 2>/dev/null) | LC_ALL=C sort
 }
 
+fm_ops_inbox_home_marker() {
+  local home=$1 dir path sig
+  dir=$(fm_ops_inbox_home_dir "$home")
+  [ -d "$dir" ] || return 0
+  sig=$(fm_ops_inbox_stat_sig "$dir") || return 0
+  printf '%s\t%s\n' "$sig" "$dir"
+  while IFS= read -r -d '' path; do
+    sig=$(fm_ops_inbox_stat_sig "$path") || continue
+    printf '%s\t%s\n' "$sig" "$path"
+  done < <(find "$dir" -mindepth 1 -maxdepth 1 \( -type f -o -type d \) -print0 2>/dev/null) | LC_ALL=C sort
+}
+
+fm_ops_inbox_home_has_events() {
+  local home=$1 dir
+  dir=$(fm_ops_inbox_home_dir "$home")
+  [ -d "$dir" ] || return 1
+  [ -n "$(find "$dir" -type f -print -quit 2>/dev/null)" ]
+}
+
 # fm_ops_inbox_home_newest <home> <limit>
 # Prints newest event files as epoch/path records, bounded by <limit>.
 fm_ops_inbox_home_newest() {
@@ -110,9 +147,8 @@ fm_ops_inbox_home_newest() {
 # A malformed or failed configured command is treated as an event so its one
 # durable wake cannot be hidden by a bad local seam.
 fm_ops_inbox_has_events() {
-  local home=$1 config=$2 records output rc count
-  records=$(fm_ops_inbox_home_records "$home")
-  [ -z "$records" ] || return 0
+  local home=$1 config=$2 output rc count
+  fm_ops_inbox_home_has_events "$home" && return 0
   fm_ops_inbox_external_command "$config" >/dev/null || return 1
   output=$(fm_ops_inbox_external_output "$config")
   rc=$?
@@ -125,17 +161,14 @@ fm_ops_inbox_has_events() {
 }
 
 # fm_ops_inbox_fingerprint <home> <config-dir>
-# Hashes local event metadata plus the configured external list output.  The
-# fingerprint changes once per inbox state transition and is safe to persist in
-# state/.hash-ops-inbox as the watcher's suppressor.
+# Hashes local directory markers plus the configured external list output.  The
+# fingerprint is safe to persist in state/.hash-ops-inbox as the watcher's
+# suppressor.
 fm_ops_inbox_fingerprint() {
-  local home=$1 config=$2 dir command output rc
-  dir=$(fm_ops_inbox_home_dir "$home")
+  local home=$1 config=$2 command output rc
   {
     printf 'home\n'
-    if [ -d "$dir" ]; then
-      fm_ops_inbox_home_records "$home"
-    fi
+    fm_ops_inbox_home_marker "$home"
     if command=$(fm_ops_inbox_external_command "$config"); then
       printf 'external:configured:%s\n' "$command"
       output=$(fm_ops_inbox_external_output "$config")

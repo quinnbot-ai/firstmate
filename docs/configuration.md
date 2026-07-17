@@ -26,6 +26,7 @@ Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, whil
 ## Operations inbox (ops-inbox/ / config/ops-inbox-cmd)
 
 Each home may receive operational-failure event files under its local `ops-inbox/` directory.
+Write each event once or atomically replace it so the watcher can detect the containing directory marker without rescanning retained event files.
 `bin/fm-session-start.sh` reports a bounded count and newest full paths from that directory without changing any event or acknowledgement state.
 Set the local, gitignored `config/ops-inbox-cmd` to one list-only shell command when this machine also has a durable machine-level inbox.
 The command must print only its current unhandled critical listing, starting with `unacked_criticals: <count>`; its exit status is displayed but does not suppress its output because some list commands use a non-zero status when criticals exist.

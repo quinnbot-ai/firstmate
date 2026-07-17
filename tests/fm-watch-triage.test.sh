@@ -1244,6 +1244,27 @@ test_ops_inbox_fingerprint_distinguishes_same_second_same_size_rewrite() {
   pass "operations-inbox fingerprints retain sub-second rewrite resolution"
 }
 
+test_ops_inbox_fingerprint_uses_directory_markers() {
+  local dir home fakebin find_log real_find before after
+  dir=$(make_case ops-inbox-directory-marker); home="$dir/home"; fakebin="$dir/fakebin"
+  find_log="$dir/find.log"; real_find=$(command -v find)
+  mkdir -p "$home/ops-inbox/source" "$home/config"
+  printf 'first\n' > "$home/ops-inbox/source/event"
+  cat > "$fakebin/find" <<SH
+#!/usr/bin/env bash
+printf '%s\\n' "\$*" >> "\$FM_OPS_INBOX_FIND_LOG"
+exec "$real_find" "\$@"
+SH
+  chmod +x "$fakebin/find"
+  before=$(PATH="$fakebin:$PATH" FM_OPS_INBOX_FIND_LOG="$find_log" fm_ops_inbox_fingerprint "$home" "$home/config")
+  printf 'second\n' > "$home/ops-inbox/source/new-event"
+  after=$(PATH="$fakebin:$PATH" FM_OPS_INBOX_FIND_LOG="$find_log" fm_ops_inbox_fingerprint "$home" "$home/config")
+  [ "$before" != "$after" ] || fail "nested operations-inbox event did not change its directory-marker fingerprint"
+  grep -F -- '-maxdepth 1' "$find_log" >/dev/null || fail "fingerprint recursively enumerated retained operations-inbox events"
+  [ "$(wc -l < "$find_log" | tr -d '[:space:]')" -eq 2 ] || fail "fingerprint performed unexpected operations-inbox scans"
+  pass "operations-inbox fingerprints use bounded directory markers"
+}
+
 test_ops_inbox_external_output_is_bounded_and_timed() {
   local dir home command output rc bytes started elapsed
   dir=$(make_case ops-inbox-bounded-command); home="$dir/home"; command="$dir/external-inbox"
@@ -1401,6 +1422,7 @@ test_heartbeat_backstop_surfaces_unsurfaced_status
 test_ops_inbox_new_event_wakes_with_task_in_flight
 test_ops_inbox_new_event_wakes_on_heartbeat_without_tasks
 test_ops_inbox_fingerprint_distinguishes_same_second_same_size_rewrite
+test_ops_inbox_fingerprint_uses_directory_markers
 test_ops_inbox_external_output_is_bounded_and_timed
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
