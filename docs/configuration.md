@@ -39,8 +39,7 @@ The watcher fingerprints both sources, wakes immediately for a changed inbox whi
 `FM_SESSION_START_OPS_INBOX_SCAN_LIMIT` bounds retained home-event records inspected at startup, defaulting to 256, and reports an explicit sampled overflow when reached.
 `FM_OPS_INBOX_TIMEOUT` bounds each configured command invocation to 10 seconds by default.
 `FM_OPS_INBOX_OUTPUT_MAX_BYTES` bounds each configured command capture to 32768 bytes by default.
-`FM_OPS_INBOX_MARKER_LIMIT` bounds the top-level entries tracked by each watcher fingerprint, defaulting to 256.
-When that limit is exceeded, the fingerprint records an overflow sentinel and the inbox must be retained below the limit before individual changes can be surfaced again.
+The watcher fingerprints every supported home-event file, so retained events remain observable even after the bounded startup digest truncates its display.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
@@ -374,7 +373,7 @@ FM_BACKEND=             # optional runtime backend override for new spawns; tmux
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)
 FM_BACKEND_HERDR_COMPOSER_LINES=20  # herdr-only: tail lines scanned by composer-state guard/fallback paths; idle-baseline submit confirmation uses agent-state
 FM_BACKEND_HERDR_IDLE_RE='^Type a message\.\.\.$'  # herdr-only: empty-composer placeholder regex after shared ghost extraction plus border and prompt stripping
-FM_BACKEND_HERDR_BARE_PROMPT_RE='^[❯›]'  # herdr-only: verified agent glyphs recognized as an UNBORDERED (bare) composer row, e.g. claude's ❯ or codex's ›; shell glyphs remain unknown rather than empty, and de-emphasised ghost/placeholder text (dim or dark-truecolor) after an agent prompt reads empty via the shared fm_composer_strip_ghost (docs/herdr-backend.md "Incident (2026-07-08)", "Incident (2026-07-10)")
+FM_BACKEND_HERDR_BARE_PROMPT_RE='^(❯|›)'  # herdr-only: verified agent glyphs recognized as an UNBORDERED (bare) composer row, e.g. claude's ❯ or codex's ›; alternation prevents a non-UTF-8 locale from byte-wise matching a box corner with the same leading byte; shell glyphs remain unknown rather than empty, and de-emphasised ghost/placeholder text (dim or dark-truecolor) after an agent prompt reads empty via the shared fm_composer_strip_ghost (docs/herdr-backend.md "Incident (2026-07-08)", "Incident (2026-07-10)")
 FM_BACKEND_HERDR_PI_COMPOSER_MAX_LINES=8  # herdr-only: maximum rows admitted between Pi's native-identity-corroborated separator pair; taller or ambiguous candidates stay unknown (docs/herdr-backend.md "Incident (2026-07-14)")
 FM_BACKEND_HERDR_SUBMIT_POLLS=6  # herdr-only: agent-state samples spread across each Enter attempt's budget when confirming a submit (docs/herdr-backend.md "Native agent-state submit confirmation")
 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0.6  # herdr-only: minimum per-Enter confirmation budget before polling agent-state after an idle baseline
@@ -395,7 +394,6 @@ FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartb
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
 FM_OPS_INBOX_TIMEOUT=10   # seconds allowed for each configured operations-inbox command capture
 FM_OPS_INBOX_OUTPUT_MAX_BYTES=32768   # byte cap for each configured operations-inbox command capture
-FM_OPS_INBOX_MARKER_LIMIT=256   # top-level operations-inbox entries included in each watcher fingerprint
 FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls, custom checks, or X-mode dispatch)
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision

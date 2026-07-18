@@ -67,9 +67,6 @@ FM_OPS_INBOX_TIMEOUT=${FM_OPS_INBOX_TIMEOUT:-10}
 case "$FM_OPS_INBOX_TIMEOUT" in ''|*[!0-9]*|0) FM_OPS_INBOX_TIMEOUT=10 ;; esac
 FM_OPS_INBOX_OUTPUT_MAX_BYTES=${FM_OPS_INBOX_OUTPUT_MAX_BYTES:-32768}
 case "$FM_OPS_INBOX_OUTPUT_MAX_BYTES" in ''|*[!0-9]*|0) FM_OPS_INBOX_OUTPUT_MAX_BYTES=32768 ;; esac
-FM_OPS_INBOX_MARKER_LIMIT=${FM_OPS_INBOX_MARKER_LIMIT:-256}
-case "$FM_OPS_INBOX_MARKER_LIMIT" in ''|*[!0-9]*|0) FM_OPS_INBOX_MARKER_LIMIT=256 ;; esac
-
 fm_ops_inbox_external_run() {
   local command=$1
   perl -e '
@@ -192,20 +189,14 @@ fm_ops_inbox_home_records() {
 }
 
 fm_ops_inbox_home_marker() {
-  local home=$1 dir path sig count=0 overflow=0
+  local home=$1 dir path sig
   dir=$(fm_ops_inbox_home_dir "$home")
   [ -d "$dir" ] || return 0
   {
     while IFS= read -r -d '' path; do
-      if [ "$count" -ge "$FM_OPS_INBOX_MARKER_LIMIT" ]; then
-        overflow=1
-        break
-      fi
       sig=$(fm_ops_inbox_stat_sig "$path") || continue
       printf '%s\t%s\n' "$sig" "$path"
-      count=$((count + 1))
     done < <(find "$dir" -mindepth 1 -maxdepth 2 -type f -print0 2>/dev/null)
-    [ "$overflow" -eq 0 ] || printf '__FM_OPS_INBOX_MARKER_OVERFLOW__:%s\n' "$FM_OPS_INBOX_MARKER_LIMIT"
   } | LC_ALL=C sort
 }
 

@@ -1311,8 +1311,8 @@ test_ops_inbox_fingerprint_distinguishes_same_second_same_size_rewrite() {
   pass "operations-inbox fingerprints retain sub-second rewrite resolution"
 }
 
-test_ops_inbox_fingerprint_uses_bounded_two_level_file_markers() {
-  local dir home fakebin find_log find_count real_find before repeat after marker
+test_ops_inbox_fingerprint_uses_all_two_level_file_markers() {
+  local dir home fakebin find_log find_count real_find before repeat after marker overflow_before overflow_after i
   dir=$(make_case ops-inbox-directory-marker); home="$dir/home"; fakebin="$dir/fakebin"
   find_log="$dir/find.log"; find_count="$dir/find-count"; real_find=$(command -v find)
   mkdir -p "$home/ops-inbox/source" "$home/config"
@@ -1347,12 +1347,18 @@ SH
   : > "$home/ops-inbox/overflow-a/event"
   : > "$home/ops-inbox/overflow-b/event"
   : > "$home/ops-inbox/overflow-c/event"
-  marker=$(FM_OPS_INBOX_MARKER_LIMIT=2 fm_ops_inbox_home_marker "$home")
-  printf '%s\n' "$marker" | grep -Fx '__FM_OPS_INBOX_MARKER_OVERFLOW__:2' >/dev/null \
-    || fail "bounded operations-inbox marker did not disclose overflow"
-  [ "$(printf '%s\n' "$marker" | awk 'END { print NR + 0 }')" -eq 3 ] \
-    || fail "bounded operations-inbox marker retained more than its limit"
-  pass "operations-inbox fingerprints use bounded two-level file markers"
+  for i in $(seq 1 253); do
+    : > "$home/ops-inbox/overflow-$i"
+  done
+  overflow_before=$(fm_ops_inbox_fingerprint "$home" "$home/config")
+  printf 'rewritten\n' > "$home/ops-inbox/overflow-253"
+  overflow_after=$(fm_ops_inbox_fingerprint "$home" "$home/config")
+  [ "$overflow_before" != "$overflow_after" ] \
+    || fail "an operations-inbox rewrite beyond the former marker limit did not change its fingerprint"
+  marker=$(fm_ops_inbox_home_marker "$home")
+  [ "$(printf '%s\n' "$marker" | awk 'END { print NR + 0 }')" -eq 257 ] \
+    || fail "operations-inbox marker did not retain every supported event file"
+  pass "operations-inbox fingerprints use all two-level file markers"
 }
 
 test_ops_inbox_external_output_is_bounded_and_timed() {
@@ -1563,7 +1569,7 @@ test_heartbeat_backstop_surfaces_unsurfaced_status
 test_ops_inbox_new_event_wakes_with_task_in_flight
 test_ops_inbox_new_event_wakes_on_heartbeat_without_tasks
 test_ops_inbox_fingerprint_distinguishes_same_second_same_size_rewrite
-test_ops_inbox_fingerprint_uses_bounded_two_level_file_markers
+test_ops_inbox_fingerprint_uses_all_two_level_file_markers
 test_ops_inbox_external_output_is_bounded_and_timed
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
