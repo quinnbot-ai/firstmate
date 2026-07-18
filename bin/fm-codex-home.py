@@ -134,6 +134,7 @@ def toml_basic_string(value):
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data")
+    parser.add_argument("--state")
     parser.add_argument("--source")
     parser.add_argument("--profile")
     parser.add_argument("--worktree")
@@ -144,6 +145,7 @@ def parse_args():
     parser.add_argument("--read-activation-result", action="store_true")
     parser.add_argument("--remove-activation-result", action="store_true")
     parser.add_argument("--home")
+    parser.add_argument("--task-id")
     parser.add_argument("--result-token")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     return parser.parse_args()
@@ -154,6 +156,93 @@ def managed_home_name(home):
     if not name.startswith(".fm-codex-home.") or len(name) <= len(".fm-codex-home."):
         die("isolated Codex home name is unsafe")
     return name
+
+
+def removal_home_path(args, base_fd):
+    name = managed_home_name(args.home)
+    base = directory_path(
+        base_fd, os.path.join(os.path.abspath(args.data), "codex-crewmate")
+    )
+    expected = os.path.join(base, name)
+    if os.path.realpath(args.home) != expected:
+        die("isolated Codex home path is unsafe")
+    return expected
+
+
+def require_unreferenced_home(args, expected):
+    task_id_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
+    if not args.task_id or any(
+        char not in task_id_chars for char in args.task_id
+    ):
+        die("isolated Codex home removal requires a safe task id")
+    try:
+        state_fd = open_directory(os.path.abspath(args.state))
+    except OSError as error:
+        die(
+            "could not inspect task metadata before isolated Codex home removal: "
+            f"{error.strerror}"
+        )
+    try:
+        require_directory(state_fd, "firstmate state")
+        for entry in os.scandir(state_fd):
+            if entry.name == f"{args.task_id}.meta" or not entry.name.endswith(".meta"):
+                continue
+            try:
+                meta_fd = os.open(
+                    entry.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=state_fd
+                )
+            except OSError as error:
+                die(
+                    "could not inspect task metadata before isolated Codex home removal: "
+                    f"{error.strerror}"
+                )
+            try:
+                meta_stat = os.fstat(meta_fd)
+                if not stat.S_ISREG(meta_stat.st_mode):
+                    die("task metadata is unsafe before isolated Codex home removal")
+                content = os.read(meta_fd, 1024 * 1024 + 1)
+                if len(content) > 1024 * 1024:
+                    die("task metadata is unsafe before isolated Codex home removal")
+            finally:
+                os.close(meta_fd)
+            try:
+                lines = content.decode().splitlines()
+            except UnicodeDecodeError:
+                die("task metadata is unsafe before isolated Codex home removal")
+            for line in lines:
+                if line.startswith("codex_crewmate_home=") and os.path.realpath(
+                    line.partition("=")[2]
+                ) == expected:
+                    die("isolated Codex home is referenced by another active task")
+    finally:
+        os.close(state_fd)
+
+
+def require_task_profile(args, base_fd):
+    name = managed_home_name(args.home)
+    profile = f"fm-crewmate-{args.task_id}.config.toml"
+    try:
+        home_fd = open_directory(name, base_fd)
+    except FileNotFoundError:
+        return False
+    try:
+        try:
+            profile_fd = os.open(
+                profile, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=home_fd
+            )
+        except OSError as error:
+            die(
+                f"isolated Codex home does not belong to task {args.task_id}: "
+                f"{error.strerror}"
+            )
+        try:
+            if not stat.S_ISREG(os.fstat(profile_fd).st_mode):
+                die(f"isolated Codex home does not belong to task {args.task_id}")
+        finally:
+            os.close(profile_fd)
+    finally:
+        os.close(home_fd)
+    return True
 
 
 def launch_command(args):
@@ -332,8 +421,8 @@ def validate_data_root(data):
 def remove_home(args):
     if args.create_activate or not args.home:
         die("Codex home removal requires --home")
-    if not args.data:
-        die("Codex home removal requires --data")
+    if not args.data or not args.state:
+        die("Codex home removal requires --data and --state")
     data_fd = open_directory(os.path.abspath(args.data))
     try:
         require_directory(data_fd, "firstmate data")
@@ -345,6 +434,10 @@ def remove_home(args):
         os.close(data_fd)
     try:
         require_directory(base_fd, "isolated Codex home")
+        expected = removal_home_path(args, base_fd)
+        require_unreferenced_home(args, expected)
+        if not require_task_profile(args, base_fd):
+            return
         remove_tree(base_fd, managed_home_name(args.home))
     except FileNotFoundError:
         pass

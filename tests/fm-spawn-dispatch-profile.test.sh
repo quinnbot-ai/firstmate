@@ -508,6 +508,73 @@ test_codex_crewmate_home_is_removed_at_teardown() {
   pass "teardown removes the recorded private Codex home"
 }
 
+test_codex_teardown_preserves_home_referenced_by_another_task() {
+  local rec id sibling out status launch crew_home sibling_home target_state meta
+  id=profile-codex-home-owner-z80
+  sibling=profile-codex-home-owner-z81
+  rec=$(make_spawn_case profile-codex-home-owner codex "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "Codex spawn should prepare a private home ownership case"
+  launch=$(cat "$LAUNCH_LOG")
+  crew_home=$(codex_home_from_launch "$launch")
+  sibling_home="$HOME_DIR/data/codex-crewmate/.fm-codex-home.sibling$RANDOM"
+  materialize_codex_home "$sibling_home" "$HOME_DIR/data" "$CASE_DIR/user/.codex" "fm-crewmate-$sibling" "$WT_DIR"
+  meta="$HOME_DIR/state/$id.meta"
+  sed "s|^codex_crewmate_home=.*|codex_crewmate_home=$sibling_home|" "$meta" > "$meta.next" && mv "$meta.next" "$meta"
+  fm_write_meta "$HOME_DIR/state/$sibling.meta" \
+    "window=fm-$sibling" "worktree=$WT_DIR" "project=$PROJ_DIR" "harness=codex" \
+    "kind=ship" "mode=no-mistakes" "codex_crewmate_home=$sibling_home"
+  target_state="$CASE_DIR/target-state"
+  printf 'gone\n' > "$target_state"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_FAKE_TARGET_STATE="$target_state" \
+    FM_FAKE_BACKEND_LOG="$CASE_DIR/backend.log" PATH="$FAKEBIN_DIR:$PATH" \
+    "$TEARDOWN" "$id" --force 2>&1)
+  status=$?
+  expect_code 1 "$status" "teardown must reject another task's Codex home"
+  assert_contains "$out" "referenced by another active task" \
+    "teardown did not explain the conflicting Codex-home metadata"
+  [ -d "$sibling_home" ] || fail "teardown removed the sibling task's credential home"
+  [ -f "$meta" ] || fail "teardown discarded metadata after rejecting a sibling Codex home"
+  [ ! -e "$crew_home" ] || fail "test setup unexpectedly materialized the original Codex home"
+  pass "teardown preserves a Codex home referenced by another task"
+}
+
+test_codex_teardown_refuses_home_owned_by_another_task() {
+  local rec id sibling out status launch sibling_home target_state meta
+  id=profile-codex-home-profile-z83
+  sibling=profile-codex-home-profile-z84
+  rec=$(make_spawn_case profile-codex-home-profile codex "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "Codex spawn should prepare a private home profile case"
+  launch=$(cat "$LAUNCH_LOG")
+  sibling_home="$HOME_DIR/data/codex-crewmate/.fm-codex-home.sibling$RANDOM"
+  materialize_codex_home "$sibling_home" "$HOME_DIR/data" "$CASE_DIR/user/.codex" "fm-crewmate-$sibling" "$WT_DIR"
+  meta="$HOME_DIR/state/$id.meta"
+  sed "s|^codex_crewmate_home=.*|codex_crewmate_home=$sibling_home|" "$meta" > "$meta.next" && mv "$meta.next" "$meta"
+  target_state="$CASE_DIR/target-state"
+  printf 'gone\n' > "$target_state"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_FAKE_TARGET_STATE="$target_state" \
+    FM_FAKE_BACKEND_LOG="$CASE_DIR/backend.log" PATH="$FAKEBIN_DIR:$PATH" \
+    "$TEARDOWN" "$id" --force 2>&1)
+  status=$?
+  expect_code 1 "$status" "teardown must reject a Codex home owned by another task"
+  assert_contains "$out" "does not belong to task $id" \
+    "teardown did not explain the mismatched Codex-home profile"
+  [ -d "$sibling_home" ] || fail "teardown removed the sibling task's credential home"
+  [ -f "$meta" ] || fail "teardown discarded metadata after rejecting a mismatched Codex home"
+  pass "teardown verifies the Codex home belongs to its task"
+}
+
 test_codex_teardown_preserves_home_when_normal_endpoint_close_fails() {
   local rec id out status launch crew_home target_state
   id=profile-codex-normal-endpoint-z84
@@ -919,7 +986,8 @@ test_codex_home_activation_uses_open_descriptor() {
   [ "${codex_home_value##*/}" = "${home##*/}" ] || fail "Codex activation CODEX_HOME must resolve to the managed home: $codex_home_value"
   assert_contains "$(cat "$result")" ready "Codex activation must report readiness before launch"
   python3 "$ROOT/bin/fm-codex-home.py" --remove-activation-result --data "$data" --home "$home"
-  python3 "$ROOT/bin/fm-codex-home.py" --remove --data "$data" --home "$home"
+  mkdir -p "$(dirname "$data")/state"
+  python3 "$ROOT/bin/fm-codex-home.py" --remove --data "$data" --state "$(dirname "$data")/state" --task-id activation-z42 --home "$home"
   assert_absent "$home" "descriptor-activated Codex home must remain removable"
   pass "Codex activation passes a real-path home resolved from the retained descriptor"
 }
@@ -1161,6 +1229,35 @@ test_codex_teardown_refuses_malformed_task_temp_metadata() {
   [ -f "$meta" ] || fail "teardown discarded metadata after refusing an unsafe task temporary path"
   [ -d "$crew_home" ] || fail "teardown performed cleanup after refusing unsafe task temporary metadata"
   pass "teardown refuses malformed task temporary metadata"
+}
+
+test_codex_teardown_accepts_legacy_task_temp_metadata() {
+  local rec id out status launch crew_home legacy_task_tmp meta
+  id=profile-codex-legacy-tasktmp-z82
+  rec=$(make_spawn_case profile-codex-legacy-tasktmp codex "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "Codex spawn should prepare a legacy task-temp metadata case"
+  launch=$(cat "$LAUNCH_LOG")
+  crew_home=$(codex_home_from_launch "$launch")
+  materialize_codex_home "$crew_home" "$HOME_DIR/data" "$CASE_DIR/user/.codex" "fm-crewmate-$id" "$WT_DIR"
+  legacy_task_tmp="/tmp/fm-$id"
+  mkdir -p "$legacy_task_tmp"
+  meta="$HOME_DIR/state/$id.meta"
+  sed "s|^tasktmp=.*|tasktmp=$legacy_task_tmp|" "$meta" > "$meta.next" && mv "$meta.next" "$meta"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_FAKE_TARGET_STATE="$CASE_DIR/target-state" \
+    FM_FAKE_BACKEND_LOG="$CASE_DIR/backend.log" PATH="$FAKEBIN_DIR:$PATH" \
+    "$TEARDOWN" "$id" --force 2>&1)
+  status=$?
+  expect_code 0 "$status" "teardown should accept a legacy exact task temporary directory"
+  [ ! -e "$legacy_task_tmp" ] || fail "teardown retained the legacy task temporary directory"
+  [ ! -e "$crew_home" ] || fail "teardown retained the Codex home after legacy task-temp cleanup"
+  assert_absent "$meta" "teardown retained metadata after legacy task-temp cleanup"
+  pass "teardown accepts the legacy exact task temporary directory"
 }
 
 test_codex_teardown_refuses_symlinked_data_root() {
@@ -1428,6 +1525,8 @@ test_codex_crewmate_home_excludes_mcp_and_plugins
 test_codex_crewmate_home_honors_codex_home_override
 test_codex_crewmate_home_uses_fresh_private_directory
 test_codex_crewmate_home_is_removed_at_teardown
+test_codex_teardown_preserves_home_referenced_by_another_task
+test_codex_teardown_refuses_home_owned_by_another_task
 test_codex_teardown_preserves_home_when_normal_endpoint_close_fails
 test_codex_teardown_accepts_an_already_absent_endpoint
 test_codex_crewmate_home_refuses_symlink_escape
@@ -1454,6 +1553,7 @@ test_codex_teardown_preserves_failed_endpoint_metadata
 test_codex_teardown_preserves_metadata_when_successful_close_leaves_endpoint_live
 test_codex_teardown_preserves_metadata_when_endpoint_query_is_unavailable
 test_codex_teardown_refuses_malformed_task_temp_metadata
+test_codex_teardown_accepts_legacy_task_temp_metadata
 test_codex_teardown_refuses_symlinked_data_root
 test_codex_crewmate_home_records_failed_worktree_return
 test_codex_spawn_abort_accepts_an_already_absent_endpoint

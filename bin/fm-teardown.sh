@@ -921,10 +921,12 @@ safe_rm_rf_child_worktree() {
 }
 
 validate_task_temp_for_removal() {
-  local target=$1 prefix suffix
+  local target=$1 legacy prefix suffix
   [ -n "$target" ] || return 0
+  legacy="/tmp/fm-$ID"
   prefix="/tmp/fm-$ID."
   case "$target" in
+    "$legacy") suffix=legacy ;;
     "$prefix"*) suffix=${target#"$prefix"} ;;
     *)
       echo "REFUSED: unsafe task temporary directory $target does not match task $ID" >&2
@@ -947,7 +949,7 @@ validate_task_temp_for_removal() {
 remove_codex_crewmate_home() {
   local home=$1
   [ -n "$home" ] || return 0
-  python3 "$FM_ROOT/bin/fm-codex-home.py" --remove --data "$DATA" --home "$home"
+  python3 "$FM_ROOT/bin/fm-codex-home.py" --remove --data "$DATA" --state "$STATE" --task-id "$ID" --home "$home"
 }
 
 close_recorded_endpoint() {
