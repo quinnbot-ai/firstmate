@@ -731,6 +731,42 @@ SH
   pass "teardown detaches a parked default branch before return without deleting it"
 }
 
+test_live_lock_refuses_before_returning_checked_out_task_branch() {
+  local case_dir rc lock
+  case_dir=$(make_case live-lock-checked-out-task-branch)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  add_lsof_live_holder "$case_dir"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' invoked > "${TREEHOUSE_RETURN_MARKER:?}"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+  touch -t 200001010000 "$lock"
+
+  set +e
+  TREEHOUSE_RETURN_MARKER="$case_dir/return-invoked" \
+    FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "live-lock-checked-out-task-branch: teardown must refuse before return"
+  assert_absent "$case_dir/return-invoked" \
+    "live-lock-checked-out-task-branch: treehouse return ran with the branch still checked out"
+  [ "$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)" = fm/task-x1 ] \
+    || fail "live-lock-checked-out-task-branch: teardown detached despite the live lock"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "live-lock-checked-out-task-branch: teardown discarded recovery metadata"
+  pass "live git locks refuse teardown before a checked-out task branch can return"
+}
+
 test_no_mistakes_origin_remote_allows() {
   local case_dir rc
   case_dir=$(make_case nm-origin)
@@ -1415,6 +1451,7 @@ test_local_only_rebased_equivalent_patches_allow
 test_local_only_rebased_branch_with_unlanded_patch_refuses
 test_local_only_unique_merge_without_cherry_patch_refuses
 test_teardown_preserves_default_branch_when_worktree_is_parked_on_it
+test_live_lock_refuses_before_returning_checked_out_task_branch
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed

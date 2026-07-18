@@ -746,10 +746,6 @@ detach_and_drop_task_branch() {
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   [ "$branch" = HEAD ] && return 0
   default=$(default_branch 2>/dev/null || true)
-  if [ -n "$default" ] && [ "$branch" != "$default" ] \
-      && worktree_safety_blocked_by_lock "returning its checked-out task branch"; then
-    return 0
-  fi
   if worktree_safety_blocked_by_lock "detaching its checked-out branch"; then
     cleanup_stale_lock_for_safety_check "$WT" || {
       echo "REFUSED: cannot detach worktree $WT from checked-out branch $branch while its git lock is not provably stale; preserving it before treehouse return." >&2
@@ -961,7 +957,19 @@ close_recorded_endpoint() {
     require_confirmed_absence=1
   fi
   if [ "$require_confirmed_absence" = 1 ]; then
+    if fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
+      return 0
+    else
+      absence_status=$?
+    fi
+    if [ "$absence_status" -ne 1 ]; then
+      echo "error: endpoint $T could not be confirmed absent before cleanup; preserving recovery metadata" >&2
+      return 1
+    fi
     if ! FM_BACKEND_KILL_STRICT=1 fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null; then
+      if fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
+        return 0
+      fi
       echo "error: endpoint $T could not be confirmed closed; preserving recovery metadata" >&2
       return 1
     fi

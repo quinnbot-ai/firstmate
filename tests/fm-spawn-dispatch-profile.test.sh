@@ -82,7 +82,10 @@ cat > "$fakebin/treehouse" <<'SH'
 set -u
 [ -z "${FM_FAKE_BACKEND_LOG:-}" ] || printf 'treehouse %s\n' "$*" >> "$FM_FAKE_BACKEND_LOG"
 case "$*" in
-  "return --force"*) exit "${FM_FAKE_TREEHOUSE_RETURN_STATUS:-0}" ;;
+  "return --force"*)
+    [ "${FM_FAKE_TREEHOUSE_CLOSE_EFFECT:-none}" != gone ] || printf '%s\n' gone > "${FM_FAKE_TARGET_STATE:?}"
+    exit "${FM_FAKE_TREEHOUSE_RETURN_STATUS:-0}"
+    ;;
 esac
 exit 0
 SH
@@ -145,6 +148,7 @@ run_spawn() {
     FM_FAKE_TREEHOUSE_RETURN_STATUS="${FM_FAKE_TREEHOUSE_RETURN_STATUS:-0}" \
     FM_FAKE_BACKEND_KILL_STATUS="${FM_FAKE_BACKEND_KILL_STATUS:-0}" \
     FM_FAKE_BACKEND_CLOSE_EFFECT="${FM_FAKE_BACKEND_CLOSE_EFFECT:-gone}" \
+    FM_FAKE_TREEHOUSE_CLOSE_EFFECT="${FM_FAKE_TREEHOUSE_CLOSE_EFFECT:-none}" \
     FM_FAKE_TARGET_QUERY_STATUS="${FM_FAKE_TARGET_QUERY_STATUS:-0}" \
     FM_FAKE_TARGET_STATE="$target_state" \
     FM_FAKE_ACTIVATION_RESULT="${FM_FAKE_ACTIVATION_RESULT:-ready}" \
@@ -530,6 +534,34 @@ test_codex_teardown_preserves_home_when_normal_endpoint_close_fails() {
   [ -f "$HOME_DIR/state/$id.meta" ] || fail "normal Codex teardown discarded recovery metadata"
   [ -d "$crew_home" ] || fail "normal Codex teardown removed the credential home before close confirmation"
   pass "normal Codex teardown retains its home until the endpoint is confirmed absent"
+}
+
+test_codex_teardown_accepts_an_already_absent_endpoint() {
+  local rec id out status launch crew_home target_state
+  id=profile-codex-absent-endpoint-z85
+  rec=$(make_spawn_case profile-codex-absent-endpoint codex "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "Codex spawn should prepare an already-absent endpoint case"
+  launch=$(cat "$LAUNCH_LOG")
+  crew_home=$(codex_home_from_launch "$launch")
+  materialize_codex_home "$crew_home" "$HOME_DIR/data" "$CASE_DIR/user/.codex" "fm-crewmate-$id" "$WT_DIR"
+  target_state="$CASE_DIR/target-state"
+  printf 'gone\n' > "$target_state"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_FAKE_TARGET_STATE="$target_state" \
+    FM_FAKE_BACKEND_LOG="$CASE_DIR/backend.log" FM_FAKE_BACKEND_KILL_STATUS=75 PATH="$FAKEBIN_DIR:$PATH" \
+    "$TEARDOWN" "$id" --force 2>&1)
+  status=$?
+  expect_code 0 "$status" "teardown should accept an endpoint already confirmed absent"
+  assert_no_grep "kill-window" "$CASE_DIR/backend.log" \
+    "teardown should not strictly close an already absent endpoint"
+  [ ! -e "$crew_home" ] || fail "teardown retained the credential home after confirming endpoint absence"
+  assert_absent "$HOME_DIR/state/$id.meta" "teardown retained metadata after confirming endpoint absence"
+  pass "Codex teardown accepts a confirmed already-absent endpoint"
 }
 
 test_codex_crewmate_home_refuses_symlink_escape() {
@@ -1190,6 +1222,24 @@ SH
   pass "Codex spawn records failed worktree returns for normal teardown"
 }
 
+test_codex_spawn_abort_accepts_an_already_absent_endpoint() {
+  local rec id out status
+  id=profile-codex-home-absent-z27
+  rec=$(make_spawn_case profile-codex-home-absent codex "$id")
+  read_case_record "$rec"
+
+  out=$(FM_FAKE_TREEHOUSE_RETURN_STATUS=0 FM_FAKE_TREEHOUSE_CLOSE_EFFECT=gone \
+    FM_FAKE_BACKEND_KILL_STATUS=76 FM_FAKE_ACTIVATION_RESULT=failed \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "Codex spawn should report the isolated-home activation failure"
+  assert_no_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+    "failed spawn cleanup should not strictly close an already absent endpoint"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "failed spawn cleanup retained metadata after confirming endpoint absence"
+  pass "Codex spawn abort accepts a confirmed already-absent endpoint"
+}
+
 test_codex_crewmate_home_records_failed_endpoint_removal() {
   local rec id out status project
   id=profile-codex-home-kill-z26
@@ -1379,6 +1429,7 @@ test_codex_crewmate_home_honors_codex_home_override
 test_codex_crewmate_home_uses_fresh_private_directory
 test_codex_crewmate_home_is_removed_at_teardown
 test_codex_teardown_preserves_home_when_normal_endpoint_close_fails
+test_codex_teardown_accepts_an_already_absent_endpoint
 test_codex_crewmate_home_refuses_symlink_escape
 test_codex_crewmate_home_refuses_symlinked_data_root
 test_codex_crewmate_profile_rejects_toml_control_characters
@@ -1405,6 +1456,7 @@ test_codex_teardown_preserves_metadata_when_endpoint_query_is_unavailable
 test_codex_teardown_refuses_malformed_task_temp_metadata
 test_codex_teardown_refuses_symlinked_data_root
 test_codex_crewmate_home_records_failed_worktree_return
+test_codex_spawn_abort_accepts_an_already_absent_endpoint
 test_codex_crewmate_home_records_failed_endpoint_removal
 test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
