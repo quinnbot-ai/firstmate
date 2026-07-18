@@ -262,7 +262,11 @@ def activate_command(args, home_fd, command, result_fd, token):
         try:
             os.set_inheritable(home_fd, True)
             environment = os.environ.copy()
-            environment["CODEX_HOME"] = f"/dev/fd/{home_fd}"
+            # macOS devfs cannot open /dev/fd/<fd> as a directory, so Codex
+            # rejects an fd-shaped CODEX_HOME there; resolve the descriptor to
+            # its real path (F_GETPATH on macOS, /proc on Linux) and fall back
+            # to the fd path only when no resolution is possible.
+            environment["CODEX_HOME"] = directory_path(home_fd, args.home or f"/dev/fd/{home_fd}")
             os.execvpe(command[0], command, environment)
         except BaseException:
             try:
