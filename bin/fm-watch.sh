@@ -68,12 +68,8 @@ mkdir -p "$STATE"
 # the herdr subscriber writes them (bin/fm-transition-lib.sh).
 # shellcheck source=bin/fm-transition-lib.sh
 . "$SCRIPT_DIR/fm-transition-lib.sh"
-# shellcheck source=bin/fm-pr-lib.sh
-. "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh
 . "$SCRIPT_DIR/fm-x-lib.sh"
-# shellcheck source=bin/fm-check-lib.sh
-. "$SCRIPT_DIR/fm-check-lib.sh"
 # shellcheck source=bin/fm-ops-inbox-lib.sh
 . "$SCRIPT_DIR/fm-ops-inbox-lib.sh"
 
