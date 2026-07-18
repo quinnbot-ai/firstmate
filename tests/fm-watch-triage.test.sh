@@ -1286,7 +1286,7 @@ SH
 }
 
 test_ops_inbox_external_output_is_bounded_and_timed() {
-  local dir home command output rc bytes started elapsed
+  local dir home command output rc bytes started elapsed escaped_pid
   dir=$(make_case ops-inbox-bounded-command); home="$dir/home"; command="$dir/external-inbox"
   mkdir -p "$home/config"
   cat > "$command" <<'SH'
@@ -1347,6 +1347,22 @@ SH
   [ -z "$output" ] || fail "background-child external command produced unexpected output"
   [ "$rc" -eq 124 ] || fail "background-child external command returned $rc, expected 124"
   [ "$elapsed" -lt 3 ] || fail "background-child external command bypassed its deadline (${elapsed}s)"
+
+  escaped_pid="$dir/escaped.pid"
+  cat > "$command" <<SH
+#!/usr/bin/env bash
+perl -MPOSIX=setsid -e 'setsid; sleep 10' &
+printf '%s\\n' "\\$!" > "$escaped_pid"
+SH
+  chmod +x "$command"
+  started=$SECONDS
+  output=$(FM_OPS_INBOX_TIMEOUT=1 fm_ops_inbox_external_output "$home/config")
+  rc=$?
+  elapsed=$((SECONDS - started))
+  [ -z "$output" ] || fail "setsid-child external command produced unexpected output"
+  [ "$rc" -eq 124 ] || fail "setsid-child external command returned $rc, expected 124"
+  [ "$elapsed" -lt 3 ] || fail "setsid-child external command bypassed the parent capture deadline (${elapsed}s)"
+  kill "$(cat "$escaped_pid")" 2>/dev/null || true
   pass "external operations-inbox commands have bounded output and runtime"
 }
 

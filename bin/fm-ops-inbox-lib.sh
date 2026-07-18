@@ -98,6 +98,7 @@ fm_ops_inbox_external_run() {
     my $selector = IO::Select->new($reader);
     my $deadline = time + $timeout;
     my $kill_deadline;
+    my $capture_deadline;
     my $eof = 0;
     my $shell_done = 0;
     my $shell_status = 124;
@@ -112,14 +113,22 @@ fm_ops_inbox_external_run() {
         kill "TERM", -$pid;
         $timed_out = 1;
         $kill_deadline = $now + 0.2;
+        $capture_deadline = $kill_deadline + 0.1;
       }
       if (($timed_out || $capped) && !$killed && $now >= $kill_deadline) {
         kill "KILL", -$pid;
         $killed = 1;
       }
+      if (defined $capture_deadline && $now >= $capture_deadline) {
+        $selector->remove($reader);
+        close $reader;
+        $eof = 1;
+        last;
+      }
 
       my $next = $deadline;
       $next = $kill_deadline if defined $kill_deadline && $kill_deadline < $next;
+      $next = $capture_deadline if defined $capture_deadline && $capture_deadline < $next;
       my $wait = $next - time;
       $wait = 0 if $wait < 0;
       $wait = 0.05 if $wait > 0.05;
@@ -141,6 +150,7 @@ fm_ops_inbox_external_run() {
           kill "TERM", -$pid;
           $capped = 1;
           $kill_deadline = time + 0.2;
+          $capture_deadline = $kill_deadline + 0.1;
           next;
         }
         print $chunk;
