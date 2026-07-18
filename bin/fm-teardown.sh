@@ -15,7 +15,8 @@
 # on a remote yet the change is fully in main. Local-only containment also accepts a
 # branch when git cherry proves every branch patch is already equivalent in the local
 # default branch, even though rebasing or cherry-picking gave the landed commits new
-# SHAs.
+# SHAs. That proof rejects merge commits, malformed or failed git cherry output, and
+# any '+' patch result.
 # The PR itself is resolved from the task's recorded pr= when present, or - when
 # no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
 # where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
@@ -28,6 +29,9 @@
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
+# Before returning a task worktree to treehouse, teardown detaches its checked-out
+# branch because treehouse may clean it up. It deletes only a named non-default task
+# branch, and preserves the detached branch when the project default cannot be known.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
