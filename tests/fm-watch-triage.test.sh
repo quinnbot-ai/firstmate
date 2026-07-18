@@ -1244,20 +1244,20 @@ test_ops_inbox_fingerprint_distinguishes_same_second_same_size_rewrite() {
   pass "operations-inbox fingerprints retain sub-second rewrite resolution"
 }
 
-test_ops_inbox_fingerprint_uses_directory_markers() {
-  local dir home fakebin find_log find_dir_count real_find before repeat after
+test_ops_inbox_fingerprint_uses_bounded_one_level_markers() {
+  local dir home fakebin find_log find_count real_find before repeat after marker
   dir=$(make_case ops-inbox-directory-marker); home="$dir/home"; fakebin="$dir/fakebin"
-  find_log="$dir/find.log"; find_dir_count="$dir/find-dir-count"; real_find=$(command -v find)
-  mkdir -p "$home/ops-inbox/source/run" "$home/config"
-  printf 'first\n' > "$home/ops-inbox/source/run/event"
+  find_log="$dir/find.log"; find_count="$dir/find-count"; real_find=$(command -v find)
+  mkdir -p "$home/ops-inbox/source" "$home/config"
+  printf 'first\n' > "$home/ops-inbox/source/event"
   cat > "$fakebin/find" <<SH
 #!/usr/bin/env bash
 printf '%s\\n' "\$*" >> "\$FM_OPS_INBOX_FIND_LOG"
 case " \$* " in
-  *' -type d -print0 '*)
-    count=\$(cat "\$FM_OPS_INBOX_FIND_DIR_COUNT" 2>/dev/null || echo 0)
+  *' -mindepth 1 -maxdepth 1 -print0 '*)
+    count=\$(cat "\$FM_OPS_INBOX_FIND_COUNT" 2>/dev/null || echo 0)
     count=\$((count + 1))
-    printf '%s\\n' "\$count" > "\$FM_OPS_INBOX_FIND_DIR_COUNT"
+    printf '%s\\n' "\$count" > "\$FM_OPS_INBOX_FIND_COUNT"
     if [ "\$count" -eq 2 ]; then
       "$real_find" "\$@" | perl -0 -e 'print for reverse <>'
       exit "\${PIPESTATUS[0]}"
@@ -1267,16 +1267,22 @@ esac
 exec "$real_find" "\$@"
 SH
   chmod +x "$fakebin/find"
-  before=$(PATH="$fakebin:$PATH" FM_OPS_INBOX_FIND_LOG="$find_log" FM_OPS_INBOX_FIND_DIR_COUNT="$find_dir_count" fm_ops_inbox_fingerprint "$home" "$home/config")
-  repeat=$(PATH="$fakebin:$PATH" FM_OPS_INBOX_FIND_LOG="$find_log" FM_OPS_INBOX_FIND_DIR_COUNT="$find_dir_count" fm_ops_inbox_fingerprint "$home" "$home/config")
+  before=$(PATH="$fakebin:$PATH" FM_OPS_INBOX_FIND_LOG="$find_log" FM_OPS_INBOX_FIND_COUNT="$find_count" fm_ops_inbox_fingerprint "$home" "$home/config")
+  repeat=$(PATH="$fakebin:$PATH" FM_OPS_INBOX_FIND_LOG="$find_log" FM_OPS_INBOX_FIND_COUNT="$find_count" fm_ops_inbox_fingerprint "$home" "$home/config")
   [ "$before" = "$repeat" ] || fail "directory traversal order changed the operations-inbox fingerprint"
-  printf 'second\n' > "$home/ops-inbox/source/run/new-event"
-  after=$(PATH="$fakebin:$PATH" FM_OPS_INBOX_FIND_LOG="$find_log" FM_OPS_INBOX_FIND_DIR_COUNT="$find_dir_count" fm_ops_inbox_fingerprint "$home" "$home/config")
-  [ "$before" != "$after" ] || fail "nested operations-inbox event did not change its directory-marker fingerprint"
-  grep -F -- '-type d' "$find_log" >/dev/null || fail "fingerprint did not track nested directory markers"
-  grep -F -- '-maxdepth 1 -type f' "$find_log" >/dev/null || fail "fingerprint recursively enumerated retained operations-inbox events"
-  [ "$(wc -l < "$find_log" | tr -d '[:space:]')" -eq 6 ] || fail "fingerprint performed unexpected operations-inbox scans"
-  pass "operations-inbox fingerprints use nested directory markers"
+  printf 'second\n' > "$home/ops-inbox/source/new-event"
+  after=$(PATH="$fakebin:$PATH" FM_OPS_INBOX_FIND_LOG="$find_log" FM_OPS_INBOX_FIND_COUNT="$find_count" fm_ops_inbox_fingerprint "$home" "$home/config")
+  [ "$before" != "$after" ] || fail "one-level operations-inbox event did not change its directory-marker fingerprint"
+  grep -F -- '-mindepth 1 -maxdepth 1 -print0' "$find_log" >/dev/null || fail "fingerprint did not restrict markers to top-level entries"
+  [ "$(wc -l < "$find_log" | tr -d '[:space:]')" -eq 3 ] || fail "fingerprint performed unexpected operations-inbox scans"
+
+  mkdir -p "$home/ops-inbox/overflow-a" "$home/ops-inbox/overflow-b" "$home/ops-inbox/overflow-c"
+  marker=$(FM_OPS_INBOX_MARKER_LIMIT=2 fm_ops_inbox_home_marker "$home")
+  printf '%s\n' "$marker" | grep -Fx '__FM_OPS_INBOX_MARKER_OVERFLOW__:2' >/dev/null \
+    || fail "bounded operations-inbox marker did not disclose overflow"
+  [ "$(printf '%s\n' "$marker" | awk 'END { print NR + 0 }')" -eq 3 ] \
+    || fail "bounded operations-inbox marker retained more than its limit"
+  pass "operations-inbox fingerprints use bounded one-level markers"
 }
 
 test_ops_inbox_external_output_is_bounded_and_timed() {
@@ -1470,7 +1476,7 @@ test_heartbeat_backstop_surfaces_unsurfaced_status
 test_ops_inbox_new_event_wakes_with_task_in_flight
 test_ops_inbox_new_event_wakes_on_heartbeat_without_tasks
 test_ops_inbox_fingerprint_distinguishes_same_second_same_size_rewrite
-test_ops_inbox_fingerprint_uses_directory_markers
+test_ops_inbox_fingerprint_uses_bounded_one_level_markers
 test_ops_inbox_external_output_is_bounded_and_timed
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot

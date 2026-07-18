@@ -67,6 +67,8 @@ FM_OPS_INBOX_TIMEOUT=${FM_OPS_INBOX_TIMEOUT:-10}
 case "$FM_OPS_INBOX_TIMEOUT" in ''|*[!0-9]*|0) FM_OPS_INBOX_TIMEOUT=10 ;; esac
 FM_OPS_INBOX_OUTPUT_MAX_BYTES=${FM_OPS_INBOX_OUTPUT_MAX_BYTES:-32768}
 case "$FM_OPS_INBOX_OUTPUT_MAX_BYTES" in ''|*[!0-9]*|0) FM_OPS_INBOX_OUTPUT_MAX_BYTES=32768 ;; esac
+FM_OPS_INBOX_MARKER_LIMIT=${FM_OPS_INBOX_MARKER_LIMIT:-256}
+case "$FM_OPS_INBOX_MARKER_LIMIT" in ''|*[!0-9]*|0) FM_OPS_INBOX_MARKER_LIMIT=256 ;; esac
 
 fm_ops_inbox_external_run() {
   local command=$1
@@ -174,24 +176,26 @@ fm_ops_inbox_home_records() {
     mtime=$(fm_ops_inbox_stat_mtime "$path") || continue
     records+=("$mtime"$'\t'"$path")
     count=$((count + 1))
-  done < <(find "$dir" -type f -print0 2>/dev/null)
+  done < <(find "$dir" -mindepth 1 -maxdepth 2 -type f -print0 2>/dev/null)
   ((${#records[@]})) && printf '%s\n' "${records[@]}" | LC_ALL=C sort -rn
   [ "$overflow" -eq 0 ] || printf '%s\n' '__FM_OPS_INBOX_OVERFLOW__'
 }
 
 fm_ops_inbox_home_marker() {
-  local home=$1 dir path sig
+  local home=$1 dir path sig count=0 overflow=0
   dir=$(fm_ops_inbox_home_dir "$home")
   [ -d "$dir" ] || return 0
   {
     while IFS= read -r -d '' path; do
+      if [ "$count" -ge "$FM_OPS_INBOX_MARKER_LIMIT" ]; then
+        overflow=1
+        break
+      fi
       sig=$(fm_ops_inbox_stat_sig "$path") || continue
       printf '%s\t%s\n' "$sig" "$path"
-    done < <(find "$dir" -type d -print0 2>/dev/null)
-    while IFS= read -r -d '' path; do
-      sig=$(fm_ops_inbox_stat_sig "$path") || continue
-      printf '%s\t%s\n' "$sig" "$path"
-    done < <(find "$dir" -mindepth 1 -maxdepth 1 -type f -print0 2>/dev/null)
+      count=$((count + 1))
+    done < <(find "$dir" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+    [ "$overflow" -eq 0 ] || printf '__FM_OPS_INBOX_MARKER_OVERFLOW__:%s\n' "$FM_OPS_INBOX_MARKER_LIMIT"
   } | LC_ALL=C sort
 }
 
@@ -199,7 +203,7 @@ fm_ops_inbox_home_has_events() {
   local home=$1 dir
   dir=$(fm_ops_inbox_home_dir "$home")
   [ -d "$dir" ] || return 1
-  [ -n "$(find "$dir" -type f -print -quit 2>/dev/null)" ]
+  [ -n "$(find "$dir" -mindepth 1 -maxdepth 2 -type f -print -quit 2>/dev/null)" ]
 }
 
 # fm_ops_inbox_has_events <home> <config-dir>
