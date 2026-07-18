@@ -241,6 +241,14 @@ test_crew_absorb_class_classifier() {
   FM_FAKE_CREW_STATE='state: unknown · source: none · worktree gone'
   [ "$(crew_absorb_class a)" = none ] || fail "unknown crew classed absorbable"
   ! crew_is_paused a || fail "unknown crew classed paused"
+  FM_FAKE_CREW_STATE='state: parked · source: run-step · awaiting no-mistakes gate'
+  printf 'paused: awaiting upstream\n' > "$state/a.status"
+  [ "$(STATE="$state" crew_absorb_class a)" = paused ] \
+    || fail "a latest declared pause did not override a parked gate"
+  printf 'working: resumed after the gate\n' > "$state/a.status"
+  [ "$(STATE="$state" crew_absorb_class a)" = none ] \
+    || fail "a parked gate without a latest declared pause was absorbed"
+  FM_FAKE_CREW_STATE='state: unknown · source: none · worktree gone'
   printf 'paused: awaiting upstream\n' > "$state/a.status"
   [ "$(STATE="$state" crew_absorb_class a)" = none ] || fail "unknown/none trusted an old paused status without a handoff"
   printf 'paused: awaiting upstream\n' > "$state/.pause-handoff-a"
@@ -534,8 +542,9 @@ test_nonterminal_stale_not_working_surfaced() {
   pane_hash=$(hash_text "idle prompt, finished")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
-  # No running pipeline; the pane is idle. NOT provably working.
-  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  # A parked no-mistakes gate is not active work. Without a declared pause, the
+  # idle pane must still surface immediately.
+  export FM_FAKE_CREW_STATE='state: parked · source: run-step · awaiting next gate'
 
   # Even with a high wedge threshold, a not-provably-working stale surfaces at once.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -549,7 +558,7 @@ test_nonterminal_stale_not_working_surfaced() {
   [ ! -e "$state/.stale-since-$key" ] || fail "stale-since timer should not be set when surfacing immediately"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the immediate stale failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "immediate stale wake was not queued"
-  pass "a not-provably-working non-terminal stale is surfaced immediately (never left to wait out the timer)"
+  pass "a non-paused parked stale is surfaced immediately (never left to wait out the timer)"
 }
 
 # --- non-terminal stale, crew DECLARED a pause: absorbed, re-surfaced on a long
@@ -617,6 +626,42 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the paused re-surface failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "paused re-surface was not queued"
   pass "a declared pause is absorbed on first sight, then re-surfaced as a recheck past the threshold, never wedge-escalated"
+}
+
+# A no-mistakes review gate reports parked rather than paused through
+# fm-crew-state.sh. The task's latest declared paused: status remains the
+# operator's explicit external-wait signal, so a stale pane must take the long
+# pause cadence instead of immediately ending the watcher with a bare stale.
+test_declared_pause_with_parked_gate_is_absorbed() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid
+  dir=$(make_case declared-pause-parked-gate); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-parked-pause"
+  printf 'idle, awaiting next gate\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/parked-pause.meta"
+  statusf="$state/parked-pause.status"
+  printf 'paused: no-mistakes review fix round running, awaiting next gate\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-parked-pause_status"
+  key=$(printf '%s' "$window" | tr ':/. ' '____')
+  pane_hash=$(hash_text 'idle, awaiting next gate')
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: parked · source: run-step · no-mistakes review awaiting next gate'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "declared pause behind a parked gate surfaced a bare stale wake: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "declared pause behind a parked gate printed a wake: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "declared pause behind a parked gate enqueued a wake"; }
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "declared pause behind a parked gate did not enter pause tracking"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "declared pause behind a parked gate started a wedge timer"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a latest declared pause absorbs a stale parked no-mistakes gate"
 }
 
 # A normal-mode watcher intentionally surfaces a newly declared pause once through
@@ -1496,6 +1541,7 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
+test_declared_pause_with_parked_gate_is_absorbed
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_settled_pause_survives_watcher_restart_without_pause_marker
 test_coalesced_pause_signal_rebuilds_stale_pause_tracking
