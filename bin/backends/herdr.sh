@@ -1014,8 +1014,8 @@ FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-'^Type a message\.\.\.$'}
 # Known bare (unbordered) prompt glyphs a composer row may start with: ❯
 # (claude) and › (codex) only. Generic shell-style glyphs > $ % # are still
 # recognized after a bordered composer row has already been structurally found.
- # Alternation, not a bracket expression, keeps byte-wise C-locale matching
- # from accepting a box corner that shares the glyphs' leading byte.
+# Alternation avoids C-locale bytewise bracket matching: box corners share the
+# first UTF-8 byte with the agent glyphs and must not outrank the composer row.
 FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^(❯|›)'}
 # Pi allows a multi-line composer between its horizontal separators. Bound the
 # structural candidate so two unrelated transcript rules with an arbitrarily
