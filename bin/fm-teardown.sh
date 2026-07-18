@@ -23,7 +23,7 @@
 # teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed.
 # local-only projects additionally accept work merged into the local default
-# branch (firstmate performs that merge on the captain's approval) as a fallback
+# branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
@@ -34,10 +34,6 @@
 # device. It refuses and preserves task state when that proof fails; otherwise
 # it removes the task's check, trust record, PR sidecar, publication record, and
 # quarantine entries with the rest of the volatile state.
-# Codex ship and scout tasks record a firstmate-managed private home under
-# data/codex-crewmate in codex_crewmate_home= metadata.
-# Teardown removes that home only after endpoint cleanup succeeds.
-# When failed-spawn cleanup cannot confirm the endpoint absent, it preserves the metadata and private home for a later safe recovery attempt.
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
@@ -100,13 +96,19 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
+if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
+  echo "error: invalid teardown request" >&2
+  exit 2
+fi
+ID=$1
+FORCE=${2:-}
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never tear
 # down a worktree (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
 FM_LOCK_LOG_PREFIX=teardown
 "$FM_ROOT/bin/fm-guard.sh" || true
-ID=$1
-FORCE=${2:-}
 
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
@@ -120,13 +122,10 @@ if [ "$BACKEND" = orca ]; then
 fi
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
-# tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root;
-# absent for tasks spawned before that change, so tolerate empty.
+# tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
+# (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
-CODEX_CREWMATE_HOME=$(grep '^codex_crewmate_home=' "$META" | cut -d= -f2- || true)
-ENDPOINT_CLEANUP_PENDING=$(grep '^endpoint_cleanup_pending=' "$META" | tail -1 | cut -d= -f2- || true)
 ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
-ORCA_WORKTREE_CLEANUP_COMPLETE=$(fm_meta_get "$META" orca_worktree_cleanup_complete)
 ORCA_PATH_MATCH_VERIFIED=0
 
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
@@ -176,9 +175,7 @@ require_orca_terminal() {
 }
 
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
-  if [ "$ORCA_WORKTREE_CLEANUP_COMPLETE" != 1 ]; then
-    ORCA_WORKTREE_ID=$(require_orca_worktree_id "$META") || exit 1
-  fi
+  ORCA_WORKTREE_ID=$(require_orca_worktree_id "$META") || exit 1
   T_ORCA=$(meta_value "$META" terminal)
   [ -z "$T_ORCA" ] || T=$T_ORCA
 fi
@@ -189,6 +186,76 @@ remove_grok_turnend_auth() {
   case "$token" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
   hooks_dir="${GROK_HOME:-$HOME/.grok}/hooks/fm-turn-end.d"
   rm -f "$hooks_dir/$token"
+}
+
+validate_pr_poll_cleanup() {
+  local state_dir=$1 id=$2 quarantine state_device artifact has_artifact=0
+  fm_task_id_path_safe "$id" || return 0
+  quarantine="$state_dir/.pr-check-quarantine"
+  if [ "$id" = _noncanonical ] \
+    && { [ -e "$quarantine/_noncanonical.diagnostic.pending-noncanonical" ] \
+      || [ -L "$quarantine/_noncanonical.diagnostic.pending-noncanonical" ] \
+      || [ -e "$quarantine/_noncanonical.diagnostic.noncanonical" ] \
+      || [ -L "$quarantine/_noncanonical.diagnostic.noncanonical" ]; }; then
+    echo "REFUSED: legacy PR-check quarantine migration is incomplete; preserving task state." >&2
+    return 1
+  fi
+  for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
+    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.check-trust"; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    has_artifact=1
+  done
+  if [ -e "$quarantine" ] || [ -L "$quarantine" ]; then
+    has_artifact=1
+  fi
+  [ "$has_artifact" -eq 1 ] || return 0
+  [ -d "$state_dir" ] && [ ! -L "$state_dir" ] || return 1
+  state_device=$(fm_pr_file_device "$state_dir") || return 1
+  for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
+    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.check-trust"; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    if [ ! -f "$artifact" ] || [ -L "$artifact" ] \
+      || [ "$(fm_pr_file_device "$artifact")" != "$state_device" ] \
+      || [ "$(fm_pr_file_link_count "$artifact")" != 1 ]; then
+      echo "REFUSED: unsafe task PR-check artifact; preserving task state." >&2
+      return 1
+    fi
+  done
+  [ -e "$quarantine" ] || [ -L "$quarantine" ] || return 0
+  if [ ! -d "$state_dir" ] || [ -L "$state_dir" ] \
+    || [ ! -d "$quarantine" ] || [ -L "$quarantine" ]; then
+    echo "REFUSED: unsafe PR-check quarantine path $quarantine; preserving task state." >&2
+    return 1
+  fi
+  if [ "$(fm_pr_file_device "$quarantine")" != "$state_device" ] \
+    || [ "$(fm_pr_file_mode "$quarantine")" != 700 ]; then
+    echo "REFUSED: PR-check quarantine is not on the task state device; preserving task state." >&2
+    return 1
+  fi
+  for artifact in "$quarantine/$id."*; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    if ! fm_pr_private_file_valid "$artifact" 600 "$state_device"; then
+      echo "REFUSED: unsafe task quarantine entry; preserving task state." >&2
+      return 1
+    fi
+  done
+}
+
+remove_pr_poll_artifacts() {
+  local state_dir=$1 id=$2 quarantine artifact
+  validate_pr_poll_cleanup "$state_dir" "$id" || return 1
+  rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
+    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.check-trust" || return 1
+  if fm_task_id_path_safe "$id"; then
+    quarantine="$state_dir/.pr-check-quarantine"
+    if [ -d "$quarantine" ] && [ ! -L "$quarantine" ]; then
+      for artifact in "$quarantine/$id."*; do
+        [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+        rm -f -- "$artifact" || return 1
+      done
+      rmdir "$quarantine" 2>/dev/null || true
+    fi
+  fi
 }
 
 # Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
@@ -792,62 +859,6 @@ safe_rm_rf_child_worktree() {
   rm -rf -- "$target"
 }
 
-validate_task_temp_for_removal() {
-  local target=$1 prefix suffix
-  [ -n "$target" ] || return 0
-  prefix="/tmp/fm-$ID."
-  case "$target" in
-    "$prefix"*) suffix=${target#"$prefix"} ;;
-    *)
-      echo "REFUSED: unsafe task temporary directory $target does not match task $ID" >&2
-      return 1
-      ;;
-  esac
-  case "$suffix" in
-    ''|*[![:alnum:]]*)
-      echo "REFUSED: unsafe task temporary directory $target does not match task $ID" >&2
-      return 1
-      ;;
-  esac
-  [ ! -e "$target" ] && [ ! -L "$target" ] && return 0
-  if [ ! -d "$target" ] || [ -L "$target" ]; then
-    echo "REFUSED: unsafe task temporary directory $target is not a private directory" >&2
-    return 1
-  fi
-}
-
-remove_codex_crewmate_home() {
-  local home=$1
-  [ -n "$home" ] || return 0
-  python3 "$FM_ROOT/bin/fm-codex-home.py" --remove --data "$DATA" --home "$home"
-}
-
-close_recorded_endpoint() {
-  local tab_id absence_status
-  tab_id=$(meta_value "$META" zellij_tab_id)
-  if [ "$ENDPOINT_CLEANUP_PENDING" = 1 ]; then
-    if ! FM_BACKEND_KILL_STRICT=1 fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null; then
-      echo "error: failed-spawn endpoint $T could not be confirmed closed; preserving recovery metadata" >&2
-      return 1
-    fi
-    if fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
-      absence_status=0
-    else
-      absence_status=$?
-    fi
-    if [ "$absence_status" -ne 0 ]; then
-      if [ "$absence_status" -eq 1 ]; then
-        echo "error: failed-spawn endpoint $T remains live after cleanup; preserving recovery metadata" >&2
-      else
-        echo "error: failed-spawn endpoint $T could not be confirmed absent after cleanup; preserving recovery metadata" >&2
-      fi
-      return 1
-    fi
-  else
-    fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null || true
-  fi
-}
-
 validate_firstmate_home_for_removal() {
   local home=$1 label=$2 expected_id=${3:-} abs_home_path marker_id conflict child_id child_home
   [ -n "$home" ] || return 0
@@ -906,6 +917,7 @@ validate_firstmate_home_children_removal() {
   for child_meta in "$sub_state"/*.meta; do
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
+    validate_pr_poll_cleanup "$sub_state" "$child_id" || return 1
     child_wt=$(meta_value "$child_meta" worktree)
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
@@ -992,7 +1004,8 @@ cleanup_firstmate_home_children() {
       fi
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id"
-    rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.check.sh" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.grok-turnend-token"
+    remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
+    rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.grok-turnend-token"
   done
 }
 
@@ -1004,6 +1017,8 @@ remove_secondmate_registry_entry() {
   mv "$tmp" "$SECONDMATE_REG"
 }
 
+validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
+
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   validate_firstmate_home_for_removal "$HOME_PATH" "secondmate home" "$ID" >/dev/null || exit 1
@@ -1011,8 +1026,6 @@ if [ "$KIND" = secondmate ]; then
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
   fi
 fi
-
-validate_task_temp_for_removal "$TASK_TMP" || exit 1
 
 if [ "$KIND" = secondmate ] && [ "$FORCE" != "--force" ]; then
   SUB_STATE="$HOME_PATH/state"
@@ -1037,9 +1050,15 @@ if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
     echo "The report is the work product. Have the crewmate write it, or use --force after explicit discard approval." >&2
     exit 1
   fi
+  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-decision-hold.sh" verify "$ID" >/dev/null; then
+    echo "REFUSED: scout task $ID has not passed the unresolved-decision completion gate." >&2
+    echo "Inventory its report and any visual review through bin/fm-decision-hold.sh before teardown." >&2
+    exit 1
+  fi
 fi
 
-if [ "$BACKEND" = orca ] && [ -n "$ORCA_WORKTREE_ID" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
+if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
   if ! inspectable_git_worktree "$WT"; then
     echo "REFUSED: Orca ship task $ID has no inspectable git worktree at ${WT:-<missing>}." >&2
     echo "Cannot verify dirty or unlanded work; restore the worktree path or get explicit OK to discard, then --force." >&2
@@ -1065,11 +1084,11 @@ fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
-  if [ -n "$ORCA_WORKTREE_ID" ] && [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
+  if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
     ORCA_PATH_MATCH_VERIFIED=1
   fi
-  if [ -n "$ORCA_WORKTREE_ID" ] && [ -d "$WT" ]; then
+  if [ -d "$WT" ]; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     if [ "$branch" != "HEAD" ]; then
       if git -C "$WT" checkout --detach -q 2>/dev/null; then
@@ -1078,8 +1097,8 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     fi
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
   fi
-  [ -z "$T_ORCA" ] || close_recorded_endpoint || exit 1
-  [ -z "$ORCA_WORKTREE_ID" ] || fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
+  [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
+  fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
@@ -1104,9 +1123,8 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
 fi
 
 if [ "$BACKEND" != orca ]; then
-  close_recorded_endpoint || exit 1
+  fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
 fi
-remove_codex_crewmate_home "$CODEX_CREWMATE_HOME" || exit 1
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"
@@ -1114,10 +1132,11 @@ if [ "$KIND" = secondmate ]; then
 fi
 remove_grok_turnend_auth "$STATE" "$ID"
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
-# Remove the per-task temp root, including its gotmp/, recorded by spawn.
+# Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
-[ -z "$TASK_TMP" ] || rm -rf -- "$TASK_TMP"
-rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
+[ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
+remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
+rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
