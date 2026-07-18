@@ -857,6 +857,7 @@ test_orca_partial_cleanup_metadata_reaches_codex_home() {
   config="$TMP_ROOT/codex-cleanup-fail-config"
   home="$data/codex-crewmate/.fm-codex-home.partial"
   mkdir -p "$home" "$state" "$config"
+  : > "$home/fm-crewmate-$id.config.toml"
   touch "$state/.last-watcher-beat"
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" "worktree=" "project=" "harness=codex" "kind=ship" \

@@ -1276,16 +1276,22 @@ test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds() {
   # Fresh lock: not old enough for the force-remove path; patience must win.
   touch "$lock"
 
+  # Detach now runs before treehouse return so it cannot delete the checked-out
+  # branch. Model the real owner exiting while that pre-return safety wait runs.
+  ( sleep 0.01; rm -f "$lock" ) &
+  local lock_clear_pid=$!
+
   attempt_file="$case_dir/treehouse-attempts"
   : > "$attempt_file"
 
   set +e
   TREEHOUSE_ATTEMPT_FILE="$attempt_file" \
   FM_TREEHOUSE_RETURN_LOCK_RETRIES=2 \
-  FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=0 \
+  FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=0.1 \
   FM_STALE_WORKTREE_LOCK_AGE_SECS=3600 \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
+  wait "$lock_clear_pid"
   set -e
 
   expect_code 0 "$rc" "transient-index-lock: teardown should succeed on retry after lock self-clears"
@@ -1310,6 +1316,7 @@ test_persistent_index_lock_exhausts_retries_and_refuses_loudly() {
   add_persistent_lock_treehouse "$case_dir"
   # Fresh lock with a live holder: never provably stale, never force-removed.
   add_lsof_live_holder "$case_dir"
+  git -C "$case_dir/wt" checkout --detach -q
 
   lock=$(git_index_lock_path "$case_dir/wt")
   mkdir -p "$(dirname "$lock")"
@@ -1347,6 +1354,7 @@ test_empty_retry_wait_uses_default_without_aborting() {
 
   add_transient_lock_treehouse "$case_dir"
   add_lsof_no_holder "$case_dir"
+  git -C "$case_dir/wt" checkout --detach -q
 
   lock=$(git_index_lock_path "$case_dir/wt")
   mkdir -p "$(dirname "$lock")"
@@ -1383,6 +1391,7 @@ test_fractional_legacy_retry_wait_refuses_without_arithmetic_error() {
 
   add_persistent_lock_treehouse "$case_dir"
   add_lsof_live_holder "$case_dir"
+  git -C "$case_dir/wt" checkout --detach -q
 
   lock=$(git_index_lock_path "$case_dir/wt")
   mkdir -p "$(dirname "$lock")"

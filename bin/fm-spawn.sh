@@ -325,7 +325,7 @@ orca_spawn_abort_cleanup() {
 }
 
 spawn_abort_cleanup() {
-  local status=$? preserve_codex_home=0 clean_codex_home=0 orca_cleanup_failed=0 absence_status
+  local status=$? preserve_codex_home=0 clean_codex_home=0 orca_cleanup_failed=0
   if [ "$TREEHOUSE_ABORT_CLEANUP" = 1 ]; then
     TREEHOUSE_ABORT_CLEANUP=0
     clean_codex_home=1
@@ -333,12 +333,7 @@ spawn_abort_cleanup() {
       if fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
         :
       else
-        absence_status=$?
-        if [ "$absence_status" -ne 1 ]; then
-          FAILED_ENDPOINT_CLEANUP=1
-          write_failed_treehouse_spawn_meta
-          preserve_codex_home=1
-        elif ! FM_BACKEND_KILL_STRICT=1 fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "fm-$ID" 2>/dev/null; then
+        if ! FM_BACKEND_KILL_STRICT=1 fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "fm-$ID" 2>/dev/null; then
           if ! fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
             FAILED_ENDPOINT_CLEANUP=1
             write_failed_treehouse_spawn_meta
