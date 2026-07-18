@@ -30,7 +30,8 @@ Write each event once or atomically replace it so the watcher can detect the eve
 Deeper paths are outside the monitored layout.
 `bin/fm-session-start.sh` reports a bounded count and newest full paths from that directory without changing any event or acknowledgement state.
 Set the local, gitignored `config/ops-inbox-cmd` to one list-only shell command when this machine also has a durable machine-level inbox.
-The command must print only its current unhandled critical listing, starting with `unacked_criticals: <count>`; its exit status is displayed but does not suppress its output because some list commands use a non-zero status when criticals exist.
+The first non-empty, non-comment line is the command, and firstmate runs it through `/bin/sh -c` with combined stdout and stderr.
+The command must be trusted local code and print only its current unhandled critical listing, starting with `unacked_criticals: <count>`; its exit status is displayed but does not suppress its output because some list commands use a non-zero status when criticals exist.
 The command is intentionally operator-owned and generic, so firstmate does not encode a machine-specific inbox path or acknowledgement implementation.
 The watcher fingerprints both sources, wakes immediately for a changed inbox while a regular task is in flight, and checks the same fingerprint on its existing heartbeat cadence otherwise.
 `FM_SESSION_START_OPS_INBOX_LIMIT` bounds both the home-event paths and configured-command output lines in the digest, defaulting to 5.
@@ -375,6 +376,8 @@ FM_BACKEND_CMUX_COMPOSER_LINES=20  # cmux-only: tail lines scanned to locate the
 FM_BACKEND_CMUX_IDLE_RE='^Type a message\.\.\.$'  # cmux-only: empty-composer placeholder regex after border/prompt stripping
 CMUX_SOCKET_PASSWORD=   # cmux-only: socket password fallback when config/cmux-socket-password is absent (docs/cmux-backend.md)
 FM_SESSION_START_STATUS_TAIL=5   # state/*.status lines printed per task in the session-start digest
+FM_SESSION_START_OPS_INBOX_LIMIT=5   # home-event paths and external-command output lines printed in the operations-inbox digest
+FM_SESSION_START_OPS_INBOX_SCAN_LIMIT=256   # home-event records inspected for the bounded operations-inbox startup digest
 FM_BOOTSTRAP_DETECT_ONLY=0   # internal/read-only session-start mode: skip bootstrap's mutating sweeps and print advisory TANGLE wording
 FM_GUARD_READ_ONLY=0    # internal/read-only guard mode: keep alarms but suppress drain, supervision repair, and checkout repair commands
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the guarded operation WILL still run.'   # banner continuation line; fm-send.sh overrides it to name the requested message specifically
@@ -383,6 +386,9 @@ FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartb
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
 FM_CHECK_INTERVAL=300   # seconds between slow checks (merge polls or the X-mode poll shim)
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
+FM_OPS_INBOX_TIMEOUT=10   # seconds allowed for each configured operations-inbox command
+FM_OPS_INBOX_OUTPUT_MAX_BYTES=32768   # byte cap for each configured operations-inbox command capture
+FM_OPS_INBOX_MARKER_LIMIT=256   # top-level operations-inbox entries included in each watcher fingerprint
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes runs rows scanned when cross-branch attribution falls back from axi status

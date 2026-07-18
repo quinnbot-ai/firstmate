@@ -83,6 +83,7 @@ config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitig
 config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
 config/ops-inbox-cmd  optional local list-only command for a machine-level operations inbox; absent leaves only this home's `ops-inbox/` directory; see docs/configuration.md
 config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
+ops-inbox/           local operational-failure event files; the bounded read-only digest and monitored layout are owned by docs/configuration.md
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
   captain.md         this home's domain-local captain preferences and working style; LOCAL, gitignored, canonical even if harness memory mirrors it, and updated with inspect-then-update
