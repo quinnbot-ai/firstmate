@@ -808,15 +808,22 @@ fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
   printf '%s' "$out" | jq -r '[.result.agent.agent // "", .result.agent.agent_status // ""] | @tsv' 2>/dev/null
 }
 
+fm_backend_herdr_bare_prompt_is_editable() {
+  printf '%s' "$1" | grep -qE $'\033\\[[0-9;]*1(;[0-9;]*)?m[❯›]'
+}
+
 fm_backend_herdr_composer_state() {  # <target> [guard|post-submit] -> empty|pending|unknown
-  local target=$1 mode=${2:-guard} session pane cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped
+  local target=$1 mode=${2:-guard} session pane cap ansi=0 line trimmed found=0 shape="" raw_match="" bordered=0 stripped
   local after_match="" last_nonblank="" verdict
   local identity agent agent_status row=0 generic_line=0
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   session=$FM_BACKEND_HERDR_SESSION
   pane=$FM_BACKEND_HERDR_PANE
-  cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES" 2>/dev/null \
-    || fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES") || { printf 'unknown'; return 0; }
+  if cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES" 2>/dev/null); then
+    ansi=1
+  else
+    cap=$(fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES") || { printf 'unknown'; return 0; }
+  fi
   # Structural scan: locate the bottom-most composer row and remember its RAW
   # (styled) bytes. Shape detection runs on the plain row (fm_backend_herdr_strip_ansi
   # keeps ghost text so the border/prompt glyph is still visible); the raw row is
@@ -926,11 +933,9 @@ EOF
   # is '^[❯›]'), so a bare shell prompt never reaches here - it stays 'unknown'
   # via the no-composer-row path above, exactly as before.
   verdict=$(fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE")
-  # A submitted Codex message remains as a bare `› <text>` transcript row
-  # while the next turn is working.  A later busy footer proves that row is
-  # transcript, not editable composer text.  This inference is post-submit
-  # only - the away-mode guard must remain conservative about human drafts.
   if [ "$mode" = post-submit ] && [ "$shape" = bare ] && [ "$verdict" = pending ] \
+    && [ "$ansi" -eq 1 ] \
+    && ! fm_backend_herdr_bare_prompt_is_editable "$raw_match" \
     && printf '%s' "$after_match" | grep -qiE "${FM_BUSY_REGEX:-esc (to )?interrupt|Working\\.\\.\\.|Ctrl\\+c:cancel}"; then
     printf 'empty'
     return 0

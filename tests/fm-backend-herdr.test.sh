@@ -44,6 +44,11 @@ if [ "${1:-}" = status ] && [ "${2:-}" = --json ] && [ "${FM_HERDR_SCRIPT_STATUS
   printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n'
   exit 0
 fi
+if [ "${FM_FAKE_HERDR_NO_ANSI:-0}" = 1 ]; then
+  for arg in "$@"; do
+    [ "$arg" != --format ] || exit 1
+  done
+fi
 n=$next
 echo "$n" > "$COUNT_FILE"
 if [ -f "$RESP/$n.exit" ]; then
@@ -1358,17 +1363,14 @@ test_send_text_submit_preexisting_working_does_not_false_confirm_swallowed_enter
   pass "fm_backend_herdr_send_text_submit: preexisting working is not accepted as submit proof when the composer still holds the message"
 }
 
-# Regression for the 2026-07-08 false-negative sends.  During a Codex busy
-# redraw, the submitted user message remains on screen as a bare `› <text>`
-# transcript row.  Its busy footer proves the row is transcript rather than an
-# editable composer, so it must not be reported as a swallowed Enter.
+# Regression for the 2026-07-08 false-negative sends.
 test_send_text_submit_confirms_codex_busy_redraw_transcript() {
   local dir log resp fb out enter_count
   dir="$TMP_ROOT/submit-codex-busy-redraw"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   # The target was already working before Enter, so native state alone cannot
   # prove this submission and the post-submit composer path must decide.
   printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
-  printf '\xe2\x80\xba ship the fix\n\n\xe2\x80\xa2 Working...\n  esc to interrupt\n' > "$resp/4.out"
+  printf '\x1b[0m\xe2\x80\xba ship the fix\x1b[0m\n\n\xe2\x80\xa2 Working...\n  esc to interrupt\n' > "$resp/4.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "ship the fix" 3 0.01 0.01' "$ROOT" )
@@ -1376,6 +1378,36 @@ test_send_text_submit_confirms_codex_busy_redraw_transcript() {
   enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
   [ "$enter_count" -eq 1 ] || fail "a busy redraw transcript must not provoke retry Enters, sent $enter_count Enter(s)"
   pass "fm_backend_herdr_send_text_submit: a Codex busy redraw transcript is not misread as a pending composer"
+}
+
+test_send_text_submit_codex_editable_draft_with_preexisting_busy_footer_stays_pending() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-codex-editable-preexisting-busy"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  printf '\x1b[0m\x1b[1m\xe2\x80\xba ship the fix\x1b[0m\n\n\xe2\x80\xa2 Working...\n  esc to interrupt\n' > "$resp/4.out"
+  printf '\x1b[0m\x1b[1m\xe2\x80\xba ship the fix\x1b[0m\n\n\xe2\x80\xa2 Working...\n  esc to interrupt\n' > "$resp/6.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "ship the fix" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = pending ] || fail "an editable Codex draft with an old busy footer must remain pending, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 2 ] || fail "an editable Codex draft with an old busy footer must retry Enter, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: an editable Codex draft with a preexisting busy footer remains a swallowed Enter"
+}
+
+test_send_text_submit_codex_busy_redraw_without_ansi_stays_pending() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-codex-busy-no-ansi"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  printf '\xe2\x80\xba ship the fix\n\n\xe2\x80\xa2 Working...\n  esc to interrupt\n' > "$resp/4.out"
+  printf '\xe2\x80\xba ship the fix\n\n\xe2\x80\xa2 Working...\n  esc to interrupt\n' > "$resp/6.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_FAKE_HERDR_NO_ANSI=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "ship the fix" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = pending ] || fail "a busy redraw without ANSI styling must remain pending, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 2 ] || fail "a busy redraw without ANSI styling must retry Enter, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: a Codex busy redraw without ANSI styling remains pending"
 }
 
 # The same preexisting-working fallback must treat a styled Codex ghost hint as
@@ -2196,6 +2228,8 @@ test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_text_submit_confirms_blocked_after_enter
 test_send_text_submit_preexisting_working_does_not_false_confirm_swallowed_enter
 test_send_text_submit_confirms_codex_busy_redraw_transcript
+test_send_text_submit_codex_editable_draft_with_preexisting_busy_footer_stays_pending
+test_send_text_submit_codex_busy_redraw_without_ansi_stays_pending
 test_send_text_submit_confirms_codex_ghost_after_preexisting_working
 test_send_text_submit_codex_true_swallow_stays_pending
 test_send_text_submit_confirms_despite_codex_idle_tip_composer

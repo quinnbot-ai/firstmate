@@ -730,7 +730,8 @@ During Codex's busy redraw, a submitted user message remains in the transcript a
 The guard reader conservatively classified that row as editable pending input, which is correct for pre-injection safety but false for this post-submit transcript frame.
 
 **Fix.** `fm_backend_herdr_composer_state` has a private `post-submit` mode used only by that fallback.
-It accepts the bare Codex transcript row only when a later busy footer proves it is transcript rather than editable composer text.
+It accepts a bare Codex transcript row only when Herdr provides an ANSI capture, its prompt glyph is not bold, and a later busy footer is present.
+An editable Codex composer renders the glyph bold, so that shape remains `pending` even when a prior turn's busy footer is still visible.
 Guard reads remain unchanged, and a bare `› <text>` row without later busy evidence remains `pending`.
 
 **Verification evidence (2026-07-18, macOS aarch64).**
@@ -742,11 +743,13 @@ $ codex --version
 codex-cli 0.144.5
 $ bash tests/fm-backend-herdr.test.sh 2>/dev/null | rg 'Codex busy redraw|faint Codex ghost|real Codex draft'
 ok - fm_backend_herdr_send_text_submit: a Codex busy redraw transcript is not misread as a pending composer
+ok - fm_backend_herdr_send_text_submit: an editable Codex draft with a preexisting busy footer remains a swallowed Enter
+ok - fm_backend_herdr_send_text_submit: a Codex busy redraw without ANSI styling remains pending
 ok - fm_backend_herdr_send_text_submit: a faint Codex ghost is empty in the preexisting-working fallback
 ok - fm_backend_herdr_send_text_submit: a real Codex draft still reports a swallowed Enter
 ```
 
-The focused regressions are `test_send_text_submit_confirms_codex_busy_redraw_transcript`, `test_send_text_submit_confirms_codex_ghost_after_preexisting_working`, and `test_send_text_submit_codex_true_swallow_stays_pending` in `tests/fm-backend-herdr.test.sh`.
+The focused regressions are `test_send_text_submit_confirms_codex_busy_redraw_transcript`, `test_send_text_submit_codex_editable_draft_with_preexisting_busy_footer_stays_pending`, `test_send_text_submit_codex_busy_redraw_without_ansi_stays_pending`, `test_send_text_submit_confirms_codex_ghost_after_preexisting_working`, and `test_send_text_submit_codex_true_swallow_stays_pending` in `tests/fm-backend-herdr.test.sh`.
 
 ## Composer-emptiness safety (2026-07-10, fleet-wide across all four backends)
 

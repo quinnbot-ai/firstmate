@@ -204,7 +204,7 @@ fm_ops_inbox_home_marker() {
       sig=$(fm_ops_inbox_stat_sig "$path") || continue
       printf '%s\t%s\n' "$sig" "$path"
       count=$((count + 1))
-    done < <(find "$dir" -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
+    done < <(find "$dir" -mindepth 1 -maxdepth 2 -type f -print0 2>/dev/null)
     [ "$overflow" -eq 0 ] || printf '__FM_OPS_INBOX_MARKER_OVERFLOW__:%s\n' "$FM_OPS_INBOX_MARKER_LIMIT"
   } | LC_ALL=C sort
 }
