@@ -61,7 +61,12 @@ def write_all(fd, content):
 
 
 def write_file(directory_fd, name, content):
-    fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory_fd)
+    fd = os.open(
+        name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+        dir_fd=directory_fd,
+    )
     try:
         write_all(fd, content)
         os.fchmod(fd, 0o600)
@@ -77,7 +82,12 @@ def copy_regular_file(source, directory_fd, name):
     try:
         if not stat.S_ISREG(os.fstat(source_fd).st_mode):
             die(f"Codex source file is not regular: {os.path.join(source, name)}")
-        target_fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory_fd)
+        target_fd = os.open(
+            name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=directory_fd,
+        )
         try:
             while True:
                 chunk = os.read(source_fd, 1024 * 1024)
@@ -107,7 +117,10 @@ def remove_tree(directory_fd, name):
     finally:
         os.close(child_fd)
     current_stat = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-    if (current_stat.st_dev, current_stat.st_ino) != (opened_stat.st_dev, opened_stat.st_ino):
+    if (current_stat.st_dev, current_stat.st_ino) != (
+        opened_stat.st_dev,
+        opened_stat.st_ino,
+    ):
         raise OSError("managed Codex home changed during removal")
     os.rmdir(name, dir_fd=directory_fd)
 
@@ -194,7 +207,11 @@ def read_activation_result(args):
         try:
             require_directory(base_fd, "isolated Codex home")
             try:
-                fd = os.open(activation_result_name(args), os.O_RDONLY | os.O_NOFOLLOW, dir_fd=base_fd)
+                fd = os.open(
+                    activation_result_name(args),
+                    os.O_RDONLY | os.O_NOFOLLOW,
+                    dir_fd=base_fd,
+                )
             except FileNotFoundError:
                 print("pending")
                 return 3
@@ -266,7 +283,9 @@ def activate_command(args, home_fd, command, result_fd, token):
             # rejects an fd-shaped CODEX_HOME there; resolve the descriptor to
             # its real path (F_GETPATH on macOS, /proc on Linux) and fall back
             # to the fd path only when no resolution is possible.
-            environment["CODEX_HOME"] = directory_path(home_fd, args.home or f"/dev/fd/{home_fd}")
+            environment["CODEX_HOME"] = directory_path(
+                home_fd, args.home or f"/dev/fd/{home_fd}"
+            )
             os.execvpe(command[0], command, environment)
         except BaseException:
             try:
@@ -338,7 +357,10 @@ def create_home(args, command=None):
         die("Codex home creation requires --source, --profile, and --worktree")
     if not args.data:
         die("Codex home creation requires --data")
-    if not args.profile or any(char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-" for char in args.profile):
+    if not args.profile or any(
+        char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
+        for char in args.profile
+    ):
         die("isolated Codex profile name is unsafe")
     worktree = toml_basic_string(args.worktree)
     try:
@@ -362,7 +384,11 @@ def create_home(args, command=None):
                     activation_fd = activation_result_fd(args, base_fd)
                     activation_token = result_token(args)
                 while True:
-                    name = managed_home_name(args.home) if args.home else ".fm-codex-home." + secrets.token_hex(16)
+                    name = (
+                        managed_home_name(args.home)
+                        if args.home
+                        else ".fm-codex-home." + secrets.token_hex(16)
+                    )
                     try:
                         os.mkdir(name, 0o700, dir_fd=base_fd)
                         home_created = True
@@ -375,21 +401,31 @@ def create_home(args, command=None):
                 try:
                     require_directory(home_fd, "isolated Codex home")
                     os.fchmod(home_fd, 0o700)
-                    base_config = "# Firstmate Codex crewmate home.\n[features]\nplugins = false\n[projects.\"%s\"]\ntrust_level = \"untrusted\"\n" % worktree
+                    base_config = (
+                        '# Firstmate Codex crewmate home.\n[features]\nplugins = false\n[projects."%s"]\ntrust_level = "untrusted"\n'
+                        % worktree
+                    )
                     write_file(home_fd, "config.toml", base_config.encode())
                     copy_regular_file(args.source, home_fd, "auth.json")
                     copy_regular_file(args.source, home_fd, "models_cache.json")
-                    profile = "# Firstmate Codex crewmate profile.\n[projects.\"%s\"]\ntrust_level = \"untrusted\"\n" % worktree
+                    profile = (
+                        '# Firstmate Codex crewmate profile.\n[projects."%s"]\ntrust_level = "untrusted"\n'
+                        % worktree
+                    )
                     write_file(home_fd, args.profile + ".config.toml", profile.encode())
                     if command:
-                        return activate_command(args, home_fd, command, activation_fd, activation_token)
+                        return activate_command(
+                            args, home_fd, command, activation_fd, activation_token
+                        )
                 finally:
                     os.close(home_fd)
                 print(os.path.join(data, "codex-crewmate", name))
             except BaseException:
                 if activation_fd is not None:
                     try:
-                        finish_activation_result_with_token(activation_fd, b"failed", activation_token)
+                        finish_activation_result_with_token(
+                            activation_fd, b"failed", activation_token
+                        )
                     except OSError:
                         pass
                 if home_created:
@@ -409,12 +445,29 @@ def create_home(args, command=None):
 def main():
     args = parse_args()
     if args.new_result_token:
-        if args.new_home_name or args.remove or args.create_activate or args.read_activation_result or args.remove_activation_result or args.home or args.result_token or args.command:
+        if (
+            args.new_home_name
+            or args.remove
+            or args.create_activate
+            or args.read_activation_result
+            or args.remove_activation_result
+            or args.home
+            or args.result_token
+            or args.command
+        ):
             die("isolated Codex home result token generation accepts no other action")
         print(secrets.token_hex(32))
         return
     if args.new_home_name:
-        if args.remove or args.create_activate or args.read_activation_result or args.remove_activation_result or args.home or args.result_token or args.command:
+        if (
+            args.remove
+            or args.create_activate
+            or args.read_activation_result
+            or args.remove_activation_result
+            or args.home
+            or args.result_token
+            or args.command
+        ):
             die("isolated Codex home name generation accepts no other action")
         try:
             validate_data_root(args.data)
@@ -423,11 +476,33 @@ def main():
         print(".fm-codex-home." + secrets.token_hex(16))
         return
     if args.read_activation_result:
-        if args.remove or args.create_activate or args.remove_activation_result or not args.home or not args.data or args.source or args.profile or args.worktree is not None or args.command:
-            die("isolated Codex home activation result read requires data, home, and result arguments")
+        if (
+            args.remove
+            or args.create_activate
+            or args.remove_activation_result
+            or not args.home
+            or not args.data
+            or args.source
+            or args.profile
+            or args.worktree is not None
+            or args.command
+        ):
+            die(
+                "isolated Codex home activation result read requires data, home, and result arguments"
+            )
         raise SystemExit(read_activation_result(args))
     if args.remove_activation_result:
-        if args.remove or args.create_activate or args.read_activation_result or not args.home or not args.data or args.source or args.profile or args.worktree is not None or args.command:
+        if (
+            args.remove
+            or args.create_activate
+            or args.read_activation_result
+            or not args.home
+            or not args.data
+            or args.source
+            or args.profile
+            or args.worktree is not None
+            or args.command
+        ):
             die("isolated Codex home activation result removal requires data and home")
         remove_activation_result(args)
         return
