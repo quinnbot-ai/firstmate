@@ -279,7 +279,7 @@ EOF
 # --- operations inbox digest: absent, bounded home paths, configured command --
 
 test_ops_inbox_digest_absent_bounded_and_configured() {
-  local rec root home fakebin out external
+  local rec root home fakebin out external stat_log real_stat
   rec=$(new_world ops-inbox-digest)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -320,7 +320,22 @@ SH
   assert_not_contains "$out" "critical-new" "configured external inbox output was not bounded"
   assert_contains "$out" "(truncated 1 additional output line(s))" "external inbox truncation was not disclosed"
 
-  pass "OPS INBOX digest distinguishes absent sources and bounds home and configured-inbox output"
+  stat_log="$home/stat.log"
+  real_stat=$(command -v stat)
+cat > "$fakebin/stat" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *"$home/ops-inbox"*) printf '%s\\n' "\$*" >> "$stat_log" ;;
+esac
+exec "$real_stat" "\$@"
+SH
+  chmod +x "$fakebin/stat"
+  out=$(FM_SESSION_START_OPS_INBOX_LIMIT=2 FM_SESSION_START_OPS_INBOX_SCAN_LIMIT=2 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "home ops-inbox: at least 3 event file(s); bounded scan reached 2; newest 2 sampled paths:" "bounded inbox scan did not disclose overflow"
+  assert_contains "$out" "(scan stopped after 2 event file(s); retained inbox exceeds the bounded startup scan)" "bounded inbox scan did not disclose retained overflow"
+  [ "$(wc -l < "$stat_log" | tr -d '[:space:]')" -eq 2 ] || fail "bounded inbox scan statted more than its configured record limit"
+
+  pass "OPS INBOX digest distinguishes absent sources and bounds home and configured-inbox scans"
 }
 
 # --- lock refusal: read-only path --------------------------------------------

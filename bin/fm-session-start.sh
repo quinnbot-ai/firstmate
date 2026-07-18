@@ -95,6 +95,9 @@ BACKLOG_LIMIT=${FM_SESSION_START_BACKLOG_LIMIT:-80}
 case "$BACKLOG_LIMIT" in ''|*[!0-9]*|0) BACKLOG_LIMIT=80 ;; esac
 OPS_INBOX_LIMIT=${FM_SESSION_START_OPS_INBOX_LIMIT:-5}
 case "$OPS_INBOX_LIMIT" in ''|*[!0-9]*|0) OPS_INBOX_LIMIT=5 ;; esac
+OPS_INBOX_SCAN_LIMIT=${FM_SESSION_START_OPS_INBOX_SCAN_LIMIT:-256}
+case "$OPS_INBOX_SCAN_LIMIT" in ''|*[!0-9]*|0) OPS_INBOX_SCAN_LIMIT=256 ;; esac
+[ "$OPS_INBOX_SCAN_LIMIT" -ge "$OPS_INBOX_LIMIT" ] || OPS_INBOX_SCAN_LIMIT=$OPS_INBOX_LIMIT
 
 RULE='================================================================================'
 SUBRULE='--------------------------------------------------------------------------------'
@@ -129,27 +132,49 @@ print_status_tail() {
 }
 
 print_ops_inbox() {
-  local dir records count output rc shown
+  local dir record path output rc shown event_count overflow
+  local records
   subsection "OPS INBOX"
   dir=$(fm_ops_inbox_home_dir "$FM_HOME")
   if [ ! -d "$dir" ]; then
     printf 'home ops-inbox: ABSENT (%s)\n' "$dir"
   else
-    records=$(fm_ops_inbox_home_records "$FM_HOME")
-    if [ -z "$records" ]; then
+    records=$(fm_ops_inbox_home_records "$FM_HOME" "$OPS_INBOX_SCAN_LIMIT")
+    event_count=0
+    overflow=0
+    while IFS= read -r record; do
+      [ "$record" = '__FM_OPS_INBOX_OVERFLOW__' ] && { overflow=1; continue; }
+      [ -n "$record" ] && event_count=$((event_count + 1))
+    done <<EOF
+$records
+EOF
+    if [ "$event_count" -eq 0 ]; then
       printf 'home ops-inbox: (present, empty: %s)\n' "$dir"
     else
-      count=$(printf '%s\n' "$records" | awk 'END { print NR + 0 }')
-      printf 'home ops-inbox: %s event file(s); newest %s with full paths:\n' "$count" "$OPS_INBOX_LIMIT"
+      if [ "$overflow" -eq 1 ]; then
+        printf 'home ops-inbox: at least %s event file(s); bounded scan reached %s; newest %s sampled paths:\n' \
+          "$((event_count + 1))" "$OPS_INBOX_SCAN_LIMIT" "$OPS_INBOX_LIMIT"
+      else
+        printf 'home ops-inbox: %s event file(s); newest %s with full paths:\n' "$event_count" "$OPS_INBOX_LIMIT"
+      fi
       shown=0
-      while IFS=$(printf '\t') read -r _ path; do
+      while IFS= read -r record; do
+        [ "$record" = '__FM_OPS_INBOX_OVERFLOW__' ] && continue
+        IFS=$(printf '\t') read -r _ path <<EOF
+$record
+EOF
         [ -n "$path" ] || continue
+        [ "$shown" -lt "$OPS_INBOX_LIMIT" ] || continue
         printf '%s\n' "$path"
         shown=$((shown + 1))
       done <<EOF
-$(fm_ops_inbox_home_newest "$FM_HOME" "$OPS_INBOX_LIMIT")
+$records
 EOF
-      [ "$count" -le "$shown" ] || printf '(truncated %s older event file(s))\n' "$((count - shown))"
+      if [ "$overflow" -eq 1 ]; then
+        printf '(scan stopped after %s event file(s); retained inbox exceeds the bounded startup scan)\n' "$event_count"
+      elif [ "$event_count" -gt "$shown" ]; then
+        printf '(truncated %s older event file(s))\n' "$((event_count - shown))"
+      fi
     fi
   fi
 

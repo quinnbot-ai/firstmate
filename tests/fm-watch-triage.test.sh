@@ -1308,6 +1308,16 @@ SH
 
   cat > "$command" <<'SH'
 #!/usr/bin/env bash
+kill -TERM "$$"
+SH
+  chmod +x "$command"
+  output=$(fm_ops_inbox_external_output "$home/config")
+  rc=$?
+  [ -z "$output" ] || fail "signalled external operations-inbox command produced unexpected output"
+  [ "$rc" -eq 143 ] || fail "signalled external operations-inbox command returned $rc, expected 143"
+
+  cat > "$command" <<'SH'
+#!/usr/bin/env bash
 sleep 3
 SH
   chmod +x "$command"

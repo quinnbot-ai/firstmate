@@ -153,20 +153,30 @@ fm_ops_inbox_external_run() {
 
     exit 125 if $capped;
     exit 124 if $timed_out;
+    exit(128 + ($shell_status & 127)) if $shell_status & 127;
     exit($shell_status >> 8);
   ' "$FM_OPS_INBOX_TIMEOUT" "$FM_OPS_INBOX_OUTPUT_MAX_BYTES" "$command"
 }
 
-# fm_ops_inbox_home_records <home>
-# Prints deterministic size/mtime/path records for every home inbox event.
+# fm_ops_inbox_home_records <home> <scan-limit>
+# Prints newest-first mtime/path records from a bounded home-inbox scan.
+# A final __FM_OPS_INBOX_OVERFLOW__ record means the scan limit was reached.
 fm_ops_inbox_home_records() {
-  local home=$1 dir path sig
+  local home=$1 limit=$2 dir path mtime count=0 overflow=0
+  local -a records=()
   dir=$(fm_ops_inbox_home_dir "$home")
   [ -d "$dir" ] || return 0
   while IFS= read -r -d '' path; do
-    sig=$(fm_ops_inbox_stat_sig "$path") || continue
-    printf '%s\t%s\n' "$sig" "$path"
-  done < <(find "$dir" -type f -print0 2>/dev/null) | LC_ALL=C sort
+    if [ "$count" -ge "$limit" ]; then
+      overflow=1
+      break
+    fi
+    mtime=$(fm_ops_inbox_stat_mtime "$path") || continue
+    records+=("$mtime"$'\t'"$path")
+    count=$((count + 1))
+  done < <(find "$dir" -type f -print0 2>/dev/null)
+  ((${#records[@]})) && printf '%s\n' "${records[@]}" | LC_ALL=C sort -rn
+  [ "$overflow" -eq 0 ] || printf '%s\n' '__FM_OPS_INBOX_OVERFLOW__'
 }
 
 fm_ops_inbox_home_marker() {
@@ -190,18 +200,6 @@ fm_ops_inbox_home_has_events() {
   dir=$(fm_ops_inbox_home_dir "$home")
   [ -d "$dir" ] || return 1
   [ -n "$(find "$dir" -type f -print -quit 2>/dev/null)" ]
-}
-
-# fm_ops_inbox_home_newest <home> <limit>
-# Prints newest event files as epoch/path records, bounded by <limit>.
-fm_ops_inbox_home_newest() {
-  local home=$1 limit=$2 dir path mtime
-  dir=$(fm_ops_inbox_home_dir "$home")
-  [ -d "$dir" ] || return 0
-  while IFS= read -r -d '' path; do
-    mtime=$(fm_ops_inbox_stat_mtime "$path") || continue
-    printf '%s\t%s\n' "$mtime" "$path"
-  done < <(find "$dir" -type f -print0 2>/dev/null) | LC_ALL=C sort -rn | head -n "$limit"
 }
 
 # fm_ops_inbox_has_events <home> <config-dir>
