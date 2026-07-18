@@ -1311,8 +1311,8 @@ test_ops_inbox_fingerprint_distinguishes_same_second_same_size_rewrite() {
   pass "operations-inbox fingerprints retain sub-second rewrite resolution"
 }
 
-test_ops_inbox_fingerprint_uses_all_two_level_file_markers() {
-  local dir home fakebin find_log find_count real_find before repeat after marker overflow_before overflow_after i
+test_ops_inbox_fingerprint_uses_bounded_two_level_file_markers() {
+  local dir home fakebin find_log find_count real_find before repeat after marker i stat_log real_stat stat_count
   dir=$(make_case ops-inbox-directory-marker); home="$dir/home"; fakebin="$dir/fakebin"
   find_log="$dir/find.log"; find_count="$dir/find-count"; real_find=$(command -v find)
   mkdir -p "$home/ops-inbox/source" "$home/config"
@@ -1350,15 +1350,19 @@ SH
   for i in $(seq 1 253); do
     : > "$home/ops-inbox/overflow-$i"
   done
-  overflow_before=$(fm_ops_inbox_fingerprint "$home" "$home/config")
-  printf 'rewritten\n' > "$home/ops-inbox/overflow-253"
-  overflow_after=$(fm_ops_inbox_fingerprint "$home" "$home/config")
-  [ "$overflow_before" != "$overflow_after" ] \
-    || fail "an operations-inbox rewrite beyond the former marker limit did not change its fingerprint"
-  marker=$(fm_ops_inbox_home_marker "$home")
-  [ "$(printf '%s\n' "$marker" | awk 'END { print NR + 0 }')" -eq 257 ] \
-    || fail "operations-inbox marker did not retain every supported event file"
-  pass "operations-inbox fingerprints use all two-level file markers"
+  stat_log="$dir/stat.log"; real_stat=$(command -v stat)
+  cat > "$fakebin/stat" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$stat_log"
+exec "$real_stat" "\$@"
+SH
+  chmod +x "$fakebin/stat"
+  marker=$(PATH="$fakebin:$PATH" FM_OPS_INBOX_MARKER_LIMIT=2 FM_OPS_INBOX_MARKER_SCAN_LIMIT=4 fm_ops_inbox_home_marker "$home")
+  stat_count=$(wc -l < "$stat_log" | tr -d '[:space:]')
+  [ "$stat_count" -le 6 ] || fail "operations-inbox marker statted more than its fixed scan budget ($stat_count)"
+  assert_contains "$marker" '__FM_OPS_INBOX_MARKER_LIMIT__' "operations-inbox marker did not disclose its selected-entry bound"
+  assert_contains "$marker" '__FM_OPS_INBOX_MARKER_SCAN_LIMIT__' "operations-inbox marker did not disclose its scan bound"
+  pass "operations-inbox fingerprints use bounded two-level file markers"
 }
 
 test_ops_inbox_external_output_is_bounded_and_timed() {
@@ -1569,7 +1573,7 @@ test_heartbeat_backstop_surfaces_unsurfaced_status
 test_ops_inbox_new_event_wakes_with_task_in_flight
 test_ops_inbox_new_event_wakes_on_heartbeat_without_tasks
 test_ops_inbox_fingerprint_distinguishes_same_second_same_size_rewrite
-test_ops_inbox_fingerprint_uses_all_two_level_file_markers
+test_ops_inbox_fingerprint_uses_bounded_two_level_file_markers
 test_ops_inbox_external_output_is_bounded_and_timed
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot

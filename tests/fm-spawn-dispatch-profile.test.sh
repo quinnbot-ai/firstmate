@@ -190,7 +190,7 @@ assert_private_activation_result() {  # <task-id> <result-path> <message>
 materialize_codex_home() {  # <home> <data> <source> <profile> <worktree>
   python3 "$ROOT/bin/fm-codex-home.py" --create-activate --data "$2" --source "$3" \
     --profile "$4" --worktree "$5" --home "$1" \
-    --result-token 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef -- /bin/sleep 1 >/dev/null
+    --result-token 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef -- /bin/sleep 2 >/dev/null
   python3 "$ROOT/bin/fm-codex-home.py" --remove-activation-result --data "$2" --home "$1"
 }
 
@@ -976,7 +976,7 @@ test_codex_home_activation_uses_open_descriptor() {
   cat > "$command" <<'SH'
 #!/usr/bin/env bash
 printf 'CODEX_HOME=%s\n' "$CODEX_HOME"
-sleep 0.2
+sleep 2
 SH
   chmod +x "$command"
   home="$data/codex-crewmate/$(python3 "$ROOT/bin/fm-codex-home.py" --data "$data" --new-home-name)"
@@ -1032,6 +1032,31 @@ test_codex_home_activation_rejects_immediate_exit() {
   assert_contains "$(cat "$result")" failed "Codex activation must report immediate exits as failed"
   assert_absent "$home" "Codex activation must remove a home after an immediate launch exit"
   pass "Codex activation rejects launches that exit during activation"
+}
+
+test_codex_home_activation_rejects_delayed_exit() {
+  local data source home result token command out status
+  data="$TMP_ROOT/codex-activation-delayed-exit-data"
+  source="$TMP_ROOT/codex-activation-delayed-exit-source"
+  mkdir -p "$data" "$source"
+  command="$TMP_ROOT/codex-activation-delayed-exit-command"
+  cat > "$command" <<'SH'
+#!/usr/bin/env bash
+sleep 0.2
+exit 1
+SH
+  chmod +x "$command"
+  home="$data/codex-crewmate/$(python3 "$ROOT/bin/fm-codex-home.py" --data "$data" --new-home-name)"
+  result="$data/codex-crewmate/.fm-codex-activation.${home##*/}"
+  token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  out=$(python3 "$ROOT/bin/fm-codex-home.py" --create-activate --data "$data" --source "$source" \
+    --profile fm-crewmate-delayed-exit-z47 --worktree /tmp/fm-codex-delayed-exit --home "$home" --result-token "$token" -- "$command" 2>&1)
+  status=$?
+  expect_code 1 "$status" "Codex activation must fail when its launch exits during startup"
+  assert_contains "$out" "exited during activation" "Codex activation did not report a delayed launch exit"
+  assert_contains "$(cat "$result")" failed "Codex activation must report delayed exits as failed"
+  assert_absent "$home" "Codex activation must remove a home after a delayed launch exit"
+  pass "Codex activation rejects delayed startup exits"
 }
 
 test_codex_home_activation_refuses_replaced_path() {
@@ -1570,6 +1595,7 @@ test_codex_crewmate_home_uses_private_directory
 test_codex_home_activation_uses_open_descriptor
 test_codex_home_activation_reports_exec_failure
 test_codex_home_activation_rejects_immediate_exit
+test_codex_home_activation_rejects_delayed_exit
 test_codex_home_activation_refuses_replaced_path
 test_codex_home_activation_result_refuses_symlink
 test_codex_home_activation_refuses_existing_result
