@@ -74,6 +74,8 @@ On an unmarked return, `bin/fm-afk-return.sh` owns ordered shutdown, durable cat
 The runtime backend is the session-provider layer below firstmate's scripts.
 It owns task endpoint creation, bounded capture, text/key sends, current-path reads for spawn-time worktree discovery when the backend does not create the worktree itself, live-window fallback lookup, agent-process liveness probes where verified, and endpoint teardown.
 `bin/fm-backend.sh` centralizes backend selection, `state/<id>.meta` helpers, selector resolution, and operation dispatch; `bin/backends/tmux.sh` is the verified reference adapter ([`docs/tmux-backend.md`](tmux-backend.md)), and `bin/backends/herdr.sh` (P2), `bin/backends/zellij.sh` (P3), `bin/backends/orca.sh` (P4), and `bin/backends/cmux.sh` (P5) are experimental task-spawn adapters.
+Routine endpoint teardown is best-effort, but cleanup following a failed allocation is strict: firstmate must confirm the recorded endpoint is absent before discarding recovery metadata or task-private credentials.
+When that proof is unavailable, `fm-teardown.sh` preserves the task's metadata and resources for a later recovery instead of assuming cleanup succeeded.
 New spawns select a backend from `--backend`, then `FM_BACKEND`, then local `config/backend`, then runtime auto-detection from `$TMUX`, `HERDR_ENV=1`, or cmux runtime signals, then default `tmux`.
 Runtime auto-detection is innermost-first: `$TMUX` wins over `HERDR_ENV=1`, which wins over cmux's primary `CMUX_WORKSPACE_ID` marker and documented fallback signals; auto-detected herdr or cmux prints a one-time opt-out notice, auto-detected tmux stays silent, and zellij and orca are never auto-detected (only explicit selection).
 Unknown backend names fail loudly.
@@ -95,6 +97,10 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
+Codex ship and scout workers additionally run with a firstmate-managed, task-private `CODEX_HOME` under `data/codex-crewmate/`.
+That home copies only the captain's Codex authentication and model catalog, disables plugins, carries no MCP configuration, and excludes the project-local Codex configuration.
+It is recorded as `codex_crewmate_home=` in task metadata and removed only after endpoint cleanup succeeds; the full configuration contract is in [configuration.md](configuration.md#harness-support).
+Codex secondmate launches are intentionally outside this isolation rule and retain their existing home behavior.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
