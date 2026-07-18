@@ -736,19 +736,13 @@ fm_backend_target_absent() {  # <backend> <target> [expected-label] -> 0 absent,
       fm_backend_source cmux || return 2
       fm_backend_cmux_parse_target "$target" || return 2
       wsid=$FM_BACKEND_CMUX_WORKSPACE
-      out=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null) || return 2
-      printf '%s' "$out" | jq -e '(.workspaces | type) == "array"' >/dev/null 2>&1 || return 2
       if [ -n "$expected_label" ]; then
         title=$(fm_backend_cmux_scoped_title "$expected_label")
-        if printf '%s' "$out" | jq -e --arg id "$wsid" --arg title "$title" \
-          '[.workspaces[]? | select(.id == $id or .title == $title)] | length == 0' >/dev/null 2>&1; then
-          return 0
-        fi
-      elif printf '%s' "$out" | jq -e --arg id "$wsid" \
-        '[.workspaces[]? | select(.id == $id)] | length == 0' >/dev/null 2>&1; then
-        return 0
+        fm_backend_cmux_workspace_absent "$wsid" "$title"
+      else
+        fm_backend_cmux_workspace_absent "$wsid"
       fi
-      return 1
+      return $?
       ;;
     orca)
       fm_backend_source orca || return 2

@@ -547,19 +547,38 @@ test_dispatch_target_absent_requires_confirmed_workspace_list() {
   title=$(cmux_expected_scoped_title fm-label)
 
   dir="$TMP_ROOT/target-absent-confirmed"; mkdir -p "$dir/responses"
-  cmux_workspace_list_response "$dir" 1
+  cmux_windows_response "$dir" 1 "e1111111-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_response "$dir" 2
   fb=$(make_cmux_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/fm-backend.sh"; fm_backend_target_absent cmux "$1" fm-label; printf "%s" "$?"' "$ROOT" "$target" )
-  [ "$out" = 0 ] || fail "target absence should be confirmed only when the workspace list succeeds and contains neither target nor label, got $out"
+  [ "$out" = 0 ] || fail "target absence should be confirmed only when every scoped workspace list succeeds and contains neither target nor label, got $out"
 
   dir="$TMP_ROOT/target-absent-unqueryable"; mkdir -p "$dir/responses"
   printf '1\n' > "$dir/responses/1.exit"
   fb=$(make_cmux_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/fm-backend.sh"; fm_backend_target_absent cmux "$1" fm-label; printf "%s" "$?"' "$ROOT" "$target" )
-  [ "$out" = 2 ] || fail "an unqueryable workspace list must not be treated as absent, got $out"
-  pass "fm_backend_target_absent: cmux requires a readable workspace list"
+  [ "$out" = 2 ] || fail "an unqueryable window list must not be treated as absent, got $out"
+
+  dir="$TMP_ROOT/target-live-other-window"; mkdir -p "$dir/responses"
+  cmux_windows_response "$dir" 1 "e1111111-0000-0000-0000-000000000000" 1 "e2222222-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_response "$dir" 2 "ffffffff-0000-0000-0000-000000000000" "other"
+  cmux_workspace_list_response "$dir" 3 "cccccccc-0000-0000-0000-000000000000" "$title"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_target_absent cmux "$1" fm-label; printf "%s" "$?"' "$ROOT" "$target" )
+  [ "$out" = 1 ] || fail "a title in another cmux window must remain live, got $out"
+
+  dir="$TMP_ROOT/target-absent-later-window-unqueryable"; mkdir -p "$dir/responses"
+  cmux_windows_response "$dir" 1 "e1111111-0000-0000-0000-000000000000" 1 "e2222222-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_response "$dir" 2 "ffffffff-0000-0000-0000-000000000000" "other"
+  printf '1\n' > "$dir/responses/3.exit"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_target_absent cmux "$1" fm-label; printf "%s" "$?"' "$ROOT" "$target" )
+  [ "$out" = 2 ] || fail "an unqueryable later cmux window must remain unknown, got $out"
+  pass "fm_backend_target_absent: cmux requires complete scoped workspace coverage"
 }
 
 test_capture_trims_locally() {

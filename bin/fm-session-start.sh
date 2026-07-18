@@ -244,7 +244,7 @@ EOF
       printf 'home ops-inbox: (present, empty: %s)\n' "$dir"
     else
       if [ "$overflow" -eq 1 ]; then
-        printf 'home ops-inbox: at least %s event file(s); bounded scan reached %s; newest %s sampled paths:\n' \
+        printf 'home ops-inbox: at least %s event file(s); bounded scan reached %s; up to %s newest paths within the traversal sample:\n' \
           "$((event_count + 1))" "$OPS_INBOX_SCAN_LIMIT" "$OPS_INBOX_LIMIT"
       else
         printf 'home ops-inbox: %s event file(s); newest %s with full paths:\n' "$event_count" "$OPS_INBOX_LIMIT"

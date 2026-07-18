@@ -620,6 +620,25 @@ fm_backend_cmux_window_of_workspace() {  # <workspace_id> -> "<window_id> <count
   done < <(printf '%s' "$wins" | jq -r '.[]? | .id' 2>/dev/null)
 }
 
+fm_backend_cmux_workspace_absent() {  # <workspace_id> [title]
+  local wsid=$1 title=${2:-} wins wid wss
+  wins=$(fm_backend_cmux_cli list-windows --json --id-format uuids 2>/dev/null) || return 2
+  printf '%s' "$wins" | jq -e 'type == "array"' >/dev/null 2>&1 || return 2
+  while IFS= read -r wid; do
+    [ -n "$wid" ] || continue
+    wss=$(fm_backend_cmux_cli workspace list --json --id-format uuids --window "$wid" 2>/dev/null) || return 2
+    printf '%s' "$wss" | jq -e '(.workspaces | type) == "array"' >/dev/null 2>&1 || return 2
+    if [ -n "$title" ]; then
+      printf '%s' "$wss" | jq -e --arg id "$wsid" --arg title "$title" \
+        '[.workspaces[]? | select(.id == $id or .title == $title)] | length > 0' >/dev/null 2>&1 && return 1
+    elif printf '%s' "$wss" | jq -e --arg id "$wsid" \
+      '[.workspaces[]? | select(.id == $id)] | length > 0' >/dev/null 2>&1; then
+      return 1
+    fi
+  done < <(printf '%s' "$wins" | jq -r '.[]? | .id' 2>/dev/null)
+  return 0
+}
+
 # fm_backend_cmux_kill: remove the task's whole workspace. A cmux task owns one
 # workspace, so teardown reclaims that workspace and all of its surfaces.
 #
