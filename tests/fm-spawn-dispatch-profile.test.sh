@@ -850,13 +850,18 @@ test_codex_home_activation_uses_open_descriptor() {
   token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
   out=$(python3 "$ROOT/bin/fm-codex-home.py" --create-activate --data "$data" --source "$source" \
     --profile fm-crewmate-activation-z42 --worktree /tmp/fm-codex-activation --home "$home" --result-token "$token" -- /usr/bin/env)
-  assert_contains "$out" "CODEX_HOME=/dev/fd/" \
-    "Codex activation must retain an opened home descriptor"
+  codex_home_value=$(printf '%s\n' "$out" | sed -n 's/^CODEX_HOME=//p' | head -n 1)
+  [ -n "$codex_home_value" ] || fail "Codex activation must export CODEX_HOME to the child"
+  case "$codex_home_value" in
+    /dev/fd/*) fail "Codex activation must not hand the child an fd-shaped CODEX_HOME (macOS cannot open it as a directory): $codex_home_value" ;;
+  esac
+  [ -d "$codex_home_value" ] || fail "Codex activation must hand the child an openable real home directory: $codex_home_value"
+  [ "${codex_home_value##*/}" = "${home##*/}" ] || fail "Codex activation CODEX_HOME must resolve to the managed home: $codex_home_value"
   assert_contains "$(cat "$result")" ready "Codex activation must report readiness before launch"
   python3 "$ROOT/bin/fm-codex-home.py" --remove-activation-result --data "$data" --home "$home"
   python3 "$ROOT/bin/fm-codex-home.py" --remove --data "$data" --home "$home"
   assert_absent "$home" "descriptor-activated Codex home must remain removable"
-  pass "Codex activation passes a descriptor-backed home"
+  pass "Codex activation passes a real-path home resolved from the retained descriptor"
 }
 
 test_codex_home_activation_reports_exec_failure() {
