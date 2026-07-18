@@ -21,6 +21,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$ROOT/bin/fm-classify-lib.sh"
+. "$ROOT/bin/fm-ops-inbox-lib.sh"
 
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
@@ -1276,6 +1277,195 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
   pass "heartbeat backstop fail-safe surfaces a captain-relevant status the per-wake path missed"
 }
 
+# --- operations inbox: task-poll and heartbeat wake classification -----------
+
+seed_ops_inbox_fingerprint() {  # <home> <state>
+  local home=$1 state=$2 fingerprint
+  fingerprint=$(bash -c '. "$1"; fm_ops_inbox_fingerprint "$2" "$3"' _ \
+    "$ROOT/bin/fm-ops-inbox-lib.sh" "$home" "$home/config") \
+    || fail "could not seed operations-inbox fingerprint"
+  printf '%s\n' "$fingerprint" > "$state/.hash-ops-inbox"
+}
+
+test_ops_inbox_new_event_wakes_with_task_in_flight() {
+  local dir state fakebin out home pid
+  dir=$(make_case ops-inbox-task); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  home="$dir/home"
+  mkdir -p "$home/ops-inbox" "$home/config"
+  printf 'project=firstmate\nkind=ship\n' > "$state/ops.meta"
+  seed_ops_inbox_fingerprint "$home" "$state"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 15 || { reap "$pid"; fail "watcher exited before an operations-inbox event landed: $(cat "$out")"; }
+  printf 'P1 failure\n' > "$home/ops-inbox/new.event"
+  wait_for_exit "$pid" 40 || fail "watcher did not wake for a new operations-inbox event while a task was in flight"
+  grep -Fx 'check: ops-inbox changed - inspect the OPS INBOX session-start digest' "$out" >/dev/null \
+    || fail "operations-inbox task wake did not use the actionable check classification: $(cat "$out")"
+  grep "$(printf '\tcheck\tops-inbox\t')" "$state/.wake-queue" >/dev/null \
+    || fail "operations-inbox task wake was not durably queued as a check"
+
+  pass "a new operations-inbox event wakes immediately with a task in flight"
+}
+
+test_ops_inbox_new_event_wakes_on_heartbeat_without_tasks() {
+  local dir state fakebin out home pid
+  dir=$(make_case ops-inbox-heartbeat); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  home="$dir/home"
+  mkdir -p "$home/ops-inbox" "$home/config"
+  seed_ops_inbox_fingerprint "$home" "$state"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 FM_HEARTBEAT_MAX=1 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 15 || { reap "$pid"; fail "watcher exited before heartbeat operations-inbox event: $(cat "$out")"; }
+  printf 'P0 failure\n' > "$home/ops-inbox/new.event"
+  wait_for_exit "$pid" 40 || fail "watcher did not wake for a new operations-inbox event on its heartbeat scan"
+  grep -Fx 'check: ops-inbox changed - inspect the OPS INBOX session-start digest' "$out" >/dev/null \
+    || fail "operations-inbox heartbeat wake did not use the actionable check classification: $(cat "$out")"
+  grep "$(printf '\tcheck\tops-inbox\t')" "$state/.wake-queue" >/dev/null \
+    || fail "operations-inbox heartbeat wake was not durably queued as a check"
+
+  pass "a new operations-inbox event wakes on heartbeat when no task is in flight"
+}
+
+test_ops_inbox_fingerprint_distinguishes_same_second_same_size_rewrite() {
+  local dir home before after
+  dir=$(make_case ops-inbox-subsecond); home="$dir/home"
+  mkdir -p "$home/ops-inbox" "$home/config"
+  printf 'first\n' > "$home/ops-inbox/event"
+  before=$(fm_ops_inbox_fingerprint "$home" "$home/config")
+  printf 'other\n' > "$home/ops-inbox/event"
+  after=$(fm_ops_inbox_fingerprint "$home" "$home/config")
+  [ "$before" != "$after" ] || fail "same-size operations-inbox rewrite did not change its fingerprint"
+  pass "operations-inbox fingerprints retain sub-second rewrite resolution"
+}
+
+test_ops_inbox_fingerprint_uses_bounded_one_level_markers() {
+  local dir home fakebin find_log find_count real_find before repeat after marker
+  dir=$(make_case ops-inbox-directory-marker); home="$dir/home"; fakebin="$dir/fakebin"
+  find_log="$dir/find.log"; find_count="$dir/find-count"; real_find=$(command -v find)
+  mkdir -p "$home/ops-inbox/source" "$home/config"
+  printf 'first\n' > "$home/ops-inbox/source/event"
+  cat > "$fakebin/find" <<SH
+#!/usr/bin/env bash
+printf '%s\\n' "\$*" >> "\$FM_OPS_INBOX_FIND_LOG"
+case " \$* " in
+  *' -mindepth 1 -maxdepth 1 -print0 '*)
+    count=\$(cat "\$FM_OPS_INBOX_FIND_COUNT" 2>/dev/null || echo 0)
+    count=\$((count + 1))
+    printf '%s\\n' "\$count" > "\$FM_OPS_INBOX_FIND_COUNT"
+    if [ "\$count" -eq 2 ]; then
+      "$real_find" "\$@" | perl -0 -e 'print for reverse <>'
+      exit "\${PIPESTATUS[0]}"
+    fi
+    ;;
+esac
+exec "$real_find" "\$@"
+SH
+  chmod +x "$fakebin/find"
+  before=$(PATH="$fakebin:$PATH" FM_OPS_INBOX_FIND_LOG="$find_log" FM_OPS_INBOX_FIND_COUNT="$find_count" fm_ops_inbox_fingerprint "$home" "$home/config")
+  repeat=$(PATH="$fakebin:$PATH" FM_OPS_INBOX_FIND_LOG="$find_log" FM_OPS_INBOX_FIND_COUNT="$find_count" fm_ops_inbox_fingerprint "$home" "$home/config")
+  [ "$before" = "$repeat" ] || fail "directory traversal order changed the operations-inbox fingerprint"
+  printf 'second\n' > "$home/ops-inbox/source/new-event"
+  after=$(PATH="$fakebin:$PATH" FM_OPS_INBOX_FIND_LOG="$find_log" FM_OPS_INBOX_FIND_COUNT="$find_count" fm_ops_inbox_fingerprint "$home" "$home/config")
+  [ "$before" != "$after" ] || fail "one-level operations-inbox event did not change its directory-marker fingerprint"
+  grep -F -- '-mindepth 1 -maxdepth 1 -print0' "$find_log" >/dev/null || fail "fingerprint did not restrict markers to top-level entries"
+  [ "$(wc -l < "$find_log" | tr -d '[:space:]')" -eq 3 ] || fail "fingerprint performed unexpected operations-inbox scans"
+
+  mkdir -p "$home/ops-inbox/overflow-a" "$home/ops-inbox/overflow-b" "$home/ops-inbox/overflow-c"
+  marker=$(FM_OPS_INBOX_MARKER_LIMIT=2 fm_ops_inbox_home_marker "$home")
+  printf '%s\n' "$marker" | grep -Fx '__FM_OPS_INBOX_MARKER_OVERFLOW__:2' >/dev/null \
+    || fail "bounded operations-inbox marker did not disclose overflow"
+  [ "$(printf '%s\n' "$marker" | awk 'END { print NR + 0 }')" -eq 3 ] \
+    || fail "bounded operations-inbox marker retained more than its limit"
+  pass "operations-inbox fingerprints use bounded one-level markers"
+}
+
+test_ops_inbox_external_output_is_bounded_and_timed() {
+  local dir home command output rc bytes started elapsed escaped_pid
+  dir=$(make_case ops-inbox-bounded-command); home="$dir/home"; command="$dir/external-inbox"
+  mkdir -p "$home/config"
+  cat > "$command" <<'SH'
+#!/usr/bin/env bash
+while :; do printf '0123456789abcdef'; done
+SH
+  chmod +x "$command"
+  printf '%s\n' "$command" > "$home/config/ops-inbox-cmd"
+  output=$(FM_OPS_INBOX_OUTPUT_MAX_BYTES=128 fm_ops_inbox_external_output "$home/config")
+  rc=$?
+  bytes=$(printf '%s' "$output" | LC_ALL=C wc -c | tr -d '[:space:]')
+  [ "$bytes" -le 128 ] || fail "external operations-inbox output exceeded its byte cap ($bytes)"
+  [ "$rc" -ne 0 ] || fail "capped external operations-inbox command unexpectedly succeeded"
+
+  cat > "$command" <<'SH'
+#!/usr/bin/env bash
+printf 'external failure\n'
+exit 42
+SH
+  chmod +x "$command"
+  output=$(fm_ops_inbox_external_output "$home/config")
+  rc=$?
+  [ "$output" = 'external failure' ] || fail "external operations-inbox command lost its output"
+  [ "$rc" -eq 42 ] || fail "external operations-inbox command returned $rc, expected 42"
+
+  cat > "$command" <<'SH'
+#!/usr/bin/env bash
+kill -TERM "$$"
+SH
+  chmod +x "$command"
+  output=$(fm_ops_inbox_external_output "$home/config")
+  rc=$?
+  [ -z "$output" ] || fail "signalled external operations-inbox command produced unexpected output"
+  [ "$rc" -eq 143 ] || fail "signalled external operations-inbox command returned $rc, expected 143"
+
+  cat > "$command" <<'SH'
+#!/usr/bin/env bash
+sleep 3
+SH
+  chmod +x "$command"
+  started=$SECONDS
+  output=$(FM_OPS_INBOX_TIMEOUT=1 fm_ops_inbox_external_output "$home/config")
+  rc=$?
+  elapsed=$((SECONDS - started))
+  [ -z "$output" ] || fail "timed external operations-inbox command produced unexpected output"
+  [ "$rc" -eq 124 ] || fail "timed external operations-inbox command returned $rc, expected 124"
+  [ "$elapsed" -lt 3 ] || fail "timed external operations-inbox command exceeded its deadline (${elapsed}s)"
+
+  cat > "$command" <<'SH'
+#!/usr/bin/env bash
+sleep 3 &
+SH
+  chmod +x "$command"
+  started=$SECONDS
+  output=$(FM_OPS_INBOX_TIMEOUT=1 fm_ops_inbox_external_output "$home/config")
+  rc=$?
+  elapsed=$((SECONDS - started))
+  [ -z "$output" ] || fail "background-child external command produced unexpected output"
+  [ "$rc" -eq 124 ] || fail "background-child external command returned $rc, expected 124"
+  [ "$elapsed" -lt 3 ] || fail "background-child external command bypassed its deadline (${elapsed}s)"
+
+  escaped_pid="$dir/escaped.pid"
+  cat > "$command" <<SH
+#!/usr/bin/env bash
+perl -MPOSIX=setsid -e 'setsid; sleep 10' &
+printf '%s\\n' "\\$!" > "$escaped_pid"
+SH
+  chmod +x "$command"
+  started=$SECONDS
+  output=$(FM_OPS_INBOX_TIMEOUT=1 fm_ops_inbox_external_output "$home/config")
+  rc=$?
+  elapsed=$((SECONDS - started))
+  [ -z "$output" ] || fail "setsid-child external command produced unexpected output"
+  [ "$rc" -eq 124 ] || fail "setsid-child external command returned $rc, expected 124"
+  [ "$elapsed" -lt 3 ] || fail "setsid-child external command bypassed the parent capture deadline (${elapsed}s)"
+  kill "$(cat "$escaped_pid")" 2>/dev/null || true
+  pass "external operations-inbox commands have bounded output and runtime"
+}
+
 # --- beacon stays fresh while absorbing -------------------------------------
 
 test_beacon_stays_fresh_while_absorbing() {
@@ -1400,6 +1590,11 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
+test_ops_inbox_new_event_wakes_with_task_in_flight
+test_ops_inbox_new_event_wakes_on_heartbeat_without_tasks
+test_ops_inbox_fingerprint_distinguishes_same_second_same_size_rewrite
+test_ops_inbox_fingerprint_uses_bounded_one_level_markers
+test_ops_inbox_external_output_is_bounded_and_timed
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale

@@ -76,6 +76,8 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
+# shellcheck source=bin/fm-ops-inbox-lib.sh
+. "$SCRIPT_DIR/fm-ops-inbox-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -604,6 +606,53 @@ heartbeat_scan_finds_actionable() {
   return 1
 }
 
+# Operations inboxes are external failure signals, not crew-status events.
+# Poll their compact fingerprint every cycle while a regular task is in flight,
+# then at the existing heartbeat cadence otherwise.  A changed fingerprint is
+# only marked seen after its durable wake record is appended, preventing both a
+# missed event on interruption and a hot loop on an unchanged inbox.
+ops_inbox_tasks_in_flight() {
+  local meta kind
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    kind=$(grep '^kind=' "$meta" | cut -d= -f2- || true)
+    [ "$kind" = secondmate ] && continue
+    return 0
+  done
+  return 1
+}
+
+ops_inbox_changed() {
+  local fingerprint previous
+  fingerprint=$(fm_ops_inbox_fingerprint "$FM_HOME" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}")
+  previous=$(cat "$STATE/.hash-ops-inbox" 2>/dev/null || true)
+  if [ -z "$previous" ]; then
+    # A watcher first armed against an empty inbox establishes its baseline
+    # silently.  Existing events or a broken configured command still surface,
+    # while normal task tests and an empty new home do not manufacture a wake.
+    FM_OPS_INBOX_FINGERPRINT=$fingerprint
+    if ! fm_ops_inbox_has_events "$FM_HOME" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"; then
+      mark_ops_inbox_seen
+      return 1
+    fi
+    return 0
+  fi
+  [ "$fingerprint" != "$previous" ] || return 1
+  FM_OPS_INBOX_FINGERPRINT=$fingerprint
+  return 0
+}
+
+mark_ops_inbox_seen() {
+  printf '%s\n' "$FM_OPS_INBOX_FINGERPRINT" > "$STATE/.hash-ops-inbox"
+}
+
+surface_ops_inbox_change() {
+  local reason='check: ops-inbox changed - inspect the OPS INBOX session-start digest'
+  fm_wake_append check ops-inbox "$reason" || exit 1
+  mark_ops_inbox_seen
+  wake "$reason"
+}
+
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
 # with push-capable windows (herdr), it replaces the blind `sleep POLL` with a
 # bounded wait on the backend's native transition stream, so a crew going
@@ -775,6 +824,10 @@ while :; do
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
+
+  if ops_inbox_tasks_in_flight && ops_inbox_changed; then
+    surface_ops_inbox_change
+  fi
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
@@ -1063,7 +1116,10 @@ EOF
     # no-change case (advance the schedule and back off exactly as wake() would,
     # without exiting); the away-mode daemon, when present, owns triage and wants
     # every heartbeat.
-    if afk_present; then
+    if ! ops_inbox_tasks_in_flight && ops_inbox_changed; then
+      touch "$STATE/.last-heartbeat"
+      surface_ops_inbox_change
+    elif afk_present; then
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
       wake "heartbeat"
