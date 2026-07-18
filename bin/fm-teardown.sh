@@ -12,7 +12,11 @@
 # GitHub reports a PR head that contains the current local work, or its content is
 # already present in the up-to-date default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
-# on a remote yet the change is fully in main.
+# on a remote yet the change is fully in main. Local-only containment also accepts a
+# branch when git cherry proves every branch patch is already equivalent in the local
+# default branch, even though rebasing or cherry-picking gave the landed commits new
+# SHAs. That proof rejects merge commits, malformed or failed git cherry output, and
+# any '+' patch result.
 # The PR itself is resolved from the task's recorded pr= when present, or - when
 # no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
 # where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
@@ -25,6 +29,9 @@
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
+# Before returning a task worktree to treehouse, teardown detaches its checked-out
+# branch because treehouse may clean it up. It deletes only a named non-default task
+# branch, and preserves the detached branch when the project default cannot be known.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
@@ -390,6 +397,28 @@ content_in_default() {
   [ "$merged_tree" = "$default_tree" ]
 }
 
+# Is every commit unique to HEAD patch-equivalent to a commit already on the local
+# default branch? git cherry prints '-' for equivalent commits and '+' for commits
+# that are not present upstream. Any '+' line, malformed output, or git error is
+# ambiguous and fails closed.
+patches_are_in_default() {
+  local default=$1 cherry line merge_commits
+  [ -n "$default" ] || return 1
+  merge_commits=$(git -C "$WT" rev-list --min-parents=2 "$default..HEAD" 2>/dev/null) || return 1
+  [ -z "$merge_commits" ] || return 1
+  cherry=$(git -C "$WT" cherry "$default" HEAD 2>/dev/null) || return 1
+  [ -n "$cherry" ] || return 0
+  while IFS= read -r line; do
+    case "$line" in
+      '- '*) ;;
+      '+ '*) return 1 ;;
+      *) return 1 ;;
+    esac
+  done <<EOF
+$cherry
+EOF
+}
+
 # Has the worktree's committed work actually LANDED, though its commits are not
 # reachable from any remote-tracking branch? True when a merged PR proves the
 # current local work is contained in the PR head, OR the content is already in the
@@ -685,7 +714,7 @@ validate_worktree_teardown_safety() {
       return 1
     fi
     unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
-    if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
+    if [ -n "$dirty" ] || { [ -n "$unmerged" ] && ! patches_are_in_default "$DEFAULT"; }; then
       echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
       [ -n "$dirty" ] && echo "uncommitted changes present" >&2
       [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
@@ -710,6 +739,33 @@ validate_worktree_teardown_safety() {
       return 1
     fi
   fi
+}
+
+# Detach before treehouse returns a worktree, because treehouse may clean up the
+# checked-out branch. Never delete the project default branch when a landed task is
+# parked on it. If the default cannot be identified, preserve the detached branch
+# rather than guessing that it is safe to delete.
+detach_and_drop_task_branch() {
+  local branch default
+  branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+  [ "$branch" = HEAD ] && return 0
+  default=$(default_branch 2>/dev/null || true)
+  if worktree_safety_blocked_by_lock "detaching its checked-out branch"; then
+    cleanup_stale_lock_for_safety_check "$WT" || {
+      echo "REFUSED: cannot detach worktree $WT from checked-out branch $branch while its git lock is not provably stale; preserving it before treehouse return." >&2
+      return 1
+    }
+  fi
+  if ! git -C "$WT" checkout --detach -q; then
+    echo "REFUSED: cannot detach worktree $WT from checked-out branch $branch; preserving it before treehouse return." >&2
+    return 1
+  fi
+  if [ -z "$default" ]; then
+    echo "teardown: cannot determine the project default branch; preserving detached branch $branch" >&2
+    return 0
+  fi
+  [ "$branch" = "$default" ] && return 0
+  git -C "$WT" branch -D -- "$branch" >/dev/null 2>&1 || true
 }
 
 require_orca_worktree_path_match() {
@@ -869,10 +925,12 @@ safe_rm_rf_child_worktree() {
 }
 
 validate_task_temp_for_removal() {
-  local target=$1 prefix suffix
+  local target=$1 legacy prefix suffix
   [ -n "$target" ] || return 0
+  legacy="/tmp/fm-$ID"
   prefix="/tmp/fm-$ID."
   case "$target" in
+    "$legacy") suffix=legacy ;;
     "$prefix"*) suffix=${target#"$prefix"} ;;
     *)
       echo "REFUSED: unsafe task temporary directory $target does not match task $ID" >&2
@@ -895,15 +953,30 @@ validate_task_temp_for_removal() {
 remove_codex_crewmate_home() {
   local home=$1
   [ -n "$home" ] || return 0
-  python3 "$FM_ROOT/bin/fm-codex-home.py" --remove --data "$DATA" --home "$home"
+  python3 "$FM_ROOT/bin/fm-codex-home.py" --remove --data "$DATA" --state "$STATE" --task-id "$ID" --home "$home"
 }
 
 close_recorded_endpoint() {
-  local tab_id absence_status
+  local tab_id absence_status require_confirmed_absence=0
   tab_id=$(meta_value "$META" zellij_tab_id)
-  if [ "$ENDPOINT_CLEANUP_PENDING" = 1 ]; then
+  if [ "$ENDPOINT_CLEANUP_PENDING" = 1 ] || [ -n "$CODEX_CREWMATE_HOME" ]; then
+    require_confirmed_absence=1
+  fi
+  if [ "$require_confirmed_absence" = 1 ]; then
+    if fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
+      return 0
+    else
+      absence_status=$?
+    fi
+    if [ "$absence_status" -ne 1 ]; then
+      echo "error: endpoint $T could not be confirmed absent before cleanup; preserving recovery metadata" >&2
+      return 1
+    fi
     if ! FM_BACKEND_KILL_STRICT=1 fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null; then
-      echo "error: failed-spawn endpoint $T could not be confirmed closed; preserving recovery metadata" >&2
+      if fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
+        return 0
+      fi
+      echo "error: endpoint $T could not be confirmed closed; preserving recovery metadata" >&2
       return 1
     fi
     if fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
@@ -913,9 +986,9 @@ close_recorded_endpoint() {
     fi
     if [ "$absence_status" -ne 0 ]; then
       if [ "$absence_status" -eq 1 ]; then
-        echo "error: failed-spawn endpoint $T remains live after cleanup; preserving recovery metadata" >&2
+        echo "error: endpoint $T remains live after cleanup; preserving recovery metadata" >&2
       else
-        echo "error: failed-spawn endpoint $T could not be confirmed absent after cleanup; preserving recovery metadata" >&2
+        echo "error: endpoint $T could not be confirmed absent after cleanup; preserving recovery metadata" >&2
       fi
       return 1
     fi
@@ -1156,23 +1229,13 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     ORCA_PATH_MATCH_VERIFIED=1
   fi
   if [ -n "$ORCA_WORKTREE_ID" ] && [ -d "$WT" ]; then
-    branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-    if [ "$branch" != "HEAD" ]; then
-      if git -C "$WT" checkout --detach -q 2>/dev/null; then
-        git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
-      fi
-    fi
+    detach_and_drop_task_branch || exit 1
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
   fi
   [ -z "$T_ORCA" ] || close_recorded_endpoint || exit 1
   [ -z "$ORCA_WORKTREE_ID" ] || fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
-  branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-  if [ "$branch" != "HEAD" ]; then
-    if git -C "$WT" checkout --detach -q 2>/dev/null; then
-      git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
-    fi
-  fi
+  detach_and_drop_task_branch || exit 1
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
   # Kills remaining processes in the worktree (including the agent), resets, returns
