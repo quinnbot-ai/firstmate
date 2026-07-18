@@ -190,7 +190,7 @@ assert_private_activation_result() {  # <task-id> <result-path> <message>
 materialize_codex_home() {  # <home> <data> <source> <profile> <worktree>
   python3 "$ROOT/bin/fm-codex-home.py" --create-activate --data "$2" --source "$3" \
     --profile "$4" --worktree "$5" --home "$1" \
-    --result-token 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef -- /usr/bin/env >/dev/null
+    --result-token 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef -- /bin/sleep 1 >/dev/null
   python3 "$ROOT/bin/fm-codex-home.py" --remove-activation-result --data "$2" --home "$1"
 }
 
@@ -968,15 +968,22 @@ test_codex_crewmate_home_uses_private_directory() {
 }
 
 test_codex_home_activation_uses_open_descriptor() {
-  local data source home result token out
+  local data source home result token out command
   data="$TMP_ROOT/codex-activation-data"
   source="$TMP_ROOT/codex-activation-source"
   mkdir -p "$data" "$source"
+  command="$TMP_ROOT/codex-activation-live-command"
+  cat > "$command" <<'SH'
+#!/usr/bin/env bash
+printf 'CODEX_HOME=%s\n' "$CODEX_HOME"
+sleep 0.2
+SH
+  chmod +x "$command"
   home="$data/codex-crewmate/$(python3 "$ROOT/bin/fm-codex-home.py" --data "$data" --new-home-name)"
   result="$data/codex-crewmate/.fm-codex-activation.${home##*/}"
   token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
   out=$(python3 "$ROOT/bin/fm-codex-home.py" --create-activate --data "$data" --source "$source" \
-    --profile fm-crewmate-activation-z42 --worktree /tmp/fm-codex-activation --home "$home" --result-token "$token" -- /usr/bin/env)
+    --profile fm-crewmate-activation-z42 --worktree /tmp/fm-codex-activation --home "$home" --result-token "$token" -- "$command")
   codex_home_value=$(printf '%s\n' "$out" | sed -n 's/^CODEX_HOME=//p' | head -n 1)
   [ -n "$codex_home_value" ] || fail "Codex activation must export CODEX_HOME to the child"
   case "$codex_home_value" in
@@ -1007,6 +1014,24 @@ test_codex_home_activation_reports_exec_failure() {
   assert_contains "$(cat "$result")" failed "Codex activation must report exec failures as failed"
   assert_absent "$home" "Codex activation must remove a home after an exec failure"
   pass "Codex activation reports exec failures before ready"
+}
+
+test_codex_home_activation_rejects_immediate_exit() {
+  local data source home result token out status
+  data="$TMP_ROOT/codex-activation-immediate-exit-data"
+  source="$TMP_ROOT/codex-activation-immediate-exit-source"
+  mkdir -p "$data" "$source"
+  home="$data/codex-crewmate/$(python3 "$ROOT/bin/fm-codex-home.py" --data "$data" --new-home-name)"
+  result="$data/codex-crewmate/.fm-codex-activation.${home##*/}"
+  token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  out=$(python3 "$ROOT/bin/fm-codex-home.py" --create-activate --data "$data" --source "$source" \
+    --profile fm-crewmate-immediate-exit-z46 --worktree /tmp/fm-codex-immediate-exit --home "$home" --result-token "$token" -- /usr/bin/true 2>&1)
+  status=$?
+  expect_code 1 "$status" "Codex activation must fail when its launch exits during activation"
+  assert_contains "$out" "exited during activation" "Codex activation did not report an immediate launch exit"
+  assert_contains "$(cat "$result")" failed "Codex activation must report immediate exits as failed"
+  assert_absent "$home" "Codex activation must remove a home after an immediate launch exit"
+  pass "Codex activation rejects launches that exit during activation"
 }
 
 test_codex_home_activation_refuses_replaced_path() {
@@ -1544,6 +1569,7 @@ test_raw_script_dispatches_fail_closed
 test_codex_crewmate_home_uses_private_directory
 test_codex_home_activation_uses_open_descriptor
 test_codex_home_activation_reports_exec_failure
+test_codex_home_activation_rejects_immediate_exit
 test_codex_home_activation_refuses_replaced_path
 test_codex_home_activation_result_refuses_symlink
 test_codex_home_activation_refuses_existing_result

@@ -808,19 +808,23 @@ fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
   printf '%s' "$out" | jq -r '[.result.agent.agent // "", .result.agent.agent_status // ""] | @tsv' 2>/dev/null
 }
 
+fm_backend_herdr_bare_prompt_has_ansi() {
+  printf '%s' "$1" | grep -q $'\033\\['
+}
+
 fm_backend_herdr_bare_prompt_is_editable() {
   printf '%s' "$1" | grep -qE $'\033\\[[0-9;]*1(;[0-9;]*)?m[❯›]'
 }
 
 fm_backend_herdr_composer_state() {  # <target> [guard|post-submit] -> empty|pending|unknown
-  local target=$1 mode=${2:-guard} session pane cap ansi=0 line trimmed found=0 shape="" raw_match="" bordered=0 stripped
+  local target=$1 mode=${2:-guard} session pane cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped
   local after_match="" last_nonblank="" verdict
   local identity agent agent_status row=0 generic_line=0
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   session=$FM_BACKEND_HERDR_SESSION
   pane=$FM_BACKEND_HERDR_PANE
   if cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES" 2>/dev/null); then
-    ansi=1
+    :
   else
     cap=$(fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES") || { printf 'unknown'; return 0; }
   fi
@@ -934,7 +938,7 @@ EOF
   # via the no-composer-row path above, exactly as before.
   verdict=$(fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE")
   if [ "$mode" = post-submit ] && [ "$shape" = bare ] && [ "$verdict" = pending ] \
-    && [ "$ansi" -eq 1 ] \
+    && fm_backend_herdr_bare_prompt_has_ansi "$raw_match" \
     && ! fm_backend_herdr_bare_prompt_is_editable "$raw_match" \
     && printf '%s' "$after_match" | grep -qiE "${FM_BUSY_REGEX:-esc (to )?interrupt|Working\\.\\.\\.|Ctrl\\+c:cancel}"; then
     printf 'empty'

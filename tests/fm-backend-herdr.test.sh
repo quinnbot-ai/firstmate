@@ -1410,6 +1410,21 @@ test_send_text_submit_codex_busy_redraw_without_ansi_stays_pending() {
   pass "fm_backend_herdr_send_text_submit: a Codex busy redraw without ANSI styling remains pending"
 }
 
+test_send_text_submit_codex_busy_redraw_plain_ansi_stays_pending() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-codex-busy-plain-ansi"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  printf '\xe2\x80\xba ship the fix\n\n\xe2\x80\xa2 Working...\n  esc to interrupt\n' > "$resp/4.out"
+  printf '\xe2\x80\xba ship the fix\n\n\xe2\x80\xa2 Working...\n  esc to interrupt\n' > "$resp/6.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "ship the fix" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = pending ] || fail "a plain row from an otherwise successful ANSI capture must remain pending, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 2 ] || fail "a plain row from an otherwise successful ANSI capture must retry Enter, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: an ANSI read with a plain busy redraw remains a swallowed Enter"
+}
+
 # The same preexisting-working fallback must treat a styled Codex ghost hint as
 # empty after Enter.  This runs through submit verification, not just the
 # away-mode guard's direct composer-state fixture.
@@ -2230,6 +2245,7 @@ test_send_text_submit_preexisting_working_does_not_false_confirm_swallowed_enter
 test_send_text_submit_confirms_codex_busy_redraw_transcript
 test_send_text_submit_codex_editable_draft_with_preexisting_busy_footer_stays_pending
 test_send_text_submit_codex_busy_redraw_without_ansi_stays_pending
+test_send_text_submit_codex_busy_redraw_plain_ansi_stays_pending
 test_send_text_submit_confirms_codex_ghost_after_preexisting_working
 test_send_text_submit_codex_true_swallow_stays_pending
 test_send_text_submit_confirms_despite_codex_idle_tip_composer
