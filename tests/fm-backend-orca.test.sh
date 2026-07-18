@@ -605,7 +605,10 @@ test_spawn_refuses_orca_nonisolated_worktree() {
   printf '1\n' > "$RESP/1.exit"
   printf '{"ok":true,"result":{"repo":{"id":"repo-bad"}}}\n' > "$RESP/2.out"
   printf '{"ok":true,"result":{"worktree":{"id":"wt-bad","path":"%s"},"terminal":{"handle":"term-bad"}}}\n' "$proj" > "$RESP/3.out"
-  printf '{"ok":false,"error":{"code":"terminal_not_found","message":"terminal not found"}}\n' > "$RESP/5.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["still live"]}}}\n' > "$RESP/4.out"
+  printf '{"ok":true,"result":{"closed":true}}\n' > "$RESP/5.out"
+  printf '{"ok":false,"error":{"code":"terminal_not_found","message":"terminal not found"}}\n' > "$RESP/6.out"
+  printf '{"ok":true,"result":{"removed":true}}\n' > "$RESP/7.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
@@ -624,6 +627,68 @@ test_spawn_refuses_orca_nonisolated_worktree() {
   pass "fm-spawn.sh --backend orca: refuses non-isolated worktrees and closes implicit terminals"
 }
 
+test_spawn_accepts_already_absent_orca_terminal() {
+  local proj data state config id out status
+  id="orcaalreadygonez7"
+  proj="$TMP_ROOT/already-gone-project"
+  data="$TMP_ROOT/already-gone-data"
+  state="$TMP_ROOT/already-gone-state"
+  config="$TMP_ROOT/already-gone-config"
+  fm_git_init_commit "$proj"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'brief\n' > "$data/$id/brief.md"
+  touch "$state/.last-watcher-beat"
+  orca_case already-gone
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-already-gone"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-already-gone","path":"%s"},"terminal":{"handle":"term-gone"}}}\n' "$proj" > "$RESP/3.out"
+  printf '{"ok":false,"error":{"code":"terminal_not_found","message":"terminal not found"}}\n' > "$RESP/4.out"
+  printf '{"ok":true,"result":{"removed":true}}\n' > "$RESP/5.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend orca 2>&1 )
+  status=$?
+  expect_code 1 "$status" "Orca spawn should abort after rejecting a primary checkout worktree"
+  assert_absent "$state/$id.meta" "an already-absent Orca terminal must not retain failed-spawn metadata"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''read'$'\x1f''--terminal'$'\x1f''term-gone'$'\x1f''--limit'$'\x1f''1'$'\x1f''--json' \
+    "Orca spawn must confirm the terminal is already absent"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-gone' \
+    "Orca spawn must not treat an already-absent terminal as a failed strict close"
+  pass "fm-spawn.sh --backend orca: accepts an already-absent terminal during abort cleanup"
+}
+
+test_spawn_accepts_orca_terminal_absent_after_close_failure() {
+  local proj data state config id out status
+  id="orcagoneafterclosez8"
+  proj="$TMP_ROOT/gone-after-close-project"
+  data="$TMP_ROOT/gone-after-close-data"
+  state="$TMP_ROOT/gone-after-close-state"
+  config="$TMP_ROOT/gone-after-close-config"
+  fm_git_init_commit "$proj"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'brief\n' > "$data/$id/brief.md"
+  touch "$state/.last-watcher-beat"
+  orca_case gone-after-close
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-gone-after-close"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-gone-after-close","path":"%s"},"terminal":{"handle":"term-gone-after-close"}}}\n' "$proj" > "$RESP/3.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["still live"]}}}\n' > "$RESP/4.out"
+  printf '1\n' > "$RESP/5.exit"
+  printf '{"ok":false,"error":{"code":"terminal_not_found","message":"terminal not found"}}\n' > "$RESP/6.out"
+  printf '{"ok":true,"result":{"removed":true}}\n' > "$RESP/7.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend orca 2>&1 )
+  status=$?
+  expect_code 1 "$status" "Orca spawn should abort after rejecting a primary checkout worktree"
+  assert_absent "$state/$id.meta" "confirmed post-close absence must not retain failed-spawn metadata"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-gone-after-close' \
+    "Orca spawn must attempt strict close while the terminal is live"
+  pass "fm-spawn.sh --backend orca: accepts terminal absence confirmed after close failure"
+}
+
 test_spawn_preserves_orca_metadata_when_terminal_close_is_unconfirmed() {
   local proj data state config id out status
   id="orcacloseunconfirmedz5"
@@ -639,7 +704,10 @@ test_spawn_preserves_orca_metadata_when_terminal_close_is_unconfirmed() {
   printf '1\n' > "$RESP/1.exit"
   printf '{"ok":true,"result":{"repo":{"id":"repo-close-unconfirmed"}}}\n' > "$RESP/2.out"
   printf '{"ok":true,"result":{"worktree":{"id":"wt-close-unconfirmed","path":"%s"},"terminal":{"handle":"term-still-live"}}}\n' "$proj" > "$RESP/3.out"
-  printf '{"ok":true,"result":{"terminal":{"tail":["still live"]}}}\n' > "$RESP/5.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["still live"]}}}\n' > "$RESP/4.out"
+  printf '{"ok":true,"result":{"closed":true}}\n' > "$RESP/5.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["still live"]}}}\n' > "$RESP/6.out"
+  printf '{"ok":true,"result":{"removed":true}}\n' > "$RESP/7.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
@@ -652,6 +720,55 @@ test_spawn_preserves_orca_metadata_when_terminal_close_is_unconfirmed() {
   assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''read'$'\x1f''--terminal'$'\x1f''term-still-live'$'\x1f''--limit'$'\x1f''1'$'\x1f''--json' \
     "Orca spawn must query the terminal after a successful strict close"
   pass "fm-spawn.sh --backend orca: preserves metadata when strict close is unconfirmed"
+}
+
+test_spawn_preserves_codex_home_when_orca_terminal_cleanup_is_unconfirmed() {
+  local proj wt data state config source home id out status real_python
+  id="orcacodexendpointz6"
+  proj="$TMP_ROOT/codex-endpoint-project"
+  wt="$TMP_ROOT/codex-endpoint-wt"
+  data="$TMP_ROOT/codex-endpoint-data"
+  state="$TMP_ROOT/codex-endpoint-state"
+  config="$TMP_ROOT/codex-endpoint-config"
+  source="$TMP_ROOT/codex-endpoint-source"
+  home="$data/codex-crewmate/.fm-codex-home.fixture"
+  real_python=$(command -v python3)
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config" "$source" "$home"
+  printf 'brief\n' > "$data/$id/brief.md"
+  touch "$state/.last-watcher-beat"
+  orca_case codex-endpoint-unconfirmed
+  cat > "$FB/python3" <<'SH'
+#!/usr/bin/env bash
+set -u
+case " $* " in
+  *' --new-home-name '*) printf '%s\n' '.fm-codex-home.fixture' ;;
+  *' --read-activation-result '*) printf '%s\n' failed ;;
+  *) exec "$FM_TEST_REAL_PYTHON" "$@" ;;
+esac
+SH
+  chmod +x "$FB/python3"
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-codex-endpoint"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-codex-endpoint","path":"%s"},"terminal":{"handle":"term-codex-live"}}}\n' "$wt" > "$RESP/3.out"
+  printf '{"ok":true,"result":{"sent":true}}\n' > "$RESP/4.out"
+  printf '{"ok":true,"result":{"sent":true}}\n' > "$RESP/5.out"
+  printf '{"ok":true,"result":{"sent":true}}\n' > "$RESP/6.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["still live"]}}}\n' > "$RESP/7.out"
+  printf '{"ok":true,"result":{"closed":true}}\n' > "$RESP/8.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["still live"]}}}\n' > "$RESP/9.out"
+  printf '{"ok":true,"result":{"removed":true}}\n' > "$RESP/10.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_TEST_REAL_PYTHON="$real_python" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 CODEX_HOME="$source" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex --backend orca 2>&1 )
+  status=$?
+  expect_code 1 "$status" "Orca Codex spawn should abort after isolated-home activation fails"
+  [ -d "$home" ] || fail "unconfirmed Orca terminal cleanup must preserve the isolated Codex home"
+  assert_present "$state/$id.meta" "unconfirmed Orca terminal cleanup must preserve recovery metadata"
+  assert_grep "codex_crewmate_home=$home" "$state/$id.meta" "preserved metadata missing the isolated Codex home"
+  assert_grep "endpoint_cleanup_pending=1" "$state/$id.meta" "preserved metadata must mark pending endpoint cleanup"
+  pass "fm-spawn.sh --backend orca: preserves the Codex home when terminal cleanup is unconfirmed"
 }
 
 test_spawn_removes_orca_worktree_when_terminal_create_fails() {
@@ -1415,7 +1532,10 @@ test_spawn_writes_orca_metadata_and_launches_harness
 test_spawn_refuses_orca_secondmate_before_home_mutation
 test_spawn_refuses_orca_when_runtime_not_ready
 test_spawn_refuses_orca_nonisolated_worktree
+test_spawn_accepts_already_absent_orca_terminal
+test_spawn_accepts_orca_terminal_absent_after_close_failure
 test_spawn_preserves_orca_metadata_when_terminal_close_is_unconfirmed
+test_spawn_preserves_codex_home_when_orca_terminal_cleanup_is_unconfirmed
 test_spawn_removes_orca_worktree_when_terminal_create_fails
 test_spawn_preserves_orca_metadata_when_abort_cleanup_fails
 test_orca_spawn_uses_strict_terminal_cleanup

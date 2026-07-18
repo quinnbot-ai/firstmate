@@ -284,7 +284,10 @@ orca_spawn_abort_cleanup() {
   [ "$ORCA_ABORT_CLEANUP" = 1 ] || return 0
   ORCA_ABORT_CLEANUP=0
   if [ -n "${ORCA_TERMINAL:-}" ]; then
-    if FM_BACKEND_KILL_STRICT=1 fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null; then
+    if fm_backend_target_absent orca "$ORCA_TERMINAL"; then
+      ORCA_TERMINAL=
+      T=
+    elif FM_BACKEND_KILL_STRICT=1 fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null; then
       if fm_backend_target_absent orca "$ORCA_TERMINAL"; then
         ORCA_TERMINAL=
         T=
@@ -292,6 +295,9 @@ orca_spawn_abort_cleanup() {
         cleanup_failed=1
         FAILED_ENDPOINT_CLEANUP=1
       fi
+    elif fm_backend_target_absent orca "$ORCA_TERMINAL"; then
+      ORCA_TERMINAL=
+      T=
     else
       cleanup_failed=1
       FAILED_ENDPOINT_CLEANUP=1
@@ -346,6 +352,7 @@ spawn_abort_cleanup() {
     clean_codex_home=1
     orca_spawn_abort_cleanup
     orca_cleanup_failed=$ORCA_ABORT_CLEANUP_FAILED
+    [ "$FAILED_ENDPOINT_CLEANUP" != 1 ] || preserve_codex_home=1
   fi
   if [ "$clean_codex_home" -eq 1 ] && [ "$preserve_codex_home" -eq 0 ] && ! remove_codex_crewmate_home; then
     echo "error: could not remove isolated Codex crewmate home" >&2
