@@ -33,10 +33,13 @@
 #   3. wake-drain     - mutates the durable wake queue, so it also only runs
 #                       when locked.
 #   4. context digest - data/projects.md, data/secondmates.md, data/captain.md,
-#                       data/learnings.md: read-only, always safe, always runs.
-#   5. fleet digest   - data/backlog.md, every state/*.meta, a bounded
-#                       state/*.status tail, state/.afk, and a cheap
-#                       per-task endpoint-liveness read: read-only, always runs.
+#                       data/captain-shared.md, data/learnings.md: read-only,
+#                       always safe, always runs.
+#   5. fleet digest   - a compact data/backlog.md identity/metadata listing,
+#                       every state/*.meta, a bounded state/*.status tail,
+#                       state/.afk, bounded operations-inbox signals, and a
+#                       cheap per-task endpoint-liveness read:
+#                       read-only, always runs.
 #   6. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
@@ -81,9 +84,20 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-tasks-axi-lib.sh
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-ops-inbox-lib.sh
+. "$SCRIPT_DIR/fm-ops-inbox-lib.sh"
 
 STATUS_TAIL=${FM_SESSION_START_STATUS_TAIL:-5}
 case "$STATUS_TAIL" in ''|*[!0-9]*) STATUS_TAIL=5 ;; esac
+BACKLOG_LIMIT=${FM_SESSION_START_BACKLOG_LIMIT:-80}
+case "$BACKLOG_LIMIT" in ''|*[!0-9]*|0) BACKLOG_LIMIT=80 ;; esac
+OPS_INBOX_LIMIT=${FM_SESSION_START_OPS_INBOX_LIMIT:-5}
+case "$OPS_INBOX_LIMIT" in ''|*[!0-9]*|0) OPS_INBOX_LIMIT=5 ;; esac
+OPS_INBOX_SCAN_LIMIT=${FM_SESSION_START_OPS_INBOX_SCAN_LIMIT:-256}
+case "$OPS_INBOX_SCAN_LIMIT" in ''|*[!0-9]*|0) OPS_INBOX_SCAN_LIMIT=256 ;; esac
+[ "$OPS_INBOX_SCAN_LIMIT" -ge "$OPS_INBOX_LIMIT" ] || OPS_INBOX_SCAN_LIMIT=$OPS_INBOX_LIMIT
 
 RULE='================================================================================'
 SUBRULE='--------------------------------------------------------------------------------'
@@ -115,6 +129,69 @@ print_status_tail() {
   local status=$1
   printf 'status tail (last %s line(s), wake-EVENT history, not current state; full log: %s):\n' "$STATUS_TAIL" "$status"
   tail -n "$STATUS_TAIL" "$status"
+}
+
+print_ops_inbox() {
+  local dir record path output rc shown event_count overflow
+  local records
+  subsection "OPS INBOX"
+  dir=$(fm_ops_inbox_home_dir "$FM_HOME")
+  if [ ! -d "$dir" ]; then
+    printf 'home ops-inbox: ABSENT (%s)\n' "$dir"
+  else
+    records=$(fm_ops_inbox_home_records "$FM_HOME" "$OPS_INBOX_SCAN_LIMIT")
+    event_count=0
+    overflow=0
+    while IFS= read -r record; do
+      [ "$record" = '__FM_OPS_INBOX_OVERFLOW__' ] && { overflow=1; continue; }
+      [ -n "$record" ] && event_count=$((event_count + 1))
+    done <<EOF
+$records
+EOF
+    if [ "$event_count" -eq 0 ]; then
+      printf 'home ops-inbox: (present, empty: %s)\n' "$dir"
+    else
+      if [ "$overflow" -eq 1 ]; then
+        printf 'home ops-inbox: at least %s event file(s); bounded scan reached %s; newest %s sampled paths:\n' \
+          "$((event_count + 1))" "$OPS_INBOX_SCAN_LIMIT" "$OPS_INBOX_LIMIT"
+      else
+        printf 'home ops-inbox: %s event file(s); newest %s with full paths:\n' "$event_count" "$OPS_INBOX_LIMIT"
+      fi
+      shown=0
+      while IFS= read -r record; do
+        [ "$record" = '__FM_OPS_INBOX_OVERFLOW__' ] && continue
+        IFS=$(printf '\t') read -r _ path <<EOF
+$record
+EOF
+        [ -n "$path" ] || continue
+        [ "$shown" -lt "$OPS_INBOX_LIMIT" ] || continue
+        printf '%s\n' "$path"
+        shown=$((shown + 1))
+      done <<EOF
+$records
+EOF
+      if [ "$overflow" -eq 1 ]; then
+        printf '(scan stopped after %s event file(s); retained inbox exceeds the bounded startup scan)\n' "$event_count"
+      elif [ "$event_count" -gt "$shown" ]; then
+        printf '(truncated %s older event file(s))\n' "$((event_count - shown))"
+      fi
+    fi
+  fi
+
+  if ! fm_ops_inbox_external_command "$CONFIG" >/dev/null; then
+    printf 'external inbox: ABSENT (config/ops-inbox-cmd)\n'
+    return
+  fi
+  output=$(fm_ops_inbox_external_output "$CONFIG")
+  rc=$?
+  printf 'external inbox: configured list command (exit %s); bounded to %s output line(s):\n' "$rc" "$OPS_INBOX_LIMIT"
+  if [ -z "$output" ]; then
+    printf '(no output)\n'
+  else
+    printf '%s\n' "$output" | head -n "$OPS_INBOX_LIMIT"
+    count=$(printf '%s\n' "$output" | awk 'END { print NR + 0 }')
+    [ "$count" -le "$OPS_INBOX_LIMIT" ] || printf '(truncated %s additional output line(s))\n' "$((count - OPS_INBOX_LIMIT))"
+  fi
 }
 
 hash_file() {
@@ -285,6 +362,8 @@ if [ -e "$STATE/.afk" ]; then
 else
   printf 'absent\n'
 fi
+
+print_ops_inbox
 
 # --- 6. closing reminder -----------------------------------------------
 section "NEXT STEP"
