@@ -398,8 +398,10 @@ content_in_default() {
 # that are not present upstream. Any '+' line, malformed output, or git error is
 # ambiguous and fails closed.
 patches_are_in_default() {
-  local default=$1 cherry line
+  local default=$1 cherry line merge_commits
   [ -n "$default" ] || return 1
+  merge_commits=$(git -C "$WT" rev-list --min-parents=2 "$default..HEAD" 2>/dev/null) || return 1
+  [ -z "$merge_commits" ] || return 1
   cherry=$(git -C "$WT" cherry "$default" HEAD 2>/dev/null) || return 1
   [ -n "$cherry" ] || return 0
   while IFS= read -r line; do
@@ -743,11 +745,21 @@ detach_and_drop_task_branch() {
   local branch default
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   [ "$branch" = HEAD ] && return 0
+  default=$(default_branch 2>/dev/null || true)
+  if [ -n "$default" ] && [ "$branch" != "$default" ] \
+      && worktree_safety_blocked_by_lock "returning its checked-out task branch"; then
+    return 0
+  fi
+  if worktree_safety_blocked_by_lock "detaching its checked-out branch"; then
+    cleanup_stale_lock_for_safety_check "$WT" || {
+      echo "REFUSED: cannot detach worktree $WT from checked-out branch $branch while its git lock is not provably stale; preserving it before treehouse return." >&2
+      return 1
+    }
+  fi
   if ! git -C "$WT" checkout --detach -q; then
     echo "REFUSED: cannot detach worktree $WT from checked-out branch $branch; preserving it before treehouse return." >&2
     return 1
   fi
-  default=$(default_branch 2>/dev/null || true)
   if [ -z "$default" ]; then
     echo "teardown: cannot determine the project default branch; preserving detached branch $branch" >&2
     return 0
@@ -943,11 +955,14 @@ remove_codex_crewmate_home() {
 }
 
 close_recorded_endpoint() {
-  local tab_id absence_status
+  local tab_id absence_status require_confirmed_absence=0
   tab_id=$(meta_value "$META" zellij_tab_id)
-  if [ "$ENDPOINT_CLEANUP_PENDING" = 1 ]; then
+  if [ "$ENDPOINT_CLEANUP_PENDING" = 1 ] || [ -n "$CODEX_CREWMATE_HOME" ]; then
+    require_confirmed_absence=1
+  fi
+  if [ "$require_confirmed_absence" = 1 ]; then
     if ! FM_BACKEND_KILL_STRICT=1 fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null; then
-      echo "error: failed-spawn endpoint $T could not be confirmed closed; preserving recovery metadata" >&2
+      echo "error: endpoint $T could not be confirmed closed; preserving recovery metadata" >&2
       return 1
     fi
     if fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
@@ -957,9 +972,9 @@ close_recorded_endpoint() {
     fi
     if [ "$absence_status" -ne 0 ]; then
       if [ "$absence_status" -eq 1 ]; then
-        echo "error: failed-spawn endpoint $T remains live after cleanup; preserving recovery metadata" >&2
+        echo "error: endpoint $T remains live after cleanup; preserving recovery metadata" >&2
       else
-        echo "error: failed-spawn endpoint $T could not be confirmed absent after cleanup; preserving recovery metadata" >&2
+        echo "error: endpoint $T could not be confirmed absent after cleanup; preserving recovery metadata" >&2
       fi
       return 1
     fi

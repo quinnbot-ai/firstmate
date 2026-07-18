@@ -504,6 +504,34 @@ test_codex_crewmate_home_is_removed_at_teardown() {
   pass "teardown removes the recorded private Codex home"
 }
 
+test_codex_teardown_preserves_home_when_normal_endpoint_close_fails() {
+  local rec id out status launch crew_home target_state
+  id=profile-codex-normal-endpoint-z84
+  rec=$(make_spawn_case profile-codex-normal-endpoint codex "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "Codex spawn should prepare a normal teardown endpoint case"
+  launch=$(cat "$LAUNCH_LOG")
+  crew_home=$(codex_home_from_launch "$launch")
+  materialize_codex_home "$crew_home" "$HOME_DIR/data" "$CASE_DIR/user/.codex" "fm-crewmate-$id" "$WT_DIR"
+  target_state="$CASE_DIR/target-state"
+  printf 'live\n' > "$target_state"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_FAKE_TARGET_STATE="$target_state" \
+    FM_FAKE_BACKEND_LOG="$CASE_DIR/backend.log" FM_FAKE_BACKEND_KILL_STATUS=75 PATH="$FAKEBIN_DIR:$PATH" \
+    "$TEARDOWN" "$id" --force 2>&1)
+  status=$?
+  expect_code 1 "$status" "normal Codex teardown must retain state when endpoint close fails"
+  assert_contains "$out" "preserving recovery metadata" \
+    "normal Codex teardown did not explain retained recovery state"
+  [ -f "$HOME_DIR/state/$id.meta" ] || fail "normal Codex teardown discarded recovery metadata"
+  [ -d "$crew_home" ] || fail "normal Codex teardown removed the credential home before close confirmation"
+  pass "normal Codex teardown retains its home until the endpoint is confirmed absent"
+}
+
 test_codex_crewmate_home_refuses_symlink_escape() {
   local rec id out status source_home crew_root
   id=profile-codex-home-symlink-z21
@@ -1350,6 +1378,7 @@ test_codex_crewmate_home_excludes_mcp_and_plugins
 test_codex_crewmate_home_honors_codex_home_override
 test_codex_crewmate_home_uses_fresh_private_directory
 test_codex_crewmate_home_is_removed_at_teardown
+test_codex_teardown_preserves_home_when_normal_endpoint_close_fails
 test_codex_crewmate_home_refuses_symlink_escape
 test_codex_crewmate_home_refuses_symlinked_data_root
 test_codex_crewmate_profile_rejects_toml_control_characters

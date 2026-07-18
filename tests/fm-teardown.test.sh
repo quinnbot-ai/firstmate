@@ -41,6 +41,7 @@
 #   (r) local-only + rebased-equivalent patches in local main    -> ALLOW  (git cherry)
 #   (s) local-only + one unlanded patch after a rebase           -> REFUSE (fail-safe)
 #   (t) worktree checked out on default branch                   -> preserve default branch
+#   (u) branch-unique merge with no `git cherry` '+' patch       -> REFUSE (safety)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -648,6 +649,51 @@ test_local_only_rebased_branch_with_unlanded_patch_refuses() {
   expect_code 1 "$rc" "rebased-with-extra: teardown should refuse an unlanded patch"
   grep -q REFUSED "$case_dir/stderr" || fail "rebased-with-extra: no REFUSED line in stderr"
   pass "local-only rebased branches with any git-cherry '+' patch remain refused"
+}
+
+test_local_only_unique_merge_without_cherry_patch_refuses() {
+  local case_dir rc task_head main_head merge_tree merge_head
+  case_dir=$(make_case unique-merge)
+  write_meta "$case_dir" local-only ship
+  wt_commit_file "$case_dir" feature.txt hello "original task patch"
+  task_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  land_equivalent_patch_on_local_main "$case_dir" feature.txt hello
+  main_head=$(git -C "$case_dir/project" rev-parse main)
+  printf '%s\n' resolution > "$case_dir/wt/merge-resolution.txt"
+  git -C "$case_dir/wt" add -- merge-resolution.txt
+  merge_tree=$(git -C "$case_dir/wt" write-tree)
+  merge_head=$(printf '%s\n' "unlanded merge resolution" | git -C "$case_dir/wt" commit-tree "$merge_tree" -p "$task_head" -p "$main_head")
+  git -C "$case_dir/wt" reset -q --hard "$merge_head"
+  git -C "$case_dir/wt" rev-list --min-parents=2 main..fm/task-x1 | grep -q . \
+    || fail "unique-merge: setup requires a branch-unique merge commit"
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -C ]; then
+  worktree=$2
+  shift 2
+else
+  worktree=
+fi
+if [ "${1:-}" = cherry ]; then
+  printf '%s\n' '- deadbeef'
+  exit 0
+fi
+if [ -n "$worktree" ]; then
+  exec "$REAL_GIT_FOR_TEST" -C "$worktree" "$@"
+fi
+exec "$REAL_GIT_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "unique-merge: teardown must refuse a merge git cherry cannot represent"
+  grep -q REFUSED "$case_dir/stderr" || fail "unique-merge: no REFUSED line in stderr"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "unique-merge: teardown discarded recovery metadata"
+  pass "local-only teardown refuses branch-unique merges hidden from git cherry"
 }
 
 test_teardown_preserves_default_branch_when_worktree_is_parked_on_it() {
@@ -1367,6 +1413,7 @@ test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_local_only_rebased_equivalent_patches_allow
 test_local_only_rebased_branch_with_unlanded_patch_refuses
+test_local_only_unique_merge_without_cherry_patch_refuses
 test_teardown_preserves_default_branch_when_worktree_is_parked_on_it
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
