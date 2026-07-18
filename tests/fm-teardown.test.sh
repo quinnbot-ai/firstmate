@@ -42,6 +42,8 @@
 #   (s) local-only + one unlanded patch after a rebase           -> REFUSE (fail-safe)
 #   (t) worktree checked out on default branch                   -> preserve default branch
 #   (u) branch-unique merge with no `git cherry` '+' patch       -> REFUSE (safety)
+#   (v) legacy exact task temporary directory                    -> ALLOW and remove
+#   (w) malformed, non-directory, or symlinked task temp path    -> REFUSE (safety)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -1430,6 +1432,90 @@ test_local_only_force_overrides_unpushed() {
   pass "local-only worktree with unpushed work is torn down under --force (escape hatch)"
 }
 
+test_legacy_task_temp_directory_allows_and_removes() {
+  local case_dir rc task_tmp
+  case_dir=$(make_case legacy-task-temp)
+  write_meta "$case_dir" local-only ship
+  task_tmp=/tmp/fm-task-x1
+  [ ! -e "$task_tmp" ] && [ ! -L "$task_tmp" ] \
+    || fail "legacy-task-temp: fixture path already exists: $task_tmp"
+  mkdir -m 700 "$task_tmp"
+  printf 'tasktmp=%s\n' "$task_tmp" >> "$case_dir/state/task-x1.meta"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "legacy-task-temp: exact legacy path should be accepted"
+  [ ! -e "$task_tmp" ] && [ ! -L "$task_tmp" ] \
+    || fail "legacy-task-temp: teardown did not remove the accepted temporary directory"
+  pass "teardown accepts and removes an exact legacy task temporary directory"
+}
+
+test_legacy_task_temp_adversarial_paths_refuse() {
+  local target case_dir rc task_tmp
+  for target in /tmp/fm-task-x10 /tmp/fm-task-x1. /tmp/fm-task-x1/child; do
+    case_dir=$(make_case "unsafe-task-temp-${target##*/}")
+    write_meta "$case_dir" local-only ship
+    printf 'tasktmp=%s\n' "$target" >> "$case_dir/state/task-x1.meta"
+
+    set +e
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "unsafe-task-temp: $target should be refused"
+    assert_grep "does not match task task-x1" "$case_dir/stderr" \
+      "unsafe-task-temp: $target was not rejected as a mismatched task path"
+    [ -f "$case_dir/state/task-x1.meta" ] \
+      || fail "unsafe-task-temp: teardown discarded metadata for $target"
+  done
+
+  case_dir=$(make_case legacy-task-temp-symlink)
+  write_meta "$case_dir" local-only ship
+  task_tmp=/tmp/fm-task-x1
+  [ ! -e "$task_tmp" ] && [ ! -L "$task_tmp" ] \
+    || fail "legacy-task-temp-symlink: fixture path already exists: $task_tmp"
+  mkdir "$case_dir/private"
+  ln -s "$case_dir/private" "$task_tmp"
+  printf 'tasktmp=%s\n' "$task_tmp" >> "$case_dir/state/task-x1.meta"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "legacy-task-temp-symlink: symlink should be refused"
+  assert_grep "is not a private directory" "$case_dir/stderr" \
+    "legacy-task-temp-symlink: symlink was not rejected as unsafe"
+  [ -L "$task_tmp" ] || fail "legacy-task-temp-symlink: teardown removed the refused symlink"
+  unlink "$task_tmp"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "legacy-task-temp-symlink: teardown discarded metadata"
+
+  case_dir=$(make_case legacy-task-temp-file)
+  write_meta "$case_dir" local-only ship
+  [ ! -e "$task_tmp" ] && [ ! -L "$task_tmp" ] \
+    || fail "legacy-task-temp-file: fixture path already exists: $task_tmp"
+  : > "$task_tmp"
+  printf 'tasktmp=%s\n' "$task_tmp" >> "$case_dir/state/task-x1.meta"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "legacy-task-temp-file: regular file should be refused"
+  assert_grep "is not a private directory" "$case_dir/stderr" \
+    "legacy-task-temp-file: regular file was not rejected as unsafe"
+  [ -f "$task_tmp" ] || fail "legacy-task-temp-file: teardown removed the refused file"
+  unlink "$task_tmp"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "legacy-task-temp-file: teardown discarded metadata"
+  pass "teardown refuses malformed, non-directory, and symlinked task temporary paths"
+}
+
 test_herdr_teardown_clears_escalation_marker() {
   local case_dir marker
   case_dir=$(make_case herdr-marker-cleanup)
@@ -1464,6 +1550,8 @@ test_live_lock_refuses_before_returning_checked_out_task_branch
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
+test_legacy_task_temp_directory_allows_and_removes
+test_legacy_task_temp_adversarial_paths_refuse
 test_herdr_teardown_clears_escalation_marker
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
