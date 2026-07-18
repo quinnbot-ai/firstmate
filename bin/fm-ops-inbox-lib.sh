@@ -88,7 +88,7 @@ fm_ops_inbox_external_run() {
       open STDOUT, ">&", $writer or exit 124;
       open STDERR, ">&", $writer or exit 124;
       close $writer;
-      exec "/bin/sh", "-c", $command;
+      exec "bash", "-c", $command;
       exit 127;
     }
 

@@ -30,7 +30,7 @@ Write each event once or atomically replace it so the watcher can detect the eve
 Deeper paths are outside the monitored layout.
 `bin/fm-session-start.sh` reports a bounded count and newest full paths from that directory without changing any event or acknowledgement state.
 Set the local, gitignored `config/ops-inbox-cmd` to one list-only shell command when this machine also has a durable machine-level inbox.
-The first non-empty, non-comment line is the command, and firstmate runs it through `/bin/sh -c` with combined stdout and stderr.
+The first non-empty, non-comment line is the command, and firstmate runs it through `bash -c` with combined stdout and stderr.
 The command must be trusted local code and print only its current unhandled critical listing, starting with `unacked_criticals: <count>`; its exit status is displayed but does not suppress its output because some list commands use a non-zero status when criticals exist.
 The command is intentionally operator-owned and generic, so firstmate does not encode a machine-specific inbox path or acknowledgement implementation.
 The watcher fingerprints both sources, wakes immediately for a changed inbox while a regular task is in flight, and checks the same fingerprint on its existing heartbeat cadence otherwise.
