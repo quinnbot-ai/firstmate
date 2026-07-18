@@ -38,17 +38,20 @@
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
+#   (r) local-only + rebased-equivalent patches in local main    -> ALLOW  (git cherry)
+#   (s) local-only + one unlanded patch after a rebase           -> REFUSE (fail-safe)
+#   (t) worktree checked out on default branch                   -> preserve default branch
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
-#   (r) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
-#   (s) index.lock with a live holder, any age                -> lock kept, REFUSE
-#   (t) lsof error while checking index.lock                  -> lock kept, REFUSE
-#   (u) dirty worktree after stale lock cleanup               -> lock removed, REFUSE
-#   (v) non-linked repo index.lock                            -> lock removed, ALLOW
-#   (w) index.lock mtime read failure                         -> lock kept, REFUSE
-#   (x) transient lock cleared after first failed return      -> retry ALLOW
-#   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
+#   (u) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
+#   (v) index.lock with a live holder, any age                -> lock kept, REFUSE
+#   (w) lsof error while checking index.lock                  -> lock kept, REFUSE
+#   (x) dirty worktree after stale lock cleanup               -> lock removed, REFUSE
+#   (y) non-linked repo index.lock                            -> lock removed, ALLOW
+#   (z) index.lock mtime read failure                         -> lock kept, REFUSE
+#   (aa) transient lock cleared after first failed return     -> retry ALLOW
+#   (ab) persistent lock (never clears, not provably stale)   -> REFUSE loudly
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -205,6 +208,18 @@ land_on_origin_main() {
   git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "squash $file"
   git -C "$tmp" push -q origin HEAD:main
   rm -rf "$tmp"
+}
+
+# Land the same patch independently on the local main branch, retaining the task
+# branch's original commit. This models a rebase or cherry-pick landing where the
+# change is on main but its SHA is not an ancestor of the task branch. Args: case_dir
+# file content
+land_equivalent_patch_on_local_main() {
+  local case_dir=$1 file=$2 content=$3
+  printf '%s\n' "$content" > "$case_dir/project/$file"
+  git -C "$case_dir/project" add -- "$file"
+  git -C "$case_dir/project" -c user.email=t@t -c user.name=t \
+    commit -q -m "rebased $file"
 }
 
 # Override GitHub lookups to report PR 7 as merged with the supplied head.
@@ -586,6 +601,88 @@ test_local_only_merged_to_local_main_allows() {
   expect_code 0 "$rc" "merged-main: teardown should succeed when work is merged into local main"
   ! grep -q REFUSED "$case_dir/stderr" || fail "merged-main: teardown printed a REFUSED line"
   pass "local-only worktree with work merged into local main is torn down (no regression)"
+}
+
+test_local_only_rebased_equivalent_patches_allow() {
+  local case_dir rc branch_head main_head cherry
+  case_dir=$(make_case rebased-equivalent)
+  write_meta "$case_dir" local-only ship
+  wt_commit_file "$case_dir" feature.txt hello "original task patch"
+  branch_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  land_equivalent_patch_on_local_main "$case_dir" feature.txt hello
+  main_head=$(git -C "$case_dir/project" rev-parse main)
+  ! git -C "$case_dir/wt" merge-base --is-ancestor "$branch_head" "$main_head" \
+    || fail "rebased-equivalent: setup requires the original task SHA not to be on main"
+  cherry=$(git -C "$case_dir/wt" cherry main fm/task-x1)
+  printf '%s\n' "$cherry" | grep -Eq '^- [0-9a-f]+$' \
+    || fail "rebased-equivalent: setup requires git cherry to prove the patch is equivalent: $cherry"
+  ! printf '%s\n' "$cherry" | grep -q '^+ ' \
+    || fail "rebased-equivalent: setup unexpectedly has an unlanded patch: $cherry"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "rebased-equivalent: teardown should accept git-cherry-equivalent work"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "rebased-equivalent: teardown printed a REFUSED line"
+  pass "local-only rebased-equivalent patches are recognized as landed by git cherry"
+}
+
+test_local_only_rebased_branch_with_unlanded_patch_refuses() {
+  local case_dir rc cherry
+  case_dir=$(make_case rebased-with-extra)
+  write_meta "$case_dir" local-only ship
+  wt_commit_file "$case_dir" feature.txt hello "original task patch"
+  land_equivalent_patch_on_local_main "$case_dir" feature.txt hello
+  wt_commit_file "$case_dir" later.txt local-only "unlanded follow-up"
+  cherry=$(git -C "$case_dir/wt" cherry main fm/task-x1)
+  printf '%s\n' "$cherry" | grep -q '^+ ' \
+    || fail "rebased-with-extra: setup requires git cherry to report an unlanded patch: $cherry"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "rebased-with-extra: teardown should refuse an unlanded patch"
+  grep -q REFUSED "$case_dir/stderr" || fail "rebased-with-extra: no REFUSED line in stderr"
+  pass "local-only rebased branches with any git-cherry '+' patch remain refused"
+}
+
+test_teardown_preserves_default_branch_when_worktree_is_parked_on_it() {
+  local case_dir rc
+  case_dir=$(make_case default-branch-parked)
+  write_meta "$case_dir" no-mistakes ship
+  git -C "$case_dir/project" checkout -q -b project-anchor
+  git -C "$case_dir/wt" checkout -q main
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = return ]; then
+  shift
+  for arg in "$@"; do
+    case "$arg" in
+      --force) ;;
+      *) git -C "$arg" rev-parse --abbrev-ref HEAD > "${TREEHOUSE_RETURN_HEAD:?}" ; break ;;
+    esac
+  done
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  TREEHOUSE_RETURN_HEAD="$case_dir/return-head" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "default-branch-parked: teardown should succeed after detaching main"
+  [ "$(cat "$case_dir/return-head")" = HEAD ] \
+    || fail "default-branch-parked: treehouse return saw a checked-out branch"
+  git -C "$case_dir/project" show-ref --verify --quiet refs/heads/main \
+    || fail "default-branch-parked: teardown deleted the project default branch"
+  pass "teardown detaches a parked default branch before return without deleting it"
 }
 
 test_no_mistakes_origin_remote_allows() {
@@ -1268,6 +1365,9 @@ test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_local_only_rebased_equivalent_patches_allow
+test_local_only_rebased_branch_with_unlanded_patch_refuses
+test_teardown_preserves_default_branch_when_worktree_is_parked_on_it
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
