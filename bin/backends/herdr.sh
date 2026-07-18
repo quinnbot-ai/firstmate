@@ -808,8 +808,9 @@ fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
   printf '%s' "$out" | jq -r '[.result.agent.agent // "", .result.agent.agent_status // ""] | @tsv' 2>/dev/null
 }
 
-fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
-  local target=$1 session pane cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped
+fm_backend_herdr_composer_state() {  # <target> [guard|post-submit] -> empty|pending|unknown
+  local target=$1 mode=${2:-guard} session pane cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped
+  local after_match="" last_nonblank="" verdict
   local identity agent agent_status row=0 generic_line=0
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   session=$FM_BACKEND_HERDR_SESSION
@@ -826,12 +827,14 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
     trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
     trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
     [ -n "$trimmed" ] || continue
+    last_nonblank=$trimmed
     case "$trimmed" in
       '│'*'│'|'┃'*'┃'|'|'*'|')
         shape=bordered
         raw_match=$line
         generic_line=$row
         found=1
+        after_match=""
         ;;
       *)
         if printf '%s' "$trimmed" | grep -qE "$FM_BACKEND_HERDR_BARE_PROMPT_RE"; then
@@ -839,6 +842,9 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
           raw_match=$line
           generic_line=$row
           found=1
+          after_match=""
+        elif [ "$found" -eq 1 ]; then
+          after_match="${after_match}${trimmed}"$'\n'
         fi
         ;;
     esac
@@ -878,7 +884,19 @@ EOF
     # not provide the complete Pi composer structure required for injection.
     found=0
   fi
-  [ "$found" -eq 1 ] || { printf 'unknown'; return 0; }
+  if [ "$found" -ne 1 ]; then
+    # A bare shell is never an empty agent composer for the away-mode guard.
+    # After sending Enter, though, a prompt with no editable text confirms that
+    # a shell consumed the command; prompt plus text remains a real swallow.
+    if [ "$mode" = post-submit ]; then
+      case "$last_nonblank" in
+        '>'|'$'|'%'|'#') printf 'empty'; return 0 ;;
+        '>'[[:space:]]*|'$'[[:space:]]*|'%'[[:space:]]*|'#'[[:space:]]*) printf 'pending'; return 0 ;;
+      esac
+    fi
+    printf 'unknown'
+    return 0
+  fi
   # Content: extract the real typed text from the raw row with the shared,
   # fleet-wide ghost stripper (bin/fm-composer-lib.sh), which drops dim/faint AND
   # dark-truecolor ghost/placeholder runs. This replaces the former herdr-only
@@ -907,7 +925,17 @@ EOF
   # shape only ever starts with an AGENT glyph (FM_BACKEND_HERDR_BARE_PROMPT_RE
   # is '^[❯›]'), so a bare shell prompt never reaches here - it stays 'unknown'
   # via the no-composer-row path above, exactly as before.
-  fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE"
+  verdict=$(fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE")
+  # A submitted Codex message remains as a bare `› <text>` transcript row
+  # while the next turn is working.  A later busy footer proves that row is
+  # transcript, not editable composer text.  This inference is post-submit
+  # only - the away-mode guard must remain conservative about human drafts.
+  if [ "$mode" = post-submit ] && [ "$shape" = bare ] && [ "$verdict" = pending ] \
+    && printf '%s' "$after_match" | grep -qiE "${FM_BUSY_REGEX:-esc (to )?interrupt|Working\\.\\.\\.|Ctrl\\+c:cancel}"; then
+    printf 'empty'
+    return 0
+  fi
+  printf '%s' "$verdict"
 }
 
 # fm_backend_herdr_send_text_submit: type <text> into <target> once (raw,
@@ -986,7 +1014,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
         "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS")
     else
       sleep "$sleep_s"
-      verdict=$(fm_backend_herdr_composer_state "$target")
+      verdict=$(fm_backend_herdr_composer_state "$target" post-submit)
     fi
     case "$verdict" in
       busy) printf 'empty'; return 0 ;;
