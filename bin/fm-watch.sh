@@ -295,9 +295,16 @@ clear_busy_progress_tracking() {  # <window>
     "$STATE/.busy-progress-escalations-$key"
 }
 
+next_escalation_count() {
+  local marker=$1 n
+  n=$(cat "$marker" 2>/dev/null || true)
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  printf '%s\n' "$((10#$n + 1))"
+}
+
 busy_progress_surface() {  # <window> <since-file> <escalations-file> <label> <age> [status-age]
   local win=$1 since_file=$2 escalations_file=$3 label=$4 age=$5 status_age=${6:-} n reason
-  n=$(( $(cat "$escalations_file" 2>/dev/null || echo 0) + 1 ))
+  n=$(next_escalation_count "$escalations_file")
   printf '%s\n' "$n" > "$escalations_file"
   reason="stale: $win (busy but zero progress for ${age}s: $label, escalation $n, demand-deep-inspection"
   [ -n "$status_age" ] && reason="$reason, last status write ${status_age}s ago"
@@ -380,7 +387,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
     *)
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
-        n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
+        n=$(next_escalation_count "$escalation_file")
         echo "$n" > "$escalation_file"
         reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
