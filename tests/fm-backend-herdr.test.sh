@@ -1607,6 +1607,19 @@ test_send_text_submit_rejects_missing_pane_before_typing() {
   pass "fm_backend_herdr_send_text_submit: rejects a missing pane before typing"
 }
 
+test_send_text_submit_rejects_unknown_pane_before_typing() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-unknown-pane-before-type"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"different-pane"}}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = send-failed ] || fail "send_text_submit must reject an unverified pane before typing, got '$out'"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''send-text' "$log")" -eq 0 ] \
+    || fail "send_text_submit typed into a pane with unverified agent state"
+  pass "fm_backend_herdr_send_text_submit: rejects an unverified pane before typing"
+}
+
 test_send_text_submit_rejects_agentless_pane_after_unknown_confirmation() {
   local dir log resp fb out
   dir="$TMP_ROOT/submit-agentless-after-unknown"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -2328,6 +2341,7 @@ test_send_text_submit_send_failed
 test_send_text_submit_unknown_on_capture_failure
 test_send_text_submit_rejects_agentless_pane_before_typing
 test_send_text_submit_rejects_missing_pane_before_typing
+test_send_text_submit_rejects_unknown_pane_before_typing
 test_send_text_submit_rejects_agentless_pane_after_unknown_confirmation
 test_dispatch_routes_herdr_backend
 test_dispatch_busy_state_unknown_for_tmux
