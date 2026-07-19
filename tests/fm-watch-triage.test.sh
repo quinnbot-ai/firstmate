@@ -79,6 +79,20 @@ seen_sig() {
 
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
+record_arm_lease() {  # <state> <watcher-pid> <arm-pid>
+  local state=$1 watcher_pid=$2 arm_pid=$3 lease="$state/.watch-arm.lease" watcher_id arm_id
+  watcher_id=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$watcher_pid") || return 1
+  arm_id=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$arm_pid") || return 1
+  mkdir -p "$lease"
+  printf '%s\n' "$arm_pid" > "$lease/pid"
+  printf '%s\n' "$arm_id" > "$lease/pid-identity"
+  printf '%s\n' "$ROOT" > "$lease/fm-home"
+  printf '%s\n' "$WATCH" > "$lease/watcher-path"
+  printf '%s\n' "$watcher_pid" > "$lease/watcher-pid"
+  printf '%s\n' "$watcher_id" > "$lease/watcher-identity"
+  touch "$lease/heartbeat"
+}
+
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
 
 test_signal_reason_is_actionable_classifier() {
@@ -1716,6 +1730,30 @@ test_beacon_stays_fresh_while_absorbing() {
   pass "the liveness beacon stays fresh while the watcher absorbs benign wakes (fm-guard never false-alarms)"
 }
 
+# --- arm relay durability ----------------------------------------------------
+
+test_watcher_queues_lost_arm_relay_before_stopping() {
+  local dir state fakebin out watcher_pid arm_pid i
+  dir=$(make_case lost-arm-relay); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  watch_bg "$state" "$fakebin" "$out" FM_ARM_LEASE_GRACE=1
+  watcher_pid=$!
+  i=0
+  while [ "$i" -lt 30 ] && [ ! -s "$state/.watch.lock/pid" ]; do sleep 0.1; i=$((i + 1)); done
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  [ -n "$watcher_pid" ] || fail "watcher did not publish its lock before arm-lease test"
+  sleep 60 & arm_pid=$!
+  record_arm_lease "$state" "$watcher_pid" "$arm_pid" || fail "could not publish hermetic arm lease"
+  sleep 1.2
+  kill "$arm_pid" 2>/dev/null || true
+  wait "$arm_pid" 2>/dev/null || true
+  i=0
+  while kill -0 "$watcher_pid" 2>/dev/null && [ "$i" -lt 40 ]; do sleep 0.1; i=$((i + 1)); done
+  grep -F 'check: watcher arm relay lost' "$out" >/dev/null || fail "watcher did not report lost arm relay"
+  grep "$(printf '\tcheck\twatcher-arm-relay\tcheck: watcher arm relay lost')" "$state/.wake-queue" >/dev/null \
+    || fail "watcher stopped without first writing its durable lost-arm wake"
+  pass "watcher appends a durable lost-arm wake before stopping"
+}
+
 # --- afk coherence: the daemon owns triage; the watcher does not double-triage ---
 
 test_afk_present_reverts_watcher_to_one_shot() {
@@ -2101,6 +2139,7 @@ test_ops_inbox_fingerprint_uses_bounded_two_level_file_markers
 test_ops_inbox_marker_scan_counts_discovered_paths
 test_ops_inbox_external_output_is_bounded_and_timed
 test_beacon_stays_fresh_while_absorbing
+test_watcher_queues_lost_arm_relay_before_stopping
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
 test_busy_startup_spinner_context_zero_surfaces

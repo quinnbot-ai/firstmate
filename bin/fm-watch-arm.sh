@@ -73,6 +73,9 @@ CYCLE_LOG_LOCK="$STATE/.watch-cycle-exits.lock"
 CYCLE_LOG_MAX_BYTES=${FM_WATCH_CYCLE_LOG_MAX_BYTES:-262144}
 CYCLE_LOG_KEEP_LINES=${FM_WATCH_CYCLE_LOG_KEEP_LINES:-1000}
 ARM_PID=${BASHPID:-$$}
+ARM_LEASE_TICK=${FM_ARM_LEASE_TICK:-5}
+ARM_LEASE_OWNER=
+ARM_LEASE_TICKER=
 case "$CYCLE_LOG_MAX_BYTES" in ''|*[!0-9]*|0) CYCLE_LOG_MAX_BYTES=262144 ;; esac
 case "$CYCLE_LOG_KEEP_LINES" in ''|*[!0-9]*|0) CYCLE_LOG_KEEP_LINES=1000 ;; esac
 
@@ -226,6 +229,46 @@ healthy_watcher() {
   HEALTHY_PID=$FM_WATCHER_HEALTHY_PID
 }
 
+# The arm is the harness-visible notification relay.  Keep a separate lease
+# while it waits so a watcher that outlives a killed arm can fail closed rather
+# than continue with no route back to the primary session.
+arm_lease_start() {  # <watcher-pid>
+  local watcher_pid=$1 rc
+  fm_arm_lease_claim "$STATE" "$WATCH" "$watcher_pid" "$FM_HOME"
+  rc=$?
+  case "$rc" in
+    0)
+      ARM_LEASE_OWNER=$FM_ARM_LEASE_OWNER
+      (
+        while fm_arm_lease_heartbeat "$STATE" "$ARM_LEASE_OWNER"; do
+          sleep "$ARM_LEASE_TICK"
+        done
+      ) &
+      ARM_LEASE_TICKER=$!
+      ;;
+    2)
+      # A verified peer is already the active relay for this watcher.  This
+      # duplicate arm stays attached but never clears or refreshes its lease.
+      ;;
+    *)
+      echo "watcher: FAILED - could not publish watch-arm lease" >&2
+      return 1
+      ;;
+  esac
+}
+
+arm_lease_stop() {
+  if [ -n "${ARM_LEASE_TICKER:-}" ]; then
+    kill "$ARM_LEASE_TICKER" 2>/dev/null || true
+    wait "$ARM_LEASE_TICKER" 2>/dev/null || true
+    ARM_LEASE_TICKER=
+  fi
+  if [ -n "${ARM_LEASE_OWNER:-}" ]; then
+    fm_arm_lease_release "$STATE" "$ARM_LEASE_OWNER" || true
+    ARM_LEASE_OWNER=
+  fi
+}
+
 report_attached() {
   local age
   age=$(fm_path_age "$BEAT")
@@ -285,6 +328,7 @@ attach_and_wait() {
 handle_attached_signal() {
   local signal=$1 rc=$2
   trap - HUP TERM INT
+  arm_lease_stop
   cycle_log_append "$rc" "$signal" arm-interrupted none
   exit "$rc"
 }
@@ -347,6 +391,7 @@ fi
 # then, not as an immediate empty wake. (--restart skips this: it just stopped
 # this home's watcher and wants a fresh one.)
 if [ "$mode" = arm ] && healthy_watcher; then
+  arm_lease_start "$HEALTHY_PID" || exit 1
   cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
   report_attached
   cycle_begin "$HEALTHY_PID" attached
@@ -373,6 +418,7 @@ cleanup_child() {
 handle_arm_signal() {
   local signal=$1 rc=$2
   trap - HUP TERM INT
+  arm_lease_stop
   if [ -n "$child" ] && fm_pid_alive "$child"; then
     kill -TERM "$child" 2>/dev/null || true
     wait "$child" 2>/dev/null || true
@@ -399,6 +445,7 @@ owned_child_finished() {
   local rc=$1 signal reason_type status
   signal=$(cycle_signal_name "$rc")
   if [ "$rc" -eq 0 ] && watch_output_has_wake "$child_out"; then
+    arm_lease_stop
     reason_type=$(watch_output_reason_type "$child_out")
     cycle_log_append "$rc" "$signal" "$reason_type" none
     print_watch_output "$child_out"
@@ -410,6 +457,8 @@ owned_child_finished() {
 
   if [ "$rc" -eq 0 ]; then
     if wait_for_healthy_successor; then
+      arm_lease_stop
+      arm_lease_start "$HEALTHY_PID" || return 1
       cycle_log_append "$rc" "$signal" unexpected-clean-exit "attached:$HEALTHY_PID"
       print_watch_output "$child_out"
       rm -f "$child_out" 2>/dev/null || true
@@ -431,6 +480,7 @@ owned_child_finished() {
   fi
 
   reason_type="nonzero-exit"
+  arm_lease_stop
   [ "$signal" = none ] || reason_type="signal-exit"
   cycle_log_append "$rc" "$signal" "$reason_type" none
   print_watch_output "$child_out"
@@ -452,6 +502,10 @@ deadline=$(( $(date +%s) + CONFIRM_TIMEOUT ))
 while :; do
   if healthy_watcher; then
     if [ "$HEALTHY_PID" = "$child" ]; then
+      arm_lease_start "$child" || {
+        cleanup_child
+        exit 1
+      }
       cycle_refresh_lock_before
       cycle_mark_predecessor_successor "started:$child"
       echo "watcher: started pid=$child (beacon fresh)"
@@ -478,6 +532,7 @@ while :; do
 done
 
 trap - HUP TERM INT
+arm_lease_stop
 print_watch_output "$child_out"
 cleanup_child
 wait "$child" 2>/dev/null
