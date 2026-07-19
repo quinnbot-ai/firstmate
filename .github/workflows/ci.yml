@@ -27,9 +27,9 @@ jobs:
   tests:
     name: Behavior tests
     runs-on: ubuntu-latest
-    # The suite should finish in ~2-3 minutes; this generous cap fails loudly on a
-    # hung watcher or tmux test instead of riding GitHub's 360-minute default.
-    timeout-minutes: 15
+    # The suite exercises bounded watcher and tmux lifecycles that can take longer
+    # under a loaded hosted runner; retain a finite guard without canceling it mid-suite.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
         with:

@@ -77,17 +77,17 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-cat > "$fakebin/treehouse" <<'SH'
+  cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 set -u
 [ -z "${FM_FAKE_BACKEND_LOG:-}" ] || printf 'treehouse %s\n' "$*" >> "$FM_FAKE_BACKEND_LOG"
-case "$*" in
-  "return --force"*)
+case "${1:-}" in
+  get) printf '%s\n' "${FM_FAKE_PANE_PATH:?}" ;;
+  return)
     [ "${FM_FAKE_TREEHOUSE_CLOSE_EFFECT:-none}" != gone ] || printf '%s\n' gone > "${FM_FAKE_TARGET_STATE:?}"
     exit "${FM_FAKE_TREEHOUSE_RETURN_STATUS:-0}"
     ;;
 esac
-exit 0
 SH
   chmod +x "$fakebin/treehouse"
   cat > "$fakebin/mktemp" <<'SH'
@@ -1077,15 +1077,18 @@ test_codex_home_activation_failure_aborts_spawn() {
   expect_code 1 "$status" "Codex spawn must fail when terminal activation fails"
   assert_contains "$out" "isolated Codex home activation failed" \
     "Codex spawn did not report terminal activation failure"
-  assert_absent "$HOME_DIR/state/$id.meta" "terminal activation failure must not retain task metadata"
-  assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
-    "terminal activation failure did not return its worktree"
+  assert_grep 'failed_spawn=1' "$HOME_DIR/state/$id.meta" \
+    "terminal activation failure did not retain recovery metadata"
+  assert_grep 'treehouse_lease=1' "$HOME_DIR/state/$id.meta" \
+    "terminal activation failure did not retain its committed lease"
+  assert_no_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
+    "terminal activation failure must not return a committed lease implicitly"
   assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
     "terminal activation failure did not remove its task endpoint"
   for task_tmp in "/tmp/fm-$id".*; do
     [ ! -e "$task_tmp" ] || fail "terminal activation failure left task temporary root: $task_tmp"
   done
-  pass "Codex spawn synchronizes terminal activation failures"
+  pass "Codex spawn retains terminal activation failures for safe teardown"
 }
 
 test_codex_activation_uses_managed_data_root() {
@@ -1291,11 +1294,10 @@ test_codex_teardown_refuses_symlinked_data_root() {
 }
 
 test_codex_crewmate_home_records_failed_worktree_return() {
-  local rec id out status project
+  local rec id out status handoff
   id=profile-codex-home-return-z22
   rec=$(make_spawn_case profile-codex-home-return codex "$id")
   read_case_record "$rec"
-  project=$(cd "$PROJ_DIR" && pwd)
   cat > "$FAKEBIN_DIR/python3" <<'SH'
 #!/usr/bin/env bash
 exit 73
@@ -1306,17 +1308,17 @@ SH
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "Codex spawn must fail when private-home creation and return fail"
+  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+    "failed spawn cleanup did not close its endpoint before returning the lease"
   assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
     "failed isolated-home cleanup did not attempt to return its worktree"
-  assert_no_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
-    "failed worktree return must leave the endpoint for normal teardown"
-  assert_grep "window=firstmate:fm-$id" "$HOME_DIR/state/$id.meta" \
-    "failed worktree return did not record the task endpoint"
-  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
-    "failed worktree return did not record the worktree"
-  assert_grep "project=$project" "$HOME_DIR/state/$id.meta" \
-    "failed worktree return did not record the project"
-  pass "Codex spawn records failed worktree returns for normal teardown"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "failed lease return must not retain a task after its endpoint is closed"
+  handoff=$(find "$HOME_DIR/state" -name ".${id}.treehouse-lease.*" -type f -print -quit)
+  [ -n "$handoff" ] || fail "failed lease return did not retain a recovery handoff"
+  assert_contains "$(cat "$handoff")" "leased=$WT_DIR" \
+    "failed lease return did not restore its handoff to leased state"
+  pass "Codex spawn retains a closed-endpoint lease handoff for recovery"
 }
 
 test_codex_spawn_abort_accepts_an_already_absent_endpoint() {
@@ -1330,11 +1332,13 @@ test_codex_spawn_abort_accepts_an_already_absent_endpoint() {
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "Codex spawn should report the isolated-home activation failure"
-  assert_no_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
-    "failed spawn cleanup should not strictly close an already absent endpoint"
-  assert_absent "$HOME_DIR/state/$id.meta" \
-    "failed spawn cleanup retained metadata after confirming endpoint absence"
-  pass "Codex spawn abort accepts a confirmed already-absent endpoint"
+  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+    "failed spawn cleanup should close a live endpoint before releasing its lease"
+  assert_grep 'failed_spawn=1' "$HOME_DIR/state/$id.meta" \
+    "failed spawn cleanup did not retain recovery metadata after endpoint closure"
+  assert_grep 'treehouse_lease=1' "$HOME_DIR/state/$id.meta" \
+    "failed spawn cleanup did not retain its committed lease"
+  pass "Codex spawn abort retains a committed lease after endpoint closure"
 }
 
 test_codex_crewmate_home_records_failed_endpoint_removal() {
@@ -1353,8 +1357,8 @@ SH
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "Codex spawn must fail when private-home creation and endpoint removal fail"
-  assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
-    "failed isolated-home cleanup did not return its worktree"
+  assert_no_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
+    "failed endpoint removal must not return a lease that still has a live endpoint"
   assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
     "failed endpoint removal was not attempted"
   assert_grep "window=firstmate:fm-$id" "$HOME_DIR/state/$id.meta" \
@@ -1363,6 +1367,8 @@ SH
     "failed endpoint removal did not record the worktree"
   assert_grep "project=$project" "$HOME_DIR/state/$id.meta" \
     "failed endpoint removal did not record the project"
+  assert_grep 'treehouse_lease=1' "$HOME_DIR/state/$id.meta" \
+    "failed endpoint removal did not hold its treehouse lease for teardown"
   [ ! -s "$LAUNCH_LOG" ] || fail "failed endpoint removal must not launch Codex"
   pass "Codex spawn records failed endpoint removals for normal teardown"
 }
