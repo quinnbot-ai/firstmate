@@ -75,6 +75,22 @@ test_afk_start_reclaims_stale_daemon_lock_reused_pid() {
   pass "fm-afk-start.sh reclaims stale daemon locks whose live pid identity no longer matches"
 }
 
+test_daemon_lease_release_cleans_owner_metadata() {
+  local dir state lock owner
+  dir=$(make_supercase daemon-lease-cleanup)
+  state="$dir/state"
+  lock="$state/.supervise-daemon.lock"
+  . "$ROOT/bin/fm-wake-lib.sh"
+  fm_lock_try_acquire "$lock" || fail "could not acquire daemon lease fixture"
+  owner=$(fm_lock_link_owner "$lock") || fail "could not resolve daemon lease owner"
+  fm_pid_identity "${BASHPID:-$$}" > "$owner/pid-identity" || fail "could not identify daemon lease fixture"
+  fm_daemon_lease_publish "$state" "$DAEMON" "$dir" "$lock" || fail "could not publish daemon lease fixture"
+  fm_lock_release "$lock"
+  [ ! -e "$lock" ] && [ ! -L "$lock" ] || fail "daemon lease link remained after release"
+  [ ! -d "$owner" ] || fail "daemon lease owner remained after release"
+  pass "daemon lease release removes its owner metadata and directory"
+}
+
 test_daemon_state_root_uses_fm_home() {
   local dir home override out
   dir=$(make_supercase daemon-fm-home)
@@ -1666,6 +1682,7 @@ test_inject_msg_defers_on_dead_shell_unknown() {
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
+test_daemon_lease_release_cleans_owner_metadata
 test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates

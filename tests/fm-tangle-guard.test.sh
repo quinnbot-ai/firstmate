@@ -950,6 +950,8 @@ test_spawn_tmux_window_construction() {
     "the leased worktree cd must target the stable window id"
   assert_grep "display-message -p -t @spawnwid #{pane_current_path}" "$rec" \
     "the worktree wait loop must query the stable window id, not the name"
+  assert_grep "tmux_window_id=@spawnwid" "$home/state/rec-win-gg7.meta" \
+    "spawn metadata must retain the stable window id for later cleanup"
 
   pass "fm-spawn: appends windows by session-colon, pins the name, and targets the window id"
 }
