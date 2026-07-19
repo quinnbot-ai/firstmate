@@ -91,6 +91,8 @@ Teardown:
 - Ship teardown resolves `orca_worktree_id` back through Orca and verifies it matches the inspected `worktree=` path before removing anything; mismatches or uninspectable paths preserve metadata and fail closed.
 - After the existing firstmate safety checks pass, teardown closes the recorded Orca terminal and releases the recorded worktree through `orca worktree rm --worktree id:<orca_worktree_id> --force`.
 - Teardown does not raw-delete Orca worktrees.
+- A failed Orca spawn removes its provisional task metadata after it confirms terminal absence and worktree cleanup.
+  If it cannot confirm terminal absence, it preserves the metadata, private Codex home, and task temporary directory for safe recovery instead of treating the spawn as clean.
 
 ## Limitations
 

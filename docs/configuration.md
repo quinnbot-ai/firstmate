@@ -208,6 +208,7 @@ Project-local `.codex/config.toml` is deliberately excluded from those launches,
 The captain's Codex home is never modified, and Codex secondmate launches intentionally keep their existing home behavior.
 The task metadata records `codex_crewmate_home=`, and normal teardown removes that managed home after endpoint cleanup succeeds.
 If a spawn or teardown cannot confirm endpoint cleanup, firstmate preserves the metadata and managed home for a later safe recovery attempt.
+After a failed spawn confirms endpoint and worktree cleanup, it removes the provisional metadata rather than leaving a false in-flight task behind.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
