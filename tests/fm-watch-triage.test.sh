@@ -1185,6 +1185,8 @@ test_busy_subagent_wait_spin_surfaces() {
   window="test:fm-subagent-wait"
   cat > "$capture_file" <<'EOF'
 Waiting for agents / No agents completed yet (esc to interrupt) 23:39
+Context: 72%
+Tokens: 3.09M
 EOF
   printf 'window=%s\nkind=ship\n' "$window" > "$state/subagent-wait.meta"
   printf 'working: waiting for parallel research\n' > "$statusf"
@@ -1203,6 +1205,34 @@ EOF
   grep -F 'subagent wait reports no agents completed' "$out" >/dev/null || fail "subagent wait wake omitted its signature: $(cat "$out")"
   grep -F 'demand-deep-inspection' "$out" >/dev/null || fail "subagent wait wake did not demand deep inspection"
   pass "busy subagent wait spin surfaces a deep-inspection wake"
+}
+
+test_busy_progress_afk_enqueues_for_daemon_escalation() {
+  local dir state fakebin out capture_file statusf window key pid
+  dir=$(make_case busy-progress-afk); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/afk-busy.status"
+  window="test:fm-afk-busy"
+  cat > "$capture_file" <<'EOF'
+Starting MCP servers ... (esc to interrupt) 10:41
+Context: 0%
+EOF
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/afk-busy.meta"
+  printf 'working: starting the task\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-afk-busy_status"
+  date '+%s' > "$state/.afk"
+  key=$(printf '%s' "$window" | tr ':/. ' '____')
+  printf 'startup-context=0' > "$state/.busy-progress-$key"
+  printf '%s\n' $(( $(date +%s) - 700 )) > "$state/.busy-progress-since-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STARTUP_ZERO_CONTEXT_SECS=600 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "AFK busy zero-progress pane was not queued: $(cat "$out")"
+  grep -F 'busy but zero progress' "$out" >/dev/null || fail "AFK busy wake omitted zero-progress evidence: $(cat "$out")"
+  grep "$(printf '\tstale\t')" "$state/.wake-queue" | grep -F "$window (busy but zero progress" >/dev/null \
+    || fail "AFK busy progress wedge was not durably queued"
+  pass "AFK busy zero-progress panes enqueue a daemon escalation"
 }
 
 test_busy_progress_or_recent_status_remains_healthy() {
@@ -1304,5 +1334,6 @@ test_afk_paused_changed_pane_hands_off_plain_stale
 test_busy_startup_spinner_context_zero_surfaces
 test_busy_token_burn_without_progress_surfaces
 test_busy_subagent_wait_spin_surfaces
+test_busy_progress_afk_enqueues_for_daemon_escalation
 test_busy_progress_or_recent_status_remains_healthy
 test_declared_paused_busy_wait_retains_pause_handling

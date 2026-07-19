@@ -319,12 +319,12 @@ busy_progress_check() {  # <window> <task> <pane-text>
   if pane_is_startup_spinner "$pane" && pane_context_is_zero "$pane"; then
     snapshot='startup-context=0'
     label='startup spinner remains at context 0%'
-  elif [ -n "$metrics" ]; then
-    snapshot=$metrics
-    label="unchanged $snapshot"
   elif pane_is_busy_wait_spin "$pane"; then
     snapshot='subagent-wait-spin'
     label='subagent wait reports no agents completed'
+  elif [ -n "$metrics" ]; then
+    snapshot=$metrics
+    label="unchanged $snapshot"
   else
     clear_busy_progress_tracking "$win"
     return
@@ -947,7 +947,7 @@ EOF
     # Busy panes bypass stale-hash handling, so inspect their semantic progress
     # before the hash branch. A declared paused wait retains its long cadence and
     # must never be converted into a busy-progress wedge.
-    if [ "$kind" != secondmate ] && ! afk_present && ! status_is_paused "$last" && window_is_busy "$w" "$tail40"; then
+    if [ "$kind" != secondmate ] && ! status_is_paused "$last" && window_is_busy "$w" "$tail40"; then
       busy_progress_check "$w" "$task" "$tail40"
     else
       clear_busy_progress_tracking "$w"

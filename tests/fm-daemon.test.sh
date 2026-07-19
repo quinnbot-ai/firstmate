@@ -125,6 +125,16 @@ test_classify_check_and_unknown_escalate() {
   pass "check + unknown escalate; heartbeat self-handles"
 }
 
+test_busy_progress_stale_escalates_immediately() {
+  local dir state out reason
+  dir=$(make_supercase busy-progress-stale)
+  state="$dir/state"
+  reason='sess:fm-busy (busy but zero progress for 600s: startup spinner remains at context 0%, escalation 1, demand-deep-inspection)'
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "$reason" "$state")
+  case "$out" in escalate\|*) ;; *) fail "busy progress stale did not escalate immediately: $out" ;; esac
+  pass "busy progress stale wakes bypass routine stale deferral"
+}
+
 test_stale_transient_self_records_marker() {
   local dir state out key
   dir=$(make_supercase stale-transient)
@@ -1660,6 +1670,7 @@ test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
 test_classify_check_and_unknown_escalate
+test_busy_progress_stale_escalates_immediately
 test_stale_transient_self_records_marker
 test_stale_terminal_escalates
 test_stale_paused_classifies_pause
