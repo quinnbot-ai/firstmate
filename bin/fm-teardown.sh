@@ -188,6 +188,13 @@ remove_grok_turnend_auth() {
   rm -f "$hooks_dir/$token"
 }
 
+remove_busy_progress_tracking() {
+  local state_dir=$1 window=$2 key
+  key=$(printf '%s' "$window" | tr ':/. ' '____')
+  rm -f "$state_dir/.busy-progress-$key" "$state_dir/.busy-progress-since-$key" \
+    "$state_dir/.busy-progress-escalations-$key"
+}
+
 validate_pr_poll_cleanup() {
   local state_dir=$1 id=$2 quarantine state_device artifact has_artifact=0
   fm_task_id_path_safe "$id" || return 0
@@ -1004,6 +1011,7 @@ cleanup_firstmate_home_children() {
       fi
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id"
+    remove_busy_progress_tracking "$sub_state" "$child_t"
     remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
     rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.grok-turnend-token"
   done
@@ -1132,6 +1140,7 @@ if [ "$KIND" = secondmate ]; then
 fi
 remove_grok_turnend_auth "$STATE" "$ID"
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
+remove_busy_progress_tracking "$STATE" "$T"
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
