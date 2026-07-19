@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Private durable-handoff helpers shared by fm-spawn.sh and fm-teardown.sh.
+# Each record is one `leased=`, `returning=`, or `returned=` absolute path line;
+# the reader accepts a legacy bare absolute path as a `leased` record.
 
 fm_treehouse_lease_handoff_read() {
   local handoff=$1 record=

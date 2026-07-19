@@ -4,6 +4,9 @@
 # clear volatile state, refresh/prune the project's clone for PR-based ship
 # tasks, then print a backlog-refresh reminder for ship and scout teardowns
 # (a secondmate teardown prints none, since secondmates are not backlog items).
+# A treehouse-backed ship or scout meta with treehouse_lease=1 retains its
+# durable lease until this script returns that exact worktree. A failed or
+# indeterminate return preserves task state and the handoff record for recovery.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
