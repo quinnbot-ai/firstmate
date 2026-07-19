@@ -82,7 +82,7 @@ fm_git_identity_enable_worktree_config() {  # <repository>
   local repository=$1 attempt
   fm_git_identity_worktree_config_is_enabled "$repository" && return 0
 
-  for attempt in {1..20}; do
+  for _ in {1..20}; do
     if git -C "$repository" config extensions.worktreeConfig true >/dev/null 2>&1; then
       return 0
     fi
