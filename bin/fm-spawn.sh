@@ -17,7 +17,7 @@
 #   then tmux.
 #   Spawn-capable backends are the reference tmux adapter and experimental
 #   herdr, zellij, orca, and cmux. Orca owns both the task worktree and
-#   terminal, so ship/scout Orca spawns do not run treehouse get; cmux is a
+#   terminal, so ship/scout Orca spawns do not lease a treehouse worktree; cmux is a
 #   session provider only, exactly like herdr/zellij, so it does. An
 #   auto-detected herdr or cmux spawn prints a loud stderr notice;
 #   auto-detected tmux stays silent; zellij and orca are never auto-detected.
@@ -202,6 +202,7 @@ ORCA_ABORT_CLEANUP_FAILED=0
 ORCA_ABORT_TERMINAL_ABSENT=1
 FAILED_ENDPOINT_CLEANUP=0
 TREEHOUSE_ABORT_CLEANUP=0
+TREEHOUSE_ENDPOINT_CLEANUP=0
 TASK_TMP=
 CODEX_CREWMATE_HOME=
 CODEX_ACTIVATION_TOKEN=
@@ -335,6 +336,16 @@ spawn_abort_cleanup() {
       FAILED_ENDPOINT_CLEANUP=1
       write_failed_treehouse_spawn_meta
       preserve_codex_home=1
+    fi
+  elif [ "$TREEHOUSE_ENDPOINT_CLEANUP" = 1 ]; then
+    TREEHOUSE_ENDPOINT_CLEANUP=0
+    if ! fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
+      FM_BACKEND_KILL_STRICT=1 fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "fm-$ID" 2>/dev/null || true
+      if ! fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
+        FAILED_ENDPOINT_CLEANUP=1
+        write_failed_treehouse_spawn_meta
+        preserve_codex_home=1
+      fi
     fi
   fi
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
@@ -1358,8 +1369,8 @@ esac
 # #134 robustness: only tmux needs a worktree-detection target distinct from $T -
 # its rename-safe stable window id, set as WT_TARGET=$WID in the tmux branch above.
 # Every other backend addresses its pane/surface by the id already in $T, so default
-# WT_TARGET to $T for them (and for any future backend) - the shared treehouse-get +
-# worktree-detection steps below must never reference an unbound WT_TARGET under set -u.
+# WT_TARGET to $T for them (and for any future backend) - the shared leased-worktree
+# entry check below must never reference an unbound WT_TARGET under set -u.
 : "${WT_TARGET:=$T}"
 spawn_send_text_line() {  # <target> <text>
   case "$BACKEND" in
@@ -1397,9 +1408,21 @@ spawn_send_key() {  # <target> <key>
   esac
 }
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  TREEHOUSE_ENDPOINT_CLEANUP=1
+  if ! WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID"); then
+    echo "error: treehouse could not lease an isolated worktree for $ID" >&2
+    exit 1
+  fi
+  [ -n "$WT" ] || {
+    echo "error: treehouse did not report a leased worktree for $ID" >&2
+    exit 1
+  }
+  TREEHOUSE_ENDPOINT_CLEANUP=0
+  TREEHOUSE_ABORT_CLEANUP=1
+  validate_spawn_worktree "treehouse get --lease" "$T"
+  spawn_send_text_line "$WT_TARGET" "cd $(shell_quote "$WT")"
 
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
+  # Wait for the pane to enter the leased worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
   # automatic-rename slips through), display-message -t <bad-name> falls back to the
   # active client's window, which would misread firstmate's OWN pane path as the
@@ -1407,20 +1430,23 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
   # prefix would otherwise make the pane's OS-level cwd read differ from
   # PROJ_ABS on the very first poll, before the pane has actually moved.
+  entered_worktree=0
   for _ in $(seq 1 60); do
     p=$(spawn_current_path "$WT_TARGET" || true)
-    if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
-      WT="$p"
-      TREEHOUSE_ABORT_CLEANUP=1
+    if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" = "$WT_REAL" ]; then
+      entered_worktree=1
       break
+    fi
+    if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
+      echo "error: treehouse pane entered unexpected path '$p' instead of leased worktree '$WT'; inspect window $T" >&2
+      exit 1
     fi
     sleep 1
   done
-  if [ -z "$WT" ]; then
+  if [ "$entered_worktree" != 1 ]; then
     echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
     exit 1
   fi
-  validate_spawn_worktree "treehouse get" "$T"
 fi
 
 if [ "$HARNESS" = codex ] && [ "$KIND" != secondmate ]; then
@@ -1655,6 +1681,7 @@ if [ -n "$CODEX_ACTIVATION_TOKEN" ]; then
   CODEX_ACTIVATION_TOKEN=
 fi
 TREEHOUSE_ABORT_CLEANUP=0
+TREEHOUSE_ENDPOINT_CLEANUP=0
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"

@@ -66,6 +66,7 @@ BEAT="$STATE/.last-watcher-beat"
 GRACE=${FM_GUARD_GRACE:-300}
 # How long to wait for a freshly forked watcher to acquire the lock and beat.
 CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-10}
+CHILD_REAP_GRACE=${FM_ARM_CHILD_REAP_GRACE:-2}
 # Poll interval while attached to an existing healthy watcher.
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
 CYCLE_LOG="$STATE/.watch-cycle-exits.log"
@@ -75,6 +76,7 @@ CYCLE_LOG_KEEP_LINES=${FM_WATCH_CYCLE_LOG_KEEP_LINES:-1000}
 ARM_PID=${BASHPID:-$$}
 case "$CYCLE_LOG_MAX_BYTES" in ''|*[!0-9]*|0) CYCLE_LOG_MAX_BYTES=262144 ;; esac
 case "$CYCLE_LOG_KEEP_LINES" in ''|*[!0-9]*|0) CYCLE_LOG_KEEP_LINES=1000 ;; esac
+case "$CHILD_REAP_GRACE" in ''|*[!0-9]*|0) CHILD_REAP_GRACE=2 ;; esac
 
 # The lifecycle ledger is diagnostic evidence, not a supervision dependency.
 # Writes are bounded and best-effort so an observability failure cannot stall an
@@ -360,25 +362,52 @@ fi
 # wake exit propagates out so the harness re-notifies firstmate.
 child=
 child_out=
+CHILD_REAP_STATUS=0
+child_reapable() {
+  [ -n "$child" ] || return 0
+  if ! fm_pid_alive "$child"; then
+    return 0
+  fi
+  ps -o stat= -p "$child" 2>/dev/null | tr -d '[:space:]' | grep -q '^Z'
+}
+
 cleanup_child() {
-  if [ -n "$child" ] && fm_pid_alive "$child"; then
-    kill -TERM "$child" 2>/dev/null || true
+  local deadline failed=0
+  if [ -n "$child" ]; then
+    if fm_pid_alive "$child"; then
+      kill -TERM "$child" 2>/dev/null || true
+      deadline=$(( $(date +%s) + CHILD_REAP_GRACE ))
+      while ! child_reapable && [ "$(date +%s)" -lt "$deadline" ]; do
+        sleep 0.1
+      done
+      if ! child_reapable; then
+        kill -KILL "$child" 2>/dev/null || true
+        deadline=$(( $(date +%s) + CHILD_REAP_GRACE ))
+        while ! child_reapable && [ "$(date +%s)" -lt "$deadline" ]; do
+          sleep 0.1
+        done
+      fi
+    fi
+    if ! child_reapable; then
+      failed=1
+    else
+      wait "$child" 2>/dev/null
+      CHILD_REAP_STATUS=$?
+      child=
+    fi
   fi
   if [ -n "$child_out" ]; then
     rm -f "$child_out" 2>/dev/null || true
   fi
+  return "$failed"
 }
 
 # shellcheck disable=SC2329 # Invoked indirectly by the signal traps below.
 handle_arm_signal() {
   local signal=$1 rc=$2
   trap - HUP TERM INT
-  if [ -n "$child" ] && fm_pid_alive "$child"; then
-    kill -TERM "$child" 2>/dev/null || true
-    wait "$child" 2>/dev/null || true
-  fi
+  cleanup_child || true
   cycle_log_append "$rc" "$signal" arm-interrupted none
-  cleanup_child
   exit "$rc"
 }
 
@@ -479,9 +508,11 @@ done
 
 trap - HUP TERM INT
 print_watch_output "$child_out"
-cleanup_child
-wait "$child" 2>/dev/null
-rc=$?
+if cleanup_child; then
+  rc=$CHILD_REAP_STATUS
+else
+  rc=1
+fi
 cycle_log_append "$rc" "$(cycle_signal_name "$rc")" confirmation-timeout none
 echo "watcher: FAILED - no live watcher with a fresh beacon"
 exit 1

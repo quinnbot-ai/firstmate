@@ -84,6 +84,7 @@ cat > "$fakebin/treehouse" <<'SH'
 set -u
 [ -z "${FM_FAKE_BACKEND_LOG:-}" ] || printf 'treehouse %s\n' "$*" >> "$FM_FAKE_BACKEND_LOG"
 case "$*" in
+  "get --lease"*) printf '%s\n' "${FM_FAKE_TREEHOUSE_LEASE_PATH:?}"; exit "${FM_FAKE_TREEHOUSE_GET_STATUS:-0}" ;;
   "return --force"*)
     [ "${FM_FAKE_TREEHOUSE_CLOSE_EFFECT:-none}" != gone ] || printf '%s\n' gone > "${FM_FAKE_TARGET_STATE:?}"
     exit "${FM_FAKE_TREEHOUSE_RETURN_STATUS:-0}"
@@ -145,9 +146,11 @@ run_spawn() {
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="${FM_FAKE_PANE_PATH:-$wt}" \
+    FM_FAKE_TREEHOUSE_LEASE_PATH="${FM_FAKE_TREEHOUSE_LEASE_PATH:-$wt}" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_BACKEND_LOG="$(dirname "$launchlog")/backend.log" \
     FM_FAKE_TREEHOUSE_RETURN_STATUS="${FM_FAKE_TREEHOUSE_RETURN_STATUS:-0}" \
+    FM_FAKE_TREEHOUSE_GET_STATUS="${FM_FAKE_TREEHOUSE_GET_STATUS:-0}" \
     FM_FAKE_BACKEND_KILL_STATUS="${FM_FAKE_BACKEND_KILL_STATUS:-0}" \
     FM_FAKE_BACKEND_CLOSE_EFFECT="${FM_FAKE_BACKEND_CLOSE_EFFECT:-gone}" \
     FM_FAKE_TREEHOUSE_CLOSE_EFFECT="${FM_FAKE_TREEHOUSE_CLOSE_EFFECT:-none}" \
@@ -1519,6 +1522,44 @@ SH
   pass "Codex spawn records failed worktree returns for normal teardown"
 }
 
+test_treehouse_spawn_preserves_unverified_worktree() {
+  local rec id out status foreign
+  id=profile-treehouse-unverified-z23
+  rec=$(make_spawn_case profile-treehouse-unverified claude "$id")
+  read_case_record "$rec"
+  foreign="$CASE_DIR/foreign"
+  git -C "$PROJ_DIR" worktree add --quiet -b foreign-worktree "$foreign"
+
+  out=$(FM_FAKE_PANE_PATH="$foreign" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "spawn must reject a pane that enters an unverified worktree"
+  assert_no_grep "treehouse return --force $foreign" "$CASE_DIR/backend.log" \
+    "spawn cleanup returned an unverified worktree"
+  assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
+    "spawn cleanup did not return its leased worktree"
+  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+    "spawn cleanup did not close its own failed endpoint"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "fully reaped failed spawn retained recovery metadata"
+  pass "treehouse spawn returns only its leased worktree while reaping its endpoint"
+}
+
+test_treehouse_lease_failure_reaps_endpoint() {
+  local rec id out status
+  id=profile-treehouse-lease-failure-z24
+  rec=$(make_spawn_case profile-treehouse-lease-failure claude "$id")
+  read_case_record "$rec"
+
+  out=$(FM_FAKE_TREEHOUSE_GET_STATUS=75 run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "spawn must fail when treehouse cannot lease a worktree"
+  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+    "failed treehouse lease did not close its task endpoint"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "fully reaped failed treehouse lease retained recovery metadata"
+  pass "treehouse lease failure reaps its task endpoint"
+}
+
 test_codex_spawn_abort_accepts_an_already_absent_endpoint() {
   local rec id out status
   id=profile-codex-home-absent-z27
@@ -1763,6 +1804,8 @@ test_codex_teardown_refuses_malformed_task_temp_metadata
 test_codex_teardown_accepts_legacy_task_temp_metadata
 test_codex_teardown_refuses_symlinked_data_root
 test_codex_crewmate_home_records_failed_worktree_return
+test_treehouse_spawn_preserves_unverified_worktree
+test_treehouse_lease_failure_reaps_endpoint
 test_codex_spawn_abort_accepts_an_already_absent_endpoint
 test_codex_crewmate_home_records_failed_endpoint_removal
 test_codex_omits_invalid_max_effort
