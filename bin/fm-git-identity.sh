@@ -79,7 +79,7 @@ fm_git_identity_worktree_config_is_enabled() {  # <repository>
 }
 
 fm_git_identity_enable_worktree_config() {  # <repository>
-  local repository=$1 attempt
+  local repository=$1
   fm_git_identity_worktree_config_is_enabled "$repository" && return 0
 
   for _ in {1..20}; do
