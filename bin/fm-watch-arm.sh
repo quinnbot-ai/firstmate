@@ -259,11 +259,11 @@ attach_and_wait() {
   local attached_pid=$1
   while :; do
     if healthy_watcher; then
-      if [ "$HEALTHY_PID" != "$attached_pid" ]; then
-        cycle_log_append unknown unknown lock-replaced "attached:$HEALTHY_PID"
-        attached_pid=$HEALTHY_PID
-        cycle_begin "$attached_pid" attached
-        report_attached
+        if [ "$HEALTHY_PID" != "$attached_pid" ]; then
+          cycle_log_append unknown unknown lock-replaced "attached:$HEALTHY_PID"
+          attached_pid=$HEALTHY_PID
+          report_attached
+          cycle_begin "$attached_pid" attached
       fi
       sleep "$ATTACH_POLL"
       continue
