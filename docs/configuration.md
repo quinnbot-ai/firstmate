@@ -29,6 +29,7 @@ Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, whil
 Each home may receive operational-failure event files directly in its local `ops-inbox/` directory or one source directory below it (`ops-inbox/<source>/<event>`).
 Each event producer must atomically replace `ops-inbox/.fm-ops-inbox.marker` whenever it adds, replaces, or acknowledges an event.
 The watcher fingerprints that aggregate marker alongside a bounded sample of event files, so retained overflow events remain observable without unbounded polling.
+`FM_OPS_INBOX_MARKER_LIMIT` bounds that fingerprint sample to 64 event files by default, and `FM_OPS_INBOX_MARKER_SCAN_LIMIT` bounds its discovery scan to 256 paths by default.
 Deeper paths are outside the monitored layout.
 `bin/fm-session-start.sh` reports a bounded count and newest full paths from that directory without changing any event or acknowledgement state.
 Set the local, gitignored `config/ops-inbox-cmd` to one list-only shell command when this machine also has a durable machine-level inbox.
@@ -393,6 +394,8 @@ FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the guarded operatio
 FM_POLL=15              # seconds between watcher poll cycles
 FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartbeats are absorbed while idle
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
+FM_OPS_INBOX_MARKER_LIMIT=64   # home-event records included in each watcher operations-inbox fingerprint
+FM_OPS_INBOX_MARKER_SCAN_LIMIT=256   # home-event paths considered for each watcher operations-inbox fingerprint
 FM_OPS_INBOX_TIMEOUT=10   # seconds allowed for each configured operations-inbox command capture
 FM_OPS_INBOX_OUTPUT_MAX_BYTES=32768   # byte cap for each configured operations-inbox command capture
 FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls, custom checks, or X-mode dispatch)
