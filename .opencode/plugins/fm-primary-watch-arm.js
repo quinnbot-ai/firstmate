@@ -392,7 +392,8 @@ function armAttempt(status, armChild, includeArmChild) {
 
 async function ensureArm(paths, sessionID, client, predecessorArmPid = "", includeArmChild = false) {
   let launchResult = null;
-  if (!launchInFlight) {
+  const waitingForLaunch = launchInFlight;
+  if (!waitingForLaunch) {
     const launch = beginArm(paths, sessionID, client, predecessorArmPid);
     launchInFlight = launch;
     try {
@@ -401,7 +402,10 @@ async function ensureArm(paths, sessionID, client, predecessorArmPid = "", inclu
       if (launchInFlight === launch) launchInFlight = null;
     }
   } else {
-    launchResult = await launchInFlight;
+    launchResult = await waitingForLaunch;
+    if (!launchResult.armChild) {
+      return ensureArm(paths, sessionID, client, predecessorArmPid, includeArmChild);
+    }
   }
   const armChild = launchResult.armChild;
   if (!armChild) {

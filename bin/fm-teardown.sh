@@ -647,12 +647,16 @@ teardown_treehouse_return() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
+  local dirty_raw dirty unpushed_raw unpushed DEFAULT cherry_raw unlanded_patches unique_merges branch
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
     secondmate|scout) return 0 ;;
   esac
+
+  if worktree_safety_blocked_by_lock "safety checks"; then
+    return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
+  fi
 
   if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
     if worktree_safety_blocked_by_lock "uncommitted changes"; then
@@ -676,7 +680,7 @@ validate_worktree_teardown_safety() {
 
   if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
     DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
-    if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null); then
+    if ! unique_merges=$(git -C "$WT" rev-list --min-parents=2 "$DEFAULT..HEAD" 2>/dev/null); then
       if worktree_safety_blocked_by_lock "commits not on $DEFAULT"; then
         return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
       fi
@@ -684,11 +688,20 @@ validate_worktree_teardown_safety() {
       echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
-    unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
-    if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
+    if ! cherry_raw=$(git -C "$WT" cherry "$DEFAULT" HEAD 2>/dev/null); then
+      if worktree_safety_blocked_by_lock "patches not on $DEFAULT"; then
+        return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
+      fi
+      echo "REFUSED: cannot inspect worktree $WT for patches not on $DEFAULT." >&2
+      echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
+      return 1
+    fi
+    unlanded_patches=$(printf '%s\n' "$cherry_raw" | grep '^+ ' | head -5 || true)
+    if [ -n "$dirty" ] || [ -n "$unique_merges" ] || [ -n "$unlanded_patches" ]; then
       echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
       [ -n "$dirty" ] && echo "uncommitted changes present" >&2
-      [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
+      [ -n "$unique_merges" ] && printf 'branch-unique merge commits not yet on %s:\n%s\n' "$DEFAULT" "$unique_merges" >&2
+      [ -n "$unlanded_patches" ] && printf 'patches not yet on %s:\n%s\n' "$DEFAULT" "$unlanded_patches" >&2
       echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
@@ -1194,7 +1207,10 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     if [ "$branch" != "HEAD" ]; then
       if git -C "$WT" checkout --detach -q 2>/dev/null; then
-        git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+        default=$(default_branch || true)
+        if [ -n "$default" ] && [ "$branch" != "$default" ]; then
+          git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+        fi
       fi
     fi
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
@@ -1205,7 +1221,10 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
     if git -C "$WT" checkout --detach -q 2>/dev/null; then
-      git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+      default=$(default_branch || true)
+      if [ -n "$default" ] && [ "$branch" != "$default" ]; then
+        git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+      fi
     fi
   fi
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
