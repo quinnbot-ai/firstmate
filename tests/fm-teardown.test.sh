@@ -1334,8 +1334,8 @@ test_persistent_index_lock_exhausts_retries_and_refuses_loudly() {
   set -e
 
   expect_code 1 "$rc" "persistent-index-lock: teardown should refuse when the lock never clears"
-  assert_grep "persisted across" "$case_dir/stderr" \
-    "persistent-index-lock: teardown did not mention the exhausted retry window"
+  assert_grep "worktree safety check blocked" "$case_dir/stderr" \
+    "persistent-index-lock: teardown did not report the pre-return safety refusal"
   assert_grep "not provably stale" "$case_dir/stderr" \
     "persistent-index-lock: teardown did not explain the refusal"
   assert_not_contains "$(cat "$case_dir/stderr")" "removed provably-stale git lock" \
@@ -1347,7 +1347,7 @@ test_persistent_index_lock_exhausts_retries_and_refuses_loudly() {
 }
 
 test_empty_retry_wait_uses_default_without_aborting() {
-  local case_dir rc lock attempt_file
+  local case_dir rc attempt_file
   case_dir=$(make_case empty-retry-wait)
   write_meta "$case_dir" no-mistakes ship
   wt_commit "$case_dir" "shippable work"
@@ -1357,10 +1357,6 @@ test_empty_retry_wait_uses_default_without_aborting() {
   add_transient_lock_treehouse "$case_dir"
   add_lsof_no_holder "$case_dir"
   git -C "$case_dir/wt" checkout --detach -q
-
-  lock=$(git_index_lock_path "$case_dir/wt")
-  mkdir -p "$(dirname "$lock")"
-  : > "$lock"
 
   attempt_file="$case_dir/treehouse-attempts"
   : > "$attempt_file"
@@ -1384,7 +1380,7 @@ test_empty_retry_wait_uses_default_without_aborting() {
 }
 
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error() {
-  local case_dir rc lock
+  local case_dir rc
   case_dir=$(make_case fractional-legacy-retry-wait)
   write_meta "$case_dir" no-mistakes ship
   wt_commit "$case_dir" "shippable work"
@@ -1394,10 +1390,6 @@ test_fractional_legacy_retry_wait_refuses_without_arithmetic_error() {
   add_persistent_lock_treehouse "$case_dir"
   add_lsof_live_holder "$case_dir"
   git -C "$case_dir/wt" checkout --detach -q
-
-  lock=$(git_index_lock_path "$case_dir/wt")
-  mkdir -p "$(dirname "$lock")"
-  : > "$lock"
 
   set +e
   FM_TREEHOUSE_RETURN_LOCK_RETRIES=1 \
