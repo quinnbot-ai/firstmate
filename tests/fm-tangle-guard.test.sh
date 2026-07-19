@@ -158,35 +158,57 @@ make_spawn_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+[ -z "${FM_FAKE_TMUX_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_id}"*)
+    if [ -z "${FM_FAKE_TMUX_TARGET_STATE:-}" ] || [ "$(cat "$FM_FAKE_TMUX_TARGET_STATE")" = gone ]; then
+      printf '%s\n' "can't find window" >&2
+      exit 1
+    fi
+    printf '%s\n' '%1'
+    exit 0
+    ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
-  has-session|new-session|new-window|send-keys) exit 0 ;;
+  kill-window)
+    [ -z "${FM_FAKE_TMUX_TARGET_STATE:-}" ] || printf 'gone\n' > "$FM_FAKE_TMUX_TARGET_STATE"
+    ;&
+  list-windows|has-session|new-session|new-window|send-keys) exit 0 ;;
 esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -z "${FM_FAKE_TREEHOUSE_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
+case "${1:-}" in
+  return) exit "${FM_FAKE_TREEHOUSE_RETURN_STATUS:-0}" ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
 run_spawn() {
-  local home=$1 id=$2 proj=$3 pane=$4 fakebin=$5
-  mkdir -p "$home/data/$id"
+  local home=$1 id=$2 proj=$3 pane=$4 fakebin=$5 target_state
+  mkdir -p "$home/data/$id" "$home/state"
   printf 'brief\n' > "$home/data/$id/brief.md"
+  target_state=${FM_FAKE_TMUX_TARGET_STATE:-"$home/state/.fake-tmux-$id"}
+  [ -f "$target_state" ] || printf 'live\n' > "$target_state"
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" FM_FAKE_TMUX_TARGET_STATE="$target_state" TMUX="fake,1,0" \
     PATH="$fakebin:$PATH" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude 2>&1
 }
 
 test_spawn_isolation_abort() {
-  local home proj fakebin out status
+  local home proj fakebin out status treehouse_log tmux_log target_state
   home="$TMP_ROOT/spawn-home"
   mkdir -p "$home/data"
   proj=$(make_repo "$TMP_ROOT/spawn-proj")
@@ -205,6 +227,21 @@ test_spawn_isolation_abort() {
   out=$(run_spawn "$home" abort-primary-ee5 "$proj" "$proj/sub" "$fakebin"); status=$?
   expect_code 1 "$status" "spawn landing inside the primary checkout should abort"
   assert_contains "$out" "did not yield an isolated worktree" "primary-checkout spawn lacked the isolation error"
+
+  treehouse_log="$TMP_ROOT/spawn-cleanup-treehouse.log"
+  tmux_log="$TMP_ROOT/spawn-cleanup-tmux.log"
+  target_state="$TMP_ROOT/spawn-cleanup-target-state"
+  printf 'live\n' > "$target_state"
+  out=$(FM_FAKE_TREEHOUSE_LOG="$treehouse_log" FM_FAKE_TMUX_LOG="$tmux_log" \
+    FM_FAKE_TMUX_TARGET_STATE="$target_state" \
+    run_spawn "$home" abort-cleanup-ff6 "$proj" "$TMP_ROOT/spawn-notgit" "$fakebin"); status=$?
+  expect_code 1 "$status" "spawn into a non-worktree dir should abort after cleanup"
+  assert_grep "return --force $TMP_ROOT/spawn-notgit" "$treehouse_log" \
+    "non-worktree spawn did not return its acquired worktree"
+  assert_grep "kill-window -t firstmate:fm-abort-cleanup-ff6" "$tmux_log" \
+    "non-worktree spawn did not remove its task endpoint"
+  [ "$(cat "$target_state")" = gone ] || fail "non-worktree spawn did not confirm its endpoint cleanup"
+  assert_absent "$home/state/abort-cleanup-ff6.meta" "cleaned aborted spawn retained recovery metadata"
 
   # Proceed: the pane resolves to a genuine, isolated worktree.
   out=$(run_spawn "$home" ok-isolated-ff6 "$proj" "$TMP_ROOT/spawn-wt" "$fakebin"); status=$?

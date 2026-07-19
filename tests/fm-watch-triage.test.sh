@@ -1312,7 +1312,7 @@ test_ops_inbox_fingerprint_distinguishes_same_second_same_size_rewrite() {
 }
 
 test_ops_inbox_fingerprint_uses_bounded_two_level_file_markers() {
-  local dir home fakebin find_log find_count real_find before repeat after marker marker_path overflow_before overflow_after i stat_log real_stat stat_count
+  local dir home fakebin find_log find_count real_find before repeat after marker marker_path overflow_before overflow_repeat overflow_after i stat_log real_stat stat_count
   dir=$(make_case ops-inbox-directory-marker); home="$dir/home"; fakebin="$dir/fakebin"
   find_log="$dir/find.log"; find_count="$dir/find-count"; real_find=$(command -v find)
   mkdir -p "$home/ops-inbox/source" "$home/config"
@@ -1362,9 +1362,11 @@ SH
   marker=$(PATH="$fakebin:$PATH" FM_OPS_INBOX_MARKER_LIMIT=2 FM_OPS_INBOX_MARKER_SCAN_LIMIT=4 fm_ops_inbox_home_marker "$home")
   stat_count=$(wc -l < "$stat_log" | tr -d '[:space:]')
   [ "$stat_count" -le 7 ] || fail "operations-inbox marker statted more than its fixed scan budget ($stat_count)"
-  assert_contains "$marker" '__FM_OPS_INBOX_MARKER_LIMIT__' "operations-inbox marker did not disclose its selected-entry bound"
-  assert_contains "$marker" '__FM_OPS_INBOX_MARKER_SCAN_LIMIT__' "operations-inbox marker did not disclose its scan bound"
+  assert_contains "$marker" '__FM_OPS_INBOX_MARKER_OVERFLOW__' "operations-inbox marker did not disclose its overflow bound"
   overflow_before=$(fm_ops_inbox_fingerprint "$home" "$home/config")
+  overflow_repeat=$(fm_ops_inbox_fingerprint "$home" "$home/config")
+  [ "$overflow_before" != "$overflow_repeat" ] \
+    || fail "overflowed operations-inbox fingerprint remained suppressible"
   printf 'rewritten\n' > "$home/ops-inbox/overflow-253"
   printf 'generation-two\n' > "$marker_path"
   overflow_after=$(fm_ops_inbox_fingerprint "$home" "$home/config")

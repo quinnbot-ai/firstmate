@@ -2,7 +2,7 @@
 # Shared read-only operations-inbox discovery for the session-start digest and
 # watcher.  The home directory is $FM_HOME/ops-inbox; an optional local
 # config/ops-inbox-cmd supplies one prompt list-only command for a machine
-# inbox.  Watcher fingerprints stat at most 64 of the newest entries found in
+# inbox.  Watcher fingerprints stat at most 64 entries from a 256-file
 # a 256-file early-cutoff scan, with both bounds configurable below.  This file
 # owns the config seam and fingerprint mechanics.
 
@@ -180,7 +180,7 @@ fm_ops_inbox_external_run() {
 }
 
 # fm_ops_inbox_home_records <home> <scan-limit>
-# Prints newest-first mtime/path records from a bounded home-inbox scan.
+# Prints mtime-ordered path records from a bounded home-inbox scan.
 # A final __FM_OPS_INBOX_OVERFLOW__ record means the scan limit was reached.
 fm_ops_inbox_home_records() {
   local home=$1 limit=$2 dir marker path mtime count=0 overflow=0
@@ -225,8 +225,9 @@ fm_ops_inbox_home_marker() {
     printf '%s\t%s\n' "$sig" "$path"
     count=$((count + 1))
   done < <(fm_ops_inbox_home_records "$home" "$FM_OPS_INBOX_MARKER_SCAN_LIMIT")
-  [ "$selected_overflow" -eq 0 ] || printf '%s\n' '__FM_OPS_INBOX_MARKER_LIMIT__'
-  [ "$scan_overflow" -eq 0 ] || printf '%s\n' '__FM_OPS_INBOX_MARKER_SCAN_LIMIT__'
+  if [ "$selected_overflow" -ne 0 ] || [ "$scan_overflow" -ne 0 ]; then
+    printf '%s\n' "__FM_OPS_INBOX_MARKER_OVERFLOW__:${BASHPID:-$$}"
+  fi
 }
 
 fm_ops_inbox_home_has_events() {

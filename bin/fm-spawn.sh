@@ -1411,6 +1411,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     p=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
       WT="$p"
+      TREEHOUSE_ABORT_CLEANUP=1
       break
     fi
     sleep 1
@@ -1419,9 +1420,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
     exit 1
   fi
-
   validate_spawn_worktree "treehouse get" "$T"
-  TREEHOUSE_ABORT_CLEANUP=1
 fi
 
 if [ "$HARNESS" = codex ] && [ "$KIND" != secondmate ]; then
