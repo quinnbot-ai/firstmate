@@ -93,6 +93,34 @@ fm_arm_lease_owner() {  # <state>
   [ -d "$lease" ] && printf '%s\n' "$lease"
 }
 
+fm_arm_lease_bind_watcher() {  # <state> <watch-path> <watcher-pid> <home> <watcher-identity>
+  local state=$1 watch_path=$2 watcher_pid=$3 home=$4 watcher_identity=$5 bound tmp
+  bound="$state/.watch-arm.bound"
+  fm_watcher_lock_matches_pid "$state" "$watch_path" "$watcher_pid" "$home" || return 1
+  tmp=$(umask 077; mktemp "$state/.watch-arm.bound.XXXXXX" 2>/dev/null) || return 1
+  if ! printf '%s\n%s\n%s\n%s\n' "$home" "$watch_path" "$watcher_pid" "$watcher_identity" > "$tmp" \
+    || ! mv -f "$tmp" "$bound"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+fm_arm_lease_watcher_bound() {  # <state> <watch-path> <watcher-pid> <home>
+  local state=$1 watch_path=$2 watcher_pid=$3 home=$4 bound bound_home bound_path bound_pid bound_identity current
+  bound="$state/.watch-arm.bound"
+  [ -f "$bound" ] && [ ! -L "$bound" ] || return 1
+  {
+    IFS= read -r bound_home
+    IFS= read -r bound_path
+    IFS= read -r bound_pid
+    IFS= read -r bound_identity
+  } < "$bound" || return 1
+  [ "$bound_home" = "$home" ] && [ "$bound_path" = "$watch_path" ] && [ "$bound_pid" = "$watcher_pid" ] || return 1
+  current=$(fm_pid_identity "$watcher_pid") || return 1
+  [ -n "$bound_identity" ] && [ "$current" = "$bound_identity" ] || return 1
+  fm_watcher_lock_matches_pid "$state" "$watch_path" "$watcher_pid" "$home"
+}
+
 fm_arm_lease_healthy() {  # <state> <watch-path> <watcher-pid> <home> [grace]
   local state=$1 watch_path=$2 watcher_pid=$3 home=$4 grace=${5:-${FM_ARM_LEASE_GRACE:-45}}
   local owner arm_pid arm_identity watcher_identity current_arm current_watcher lease_home lease_path
@@ -170,6 +198,10 @@ fm_arm_lease_claim() {  # <state> <watch-path> <watcher-pid> <home>
   printf '%s\n' "$watcher_pid" > "$owner/watcher-pid"
   printf '%s\n' "$watcher_identity" > "$owner/watcher-identity"
   touch "$owner/heartbeat"
+  fm_arm_lease_bind_watcher "$state" "$watch_path" "$watcher_pid" "$home" "$watcher_identity" || {
+    fm_arm_lease_release "$state" "$owner"
+    return 1
+  }
   FM_ARM_LEASE_OWNER=$owner
 }
 

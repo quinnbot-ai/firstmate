@@ -222,7 +222,12 @@ make_liveness_tmux() {
 set -u
 case "${1:-}" in
   display-message)
-    for a in "$@"; do case "$a" in *pane_current_command*) printf '%s\n' "${FM_TEST_PANE_CMD:-zsh}"; exit 0 ;; esac; done
+    for a in "$@"; do
+      case "$a" in
+        *pane_current_command*) printf '%s\n' "${FM_TEST_PANE_CMD:-zsh}"; exit 0 ;;
+        *window_name*) printf '%s\n' "${FM_TEST_WINDOW_NAME:-fm-sm1}"; exit 0 ;;
+      esac
+    done
     exit 0 ;;
   new-window|kill-window)
     printf '%s\n' "$*" >> "${FM_TMUX_CALL_LOG:?}"
@@ -344,6 +349,22 @@ test_sweep_never_acts_on_unverified_harness_dead_reading() {
   pass "sweep: an unverified harness makes a dead-looking probe inconclusive"
 }
 
+test_sweep_refuses_reused_tmux_window_id() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-reused-window-id)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  printf 'tmux_window_id=@42\n' >> "$w/home/state/sm1.meta"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" FM_TEST_WINDOW_NAME=unrelated)
+
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: skipped: liveness probe inconclusive" \
+    "a recycled tmux window id with the wrong label must be inconclusive"
+  [ ! -s "$log" ] || fail "a recycled tmux window id must not be killed or respawned: $(cat "$log")"
+  pass "sweep: a recycled tmux window id with another label is never touched"
+}
+
 test_sweep_converges_no_retouch_once_alive() {
   local w fb tmuxfb log out1 out2
   w=$(new_world sweep-idempotent)
@@ -408,6 +429,7 @@ test_sweep_respawns_confirmed_dead_secondmate
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_never_acts_on_inconclusive_reading
 test_sweep_never_acts_on_unverified_harness_dead_reading
+test_sweep_refuses_reused_tmux_window_id
 test_sweep_converges_no_retouch_once_alive
 test_sweep_skipped_under_detect_only
 test_sweep_noop_with_no_secondmate_meta
