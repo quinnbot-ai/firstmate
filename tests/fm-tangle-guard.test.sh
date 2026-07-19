@@ -176,7 +176,28 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fakebin/treehouse"
+  cat > "$fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *".treehouse-lease."*)
+    [ -z "${FM_FAKE_TREEHOUSE_HANDOFF_RM_FAIL:-}" ] || exit 19
+    ;;
+esac
+exec /bin/rm "$@"
+SH
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+/bin/mv "$@"
+if [ -n "${FM_FAKE_META_MV_READY:-}" ] && [ "${2:-}" = "${FM_FAKE_META_MV_DEST:-}" ]; then
+  : > "$FM_FAKE_META_MV_READY"
+  while [ ! -e "${FM_FAKE_META_MV_CONTINUE:?}" ]; do
+    sleep 0.05
+  done
+fi
+SH
+  chmod +x "$fakebin/treehouse" "$fakebin/rm" "$fakebin/mv"
   printf '%s\n' "$fakebin"
 }
 
@@ -454,6 +475,74 @@ test_spawn_recovers_failed_lease_rollback() {
   pass "fm-spawn: recovers a retained lease handoff before retrying allocation"
 }
 
+test_spawn_tombstones_returned_lease_handoff() {
+  local home proj wt invalid fakebin rec out status id retry_id handoff returns
+  home="$TMP_ROOT/lease-returned-tombstone-home"
+  mkdir -p "$home/state" "$home/data"
+  proj=$(make_repo "$TMP_ROOT/lease-returned-tombstone-proj")
+  wt="$TMP_ROOT/lease-returned-tombstone-wt"
+  invalid="$TMP_ROOT/lease-returned-tombstone-invalid"
+  mkdir -p "$invalid"
+  git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
+  fakebin=$(make_spawn_lease_fakebin "$TMP_ROOT/lease-returned-tombstone-fake")
+  rec="$TMP_ROOT/lease-returned-tombstone-treehouse.log"; : > "$rec"
+  id=lease-returned-tombstone-ff7
+  retry_id=lease-returned-tombstone-gg8
+
+  out=$(FM_FAKE_TREEHOUSE_HANDOFF_RM_FAIL=1 run_spawn_lease_case "$home" "$id" "$proj" "$invalid" "$fakebin" "$rec" '' "$wt"); status=$?
+  expect_code 1 "$status" "spawn must fail when the post-rollback handoff removal fails"
+  handoff=$(printf '%s\n' "$home/state/.${id}.treehouse-lease."*)
+  assert_present "$handoff" "returned lease rollback did not retain a tombstone"
+  assert_contains "$(cat "$handoff")" "returned=$wt" \
+    "returned lease rollback handoff was not tombstoned"
+  returns=$(grep -Fc "treehouse return --force $wt" "$rec")
+  [ "$returns" -eq 1 ] || fail "expected one completed rollback before tombstone recovery; got $returns"
+
+  out=$(run_spawn_lease_case "$home" "$retry_id" "$proj" "$wt" "$fakebin" "$rec" '' "$wt"); status=$?
+  expect_code 0 "$status" "spawn should clear a returned handoff before allocating"
+  assert_contains "$out" "cleared returned treehouse lease handoff" \
+    "returned handoff was not cleared without replaying its return"
+  assert_absent "$handoff" "cleared returned handoff remained durable"
+  returns=$(grep -Fc "treehouse return --force $wt" "$rec")
+  [ "$returns" -eq 1 ] || fail "returned handoff recovery replayed a completed return; got $returns returns"
+  pass "fm-spawn: tombstones a returned lease before retrying handoff cleanup"
+}
+
+test_spawn_keeps_published_lease_on_abort() {
+  local home proj wt fakebin rec out status id ready go pid
+  home="$TMP_ROOT/lease-published-abort-home"
+  mkdir -p "$home/state" "$home/data"
+  proj=$(make_repo "$TMP_ROOT/lease-published-abort-proj")
+  wt="$TMP_ROOT/lease-published-abort-wt"
+  git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
+  fakebin=$(make_spawn_lease_fakebin "$TMP_ROOT/lease-published-abort-fake")
+  rec="$TMP_ROOT/lease-published-abort-treehouse.log"; : > "$rec"
+  id=lease-published-abort-hh9
+  ready="$TMP_ROOT/lease-published-abort-ready"
+  go="$TMP_ROOT/lease-published-abort-go"
+  out="$TMP_ROOT/lease-published-abort.out"
+
+  FM_FAKE_META_MV_READY="$ready" FM_FAKE_META_MV_CONTINUE="$go" \
+    FM_FAKE_META_MV_DEST="$home/state/$id.meta" \
+    run_spawn_lease_case "$home" "$id" "$proj" "$wt" "$fakebin" "$rec" > "$out" &
+  pid=$!
+  for _ in $(seq 1 100); do
+    [ -e "$ready" ] && break
+    sleep 0.05
+  done
+  assert_present "$ready" "spawn did not pause after publishing its task metadata"
+  assert_present "$home/state/$id.meta" "published lease metadata was not visible before abort"
+  kill -TERM "$pid"
+  : > "$go"
+  wait "$pid"; status=$?
+  expect_code 143 "$status" "spawn should terminate from the post-publish abort signal"
+  assert_contains "$(cat "$home/state/$id.meta")" "treehouse_lease=1" \
+    "published task metadata lost its durable lease marker"
+  assert_no_grep "treehouse return --force $wt" "$rec" \
+    "abort cleanup returned a worktree already published in task metadata"
+  pass "fm-spawn: abort cleanup recognizes lease metadata published before its in-memory commit flag"
+}
+
 test_spawn_refuses_empty_lease_handoff() {
   local home proj wt fakebin rec out status handoff
   home="$TMP_ROOT/lease-empty-handoff-home"
@@ -709,6 +798,8 @@ test_spawn_rolls_back_lease_after_isolation_failure
 test_spawn_refuses_to_roll_back_primary_checkout
 test_spawn_rolls_back_lease_after_setup_failure
 test_spawn_recovers_failed_lease_rollback
+test_spawn_tombstones_returned_lease_handoff
+test_spawn_keeps_published_lease_on_abort
 test_spawn_refuses_empty_lease_handoff
 test_spawn_serializes_lease_handoff_publication
 test_spawn_clears_committed_lease_handoff

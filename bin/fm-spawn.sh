@@ -222,10 +222,15 @@ parse_orca_worktree_result() {
 }
 
 treehouse_spawn_abort_cleanup() {
-  local status=$1 lease_path= lease_validation=
+  local status=$1 lease_path= lease_validation= lease_state=
   [ "$TREEHOUSE_LEASE_COMMITTED" = 1 ] && return "$status"
   [ -n "$TREEHOUSE_LEASE_PATH_FILE" ] || return "$status"
-  IFS= read -r lease_path < "$TREEHOUSE_LEASE_PATH_FILE" || true
+  treehouse_lease_handoff_read "$TREEHOUSE_LEASE_PATH_FILE" || {
+    echo "error: refusing to roll back malformed treehouse lease handoff $TREEHOUSE_LEASE_PATH_FILE; handoff retained" >&2
+    return "$status"
+  }
+  lease_path=$TREEHOUSE_LEASE_HANDOFF_PATH
+  lease_state=$TREEHOUSE_LEASE_HANDOFF_STATE
   case "$lease_path" in
     '') echo "error: treehouse lease handoff has no path after spawn abort; handoff retained at $TREEHOUSE_LEASE_PATH_FILE" >&2 ;;
     /*)
@@ -234,8 +239,16 @@ treehouse_spawn_abort_cleanup() {
         echo "error: refusing to roll back invalid treehouse lease path '$lease_path'; handoff retained at $TREEHOUSE_LEASE_PATH_FILE" >&2
         return "$status"
       fi
-      if ( cd "$PROJ_ABS" && treehouse return --force "$lease_path" ); then
-        rm -f "$TREEHOUSE_LEASE_PATH_FILE" || true
+      if treehouse_lease_handoff_is_committed "$lease_path"; then
+        rm -f "$TREEHOUSE_LEASE_PATH_FILE" || \
+          echo "warning: committed treehouse lease handoff retained at $TREEHOUSE_LEASE_PATH_FILE" >&2
+      elif [ "$lease_state" = returned ]; then
+        rm -f "$TREEHOUSE_LEASE_PATH_FILE" || \
+          echo "error: returned treehouse lease handoff could not be removed: $TREEHOUSE_LEASE_PATH_FILE" >&2
+      elif [ "$lease_state" = returning ]; then
+        echo "error: refusing to retry treehouse lease return with an indeterminate handoff at $TREEHOUSE_LEASE_PATH_FILE" >&2
+      elif treehouse_lease_handoff_return "$TREEHOUSE_LEASE_PATH_FILE" "$lease_path"; then
+        :
       else
         echo "error: failed to roll back treehouse lease $lease_path after spawn abort; handoff retained at $TREEHOUSE_LEASE_PATH_FILE" >&2
       fi
@@ -762,12 +775,66 @@ treehouse_lease_handoff_is_committed() {  # <lease-path>
   return 1
 }
 
+TREEHOUSE_LEASE_HANDOFF_STATE=
+TREEHOUSE_LEASE_HANDOFF_PATH=
+
+treehouse_lease_handoff_read() {  # <handoff>
+  local handoff=$1 record=
+  TREEHOUSE_LEASE_HANDOFF_STATE=
+  TREEHOUSE_LEASE_HANDOFF_PATH=
+  IFS= read -r record < "$handoff" || true
+  case "$record" in
+    leased=/*)
+      TREEHOUSE_LEASE_HANDOFF_STATE=leased
+      TREEHOUSE_LEASE_HANDOFF_PATH=${record#leased=}
+      ;;
+    returning=/*)
+      TREEHOUSE_LEASE_HANDOFF_STATE=returning
+      TREEHOUSE_LEASE_HANDOFF_PATH=${record#returning=}
+      ;;
+    returned=/*)
+      TREEHOUSE_LEASE_HANDOFF_STATE=returned
+      TREEHOUSE_LEASE_HANDOFF_PATH=${record#returned=}
+      ;;
+    /*)
+      TREEHOUSE_LEASE_HANDOFF_STATE=leased
+      TREEHOUSE_LEASE_HANDOFF_PATH=$record
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+treehouse_lease_handoff_write() {  # <handoff> <state> <lease-path>
+  local handoff=$1 handoff_state=$2 lease_path=$3
+  printf '%s=%s\n' "$handoff_state" "$lease_path" > "$handoff"
+}
+
+treehouse_lease_handoff_return() {  # <handoff> <lease-path>
+  local handoff=$1 lease_path=$2
+  treehouse_lease_handoff_write "$handoff" returning "$lease_path" || return 1
+  if ! ( cd "$PROJ_ABS" && treehouse return --force "$lease_path" ); then
+    treehouse_lease_handoff_write "$handoff" leased "$lease_path" || true
+    return 1
+  fi
+  treehouse_lease_handoff_write "$handoff" returned "$lease_path" || return 1
+  rm -f "$handoff"
+}
+
 recover_treehouse_lease_handoffs() {
-  local handoff lease_path lease_validation
+  local handoff lease_path lease_state lease_validation
   [ -d "$STATE" ] || return 0
   for handoff in "$STATE"/.*.treehouse-lease.*; do
     [ -f "$handoff" ] || continue
-    IFS= read -r lease_path < "$handoff" || true
+    if [ ! -s "$handoff" ]; then
+      echo "error: refusing to recover empty treehouse lease handoff $handoff; handoff retained" >&2
+      return 1
+    fi
+    treehouse_lease_handoff_read "$handoff" || {
+      echo "error: refusing to recover malformed treehouse lease handoff $handoff; handoff retained" >&2
+      return 1
+    }
+    lease_path=$TREEHOUSE_LEASE_HANDOFF_PATH
+    lease_state=$TREEHOUSE_LEASE_HANDOFF_STATE
     case "$lease_path" in
       '')
         echo "error: refusing to recover empty treehouse lease handoff $handoff; handoff retained" >&2
@@ -796,16 +863,23 @@ recover_treehouse_lease_handoffs() {
       echo "cleared committed treehouse lease handoff $handoff" >&2
       continue
     fi
-    if ( cd "$PROJ_ABS" && treehouse return --force "$lease_path" ); then
+    if [ "$lease_state" = returned ]; then
       rm -f "$handoff" || {
-        echo "error: recovered treehouse lease $lease_path but failed to remove handoff $handoff" >&2
+        echo "error: returned treehouse lease $lease_path has a tombstone that could not be removed: $handoff" >&2
         return 1
       }
-      echo "recovered treehouse lease handoff $handoff" >&2
-    else
+      echo "cleared returned treehouse lease handoff $handoff" >&2
+      continue
+    fi
+    if [ "$lease_state" = returning ]; then
+      echo "error: refusing to retry treehouse lease return with an indeterminate handoff $handoff; handoff retained" >&2
+      return 1
+    fi
+    if ! treehouse_lease_handoff_return "$handoff" "$lease_path"; then
       echo "error: failed to recover treehouse lease $lease_path from $handoff; handoff retained" >&2
       return 1
     fi
+    echo "recovered treehouse lease handoff $handoff" >&2
   done
 }
 
