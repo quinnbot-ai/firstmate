@@ -149,7 +149,7 @@ test_brief_assertion_precedes_branch() {
 
 # --- GUARD 1b: fm-spawn isolation abort -------------------------------------
 
-# A fake tmux that reports FM_FAKE_PANE_PATH as the post-`treehouse get` pane cwd
+# A fake tmux that reports FM_FAKE_PANE_PATH as the post-lease pane cwd
 # (so the spawn's worktree-resolution loop resolves to a path we control), names
 # the session on '#S', and swallows window ops. Echoes the fakebin dir.
 make_spawn_fakebin() {
@@ -214,7 +214,122 @@ test_spawn_isolation_abort() {
   pass "fm-spawn: aborts unless the resolved worktree is a genuine, isolated worktree"
 }
 
-# --- GUARD 1c: fm-spawn tmux window construction ----------------------------
+# --- GUARD 1c: fm-spawn treehouse lease hold --------------------------------
+
+# A meta persists while a task is held for review, including when the pane is
+# detached. Older tasks have no treehouse_lease=1 marker, so a new spawn must
+# fail before it asks treehouse for any slot rather than risking a destructive
+# pool reset of that recorded worktree.
+make_spawn_lease_fakebin() {
+  local dir=$1 fakebin
+  fakebin=$(make_spawn_fakebin "$dir")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -z "${FM_TREEHOUSE_REC:-}" ] || printf 'tmux %s\n' "$*" >> "$FM_TREEHOUSE_REC"
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows|has-session|new-session|new-window|send-keys) exit 0 ;;
+esac
+exit 0
+SH
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf 'treehouse %s\n' "$*" >> "${FM_TREEHOUSE_REC:?}"
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+  printf '%s\n' "$fakebin"
+}
+
+run_spawn_lease_case() {
+  local home=$1 id=$2 proj=$3 pane=$4 fakebin=$5 rec=$6 kind=${7:-}
+  mkdir -p "$home/data/$id"
+  printf 'brief\n' > "$home/data/$id/brief.md"
+  if [ "$kind" = scout ]; then
+    FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+      FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+      FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
+      FM_TREEHOUSE_REC="$rec" PATH="$fakebin:$PATH" \
+      "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex --scout 2>&1
+  else
+    FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+      FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+      FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
+      FM_TREEHOUSE_REC="$rec" PATH="$fakebin:$PATH" \
+      "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex 2>&1
+  fi
+}
+
+test_spawn_refuses_legacy_held_worktree() {
+  local home proj held fakebin rec out status
+  home="$TMP_ROOT/lease-held-home"
+  mkdir -p "$home/state" "$home/data"
+  proj=$(make_repo "$TMP_ROOT/lease-held-proj")
+  held="$TMP_ROOT/lease-held-wt"
+  git -C "$proj" worktree add -q --detach "$held" >/dev/null 2>&1
+  fm_write_meta "$home/state/held-ship.meta" \
+    "window=firstmate:fm-held-ship" "worktree=$held" "project=$proj" "kind=ship"
+  fakebin=$(make_spawn_lease_fakebin "$TMP_ROOT/lease-held-fake")
+  rec="$TMP_ROOT/lease-held-treehouse.log"; : > "$rec"
+
+  out=$(run_spawn_lease_case "$home" new-ship-aa1 "$proj" "$held" "$fakebin" "$rec"); status=$?
+  expect_code 1 "$status" "spawn must refuse when a live ship meta holds a pre-lease slot"
+  assert_contains "$out" "live task held-ship still holds unleased worktree $held" \
+    "held ship refusal did not name the protected task and worktree"
+  [ ! -s "$rec" ] || fail "held ship refusal invoked treehouse despite the live unleased meta"
+  assert_absent "$home/state/new-ship-aa1.meta" "held ship refusal must not create a new task meta"
+  pass "fm-spawn: refuses before treehouse allocation when a live ship meta holds an unleased slot"
+}
+
+test_spawn_refuses_detached_legacy_held_worktree() {
+  local home proj held fakebin rec out status
+  home="$TMP_ROOT/lease-detached-home"
+  mkdir -p "$home/state" "$home/data"
+  proj=$(make_repo "$TMP_ROOT/lease-detached-proj")
+  held="$TMP_ROOT/lease-detached-wt"
+  git -C "$proj" worktree add -q --detach "$held" >/dev/null 2>&1
+  fm_write_meta "$home/state/held-scout.meta" \
+    "window_detached_tmux=firstmate:fm-held-scout" "worktree=$held" "project=$proj" "kind=scout"
+  fakebin=$(make_spawn_lease_fakebin "$TMP_ROOT/lease-detached-fake")
+  rec="$TMP_ROOT/lease-detached-treehouse.log"; : > "$rec"
+
+  out=$(run_spawn_lease_case "$home" new-scout-bb2 "$proj" "$held" "$fakebin" "$rec" scout); status=$?
+  expect_code 1 "$status" "spawn must refuse when detached scout metadata holds a pre-lease slot"
+  assert_contains "$out" "live task held-scout still holds unleased worktree $held" \
+    "detached scout refusal did not protect the recorded worktree"
+  [ ! -s "$rec" ] || fail "detached-meta refusal invoked treehouse despite the live unleased meta"
+  assert_absent "$home/state/new-scout-bb2.meta" "detached scout refusal must not create a new task meta"
+  pass "fm-spawn: detached-window scout metadata receives the same held-slot refusal"
+}
+
+test_spawn_leases_normal_treehouse_allocation() {
+  local home proj wt fakebin rec out status
+  home="$TMP_ROOT/lease-normal-home"
+  mkdir -p "$home/state" "$home/data"
+  proj=$(make_repo "$TMP_ROOT/lease-normal-proj")
+  wt="$TMP_ROOT/lease-normal-wt"
+  git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
+  fakebin=$(make_spawn_lease_fakebin "$TMP_ROOT/lease-normal-fake")
+  rec="$TMP_ROOT/lease-normal-treehouse.log"; : > "$rec"
+
+  out=$(run_spawn_lease_case "$home" normal-scout-cc3 "$proj" "$wt" "$fakebin" "$rec" scout); status=$?
+  expect_code 0 "$status" "normal scout spawn should acquire a treehouse lease"
+  assert_contains "$out" "spawned normal-scout-cc3" "normal leased spawn did not report success"
+  assert_grep "treehouse get --lease --lease-holder 'normal-scout-cc3'" "$rec" \
+    "normal spawn did not request a durable treehouse lease under its task id"
+  assert_contains "$(cat "$home/state/normal-scout-cc3.meta")" "treehouse_lease=1" \
+    "normal leased spawn did not record its durable pool hold"
+  pass "fm-spawn: normal allocation leases its treehouse slot until teardown"
+}
+
+# --- GUARD 1d: fm-spawn tmux window construction ----------------------------
 
 # The prevention guard also depends on fm-spawn building robust tmux commands
 # under a non-default tmux config (base-index 1, automatic-rename on). A RECORDING
@@ -292,9 +407,11 @@ test_spawn_tmux_window_construction() {
   assert_grep "set-window-option -t @spawnwid allow-rename off" "$rec" \
     "must disable allow-rename on the spawned window"
 
-  # Bug 2 fix (b): treehouse-get and the worktree wait loop target the stable id.
-  assert_grep "send-keys -t @spawnwid treehouse get Enter" "$rec" \
-    "treehouse get must be sent to the stable window id"
+  # Bug 2 fix (b): treehouse lease acquisition and the worktree wait loop target the stable id.
+  assert_grep "send-keys -t @spawnwid fm_treehouse_worktree=" "$rec" \
+    "treehouse lease acquisition must be sent to the stable window id"
+  assert_grep "treehouse get --lease --lease-holder 'rec-win-gg7'" "$rec" \
+    "treehouse acquisition must request a durable lease under the task id"
   assert_grep "display-message -p -t @spawnwid #{pane_current_path}" "$rec" \
     "the worktree wait loop must query the stable window id, not the name"
 
@@ -306,4 +423,7 @@ test_guard_banner
 test_bootstrap_line
 test_brief_assertion_precedes_branch
 test_spawn_isolation_abort
+test_spawn_refuses_legacy_held_worktree
+test_spawn_refuses_detached_legacy_held_worktree
+test_spawn_leases_normal_treehouse_allocation
 test_spawn_tmux_window_construction

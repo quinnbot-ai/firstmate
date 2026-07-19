@@ -17,8 +17,8 @@
 #   then tmux.
 #   Spawn-capable backends are the reference tmux adapter and experimental
 #   herdr, zellij, orca, and cmux. Orca owns both the task worktree and
-#   terminal, so ship/scout Orca spawns do not run treehouse get; cmux is a
-#   session provider only, exactly like herdr/zellij, so it does. An
+#   terminal, so ship/scout Orca spawns do not acquire a treehouse lease; cmux
+#   is a session provider only, exactly like herdr/zellij, so it does. An
 #   auto-detected herdr or cmux spawn prints a loud stderr notice;
 #   auto-detected tmux stays silent; zellij and orca are never auto-detected.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
@@ -50,6 +50,10 @@
 #   material, so the secondmate's OWN crewmates inherit primary config and the
 #   secondmate receives the primary's read-only shared captain-preference file
 #   (fm-config-inherit-lib.sh).
+#   Treehouse-backed ship and scout worktrees are acquired with `treehouse get
+#   --lease --lease-holder <task-id>`, which holds the pool slot until this
+#   task's fm-teardown returns it. A live pre-lease meta for the same project
+#   fails the new spawn before allocation, preserving its unleased worktree.
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
@@ -664,6 +668,35 @@ real_path_or_raw() {  # <path>
   fi
 }
 
+# Refuse allocation beside a live task created before treehouse leasing. That
+# meta's worktree is still authoritative, but an older treehouse get may treat
+# its detached pane as idle and reset it for this spawn. New task metas carry
+# treehouse_lease=1, so their durable treehouse reservation safely permits
+# concurrent allocations in the same project pool.
+refuse_unleased_treehouse_hold() {
+  local meta held_id held_project held_worktree held_backend
+  [ -d "$STATE" ] || return 0
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    held_project=$(fm_meta_get "$meta" project)
+    [ -n "$held_project" ] || continue
+    [ "$(real_path_or_raw "$held_project")" = "$PROJ_ABS_REAL" ] || continue
+    held_backend=$(fm_meta_get "$meta" backend)
+    [ "$held_backend" = orca ] && continue
+    held_worktree=$(fm_meta_get "$meta" worktree)
+    [ -n "$held_worktree" ] || continue
+    [ "$(fm_meta_get "$meta" treehouse_lease)" = 1 ] && continue
+    held_id=$(basename "$meta" .meta)
+    echo "error: refusing treehouse allocation for $ID: live task $held_id still holds unleased worktree $held_worktree. Do not spawn into $PROJ_ABS until fm-teardown.sh returns that task's worktree; this preserves detached or uncommitted task state." >&2
+    return 1
+  done
+  return 0
+}
+
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  refuse_unleased_treehouse_hold || exit 1
+fi
+
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
 # a herdr spawn goes through the version-gated, workspace-per-HOME,
@@ -833,7 +866,10 @@ spawn_send_key() {  # <target> <key>
   esac
 }
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  # A durable lease survives a detached window, so treehouse cannot hand this
+  # slot to another spawn before fm-teardown releases it. `get --lease` prints
+  # only the absolute path, and the pane changes into that leased worktree.
+  spawn_send_text_line "$WT_TARGET" "fm_treehouse_worktree=\$(treehouse get --lease --lease-holder $(shell_quote "$ID")) && cd \"\$fm_treehouse_worktree\""
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -994,6 +1030,7 @@ META_WINDOW=$T
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
   echo "kind=$KIND"
+  [ "$KIND" = secondmate ] || [ "$BACKEND" = orca ] || echo "treehouse_lease=1"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
   echo "tasktmp=$TASK_TMP"
