@@ -199,6 +199,7 @@ ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
 ORCA_WORKTREE_CLEANUP_COMPLETE=0
 ORCA_ABORT_CLEANUP_FAILED=0
+ORCA_ABORT_TERMINAL_ABSENT=1
 FAILED_ENDPOINT_CLEANUP=0
 TREEHOUSE_ABORT_CLEANUP=0
 TASK_TMP=
@@ -280,20 +281,28 @@ remove_codex_home_activation_result() {
 }
 
 orca_spawn_abort_cleanup() {
-  local cleanup_failed=0
+  local cleanup_failed=0 terminal_absent=1
   [ "$ORCA_ABORT_CLEANUP" = 1 ] || return 0
   ORCA_ABORT_CLEANUP=0
   if [ -n "${ORCA_TERMINAL:-}" ]; then
-    FM_BACKEND_KILL_STRICT=1 fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
+    terminal_absent=0
     if fm_backend_target_absent orca "$ORCA_TERMINAL"; then
       ORCA_TERMINAL=
       T=
     else
-      cleanup_failed=1
-      FAILED_ENDPOINT_CLEANUP=1
+      FM_BACKEND_KILL_STRICT=1 fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
+      if fm_backend_target_absent orca "$ORCA_TERMINAL"; then
+        terminal_absent=1
+        ORCA_TERMINAL=
+        T=
+      else
+        cleanup_failed=1
+        FAILED_ENDPOINT_CLEANUP=1
+        echo "error: Orca terminal cleanup is unconfirmed; retaining failed-spawn resources for recovery" >&2
+      fi
     fi
   fi
-  if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
+  if [ "$terminal_absent" = 1 ] && [ -n "${ORCA_WORKTREE_ID:-}" ]; then
     if fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
       ORCA_WORKTREE_ID=
       ORCA_WORKTREE_CLEANUP_COMPLETE=1
@@ -303,6 +312,7 @@ orca_spawn_abort_cleanup() {
     fi
   fi
   ORCA_ABORT_CLEANUP_FAILED=$cleanup_failed
+  ORCA_ABORT_TERMINAL_ABSENT=$terminal_absent
   return 0
 }
 
@@ -312,11 +322,13 @@ spawn_abort_cleanup() {
     TREEHOUSE_ABORT_CLEANUP=0
     clean_codex_home=1
     if ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) 2>/dev/null; then
-      FM_BACKEND_KILL_STRICT=1 fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "fm-$ID" 2>/dev/null || true
       if ! fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
-        FAILED_ENDPOINT_CLEANUP=1
-        write_failed_treehouse_spawn_meta
-        preserve_codex_home=1
+        FM_BACKEND_KILL_STRICT=1 fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "fm-$ID" 2>/dev/null || true
+        if ! fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
+          FAILED_ENDPOINT_CLEANUP=1
+          write_failed_treehouse_spawn_meta
+          preserve_codex_home=1
+        fi
       fi
     else
       FAILED_ENDPOINT_CLEANUP=1
@@ -328,6 +340,7 @@ spawn_abort_cleanup() {
     clean_codex_home=1
     orca_spawn_abort_cleanup
     orca_cleanup_failed=$ORCA_ABORT_CLEANUP_FAILED
+    [ "$ORCA_ABORT_TERMINAL_ABSENT" = 1 ] || preserve_codex_home=1
   fi
   if [ "$clean_codex_home" -eq 1 ] && [ "$preserve_codex_home" -eq 0 ] && ! remove_codex_crewmate_home; then
     echo "error: could not remove isolated Codex crewmate home" >&2

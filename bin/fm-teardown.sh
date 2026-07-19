@@ -869,10 +869,12 @@ safe_rm_rf_child_worktree() {
 }
 
 validate_task_temp_for_removal() {
-  local target=$1 prefix suffix
+  local target=$1 legacy prefix suffix
   [ -n "$target" ] || return 0
-  prefix="/tmp/fm-$ID."
+  legacy="/tmp/fm-$ID"
+  prefix="$legacy."
   case "$target" in
+    "$legacy") suffix= ;;
     "$prefix"*) suffix=${target#"$prefix"} ;;
     *)
       echo "REFUSED: unsafe task temporary directory $target does not match task $ID" >&2
@@ -880,10 +882,14 @@ validate_task_temp_for_removal() {
       ;;
   esac
   case "$suffix" in
-    ''|*[![:alnum:]]*)
+    *[![:alnum:]]*)
       echo "REFUSED: unsafe task temporary directory $target does not match task $ID" >&2
       return 1
       ;;
+    '') [ "$target" = "$legacy" ] || {
+      echo "REFUSED: unsafe task temporary directory $target does not match task $ID" >&2
+      return 1
+    } ;;
   esac
   [ ! -e "$target" ] && [ ! -L "$target" ] && return 0
   if [ ! -d "$target" ] || [ -L "$target" ]; then
@@ -899,30 +905,48 @@ remove_codex_crewmate_home() {
 }
 
 close_recorded_endpoint() {
-  local tab_id absence_status close_failed=0
+  local tab_id absence_status close_failed=0 require_absence=0
   tab_id=$(meta_value "$META" zellij_tab_id)
-  if [ "$ENDPOINT_CLEANUP_PENDING" = 1 ]; then
-    if ! FM_BACKEND_KILL_STRICT=1 fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null; then
-      close_failed=1
-    fi
-    if fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
-      absence_status=0
-    else
-      absence_status=$?
-    fi
-    if [ "$absence_status" -ne 0 ]; then
+  if [ "$ENDPOINT_CLEANUP_PENDING" = 1 ] || [ -n "$CODEX_CREWMATE_HOME" ]; then
+    require_absence=1
+  fi
+  if [ "$require_absence" -ne 1 ]; then
+    fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null || true
+    return 0
+  fi
+  if fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
+    return 0
+  fi
+  if ! FM_BACKEND_KILL_STRICT=1 fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null; then
+    close_failed=1
+  fi
+  if fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
+    absence_status=0
+  else
+    absence_status=$?
+  fi
+  if [ "$absence_status" -ne 0 ]; then
+    if [ "$ENDPOINT_CLEANUP_PENDING" = 1 ]; then
       if [ "$absence_status" -eq 1 ]; then
         echo "error: failed-spawn endpoint $T remains live after cleanup; preserving recovery metadata" >&2
       else
         echo "error: failed-spawn endpoint $T could not be confirmed absent after cleanup; preserving recovery metadata" >&2
       fi
-      return 1
+    else
+      if [ "$absence_status" -eq 1 ]; then
+        echo "error: endpoint $T remains live after cleanup; preserving recovery metadata" >&2
+      else
+        echo "error: endpoint $T could not be confirmed absent after cleanup; preserving recovery metadata" >&2
+      fi
     fi
-    if [ "$close_failed" -ne 0 ]; then
+    return 1
+  fi
+  if [ "$close_failed" -ne 0 ]; then
+    if [ "$ENDPOINT_CLEANUP_PENDING" = 1 ]; then
       echo "warning: failed-spawn endpoint $T was already absent after close reported an error" >&2
+    else
+      echo "warning: endpoint $T was already absent after close reported an error" >&2
     fi
-  else
-    fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null || true
   fi
 }
 

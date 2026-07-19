@@ -605,9 +605,10 @@ test_spawn_refuses_orca_nonisolated_worktree() {
   printf '1\n' > "$RESP/1.exit"
   printf '{"ok":true,"result":{"repo":{"id":"repo-bad"}}}\n' > "$RESP/2.out"
   printf '{"ok":true,"result":{"worktree":{"id":"wt-bad","path":"%s"},"terminal":{"handle":"term-bad"}}}\n' "$proj" > "$RESP/3.out"
-  printf '{"ok":true,"result":{"closed":true}}\n' > "$RESP/4.out"
-  printf '{"ok":false,"error":{"code":"terminal_not_found","message":"terminal not found"}}\n' > "$RESP/5.out"
-  printf '{"ok":true,"result":{"removed":true}}\n' > "$RESP/6.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["still live"]}}}\n' > "$RESP/4.out"
+  printf '{"ok":true,"result":{"closed":true}}\n' > "$RESP/5.out"
+  printf '{"ok":false,"error":{"code":"terminal_not_found","message":"terminal not found"}}\n' > "$RESP/6.out"
+  printf '{"ok":true,"result":{"removed":true}}\n' > "$RESP/7.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
@@ -716,7 +717,10 @@ test_spawn_preserves_orca_metadata_when_terminal_close_is_unconfirmed() {
   assert_present "$state/$id.meta" "an unconfirmed Orca close must preserve failed-spawn metadata"
   assert_grep "terminal=term-still-live" "$state/$id.meta" "preserved metadata missing the still-live Orca terminal"
   assert_grep "orca_worktree_id=wt-close-unconfirmed" "$state/$id.meta" "preserved metadata missing the live worker's Orca worktree"
+  assert_grep "failed_spawn=1" "$state/$id.meta" "preserved metadata must identify the aborted spawn"
   assert_grep "endpoint_cleanup_pending=1" "$state/$id.meta" "preserved metadata must mark pending endpoint cleanup"
+  assert_contains "$out" "retaining failed-spawn resources for recovery" \
+    "Orca spawn must report retained resources when terminal cleanup is unconfirmed"
   assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''read'$'\x1f''--terminal'$'\x1f''term-still-live'$'\x1f''--limit'$'\x1f''1'$'\x1f''--json' \
     "Orca spawn must query the terminal after a successful strict close"
   assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-close-unconfirmed' \
@@ -769,6 +773,7 @@ SH
   [ -d "$home" ] || fail "unconfirmed Orca terminal cleanup must preserve the isolated Codex home"
   assert_present "$state/$id.meta" "unconfirmed Orca terminal cleanup must preserve recovery metadata"
   assert_grep "codex_crewmate_home=$home" "$state/$id.meta" "preserved metadata missing the isolated Codex home"
+  assert_grep "failed_spawn=1" "$state/$id.meta" "preserved metadata must identify the aborted spawn"
   assert_grep "endpoint_cleanup_pending=1" "$state/$id.meta" "preserved metadata must mark pending endpoint cleanup"
   pass "fm-spawn.sh --backend orca: preserves the Codex home when terminal cleanup is unconfirmed"
 }
