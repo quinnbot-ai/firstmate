@@ -193,6 +193,18 @@ Context: 0.00%' || fail "zero context with decimal precision was not recognized"
   pass "pane progress reads current footer controls and recognizes decimal zero context"
 }
 
+test_invalid_busy_signature_regexes_fall_back_once() {
+  local out pane
+  pane='Starting MCP servers
+Waiting for agents'
+  out=$(FM_STARTUP_SPINNER_RE='[' FM_BUSY_WAIT_SPIN_RE='(' \
+    bash -c '. "$1"; pane_is_startup_spinner "$2" && printf startup; pane_is_busy_wait_spin "$2" && printf busy' \
+    _ "$ROOT/bin/fm-classify-lib.sh" "$pane" 2>&1) \
+    || fail "invalid busy signature regexes prevented classifier initialization"
+  [ "$out" = 'startupbusy' ] || fail "invalid busy signature regexes did not fall back silently: $out"
+  pass "invalid busy signature regexes fall back to defaults without diagnostics"
+}
+
 # crew_is_provably_working: the absorb-only-when-provably-working predicate. It is
 # benign (absorb) ONLY when fm-crew-state.sh reports the crew as working from an
 # actively-running pipeline step (source run-step) or a busy pane (source pane);
@@ -1238,6 +1250,45 @@ test_busy_progress_thresholds_normalize_invalid_overrides() {
   pass "invalid busy-progress thresholds reset to safe defaults"
 }
 
+test_native_busy_state_is_cached_per_watcher_poll() {
+  local dir state fakebin out capture_file statusf window key h pid calls
+  dir=$(make_case native-busy-cache); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/native-busy.status"
+  window='default:w1:p2'
+  cat > "$capture_file" <<'EOF'
+Working on the next request (esc to interrupt)
+Context: 73%
+EOF
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}:${2:-}" in
+  status:--json) printf '{"server":{"running":true}}\n' ;;
+  pane:read) cat "$FM_FAKE_HERDR_CAPTURE" ;;
+  agent:get) printf '1\n' >> "$FM_FAKE_HERDR_BUSY_CALLS"; printf '{"result":{"agent":{"agent_status":"working"}}}\n' ;;
+esac
+SH
+  chmod +x "$fakebin/herdr"
+  printf 'window=%s\nbackend=herdr\nkind=ship\n' "$window" > "$state/native-busy.meta"
+  printf 'working: active\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-native-busy_status"
+  key=$(printf '%s' "$window" | tr ':/. ' '____')
+  if command -v md5 >/dev/null 2>&1; then h=$(printf '%s' "$(cat "$capture_file")" | md5 -q); else h=$(printf '%s' "$(cat "$capture_file")" | md5sum | cut -d' ' -f1); fi
+  printf '%s' "$h" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_HERDR_CAPTURE="$capture_file" FM_FAKE_HERDR_BUSY_CALLS="$dir/busy-calls" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=30 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_numeric_file "$dir/busy-calls" 30 || fail "herdr watcher poll never queried native busy state: $(cat "$out")"
+  sleep 0.1
+  reap "$pid"
+  calls=$(wc -l < "$dir/busy-calls" | tr -d '[:space:]')
+  [ "$calls" -eq 1 ] || fail "native busy state was queried $calls times in one watcher poll"
+  pass "native busy state is queried once and reused by stale triage"
+}
+
 test_busy_token_burn_without_progress_surfaces() {
   local dir state fakebin out capture_file statusf window key pid back
   dir=$(make_case busy-token-burn); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1392,6 +1443,7 @@ test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives
 test_pane_progress_classifier_uses_current_footer
+test_invalid_busy_signature_regexes_fall_back_once
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
@@ -1425,6 +1477,7 @@ test_busy_startup_spinner_context_zero_surfaces
 test_busy_progress_corrupt_escalation_marker_recovers
 test_busy_startup_spinner_non_codex_remains_healthy
 test_busy_progress_thresholds_normalize_invalid_overrides
+test_native_busy_state_is_cached_per_watcher_poll
 test_busy_token_burn_without_progress_surfaces
 test_busy_subagent_wait_spin_surfaces
 test_busy_progress_afk_enqueues_for_daemon_escalation

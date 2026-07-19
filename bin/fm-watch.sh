@@ -212,6 +212,14 @@ window_is_busy() {  # <window> <tail40>
   esac
 }
 
+WINDOW_BUSY_CACHE=
+window_is_busy_cached() {  # <window> <tail40>
+  if [ -z "$WINDOW_BUSY_CACHE" ]; then
+    if window_is_busy "$1" "$2"; then WINDOW_BUSY_CACHE=busy; else WINDOW_BUSY_CACHE=idle; fi
+  fi
+  [ "$WINDOW_BUSY_CACHE" = busy ]
+}
+
 window_kind() {
   local w=$1 meta kind
   meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
@@ -955,10 +963,11 @@ EOF
     ssf="$STATE/.stale-since-$key"
     ewf="$STATE/.wedge-escalations-$key"
     pf="$STATE/.paused-$key"   # flag: this key's current stale is a declared pause
+    WINDOW_BUSY_CACHE=
     # Busy panes bypass stale-hash handling, so inspect their semantic progress
     # before the hash branch. A declared paused wait retains its long cadence and
     # must never be converted into a busy-progress wedge.
-    if [ "$kind" != secondmate ] && ! status_is_paused "$last" && window_is_busy "$w" "$tail40"; then
+    if [ "$kind" != secondmate ] && ! status_is_paused "$last" && window_is_busy_cached "$w" "$tail40"; then
       busy_progress_check "$w" "$task" "$tail40"
     else
       clear_busy_progress_tracking "$w"
@@ -971,7 +980,7 @@ EOF
       # else the last 6 non-blank lines only (the TUI footer area, where every
       # verified harness renders its busy indicator) so busy-looking strings
       # in displayed content cannot suppress stale detection.
-      if [ "$n" -ge 2 ] && ! window_is_busy "$w" "$tail40"; then
+      if [ "$n" -ge 2 ] && ! window_is_busy_cached "$w" "$tail40"; then
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
         if [ "$kind" = secondmate ]; then
@@ -1082,7 +1091,7 @@ EOF
       echo 0 > "$cf"
       rm -f "$ssf" "$ewf"
       task=$(window_to_task "$w" "$STATE")
-      if ! afk_present && status_is_paused "$(last_status_line "$STATE/$task.status")" && ! window_is_busy "$w" "$tail40"; then
+      if ! afk_present && status_is_paused "$(last_status_line "$STATE/$task.status")" && ! window_is_busy_cached "$w" "$tail40"; then
         case "$(pause_state_class "$w" "$task")" in
           paused) handle_paused_stale "$w" "$task" "$h" ;;
           *)      clear_pause_tracking "$w" ;;

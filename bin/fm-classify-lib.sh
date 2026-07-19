@@ -67,6 +67,27 @@ FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 FM_CLASSIFY_STARTUP_SPINNER_RE_DEFAULT='Starting MCP servers'
 FM_CLASSIFY_BUSY_WAIT_SPIN_RE_DEFAULT='Waiting for agents|No agents completed yet'
 
+normalize_pane_signature_regex() {  # <configured-regex> <default-regex>
+  local configured=$1 fallback=$2 status
+  if grep -Eq "$configured" </dev/null 2>/dev/null; then
+    printf '%s' "$configured"
+    return 0
+  fi
+  status=$?
+  if [ "$status" -eq 1 ]; then
+    printf '%s' "$configured"
+  else
+    printf '%s' "$fallback"
+  fi
+}
+
+FM_STARTUP_SPINNER_RE=$(normalize_pane_signature_regex \
+  "${FM_STARTUP_SPINNER_RE:-$FM_CLASSIFY_STARTUP_SPINNER_RE_DEFAULT}" \
+  "$FM_CLASSIFY_STARTUP_SPINNER_RE_DEFAULT")
+FM_BUSY_WAIT_SPIN_RE=$(normalize_pane_signature_regex \
+  "${FM_BUSY_WAIT_SPIN_RE:-$FM_CLASSIFY_BUSY_WAIT_SPIN_RE_DEFAULT}" \
+  "$FM_CLASSIFY_BUSY_WAIT_SPIN_RE_DEFAULT")
+
 pane_footer_control_lines() {
   printf '%s\n' "$1" | grep -v '^[[:space:]]*$' | tail -6
 }
@@ -93,11 +114,11 @@ pane_context_is_zero() {  # <pane-text>
 }
 
 pane_is_startup_spinner() {  # <pane-text>
-  pane_footer_control_lines "$1" | grep -qiE "${FM_STARTUP_SPINNER_RE:-$FM_CLASSIFY_STARTUP_SPINNER_RE_DEFAULT}"
+  pane_footer_control_lines "$1" | grep -qiE "$FM_STARTUP_SPINNER_RE"
 }
 
 pane_is_busy_wait_spin() {  # <pane-text>
-  pane_footer_control_lines "$1" | grep -qiE "${FM_BUSY_WAIT_SPIN_RE:-$FM_CLASSIFY_BUSY_WAIT_SPIN_RE_DEFAULT}"
+  pane_footer_control_lines "$1" | grep -qiE "$FM_BUSY_WAIT_SPIN_RE"
 }
 
 # The resolution verb and durable-backlog-transfer verb that CLOSE a keyed
