@@ -90,6 +90,7 @@ mkdir -p "$STATE"
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
 WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
+ARM_LEASE_SEEN=0
 # The singleton-lock acquisition, EXIT trap, and the blocking supervision loop
 # all live below the source guard at the very bottom of this file (see "Main
 # entry"). Sourcing this file for unit tests therefore loads the functions -
@@ -964,6 +965,19 @@ while :; do
   # and doubling every wake.
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" != "$WATCHER_PID" ]; then
     exit 0
+  fi
+
+  # A direct test/manual watcher has no arm lease and remains valid.  Once an
+  # arm has bound itself to this exact watcher, however, losing that fresh,
+  # identity-matched relay means future watcher exits could no longer notify the
+  # primary.  Persist the failure before stopping so a replacement session sees
+  # it even if the harness killed the only background relay.
+  if fm_arm_lease_healthy "$STATE" "$WATCH_PATH" "$WATCHER_PID" "$FM_HOME"; then
+    ARM_LEASE_SEEN=1
+  elif [ "$ARM_LEASE_SEEN" -eq 1 ]; then
+    reason='check: watcher arm relay lost'
+    fm_wake_append check watcher-arm-relay "$reason" || exit 1
+    wake "$reason"
   fi
 
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
