@@ -2,9 +2,9 @@
 # Shared read-only operations-inbox discovery for the session-start digest and
 # watcher.  The home directory is $FM_HOME/ops-inbox; an optional local
 # config/ops-inbox-cmd supplies one prompt list-only command for a machine
-# inbox.  Watcher fingerprints stat at most 64 of the newest entries found in
-# a 256-file early-cutoff scan, with both bounds configurable below.  This file
-# owns the config seam and fingerprint mechanics.
+# inbox.  Watcher fingerprints include every monitored event file, while the
+# digest retains only its configured number of newest records.  This file owns
+# the config seam and fingerprint mechanics.
 
 fm_ops_inbox_stat_sig() {
   if [ "$(uname)" = Darwin ]; then
@@ -14,11 +14,11 @@ fm_ops_inbox_stat_sig() {
   fi
 }
 
-fm_ops_inbox_stat_mtime() {
+fm_ops_inbox_stat_record() {
   if [ "$(uname)" = Darwin ]; then
-    stat -f %m "$1" 2>/dev/null
+    stat -f '%m|%z:%Fm' "$1" 2>/dev/null
   else
-    stat -c %Y "$1" 2>/dev/null
+    stat -c '%Y|%s:%y' "$1" 2>/dev/null
   fi
 }
 
@@ -73,10 +73,6 @@ FM_OPS_INBOX_TIMEOUT=${FM_OPS_INBOX_TIMEOUT:-10}
 case "$FM_OPS_INBOX_TIMEOUT" in ''|*[!0-9]*|0) FM_OPS_INBOX_TIMEOUT=10 ;; esac
 FM_OPS_INBOX_OUTPUT_MAX_BYTES=${FM_OPS_INBOX_OUTPUT_MAX_BYTES:-32768}
 case "$FM_OPS_INBOX_OUTPUT_MAX_BYTES" in ''|*[!0-9]*|0) FM_OPS_INBOX_OUTPUT_MAX_BYTES=32768 ;; esac
-FM_OPS_INBOX_MARKER_LIMIT=${FM_OPS_INBOX_MARKER_LIMIT:-64}
-case "$FM_OPS_INBOX_MARKER_LIMIT" in ''|*[!0-9]*|0) FM_OPS_INBOX_MARKER_LIMIT=64 ;; esac
-FM_OPS_INBOX_MARKER_SCAN_LIMIT=${FM_OPS_INBOX_MARKER_SCAN_LIMIT:-256}
-case "$FM_OPS_INBOX_MARKER_SCAN_LIMIT" in ''|*[!0-9]*|0) FM_OPS_INBOX_MARKER_SCAN_LIMIT=256 ;; esac
 fm_ops_inbox_external_run() {
   local command=$1
   perl -e '
@@ -179,54 +175,52 @@ fm_ops_inbox_external_run() {
   ' "$FM_OPS_INBOX_TIMEOUT" "$FM_OPS_INBOX_OUTPUT_MAX_BYTES" "$command"
 }
 
-# fm_ops_inbox_home_records <home> <scan-limit>
-# Prints newest-first mtime/path records from a bounded home-inbox scan.
-# A final __FM_OPS_INBOX_OVERFLOW__ record means the scan limit was reached.
-fm_ops_inbox_home_records() {
-  local home=$1 limit=$2 dir marker path mtime count=0 overflow=0
+# fm_ops_inbox_home_all_records <home>
+fm_ops_inbox_home_all_records() {
+  local home=$1 dir marker path stat_record
   local -a records=()
   dir=$(fm_ops_inbox_home_dir "$home")
   marker=$(fm_ops_inbox_home_marker_path "$home")
   [ -d "$dir" ] || return 0
   while IFS= read -r -d '' path; do
     [ "$path" = "$marker" ] && continue
+    stat_record=$(fm_ops_inbox_stat_record "$path") || continue
+    records+=("$stat_record|$path")
+  done < <(find "$dir" -mindepth 1 -maxdepth 2 -type f -print0 2>/dev/null)
+  ((${#records[@]})) && printf '%s\n' "${records[@]}" | LC_ALL=C sort -t '|' -k1,1nr -k3,3
+}
+
+# fm_ops_inbox_home_records <home> <limit>
+# Prints newest-first mtime/path records, capped after ordering every event.
+# A final __FM_OPS_INBOX_OVERFLOW__ record means more records exist.
+fm_ops_inbox_home_records() {
+  local home=$1 limit=$2 record remainder path count=0 overflow=0
+  while IFS= read -r record; do
     if [ "$count" -ge "$limit" ]; then
       overflow=1
-      break
+      continue
     fi
+    remainder=${record#*|}
+    path=${remainder#*|}
+    printf '%s\t%s\n' "${record%%|*}" "$path"
     count=$((count + 1))
-    mtime=$(fm_ops_inbox_stat_mtime "$path") || continue
-    records+=("$mtime"$'\t'"$path")
-  done < <(find "$dir" -mindepth 1 -maxdepth 2 -type f -print0 2>/dev/null)
-  ((${#records[@]})) && printf '%s\n' "${records[@]}" | LC_ALL=C sort -rn
+  done < <(fm_ops_inbox_home_all_records "$home")
   [ "$overflow" -eq 0 ] || printf '%s\n' '__FM_OPS_INBOX_OVERFLOW__'
 }
 
 fm_ops_inbox_home_marker() {
-  local home=$1 marker record path sig count=0 selected_overflow=0 scan_overflow=0
+  local home=$1 marker record remainder path sig
   marker=$(fm_ops_inbox_home_marker_path "$home")
   if [ -f "$marker" ]; then
     sig=$(fm_ops_inbox_stat_sig "$marker") || return 1
     printf '%s\t%s\n' "$sig" "$marker"
   fi
   while IFS= read -r record; do
-    case "$record" in
-      __FM_OPS_INBOX_OVERFLOW__)
-        scan_overflow=1
-        continue
-        ;;
-    esac
-    if [ "$count" -ge "$FM_OPS_INBOX_MARKER_LIMIT" ]; then
-      selected_overflow=1
-      continue
-    fi
-    path=${record#*$'\t'}
-    sig=$(fm_ops_inbox_stat_sig "$path") || continue
+    remainder=${record#*|}
+    sig=${remainder%%|*}
+    path=${remainder#*|}
     printf '%s\t%s\n' "$sig" "$path"
-    count=$((count + 1))
-  done < <(fm_ops_inbox_home_records "$home" "$FM_OPS_INBOX_MARKER_SCAN_LIMIT")
-  [ "$selected_overflow" -eq 0 ] || printf '%s\n' '__FM_OPS_INBOX_MARKER_LIMIT__'
-  [ "$scan_overflow" -eq 0 ] || printf '%s\n' '__FM_OPS_INBOX_MARKER_SCAN_LIMIT__'
+  done < <(fm_ops_inbox_home_all_records "$home")
 }
 
 fm_ops_inbox_home_has_events() {

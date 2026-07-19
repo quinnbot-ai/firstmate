@@ -27,9 +27,8 @@ Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, whil
 ## Operations inbox (ops-inbox/ / config/ops-inbox-cmd)
 
 Each home may receive operational-failure event files directly in its local `ops-inbox/` directory or one source directory below it (`ops-inbox/<source>/<event>`).
-Each event producer must atomically replace `ops-inbox/.fm-ops-inbox.marker` whenever it adds, replaces, or acknowledges an event.
-The watcher fingerprints that aggregate marker alongside a bounded sample of event files, so retained overflow events remain observable without unbounded polling.
-`FM_OPS_INBOX_MARKER_LIMIT` bounds that fingerprint sample to 64 event files by default, and `FM_OPS_INBOX_MARKER_SCAN_LIMIT` bounds its discovery scan to 256 paths by default.
+Each event producer should atomically replace `ops-inbox/.fm-ops-inbox.marker` whenever it adds, replaces, or acknowledges an event.
+The watcher fingerprints that aggregate marker alongside every monitored event file, so updates remain observable even when the digest omits older paths.
 Deeper paths are outside the monitored layout.
 `bin/fm-session-start.sh` reports a bounded count and newest full paths from that directory without changing any event or acknowledgement state.
 Set the local, gitignored `config/ops-inbox-cmd` to one list-only shell command when this machine also has a durable machine-level inbox.
@@ -38,10 +37,10 @@ The command must be trusted local code and print only its current unhandled crit
 The command is intentionally operator-owned and generic, so firstmate does not encode a machine-specific inbox path or acknowledgement implementation.
 The watcher fingerprints both sources, wakes immediately for a changed inbox while a regular task is in flight, and checks the same fingerprint on its existing heartbeat cadence otherwise.
 `FM_SESSION_START_OPS_INBOX_LIMIT` bounds both the home-event paths and configured-command output lines in the digest, defaulting to 5.
-`FM_SESSION_START_OPS_INBOX_SCAN_LIMIT` bounds retained home-event records inspected at startup, defaulting to 256, and reports an explicit sampled overflow when reached.
+`FM_SESSION_START_OPS_INBOX_SCAN_LIMIT` bounds retained home-event records shown after ordering at startup, defaulting to 256, and reports an explicit truncation when reached.
 `FM_OPS_INBOX_TIMEOUT` bounds each configured command invocation to 10 seconds by default.
 `FM_OPS_INBOX_OUTPUT_MAX_BYTES` bounds each configured command capture to 32768 bytes by default.
-Homes without the aggregate marker retain bounded best-effort event-file detection only.
+Homes without the aggregate marker remain observable through their monitored event files.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
@@ -388,15 +387,13 @@ FM_BACKEND_CMUX_IDLE_RE='^Type a message\.\.\.$'  # cmux-only: empty-composer pl
 CMUX_SOCKET_PASSWORD=   # cmux-only: socket password fallback when config/cmux-socket-password is absent (docs/cmux-backend.md)
 FM_SESSION_START_STATUS_TAIL=5   # state/*.status lines printed per task in the session-start digest
 FM_SESSION_START_OPS_INBOX_LIMIT=5   # home-event paths and external-command output lines printed in the operations-inbox digest
-FM_SESSION_START_OPS_INBOX_SCAN_LIMIT=256   # home-event records inspected for the bounded operations-inbox startup digest
+FM_SESSION_START_OPS_INBOX_SCAN_LIMIT=256   # newest home-event records retained for the operations-inbox startup digest
 FM_BOOTSTRAP_DETECT_ONLY=0   # internal/read-only session-start mode: skip bootstrap's mutating sweeps and print advisory TANGLE wording
 FM_GUARD_READ_ONLY=0    # internal/read-only guard mode: keep alarms but suppress drain, supervision repair, and checkout repair commands
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the guarded operation WILL still run.'   # banner continuation line; fm-send.sh overrides it to name the requested message specifically
 FM_POLL=15              # seconds between watcher poll cycles
 FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartbeats are absorbed while idle
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
-FM_OPS_INBOX_MARKER_LIMIT=64   # home-event records included in each watcher operations-inbox fingerprint
-FM_OPS_INBOX_MARKER_SCAN_LIMIT=256   # home-event paths considered for each watcher operations-inbox fingerprint
 FM_OPS_INBOX_TIMEOUT=10   # seconds allowed for each configured operations-inbox command capture
 FM_OPS_INBOX_OUTPUT_MAX_BYTES=32768   # byte cap for each configured operations-inbox command capture
 FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls, custom checks, or X-mode dispatch)

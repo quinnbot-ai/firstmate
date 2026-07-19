@@ -584,6 +584,27 @@ test_local_only_truly_unpushed_refuses() {
   pass "local-only worktree with truly unpushed work is refused (safety preserved)"
 }
 
+test_local_only_missing_origin_head_ignores_feature_checkout() {
+  local case_dir rc task_head
+  case_dir=$(make_case missing-origin-head-feature-checkout)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "unpushed work"
+  task_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" branch feature-primary "$task_head"
+  git -C "$case_dir/project" checkout -q feature-primary
+  git -C "$case_dir/project" remote set-head origin -d
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "missing-origin-head-feature-checkout: teardown should refuse"
+  grep -q REFUSED "$case_dir/stderr" || fail "missing-origin-head-feature-checkout: no REFUSED line in stderr"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "missing-origin-head-feature-checkout: teardown removed task metadata"
+  pass "local-only teardown ignores a feature primary checkout when origin HEAD is absent"
+}
+
 test_local_only_merged_to_local_main_allows() {
   local case_dir rc
   case_dir=$(make_case merged-main)
@@ -1533,6 +1554,7 @@ test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
+test_local_only_missing_origin_head_ignores_feature_checkout
 test_local_only_merged_to_local_main_allows
 test_local_only_rebased_equivalent_patches_allow
 test_local_only_rebased_branch_with_unlanded_patch_refuses
