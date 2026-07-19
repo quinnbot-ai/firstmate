@@ -1544,6 +1544,33 @@ test_treehouse_spawn_preserves_unverified_worktree() {
   pass "treehouse spawn returns only its leased worktree while reaping its endpoint"
 }
 
+test_treehouse_lease_rejects_unverified_output() {
+  local rec id out status foreign lease_output case_name
+  for case_name in primary foreign; do
+    id="profile-treehouse-lease-$case_name-z24"
+    rec=$(make_spawn_case "profile-treehouse-lease-$case_name" claude "$id")
+    read_case_record "$rec"
+    foreign="$CASE_DIR/foreign"
+    if [ "$case_name" = foreign ]; then
+      git init --quiet "$foreign"
+      lease_output="$foreign"
+    else
+      lease_output="$PROJ_DIR"
+    fi
+
+    out=$(FM_FAKE_TREEHOUSE_LEASE_PATH="$lease_output" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 1 "$status" "spawn must reject an unverified $case_name lease output"
+    assert_no_grep "treehouse return --force $lease_output" "$CASE_DIR/backend.log" \
+      "spawn cleanup returned an unverified $case_name lease output"
+    assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+      "unverified $case_name lease output did not close its task endpoint"
+    assert_absent "$HOME_DIR/state/$id.meta" \
+      "fully reaped unverified $case_name lease output retained recovery metadata"
+  done
+  pass "treehouse lease rejects unverified output while reaping its endpoint"
+}
+
 test_treehouse_lease_failure_reaps_endpoint() {
   local rec id out status
   id=profile-treehouse-lease-failure-z24
@@ -1805,6 +1832,7 @@ test_codex_teardown_accepts_legacy_task_temp_metadata
 test_codex_teardown_refuses_symlinked_data_root
 test_codex_crewmate_home_records_failed_worktree_return
 test_treehouse_spawn_preserves_unverified_worktree
+test_treehouse_lease_rejects_unverified_output
 test_treehouse_lease_failure_reaps_endpoint
 test_codex_spawn_abort_accepts_an_already_absent_endpoint
 test_codex_crewmate_home_records_failed_endpoint_removal

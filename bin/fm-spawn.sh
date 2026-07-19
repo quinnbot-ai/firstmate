@@ -1247,7 +1247,7 @@ real_path_or_raw() {  # <path>
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
 validate_spawn_worktree() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
+  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real wt_common wt_common_real proj_common proj_common_real
   wt_real=
   if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
     wt_real=
@@ -1258,7 +1258,25 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   if ! wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P); then
     wt_top_real=
   fi
-  if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
+  wt_common=$(git -C "$WT" rev-parse --git-common-dir 2>/dev/null || true)
+  case "$wt_common" in
+    /*) ;;
+    *) wt_common="$wt_real/$wt_common" ;;
+  esac
+  wt_common_real=
+  if ! wt_common_real=$(cd "$wt_common" 2>/dev/null && pwd -P); then
+    wt_common_real=
+  fi
+  proj_common=$(git -C "$PROJ_ABS" rev-parse --git-common-dir 2>/dev/null || true)
+  case "$proj_common" in
+    /*) ;;
+    *) proj_common="$proj_real/$proj_common" ;;
+  esac
+  proj_common_real=
+  if ! proj_common_real=$(cd "$proj_common" 2>/dev/null && pwd -P); then
+    proj_common_real=
+  fi
+  if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ -z "$wt_common_real" ] || [ -z "$proj_common_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ] || [ "$wt_common_real" != "$proj_common_real" ]; then
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
@@ -1417,9 +1435,9 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     echo "error: treehouse did not report a leased worktree for $ID" >&2
     exit 1
   }
+  validate_spawn_worktree "treehouse get --lease" "$T"
   TREEHOUSE_ENDPOINT_CLEANUP=0
   TREEHOUSE_ABORT_CLEANUP=1
-  validate_spawn_worktree "treehouse get --lease" "$T"
   spawn_send_text_line "$WT_TARGET" "cd $(shell_quote "$WT")"
 
   # Wait for the pane to enter the leased worktree.
