@@ -1373,6 +1373,40 @@ SH
   pass "operations-inbox fingerprints use bounded two-level file markers"
 }
 
+test_ops_inbox_marker_scan_counts_discovered_paths() {
+  local dir home fakebin stat_log real_find real_stat records stat_count
+  dir=$(make_case ops-inbox-churn-bound); home="$dir/home"; fakebin="$dir/fakebin"
+  mkdir -p "$home/ops-inbox" "$home/config"
+  real_find=$(command -v find)
+  real_stat=$(command -v stat)
+  stat_log="$dir/stat.log"
+  cat > "$fakebin/find" <<SH
+#!/usr/bin/env bash
+case " \$* " in
+  *' -mindepth 1 -maxdepth 2 -type f -print0 '*)
+    printf '%s\\0' "\$FM_OPS_INBOX_CHURN_ONE" "\$FM_OPS_INBOX_CHURN_TWO" "\$FM_OPS_INBOX_CHURN_THREE"
+    exit 0
+    ;;
+esac
+exec "$real_find" "\$@"
+SH
+  cat > "$fakebin/stat" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$stat_log"
+exec "$real_stat" "\$@"
+SH
+  chmod +x "$fakebin/find" "$fakebin/stat"
+  records=$(PATH="$fakebin:$PATH" \
+    FM_OPS_INBOX_CHURN_ONE="$home/ops-inbox/missing-one" \
+    FM_OPS_INBOX_CHURN_TWO="$home/ops-inbox/missing-two" \
+    FM_OPS_INBOX_CHURN_THREE="$home/ops-inbox/missing-three" \
+    fm_ops_inbox_home_records "$home" 2)
+  assert_contains "$records" '__FM_OPS_INBOX_OVERFLOW__' "operations-inbox scan did not mark exhausted discovery budget"
+  stat_count=$(wc -l < "$stat_log" | tr -d '[:space:]')
+  [ "$stat_count" -eq 2 ] || fail "operations-inbox scan statted past its discovered-path budget ($stat_count)"
+  pass "operations-inbox scans bound discovered paths despite churn"
+}
+
 test_ops_inbox_external_output_is_bounded_and_timed() {
   local dir home command output rc bytes started elapsed escaped_pid
   dir=$(make_case ops-inbox-bounded-command); home="$dir/home"; command="$dir/external-inbox"
@@ -1582,6 +1616,7 @@ test_ops_inbox_new_event_wakes_with_task_in_flight
 test_ops_inbox_new_event_wakes_on_heartbeat_without_tasks
 test_ops_inbox_fingerprint_distinguishes_same_second_same_size_rewrite
 test_ops_inbox_fingerprint_uses_bounded_two_level_file_markers
+test_ops_inbox_marker_scan_counts_discovered_paths
 test_ops_inbox_external_output_is_bounded_and_timed
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot

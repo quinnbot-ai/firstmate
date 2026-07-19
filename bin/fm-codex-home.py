@@ -406,6 +406,9 @@ def activate_command(args, home_fd, command, result_fd, token):
         if remaining <= 0:
             break
         time.sleep(min(remaining, 0.05))
+    exited_pid, status = os.waitpid(pid, os.WNOHANG)
+    if exited_pid:
+        raise ActivationExecError("isolated Codex launch exited during activation")
     try:
         finish_activation_result_with_token(result_fd, b"ready", token)
     except BaseException:

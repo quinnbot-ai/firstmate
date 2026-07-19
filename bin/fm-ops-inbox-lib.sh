@@ -192,9 +192,9 @@ fm_ops_inbox_home_records() {
       overflow=1
       break
     fi
+    count=$((count + 1))
     mtime=$(fm_ops_inbox_stat_mtime "$path") || continue
     records+=("$mtime"$'\t'"$path")
-    count=$((count + 1))
   done < <(find "$dir" -mindepth 1 -maxdepth 2 -type f -print0 2>/dev/null)
   ((${#records[@]})) && printf '%s\n' "${records[@]}" | LC_ALL=C sort -rn
   [ "$overflow" -eq 0 ] || printf '%s\n' '__FM_OPS_INBOX_OVERFLOW__'

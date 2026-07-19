@@ -1059,6 +1059,51 @@ SH
   pass "Codex activation rejects delayed startup exits"
 }
 
+test_codex_home_activation_rechecks_before_publishing_ready() {
+  if ! python3 - "$ROOT/bin/fm-codex-home.py" <<'PY'
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("fm_codex_home", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+module.os.pipe = lambda: (10, 11)
+module.os.set_inheritable = lambda *args: None
+module.os.fork = lambda: 123
+module.os.close = lambda fd: None
+module.os.read = lambda fd, size: b""
+wait_calls = []
+
+def waitpid(pid, flags):
+    wait_calls.append((pid, flags))
+    if len(wait_calls) == 1:
+        return 0, 0
+    return pid, 0
+
+module.os.waitpid = waitpid
+monotonic_values = iter((0.0, 1.0))
+module.time.monotonic = lambda: next(monotonic_values)
+module.time.sleep = lambda seconds: None
+module.finish_activation_result_with_token = lambda *args: (_ for _ in ()).throw(
+    AssertionError("published ready after the child exited")
+)
+
+try:
+    module.activate_command(object(), 12, ["codex"], 13, b"token")
+except module.ActivationExecError:
+    pass
+else:
+    raise AssertionError("activation accepted an exit after the stability check")
+
+assert len(wait_calls) == 2
+PY
+  then
+    fail "Codex activation did not recheck the child before publishing ready"
+  fi
+  pass "Codex activation rechecks the child before publishing ready"
+}
+
 test_codex_home_activation_refuses_replaced_path() {
   local data source name home result token out status
   data="$TMP_ROOT/codex-activation-race-data"
@@ -1640,6 +1685,7 @@ test_codex_home_activation_uses_open_descriptor
 test_codex_home_activation_reports_exec_failure
 test_codex_home_activation_rejects_immediate_exit
 test_codex_home_activation_rejects_delayed_exit
+test_codex_home_activation_rechecks_before_publishing_ready
 test_codex_home_activation_refuses_replaced_path
 test_codex_home_activation_result_refuses_symlink
 test_codex_home_activation_result_waits_for_empty_file
