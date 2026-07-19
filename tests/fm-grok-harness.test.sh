@@ -26,7 +26,14 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse gh-axi gh
+  fm_fake_exit0 "$fakebin" gh-axi gh
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  get) printf '%s\n' "${FM_FAKE_PANE_PATH:?}" ;;
+esac
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
