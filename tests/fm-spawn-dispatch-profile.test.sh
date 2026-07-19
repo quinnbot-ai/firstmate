@@ -1334,9 +1334,11 @@ test_codex_spawn_abort_accepts_an_already_absent_endpoint() {
   expect_code 1 "$status" "Codex spawn should report the isolated-home activation failure"
   assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
     "failed spawn cleanup should close a live endpoint before releasing its lease"
-  assert_absent "$HOME_DIR/state/$id.meta" \
-    "failed spawn cleanup retained metadata after confirming endpoint absence"
-  pass "Codex spawn abort accepts a confirmed already-absent endpoint"
+  assert_grep 'failed_spawn=1' "$HOME_DIR/state/$id.meta" \
+    "failed spawn cleanup did not retain recovery metadata after endpoint closure"
+  assert_grep 'treehouse_lease=1' "$HOME_DIR/state/$id.meta" \
+    "failed spawn cleanup did not retain its committed lease"
+  pass "Codex spawn abort retains a committed lease after endpoint closure"
 }
 
 test_codex_crewmate_home_records_failed_endpoint_removal() {
