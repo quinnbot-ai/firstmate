@@ -36,6 +36,10 @@ fm_ops_inbox_home_dir() {
   printf '%s/ops-inbox\n' "$1"
 }
 
+fm_ops_inbox_home_marker_path() {
+  printf '%s/.fm-ops-inbox.marker\n' "$(fm_ops_inbox_home_dir "$1")"
+}
+
 # fm_ops_inbox_external_command <config-dir>
 # Prints the first non-empty, non-comment config line.  That line is an
 # operator-owned list-only shell command, intentionally generic so tracked
@@ -177,11 +181,13 @@ fm_ops_inbox_external_run() {
 # Prints newest-first mtime/path records from a bounded home-inbox scan.
 # A final __FM_OPS_INBOX_OVERFLOW__ record means the scan limit was reached.
 fm_ops_inbox_home_records() {
-  local home=$1 limit=$2 dir path mtime count=0 overflow=0
+  local home=$1 limit=$2 dir marker path mtime count=0 overflow=0
   local -a records=()
   dir=$(fm_ops_inbox_home_dir "$home")
+  marker=$(fm_ops_inbox_home_marker_path "$home")
   [ -d "$dir" ] || return 0
   while IFS= read -r -d '' path; do
+    [ "$path" = "$marker" ] && continue
     if [ "$count" -ge "$limit" ]; then
       overflow=1
       break
@@ -195,7 +201,12 @@ fm_ops_inbox_home_records() {
 }
 
 fm_ops_inbox_home_marker() {
-  local home=$1 record path sig count=0 selected_overflow=0 scan_overflow=0
+  local home=$1 marker record path sig count=0 selected_overflow=0 scan_overflow=0
+  marker=$(fm_ops_inbox_home_marker_path "$home")
+  if [ -f "$marker" ]; then
+    sig=$(fm_ops_inbox_stat_sig "$marker") || return 1
+    printf '%s\t%s\n' "$sig" "$marker"
+  fi
   while IFS= read -r record; do
     case "$record" in
       __FM_OPS_INBOX_OVERFLOW__)
@@ -217,10 +228,11 @@ fm_ops_inbox_home_marker() {
 }
 
 fm_ops_inbox_home_has_events() {
-  local home=$1 dir
+  local home=$1 dir marker
   dir=$(fm_ops_inbox_home_dir "$home")
+  marker=$(fm_ops_inbox_home_marker_path "$home")
   [ -d "$dir" ] || return 1
-  [ -n "$(find "$dir" -mindepth 1 -maxdepth 2 -type f -print -quit 2>/dev/null)" ]
+  [ -n "$(find "$dir" -mindepth 1 -maxdepth 2 -type f ! -path "$marker" -print -quit 2>/dev/null)" ]
 }
 
 # fm_ops_inbox_has_events <home> <config-dir>

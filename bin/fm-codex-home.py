@@ -329,6 +329,9 @@ def read_activation_result(args):
             die("isolated Codex home activation result is unsafe")
     finally:
         os.close(fd)
+    if not content:
+        print("pending")
+        return 3
     for state in (b"ready", b"failed"):
         if content == state + b" " + token + b"\n":
             print(state.decode())

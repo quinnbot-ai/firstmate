@@ -27,7 +27,8 @@ Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, whil
 ## Operations inbox (ops-inbox/ / config/ops-inbox-cmd)
 
 Each home may receive operational-failure event files directly in its local `ops-inbox/` directory or one source directory below it (`ops-inbox/<source>/<event>`).
-Write each event once or atomically replace it so the watcher can detect the event or source marker without rescanning retained event files.
+Each event producer must atomically replace `ops-inbox/.fm-ops-inbox.marker` whenever it adds, replaces, or acknowledges an event.
+The watcher fingerprints that aggregate marker alongside a bounded sample of event files, so retained overflow events remain observable without unbounded polling.
 Deeper paths are outside the monitored layout.
 `bin/fm-session-start.sh` reports a bounded count and newest full paths from that directory without changing any event or acknowledgement state.
 Set the local, gitignored `config/ops-inbox-cmd` to one list-only shell command when this machine also has a durable machine-level inbox.
@@ -39,7 +40,7 @@ The watcher fingerprints both sources, wakes immediately for a changed inbox whi
 `FM_SESSION_START_OPS_INBOX_SCAN_LIMIT` bounds retained home-event records inspected at startup, defaulting to 256, and reports an explicit sampled overflow when reached.
 `FM_OPS_INBOX_TIMEOUT` bounds each configured command invocation to 10 seconds by default.
 `FM_OPS_INBOX_OUTPUT_MAX_BYTES` bounds each configured command capture to 32768 bytes by default.
-The watcher fingerprints every supported home-event file, so retained events remain observable even after the bounded startup digest truncates its display.
+Homes without the aggregate marker retain bounded best-effort event-file detection only.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 

@@ -1096,6 +1096,23 @@ test_codex_home_activation_result_refuses_symlink() {
   pass "Codex activation result reader rejects symlinks"
 }
 
+test_codex_home_activation_result_waits_for_empty_file() {
+  local data home result token out status
+  data=$(mktemp -d "$TMP_ROOT/codex-activation-result-empty.XXXXXXXX")
+  home="$data/codex-crewmate/.fm-codex-home.0123456789abcdef0123456789abcdef"
+  result="$data/codex-crewmate/.fm-codex-activation.${home##*/}"
+  mkdir -p "$data/codex-crewmate"
+  chmod 700 "$data/codex-crewmate"
+  : > "$result"
+  chmod 600 "$result"
+  token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  out=$(python3 "$ROOT/bin/fm-codex-home.py" --read-activation-result --data "$data" --home "$home" --result-token "$token" 2>&1)
+  status=$?
+  expect_code 3 "$status" "Codex activation must wait for an empty private result"
+  [ "$out" = pending ] || fail "Codex activation did not report an empty result as pending: $out"
+  pass "Codex activation reader waits for a valid empty result"
+}
+
 test_codex_home_activation_refuses_existing_result() {
   local data source home result token out status
   data=$(mktemp -d "$TMP_ROOT/codex-activation-existing-result.XXXXXXXX")
@@ -1189,6 +1206,33 @@ test_codex_teardown_preserves_failed_endpoint_metadata() {
   [ -f "$HOME_DIR/state/$id.meta" ] || fail "failed endpoint teardown discarded recovery metadata"
   [ -d "$crew_home" ] || fail "failed endpoint teardown removed the credential home before close confirmation"
   pass "failed endpoint teardown retains recovery metadata until close succeeds"
+}
+
+test_codex_teardown_accepts_absent_endpoint_after_close_error() {
+  local rec id out status launch crew_home target_state
+  id=profile-codex-absent-after-close-error-z71
+  rec=$(make_spawn_case profile-codex-absent-after-close-error codex "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "Codex spawn should prepare an absent-endpoint recovery case"
+  launch=$(cat "$LAUNCH_LOG")
+  crew_home=$(codex_home_from_launch "$launch")
+  materialize_codex_home "$crew_home" "$HOME_DIR/data" "$CASE_DIR/user/.codex" "fm-crewmate-$id" "$WT_DIR"
+  printf 'failed_spawn=1\nendpoint_cleanup_pending=1\n' >> "$HOME_DIR/state/$id.meta"
+  target_state="$CASE_DIR/target-state"
+  printf 'gone\n' > "$target_state"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_FAKE_TARGET_STATE="$target_state" \
+    FM_FAKE_BACKEND_LOG="$CASE_DIR/backend.log" FM_FAKE_BACKEND_KILL_STATUS=75 PATH="$FAKEBIN_DIR:$PATH" \
+    "$TEARDOWN" "$id" --force 2>&1)
+  status=$?
+  expect_code 0 "$status" "teardown must recover when the failed-spawn endpoint is already absent"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "absent endpoint teardown retained recovery metadata"
+  [ ! -e "$crew_home" ] || fail "absent endpoint teardown retained the credential home"
+  pass "failed endpoint teardown accepts verified absence after a close error"
 }
 
 test_codex_teardown_preserves_metadata_when_successful_close_leaves_endpoint_live() {
@@ -1598,10 +1642,12 @@ test_codex_home_activation_rejects_immediate_exit
 test_codex_home_activation_rejects_delayed_exit
 test_codex_home_activation_refuses_replaced_path
 test_codex_home_activation_result_refuses_symlink
+test_codex_home_activation_result_waits_for_empty_file
 test_codex_home_activation_refuses_existing_result
 test_codex_home_activation_failure_aborts_spawn
 test_codex_activation_uses_managed_data_root
 test_codex_teardown_preserves_failed_endpoint_metadata
+test_codex_teardown_accepts_absent_endpoint_after_close_error
 test_codex_teardown_preserves_metadata_when_successful_close_leaves_endpoint_live
 test_codex_teardown_preserves_metadata_when_endpoint_query_is_unavailable
 test_codex_teardown_refuses_malformed_task_temp_metadata
