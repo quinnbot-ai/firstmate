@@ -60,6 +60,7 @@ test_gate_scope_and_recovery_exceptions() {
   expect_deny "time output-wrapped fleet command" 'time -o /tmp/time.out bin/fm-send.sh task hi' 'fm-send.sh'
   expect_deny "time long-output-wrapped fleet command" 'time --output=/tmp/time.out bin/fm-send.sh task hi' 'fm-send.sh'
   expect_deny "time format-wrapped fleet command" 'time --format=%e bin/fm-send.sh task hi' 'fm-send.sh'
+  expect_deny "time BSD resource-wrapped fleet command" 'time -l bin/fm-send.sh task hi' 'fm-send.sh'
   expect_allow "time-wrapped recovery" 'time bin/fm-watch-arm.sh'
   expect_deny "recovery bundled with unrelated fleet command" 'bin/fm-wake-drain.sh; bin/fm-send.sh task hi' 'fm-send.sh'
   expect_deny "literal nested fleet command" "bash -lc 'bin/fm-bootstrap.sh'" 'fm-bootstrap.sh'

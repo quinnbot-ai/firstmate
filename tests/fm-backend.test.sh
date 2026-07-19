@@ -520,6 +520,42 @@ test_tmux_meta_prefers_stable_window_id() {
   pass "tmux metadata uses a stable window id instead of the recyclable label"
 }
 
+test_tmux_window_id_requires_pinned_label() {
+  local fakebin="$TMP_ROOT/tmux-window-id-label" status
+  mkdir -p "$fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  display-message) printf '%s\n' "${FM_FAKE_TMUX_WINDOW_NAME:-fm-task-x1}" ;;
+  kill-window) printf '%s\n' "$*" >> "${FM_FAKE_TMUX_LOG:?}" ;;
+esac
+SH
+  chmod +x "$fakebin/tmux"
+
+  PATH="$fakebin:$PATH" fm_backend_target_exists tmux @42 fm-task-x1 \
+    || fail "matching tmux window id and label should be live"
+  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW_NAME=unrelated fm_backend_target_exists tmux @42 fm-task-x1; then
+    fail "reused tmux window id with a different label must not be live"
+  fi
+  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW_NAME=unrelated fm_backend_target_absent tmux @42 fm-task-x1; then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -eq 2 ] || fail "reused tmux window id must be unknown, got $status"
+  : > "$TMP_ROOT/tmux-window-id-kill.log"
+  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW_NAME=unrelated FM_FAKE_TMUX_LOG="$TMP_ROOT/tmux-window-id-kill.log" \
+    FM_BACKEND_KILL_STRICT=1 fm_backend_kill tmux @42 '' fm-task-x1; then
+    fail "strict cleanup must refuse a reused tmux window id"
+  fi
+  [ ! -s "$TMP_ROOT/tmux-window-id-kill.log" ] || fail "strict cleanup killed a reused tmux window id"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$TMP_ROOT/tmux-window-id-kill.log" \
+    FM_BACKEND_KILL_STRICT=1 fm_backend_kill tmux @42 '' fm-task-x1 \
+    || fail "strict cleanup should kill the matching task window"
+  [ -s "$TMP_ROOT/tmux-window-id-kill.log" ] || fail "matching task window was not killed"
+  pass "tmux window IDs require their pinned task label before liveness or cleanup"
+}
+
 test_resolve_selector_three_forms() {
   local state=$TMP_ROOT/resolve-state fakebin out
   mkdir -p "$state"
@@ -1108,6 +1144,7 @@ test_backend_source_shell_portable
 test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta
 test_tmux_meta_prefers_stable_window_id
+test_tmux_window_id_requires_pinned_label
 test_resolve_selector_three_forms
 test_backend_of_selector_matches_explicit_target_meta
 test_send_conformance_old_vs_new
