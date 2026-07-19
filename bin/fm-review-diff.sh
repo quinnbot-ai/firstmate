@@ -49,23 +49,27 @@ PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 [ -d "$WT" ] || { echo "error: worktree for task $ID is missing: $WT" >&2; exit 1; }
 [ -d "$PROJ" ] || { echo "error: project for task $ID is missing: $PROJ" >&2; exit 1; }
 
-default_branch() {
-  local ref branch
-  ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+default_branch() {  # <remote>
+  local remote=$1 ref branch
+  ref=$(git -C "$WT" symbolic-ref --quiet --short "refs/remotes/$remote/HEAD" 2>/dev/null || true)
   if [ -n "$ref" ]; then
-    echo "${ref#origin/}"
+    echo "${ref#"$remote/"}"
+    return 0
+  fi
+  ref=$(git -C "$WT" ls-remote --symref "$remote" HEAD 2>/dev/null | awk '/^ref: / { sub("refs/heads/", "", $2); print $2; exit }' || true)
+  if [ -n "$ref" ]; then
+    echo "$ref"
     return 0
   fi
   for branch in main master; do
-    if git -C "$PROJ" show-ref --verify --quiet "refs/heads/$branch"; then
+    if git -C "$WT" show-ref --verify --quiet "refs/remotes/$remote/$branch" \
+      || git -C "$WT" show-ref --verify --quiet "refs/heads/$branch"; then
       echo "$branch"
       return 0
     fi
   done
   return 1
 }
-
-DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
 
 BRANCH="fm/$ID"
 if ! git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; then
@@ -171,6 +175,12 @@ resolve_pr_head() {
 
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD_RECORDED=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
+BASE_REMOTE=origin
+if [ -n "$PR_URL" ] && [[ "$PR_URL" != [0-9]* ]]; then
+  BASE_REMOTE=$(remote_for_pr "$PR_URL" 2>/dev/null || true)
+  [ -n "$BASE_REMOTE" ] || BASE_REMOTE=origin
+fi
+DEFAULT=$(default_branch "$BASE_REMOTE") || { echo "error: cannot determine default branch for $PROJ on $BASE_REMOTE; expected $BASE_REMOTE/HEAD, main, or master" >&2; exit 1; }
 COMPARE_REF=$BRANCH
 if [ -n "$PR_URL" ]; then
   if PR_HEAD=$(resolve_pr_head "$PR_URL" "$PR_HEAD_RECORDED"); then
@@ -180,11 +190,11 @@ if [ -n "$PR_URL" ]; then
   fi
 fi
 
-if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
+if git -C "$WT" remote get-url "$BASE_REMOTE" >/dev/null 2>&1; then
   # Update the remote-tracking ref itself; a bare single-branch fetch can leave
   # origin/<default> stale on some Git versions and only refresh FETCH_HEAD.
-  git -C "$WT" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet
-  BASE="origin/$DEFAULT"
+  git -C "$WT" fetch "$BASE_REMOTE" "+refs/heads/$DEFAULT:refs/remotes/$BASE_REMOTE/$DEFAULT" --quiet
+  BASE="$BASE_REMOTE/$DEFAULT"
 else
   BASE="$DEFAULT"
 fi

@@ -195,9 +195,37 @@ test_pr_meta_fetches_from_matching_remote_not_origin() {
   pass "fm-review-diff fetches PR heads only from the repository named by pr="
 }
 
+test_pr_meta_uses_matching_remote_for_base() {
+  local case_dir out
+  case_dir=$(make_case matching-base-remote)
+  git init -q --bare "$case_dir/upstream.git"
+  git -C "$case_dir/upstream.git" symbolic-ref HEAD refs/heads/main
+  git -C "$case_dir/wt" remote add upstream "$case_dir/upstream.git"
+  git -C "$case_dir/wt" checkout -q -b upstream-base-tmp main
+  printf 'upstream-base\n' > "$case_dir/wt/upstream.txt"
+  git -C "$case_dir/wt" add upstream.txt
+  git -C "$case_dir/wt" commit -qm "upstream base"
+  git -C "$case_dir/wt" push -q upstream "upstream-base-tmp:main"
+  git -C "$case_dir/wt" checkout -q -b upstream-pr-tmp upstream-base-tmp
+  printf 'upstream-pr\n' > "$case_dir/wt/pr.txt"
+  git -C "$case_dir/wt" add pr.txt
+  git -C "$case_dir/wt" commit -qm "upstream PR"
+  git -C "$case_dir/wt" push -q upstream "upstream-pr-tmp:refs/pull/9/head"
+  git -C "$case_dir/wt" checkout -q fm/task-x1
+  write_task_meta "$case_dir" "pr=file://$case_dir/upstream.git/pull/9"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+upstream-pr' "matching-base-remote: diff must include the upstream PR change"
+  assert_not_contains "$out" '+upstream-base' "matching-base-remote: diff must not compare an upstream PR against origin's base"
+  assert_contains "$out" 'diff base: upstream/main' "matching-base-remote: diff must name the PR repository base"
+  pass "fm-review-diff fetches the comparison base from the repository named by pr="
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
 test_pr_meta_fetches_from_matching_remote_not_origin
+test_pr_meta_uses_matching_remote_for_base

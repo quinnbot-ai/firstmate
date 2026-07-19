@@ -666,7 +666,8 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
   local backend=$1 target=$2 expected_label=${3:-} session pane
   case "$backend" in
     tmux)
-      tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1
+      fm_backend_source tmux || return 1
+      fm_backend_tmux_target_ready "$target" "$expected_label"
       ;;
     herdr)
       fm_backend_source herdr || return 1
@@ -705,9 +706,14 @@ fm_backend_target_absent() {  # <backend> <target> [expected-label] -> 0 absent,
   local backend=$1 target=$2 expected_label=${3:-} out status state session pane wsid title
   case "$backend" in
     tmux)
-      out=$(tmux display-message -p -t "$target" '#{pane_id}' 2>&1)
+      out=$(tmux display-message -p -t "$target" '#{window_name}' 2>&1)
       status=$?
-      [ "$status" -eq 0 ] && return 1
+      if [ "$status" -eq 0 ]; then
+        case "$target" in
+          @*) [ -z "$expected_label" ] || [ "$out" = "$expected_label" ] || return 2 ;;
+        esac
+        return 1
+      fi
       case "$out" in
         "can't find "*|"no server running on "*) return 0 ;;
         *) return 2 ;;
