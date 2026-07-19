@@ -3,7 +3,7 @@
 # watcher.  The home directory is $FM_HOME/ops-inbox; an optional local
 # config/ops-inbox-cmd supplies one prompt list-only command for a machine
 # inbox.  Watcher fingerprints stat at most 64 entries from a 256-file
-# a 256-file early-cutoff scan, with both bounds configurable below.  This file
+# early-cutoff scan, with both bounds configurable below.  This file
 # owns the config seam and fingerprint mechanics.
 
 fm_ops_inbox_stat_sig() {
@@ -226,7 +226,7 @@ fm_ops_inbox_home_marker() {
     count=$((count + 1))
   done < <(fm_ops_inbox_home_records "$home" "$FM_OPS_INBOX_MARKER_SCAN_LIMIT")
   if [ "$selected_overflow" -ne 0 ] || [ "$scan_overflow" -ne 0 ]; then
-    printf '%s\n' "__FM_OPS_INBOX_MARKER_OVERFLOW__:${BASHPID:-$$}"
+    printf '%s\n' '__FM_OPS_INBOX_MARKER_OVERFLOW__'
   fi
 }
 

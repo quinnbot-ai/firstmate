@@ -1365,8 +1365,8 @@ SH
   assert_contains "$marker" '__FM_OPS_INBOX_MARKER_OVERFLOW__' "operations-inbox marker did not disclose its overflow bound"
   overflow_before=$(fm_ops_inbox_fingerprint "$home" "$home/config")
   overflow_repeat=$(fm_ops_inbox_fingerprint "$home" "$home/config")
-  [ "$overflow_before" != "$overflow_repeat" ] \
-    || fail "overflowed operations-inbox fingerprint remained suppressible"
+  [ "$overflow_before" = "$overflow_repeat" ] \
+    || fail "unchanged overflowed operations-inbox fingerprint did not remain stable"
   printf 'rewritten\n' > "$home/ops-inbox/overflow-253"
   printf 'generation-two\n' > "$marker_path"
   overflow_after=$(fm_ops_inbox_fingerprint "$home" "$home/config")
