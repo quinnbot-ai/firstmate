@@ -159,8 +159,24 @@ make_spawn_fakebin() {
 #!/usr/bin/env bash
 set -u
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_path}"*)
+    if [ -n "${FM_FAKE_PANE_PATH_SEQUENCE:-}" ]; then
+      poll_file=${FM_FAKE_PANE_POLL_FILE:?}
+      polls=0
+      [ ! -f "$poll_file" ] || polls=$(cat "$poll_file")
+      polls=$((polls + 1))
+      printf '%s\n' "$polls" > "$poll_file"
+      sed -n "${polls}p" "$FM_FAKE_PANE_PATH_SEQUENCE"
+    else
+      printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
+    fi
+    exit 0
+    ;;
   *"#{pane_id}"*)
+    if [ -n "${FM_FAKE_PANE_CLOSED_FILE:-}" ] && [ -e "$FM_FAKE_PANE_CLOSED_FILE" ]; then
+      printf '%s\n' "can't find window: ${4:-unknown}" >&2
+      exit 1
+    fi
     case "$*" in
       *:fm-abort-*) printf '%s\n' "can't find window: ${4:-unknown}" >&2; exit 1 ;;
     esac
@@ -263,8 +279,24 @@ make_spawn_lease_fakebin() {
 set -u
 [ -z "${FM_TREEHOUSE_REC:-}" ] || printf 'tmux %s\n' "$*" >> "$FM_TREEHOUSE_REC"
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_path}"*)
+    if [ -n "${FM_FAKE_PANE_PATH_SEQUENCE:-}" ]; then
+      poll_file=${FM_FAKE_PANE_POLL_FILE:?}
+      polls=0
+      [ ! -f "$poll_file" ] || polls=$(cat "$poll_file")
+      polls=$((polls + 1))
+      printf '%s\n' "$polls" > "$poll_file"
+      sed -n "${polls}p" "$FM_FAKE_PANE_PATH_SEQUENCE"
+    else
+      printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
+    fi
+    exit 0
+    ;;
   *"#{pane_id}"*)
+    if [ -n "${FM_FAKE_PANE_CLOSED_FILE:-}" ] && [ -e "$FM_FAKE_PANE_CLOSED_FILE" ]; then
+      printf '%s\n' "can't find window: ${4:-unknown}" >&2
+      exit 1
+    fi
     case "$*" in
       *:fm-lease-isolation-rollback-*|*:fm-lease-primary-rollback-*|*:fm-lease-setup-rollback-*|*:fm-lease-recovery-*|*:fm-lease-returned-tombstone-ff7*)
         printf '%s\n' "can't find window: ${4:-unknown}" >&2; exit 1 ;;
@@ -277,6 +309,10 @@ case "${1:-}" in
     case "$*" in
       *"treehouse get --lease"*) bash -c "$4" ;;
     esac
+    exit 0
+    ;;
+  kill-window)
+    [ -z "${FM_FAKE_PANE_CLOSED_FILE:-}" ] || : > "$FM_FAKE_PANE_CLOSED_FILE"
     exit 0
     ;;
   list-windows|has-session|new-session|new-window) exit 0 ;;
@@ -411,6 +447,69 @@ test_spawn_rolls_back_lease_after_isolation_failure() {
     "isolation failure did not return the leased worktree recorded by the handoff"
   assert_absent "$home/state/$id.meta" "isolation failure must not create a task meta"
   pass "fm-spawn: rolls back a leased slot when isolation validation fails"
+}
+
+# A foreground-cwd read is a snapshot of whatever process currently owns the
+# pane. The real herdr incident observed git-upload-pack temporarily cwd'd
+# into a local origin's git directory before treehouse returned the shell to
+# its leased worktree. The fixture deliberately returns that non-root git
+# directory once, then the real linked-worktree root.
+test_spawn_retries_transient_non_worktree_cwd() {
+  local home proj wt origin_git fakebin rec out status id sequence polls
+  home="$TMP_ROOT/cwd-race-home"
+  mkdir -p "$home/state" "$home/data"
+  proj=$(make_repo "$TMP_ROOT/cwd-race-proj")
+  wt="$TMP_ROOT/cwd-race-wt"
+  origin_git="$TMP_ROOT/cwd-race-local-origin.git"
+  git init -q --bare "$origin_git"
+  git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
+  fakebin=$(make_spawn_lease_fakebin "$TMP_ROOT/cwd-race-fake")
+  rec="$TMP_ROOT/cwd-race-treehouse.log"; : > "$rec"
+  id=cwd-race-aa1
+  sequence="$TMP_ROOT/cwd-race-paths"
+  polls="$TMP_ROOT/cwd-race-polls"
+  printf '%s\n%s\n' "$origin_git" "$wt" > "$sequence"
+
+  out=$(FM_FAKE_PANE_PATH_SEQUENCE="$sequence" FM_FAKE_PANE_POLL_FILE="$polls" \
+    run_spawn_lease_case "$home" "$id" "$proj" "$wt" "$fakebin" "$rec"); status=$?
+  expect_code 0 "$status" "a transient git-directory cwd must not refuse a healthy spawn"$'\n'"$out"
+  [ "$(cat "$polls")" -eq 2 ] || fail "transient cwd fixture did not advance to the worktree poll"
+  assert_not_contains "$out" "did not yield an isolated worktree" \
+    "transient git-directory cwd reached the isolation refusal"
+  assert_no_grep "treehouse return --force $wt" "$rec" \
+    "healthy spawn returned its newly leased worktree after a transient cwd"
+  pass "fm-spawn: retries a transient non-worktree foreground cwd until the leased worktree appears"
+}
+
+test_spawn_refusal_closes_pane_and_returns_lease() {
+  local home proj wt invalid fakebin rec out status id sequence polls closed
+  home="$TMP_ROOT/cwd-refusal-cleanup-home"
+  mkdir -p "$home/state" "$home/data"
+  proj=$(make_repo "$TMP_ROOT/cwd-refusal-cleanup-proj")
+  wt="$TMP_ROOT/cwd-refusal-cleanup-wt"
+  invalid="$TMP_ROOT/cwd-refusal-cleanup-invalid"
+  mkdir -p "$invalid"
+  git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
+  fakebin=$(make_spawn_lease_fakebin "$TMP_ROOT/cwd-refusal-cleanup-fake")
+  rec="$TMP_ROOT/cwd-refusal-cleanup-treehouse.log"; : > "$rec"
+  id=cwd-refusal-cleanup-bb2
+  sequence="$TMP_ROOT/cwd-refusal-cleanup-paths"
+  polls="$TMP_ROOT/cwd-refusal-cleanup-polls"
+  closed="$TMP_ROOT/cwd-refusal-cleanup-closed"
+  printf '%s\n%s\n' "$invalid" "$invalid" > "$sequence"
+
+  out=$(FM_FAKE_PANE_PATH_SEQUENCE="$sequence" FM_FAKE_PANE_POLL_FILE="$polls" \
+    FM_FAKE_PANE_CLOSED_FILE="$closed" \
+    run_spawn_lease_case "$home" "$id" "$proj" "$invalid" "$fakebin" "$rec" '' "$wt"); status=$?
+  expect_code 1 "$status" "a stable non-worktree cwd must refuse the spawn"
+  assert_contains "$out" "did not yield an isolated worktree" "stable invalid cwd did not reach isolation refusal"
+  assert_present "$closed" "isolation refusal left the launched pane open"
+  assert_grep "tmux kill-window -t firstmate:fm-$id" "$rec" \
+    "isolation refusal did not ask the backend to close its launched pane"
+  assert_grep "treehouse return --force $wt" "$rec" \
+    "isolation refusal did not return its leased worktree"
+  assert_absent "$home/state/$id.meta" "refused spawn must not retain task metadata"
+  pass "fm-spawn: a genuine isolation refusal closes its pane and returns its lease"
 }
 
 test_spawn_refuses_to_roll_back_primary_checkout() {
@@ -854,6 +953,8 @@ test_spawn_refuses_legacy_held_worktree
 test_spawn_refuses_detached_legacy_held_worktree
 test_spawn_leases_normal_treehouse_allocation
 test_spawn_rolls_back_lease_after_isolation_failure
+test_spawn_retries_transient_non_worktree_cwd
+test_spawn_refusal_closes_pane_and_returns_lease
 test_spawn_refuses_to_roll_back_primary_checkout
 test_spawn_rolls_back_lease_after_setup_failure
 test_spawn_recovers_failed_lease_rollback
