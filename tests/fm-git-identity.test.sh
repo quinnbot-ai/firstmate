@@ -142,6 +142,26 @@ test_spawn_retries_shared_worktree_config_before_allocating_task_window() {
   pass 'fm-spawn retries shared Git config initialization before task allocation'
 }
 
+test_spawn_accepts_noncanonical_enabled_worktree_config() {
+  local spelling rec project lock out status
+  for spelling in yes on 1; do
+    project="$TMP_ROOT/noncanonical-$spelling/home/projects/ordinary"
+    rec=$(make_spawn_fixture "noncanonical-$spelling" "$project")
+    read_fixture "$rec"
+    git -C "$project" config extensions.worktreeConfig "$spelling"
+    lock="$project/.git/config.lock"
+    : > "$lock"
+
+    out=$(run_spawn "$HOME_DIR" "$PROJECTS_DIR" "$WORKTREE_DIR" "$FAKEBIN" "$GLOBAL_CONFIG" "$CAPTAIN_HOME" "$ID" "$project")
+    status=$?
+    rm -f "$lock"
+    expect_code 0 "$status" "spawn should accept enabled worktree config value $spelling without rewriting it: $out"
+    [ "$(git -C "$project" config --get extensions.worktreeConfig)" = "$spelling" ] \
+      || fail "spawn rewrote enabled worktree config value $spelling"
+  done
+  pass 'fm-spawn accepts every noncanonical enabled worktree config value'
+}
+
 test_audit_reports_effective_identities_without_rewriting_clones() {
   local projects captain_home ordinary epstein wrong out status before after
   projects="$TMP_ROOT/audit/projects"
@@ -179,6 +199,7 @@ test_spawn_pins_fleet_identity_without_changing_other_identity_scopes
 test_epstein_directory_gets_dedicated_identity
 test_registered_epstein_clone_gets_dedicated_identity
 test_spawn_retries_shared_worktree_config_before_allocating_task_window
+test_spawn_accepts_noncanonical_enabled_worktree_config
 test_audit_reports_effective_identities_without_rewriting_clones
 
 echo '# fm-git-identity.test.sh: all assertions passed'
