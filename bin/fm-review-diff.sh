@@ -151,8 +151,8 @@ if git -C "$WT" diff --no-ext-diff --quiet "$BASE...$COMPARE_REF" --; then
   exit 0
 fi
 
-git -C "$WT" diff --no-ext-diff --stat "$BASE...$COMPARE_REF" --
+git -C "$WT" diff --no-ext-diff --no-textconv --stat "$BASE...$COMPARE_REF" --
 if ! "$STAT_ONLY"; then
   echo
-  git -C "$WT" diff --no-ext-diff "$BASE...$COMPARE_REF" --
+  git -C "$WT" diff --no-ext-diff --no-textconv "$BASE...$COMPARE_REF" --
 fi

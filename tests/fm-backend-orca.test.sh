@@ -884,13 +884,24 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
   config="$TMP_ROOT/meta-fail-config"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   mkdir -p "$data/$id" "$config"
-  : > "$state_file"
+  mkdir -p "$state_file"
   printf 'brief\n' > "$data/$id/brief.md"
   orca_case meta-fail
   printf '1\n' > "$RESP/1.exit"
   printf '{"ok":true,"result":{"repo":{"id":"repo-meta-fail"}}}\n' > "$RESP/2.out"
   printf '{"ok":true,"result":{"worktree":{"id":"wt-meta-fail","path":"%s"}}}\n' "$wt" > "$RESP/3.out"
   printf '{"ok":true,"result":{"terminal":{"handle":"term-meta-fail"}}}\n' > "$RESP/4.out"
+  cat > "$FB/mktemp" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  "$state_file"/."$id".meta.*)
+    echo 'mktemp: File exists' >&2
+    exit 1
+    ;;
+esac
+exec /usr/bin/mktemp "\$@"
+SH
+  chmod +x "$FB/mktemp"
   printf '{"ok":true,"result":{"terminal":{"tail":["still live"]}}}\n' > "$RESP/5.out"
   printf '{"ok":true,"result":{"closed":true}}\n' > "$RESP/6.out"
   printf '{"ok":false,"error":{"code":"terminal_not_found","message":"terminal not found"}}\n' > "$RESP/7.out"
@@ -900,7 +911,7 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend orca 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "Orca spawn should fail when metadata cannot be written"
-  assert_contains "$out" "File exists" "spawn should fail at the state directory creation point"
+  assert_contains "$out" "File exists" "spawn should fail at the metadata creation point"
   assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-meta-fail'$'\x1f''--json' \
     "Orca spawn should close the recorded terminal when a later abort occurs"
   assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-meta-fail'$'\x1f''--force'$'\x1f''--json' \

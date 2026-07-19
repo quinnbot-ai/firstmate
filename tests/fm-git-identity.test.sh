@@ -27,7 +27,14 @@ case "${1:-}" in
 esac
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  get) printf '%s\n' "${FM_FAKE_LEASED_WORKTREE:?}" ;;
+  return) exit 0 ;;
+esac
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
@@ -36,7 +43,8 @@ run_spawn() {  # <home> <projects> <worktree> <fakebin> <global-config> <captain
   HOME="$captain_home" GIT_CONFIG_GLOBAL="$global_config" FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$worktree" TMUX='fake,1,0' PATH="$fakebin:$PATH" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_LEASED_WORKTREE="$worktree" FM_FAKE_PANE_PATH="$worktree" \
+    TMUX='fake,1,0' PATH="$fakebin:$PATH" \
     "$SPAWN" "$id" "$project" claude 2>&1
 }
 
