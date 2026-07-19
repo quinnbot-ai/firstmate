@@ -135,6 +135,16 @@ BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'}
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read.
 STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
+# A pane that keeps the busy footer changing is not stale, so stale-hash
+# detection cannot see a startup spinner or a hot wait loop. Track independent
+# progress counters across busy polls instead. Startup is intentionally short:
+# Codex with `Starting MCP servers` and context 0% is not doing task work.
+# General busy escalation requires both an unchanged context/token snapshot (or
+# a known subagent-wait signature) and an old status file, preserving quiet but
+# genuinely working crews that still report a phase change.
+STARTUP_ZERO_CONTEXT_SECS=${FM_STARTUP_ZERO_CONTEXT_SECS:-600}
+BUSY_NO_PROGRESS_SECS=${FM_BUSY_NO_PROGRESS_SECS:-1800}
+BUSY_STATUS_GRACE_SECS=${FM_BUSY_STATUS_GRACE_SECS:-900}
 # A crew that DECLARED a pause (paused: <reason>, fm-classify-lib.sh) is idling on
 # a known external wait, so its stale pane is absorbed rather than wedge-escalated;
 # it re-surfaces once for a recheck every PAUSE_RESURFACE_SECS - far longer than the
@@ -269,6 +279,83 @@ wake() {
 # pane/hash state resets to genuinely active (see the two rm-on-reset call sites
 # below).
 FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
+
+# Busy-looking panes are normally proof of work, except when their actual work
+# counters never move. State files are deliberately separate from stale-hash
+# bookkeeping because a spinner/timer can change the pane on every poll. A
+# surfaced progress wedge resets its timer, then escalates again only after the
+# same bounded no-progress window; every such wake demands deep inspection.
+clear_busy_progress_tracking() {  # <window>
+  local key
+  key=$(printf '%s' "$1" | tr ':/. ' '____')
+  rm -f "$STATE/.busy-progress-$key" "$STATE/.busy-progress-since-$key" \
+    "$STATE/.busy-progress-escalations-$key"
+}
+
+busy_progress_surface() {  # <window> <since-file> <escalations-file> <label> <age> [status-age]
+  local win=$1 since_file=$2 escalations_file=$3 label=$4 age=$5 status_age=${6:-} n reason
+  n=$(( $(cat "$escalations_file" 2>/dev/null || echo 0) + 1 ))
+  printf '%s\n' "$n" > "$escalations_file"
+  reason="stale: $win (busy but zero progress for ${age}s: $label, escalation $n, demand-deep-inspection"
+  [ -n "$status_age" ] && reason="$reason, last status write ${status_age}s ago"
+  reason="$reason)"
+  fm_wake_append stale "$win" "$reason" || exit 1
+  date +%s > "$since_file"
+  wake "$reason"
+}
+
+busy_progress_check() {  # <window> <task> <pane-text>
+  local win=$1 task=$2 pane=$3 key snapshot metrics prior since_file progress_file escalations_file now since age status_age label
+  key=$(printf '%s' "$win" | tr ':/. ' '____')
+  progress_file="$STATE/.busy-progress-$key"
+  since_file="$STATE/.busy-progress-since-$key"
+  escalations_file="$STATE/.busy-progress-escalations-$key"
+  now=$(date +%s)
+  metrics=$(pane_progress_snapshot "$pane")
+
+  # Startup is independently conclusive: context 0% while MCP servers spin is
+  # neither model progress nor a declared external wait, even when the timer
+  # itself makes the pane hash change every poll.
+  if pane_is_startup_spinner "$pane" && pane_context_is_zero "$pane"; then
+    snapshot='startup-context=0'
+    label='startup spinner remains at context 0%'
+  elif [ -n "$metrics" ]; then
+    snapshot=$metrics
+    label="unchanged $snapshot"
+  elif pane_is_busy_wait_spin "$pane"; then
+    snapshot='subagent-wait-spin'
+    label='subagent wait reports no agents completed'
+  else
+    clear_busy_progress_tracking "$win"
+    return
+  fi
+
+  prior=$(cat "$progress_file" 2>/dev/null || true)
+  if [ "$snapshot" != "$prior" ]; then
+    printf '%s' "$snapshot" > "$progress_file"
+    printf '%s\n' "$now" > "$since_file"
+    rm -f "$escalations_file"
+    return
+  fi
+  since=$(cat "$since_file" 2>/dev/null || true)
+  case "$since" in
+    ''|*[!0-9]*) printf '%s\n' "$now" > "$since_file"; return ;;
+  esac
+  age=$(( now - since ))
+  if [ "$snapshot" = startup-context=0 ]; then
+    [ "$age" -ge "$STARTUP_ZERO_CONTEXT_SECS" ] || return
+    busy_progress_surface "$win" "$since_file" "$escalations_file" "$label" "$age"
+  fi
+
+  status_age=$(age_of "$STATE/$task.status")
+  if [ "$status_age" -lt "$BUSY_STATUS_GRACE_SECS" ]; then
+    printf '%s\n' "$now" > "$since_file"
+    rm -f "$escalations_file"
+    return
+  fi
+  [ "$age" -ge "$BUSY_NO_PROGRESS_SECS" ] || return
+  busy_progress_surface "$win" "$since_file" "$escalations_file" "$label" "$age" "$status_age"
+}
 
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
@@ -857,6 +944,14 @@ EOF
     ssf="$STATE/.stale-since-$key"
     ewf="$STATE/.wedge-escalations-$key"
     pf="$STATE/.paused-$key"   # flag: this key's current stale is a declared pause
+    # Busy panes bypass stale-hash handling, so inspect their semantic progress
+    # before the hash branch. A declared paused wait retains its long cadence and
+    # must never be converted into a busy-progress wedge.
+    if [ "$kind" != secondmate ] && ! afk_present && ! status_is_paused "$last" && window_is_busy "$w" "$tail40"; then
+      busy_progress_check "$w" "$task" "$tail40"
+    else
+      clear_busy_progress_tracking "$w"
+    fi
     prev=$(cat "$hf" 2>/dev/null || true)
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))

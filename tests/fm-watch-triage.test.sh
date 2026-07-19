@@ -1118,6 +1118,156 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   pass "AFK changed paused panes hand off plain stale identities for daemon-owned pause triage"
 }
 
+# Busy footers used to exempt a pane from stale hashing forever. These fixtures
+# keep the footer busy while representing the three real zero-progress classes.
+# Seed the cross-poll progress marker to make the bounded window elapsed without
+# turning this suite into a minutes-long sleep.
+test_busy_startup_spinner_context_zero_surfaces() {
+  local dir state fakebin out capture_file statusf window key pid
+  dir=$(make_case busy-startup-zero); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/startup.status"
+  window="test:fm-startup"
+  cat > "$capture_file" <<'EOF'
+Starting MCP servers ... (esc to interrupt) 10:41
+Context: 0%
+EOF
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/startup.meta"
+  printf 'working: starting the task\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-startup_status"
+  key=$(printf '%s' "$window" | tr ':/. ' '____')
+  printf 'startup-context=0' > "$state/.busy-progress-$key"
+  printf '%s\n' $(( $(date +%s) - 700 )) > "$state/.busy-progress-since-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STARTUP_ZERO_CONTEXT_SECS=600 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "startup spinner at context 0% was absorbed forever: $(cat "$out")"
+  grep -F 'busy but zero progress' "$out" >/dev/null || fail "startup spinner wake omitted zero-progress evidence: $(cat "$out")"
+  grep -F 'startup spinner remains at context 0%' "$out" >/dev/null || fail "startup spinner wake omitted its signature: $(cat "$out")"
+  grep -F 'demand-deep-inspection' "$out" >/dev/null || fail "startup spinner wake did not demand deep inspection"
+  pass "busy startup spinner at context 0% surfaces a deep-inspection wake"
+}
+
+test_busy_token_burn_without_progress_surfaces() {
+  local dir state fakebin out capture_file statusf window key pid back
+  dir=$(make_case busy-token-burn); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/token-burn.status"
+  window="test:fm-token-burn"
+  cat > "$capture_file" <<'EOF'
+Polling the same endpoint again (esc to interrupt)
+Context: 72%
+Tokens: 3.09M
+EOF
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/token-burn.meta"
+  printf 'working: researching authentication\n' > "$statusf"
+  back=$(( $(date +%s) - 700 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"; else touch -m -d "@$back" "$statusf"; fi
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-token-burn_status"
+  key=$(printf '%s' "$window" | tr ':/. ' '____')
+  printf 'context=72%%;tokens=3.09M' > "$state/.busy-progress-$key"
+  printf '%s\n' $(( $(date +%s) - 700 )) > "$state/.busy-progress-since-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_BUSY_NO_PROGRESS_SECS=600 FM_BUSY_STATUS_GRACE_SECS=300 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "busy token-burn loop was absorbed forever: $(cat "$out")"
+  grep -F 'unchanged context=72%;tokens=3.09M' "$out" >/dev/null || fail "token-burn wake omitted unchanged counters: $(cat "$out")"
+  grep -F 'last status write' "$out" >/dev/null || fail "token-burn wake omitted stale status evidence: $(cat "$out")"
+  pass "busy token-burn loop with unchanged counters and status surfaces"
+}
+
+test_busy_subagent_wait_spin_surfaces() {
+  local dir state fakebin out capture_file statusf window key pid back
+  dir=$(make_case busy-subagent-wait); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/subagent-wait.status"
+  window="test:fm-subagent-wait"
+  cat > "$capture_file" <<'EOF'
+Waiting for agents / No agents completed yet (esc to interrupt) 23:39
+EOF
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/subagent-wait.meta"
+  printf 'working: waiting for parallel research\n' > "$statusf"
+  back=$(( $(date +%s) - 700 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"; else touch -m -d "@$back" "$statusf"; fi
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-subagent-wait_status"
+  key=$(printf '%s' "$window" | tr ':/. ' '____')
+  printf 'subagent-wait-spin' > "$state/.busy-progress-$key"
+  printf '%s\n' $(( $(date +%s) - 700 )) > "$state/.busy-progress-since-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_BUSY_NO_PROGRESS_SECS=600 FM_BUSY_STATUS_GRACE_SECS=300 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "busy subagent wait spin was absorbed forever: $(cat "$out")"
+  grep -F 'subagent wait reports no agents completed' "$out" >/dev/null || fail "subagent wait wake omitted its signature: $(cat "$out")"
+  grep -F 'demand-deep-inspection' "$out" >/dev/null || fail "subagent wait wake did not demand deep inspection"
+  pass "busy subagent wait spin surfaces a deep-inspection wake"
+}
+
+test_busy_progress_or_recent_status_remains_healthy() {
+  local dir state fakebin out capture_file statusf window key pid
+  dir=$(make_case busy-progress-healthy); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/healthy.status"
+  window="test:fm-healthy-busy"
+  cat > "$capture_file" <<'EOF'
+Working on the next request (esc to interrupt)
+Context: 73%
+Tokens: 3.10M
+EOF
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/healthy.meta"
+  printf 'working: current phase just advanced\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-healthy_status"
+  key=$(printf '%s' "$window" | tr ':/. ' '____')
+  printf 'context=72%%;tokens=3.09M' > "$state/.busy-progress-$key"
+  printf '%s\n' $(( $(date +%s) - 700 )) > "$state/.busy-progress-since-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_BUSY_NO_PROGRESS_SECS=60 FM_BUSY_STATUS_GRACE_SECS=30 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 30 || fail "moving busy counters surfaced unexpectedly: $(cat "$out")"
+  [ "$(cat "$state/.busy-progress-$key")" = 'context=73%;tokens=3.10M' ] || { reap "$pid"; fail "moving busy counters did not reset the progress snapshot"; }
+  reap "$pid"
+
+  # The counters now stop, but a freshly written working status remains an
+  # explicit progress signal and restarts the no-progress timer instead of waking.
+  printf 'context=73%%;tokens=3.10M' > "$state/.busy-progress-$key"
+  printf '%s\n' $(( $(date +%s) - 700 )) > "$state/.busy-progress-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_BUSY_NO_PROGRESS_SECS=60 FM_BUSY_STATUS_GRACE_SECS=30 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 30 || fail "recent busy status surfaced unexpectedly: $(cat "$out")"
+  reap "$pid"
+  pass "moving busy counters or a recent status write remain healthy"
+}
+
+test_declared_paused_busy_wait_retains_pause_handling() {
+  local dir state fakebin out capture_file statusf window key pid
+  dir=$(make_case paused-busy-wait); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/paused-busy.status"
+  window="test:fm-paused-busy"
+  printf 'Waiting for agents / No agents completed yet (esc to interrupt)\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/paused-busy.meta"
+  printf 'paused: awaiting an upstream release\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-paused-busy_status"
+  key=$(printf '%s' "$window" | tr ':/. ' '____')
+  printf 'subagent-wait-spin' > "$state/.busy-progress-$key"
+  printf '%s\n' $(( $(date +%s) - 700 )) > "$state/.busy-progress-since-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting an upstream release' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_BUSY_NO_PROGRESS_SECS=60 FM_BUSY_STATUS_GRACE_SECS=30 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 30 || fail "declared paused busy wait surfaced as a wedge: $(cat "$out")"
+  [ ! -e "$state/.busy-progress-$key" ] || { reap "$pid"; fail "declared pause retained busy-progress tracking"; }
+  reap "$pid"
+  pass "declared paused busy waits retain the long-cadence pause path"
+}
+
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
@@ -1151,3 +1301,8 @@ test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
+test_busy_startup_spinner_context_zero_surfaces
+test_busy_token_burn_without_progress_surfaces
+test_busy_subagent_wait_spin_surfaces
+test_busy_progress_or_recent_status_remains_healthy
+test_declared_paused_busy_wait_retains_pause_handling
