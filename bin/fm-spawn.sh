@@ -1730,6 +1730,10 @@ fi
 # Nested (not a bare /tmp/fm-<id>.<random>/gotmp) so other per-task temp can live alongside
 # later, and teardown cleans the recorded path. GOTMPDIR (not TMPDIR) is the
 # targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
+if [ "${FM_TEST_FAIL_TASK_TMP:-0}" = 1 ]; then
+  echo "error: could not create private task temporary directory" >&2
+  exit 1
+fi
 if ! TASK_TMP=$(mktemp -d "/tmp/fm-$ID.XXXXXXXX"); then
   echo "error: could not create private task temporary directory" >&2
   exit 1

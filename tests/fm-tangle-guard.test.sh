@@ -301,15 +301,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  cat > "$fakebin/mktemp" <<'SH'
-#!/usr/bin/env bash
-set -u
-if [ "${FM_FAIL_TASK_MKTEMP:-0}" = 1 ] && [[ "$*" == *'/tmp/fm-'* ]]; then
-  exit 1
-fi
-exec /usr/bin/mktemp "$@"
-SH
-  chmod +x "$fakebin/treehouse" "$fakebin/mktemp"
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
@@ -324,7 +316,7 @@ run_spawn_lease_case() {
       FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
       FM_FAKE_LEASED_WORKTREE="$lease_path" FM_TREEHOUSE_REC="$rec" \
-      FM_FAIL_TASK_MKTEMP="${FM_FAIL_TASK_MKTEMP:-0}" PATH="$fakebin:$PATH" \
+      FM_TEST_FAIL_TASK_TMP="${FM_TEST_FAIL_TASK_TMP:-0}" PATH="$fakebin:$PATH" \
       "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --scout 2>&1
   else
     FM_ROOT_OVERRIDE='' FM_HOME="$home" \
@@ -332,7 +324,7 @@ run_spawn_lease_case() {
       FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
       FM_FAKE_LEASED_WORKTREE="$lease_path" FM_TREEHOUSE_REC="$rec" \
-      FM_FAIL_TASK_MKTEMP="${FM_FAIL_TASK_MKTEMP:-0}" PATH="$fakebin:$PATH" \
+      FM_TEST_FAIL_TASK_TMP="${FM_TEST_FAIL_TASK_TMP:-0}" PATH="$fakebin:$PATH" \
       "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude 2>&1
   fi
 }
@@ -454,7 +446,7 @@ test_spawn_rolls_back_lease_after_setup_failure() {
   rec="$TMP_ROOT/lease-setup-rollback-treehouse.log"; : > "$rec"
   id="lease-setup-rollback-${RANDOM}${RANDOM}"
 
-  out=$(FM_FAIL_TASK_MKTEMP=1 run_spawn_lease_case "$home" "$id" "$proj" "$wt" "$fakebin" "$rec"); status=$?
+  out=$(FM_TEST_FAIL_TASK_TMP=1 run_spawn_lease_case "$home" "$id" "$proj" "$wt" "$fakebin" "$rec"); status=$?
   expect_code 1 "$status" "spawn must fail when post-lease task temp setup fails"
   assert_grep "treehouse return --force $wt" "$rec" \
     "post-lease setup failure did not return the leased worktree"
