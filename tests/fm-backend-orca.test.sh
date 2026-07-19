@@ -690,7 +690,7 @@ test_spawn_accepts_orca_terminal_absent_after_close_failure() {
 }
 
 test_spawn_preserves_orca_metadata_when_terminal_close_is_unconfirmed() {
-  local proj data state config id out status
+  local proj data state config id out status branch
   id="orcacloseunconfirmedz5"
   proj="$TMP_ROOT/close-unconfirmed-project"
   data="$TMP_ROOT/close-unconfirmed-data"
@@ -725,11 +725,21 @@ test_spawn_preserves_orca_metadata_when_terminal_close_is_unconfirmed() {
     "Orca spawn must query the terminal after a successful strict close"
   assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-close-unconfirmed' \
     "Orca spawn must preserve the live worker's worktree until terminal absence is confirmed"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$TMP_ROOT/unused-home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1 )
+  status=$?
+  expect_code 1 "$status" "teardown must refuse failed Orca metadata pointing at the primary checkout"
+  assert_contains "$out" "resolves to its primary project checkout" \
+    "teardown did not explain its primary-checkout refusal"
+  branch=$(git -C "$proj" rev-parse --abbrev-ref HEAD)
+  [ "$branch" = main ] || fail "teardown changed the primary checkout branch to '$branch'"
+  assert_present "$state/$id.meta" "primary-checkout refusal must preserve failed-spawn metadata"
   pass "fm-spawn.sh --backend orca: preserves metadata when strict close is unconfirmed"
 }
 
 test_spawn_preserves_codex_home_when_orca_terminal_cleanup_is_unconfirmed() {
-  local proj wt data state config source home id out status real_python
+  local proj wt data state config source home id out status real_python task_tmp
   id="orcacodexendpointz6"
   proj="$TMP_ROOT/codex-endpoint-project"
   wt="$TMP_ROOT/codex-endpoint-wt"
@@ -775,6 +785,8 @@ SH
   assert_grep "codex_crewmate_home=$home" "$state/$id.meta" "preserved metadata missing the isolated Codex home"
   assert_grep "failed_spawn=1" "$state/$id.meta" "preserved metadata must identify the aborted spawn"
   assert_grep "endpoint_cleanup_pending=1" "$state/$id.meta" "preserved metadata must mark pending endpoint cleanup"
+  task_tmp=$(grep '^tasktmp=' "$state/$id.meta" | cut -d= -f2-)
+  [ -d "$task_tmp/gotmp" ] || fail "unconfirmed Orca terminal cleanup must preserve the live task temporary directory"
   pass "fm-spawn.sh --backend orca: preserves the Codex home when terminal cleanup is unconfirmed"
 }
 

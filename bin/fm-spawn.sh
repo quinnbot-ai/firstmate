@@ -287,6 +287,7 @@ orca_spawn_abort_cleanup() {
   if [ -n "${ORCA_TERMINAL:-}" ]; then
     terminal_absent=0
     if fm_backend_target_absent orca "$ORCA_TERMINAL"; then
+      terminal_absent=1
       ORCA_TERMINAL=
       T=
     else
@@ -317,7 +318,7 @@ orca_spawn_abort_cleanup() {
 }
 
 spawn_abort_cleanup() {
-  local status=$? preserve_codex_home=0 clean_codex_home=0 orca_cleanup_failed=0
+  local status=$? preserve_codex_home=0 preserve_task_tmp=0 clean_codex_home=0 orca_cleanup_failed=0
   if [ "$TREEHOUSE_ABORT_CLEANUP" = 1 ]; then
     TREEHOUSE_ABORT_CLEANUP=0
     clean_codex_home=1
@@ -340,7 +341,10 @@ spawn_abort_cleanup() {
     clean_codex_home=1
     orca_spawn_abort_cleanup
     orca_cleanup_failed=$ORCA_ABORT_CLEANUP_FAILED
-    [ "$ORCA_ABORT_TERMINAL_ABSENT" = 1 ] || preserve_codex_home=1
+    if [ "$ORCA_ABORT_TERMINAL_ABSENT" != 1 ]; then
+      preserve_codex_home=1
+      preserve_task_tmp=1
+    fi
   fi
   if [ "$clean_codex_home" -eq 1 ] && [ "$preserve_codex_home" -eq 0 ] && ! remove_codex_crewmate_home; then
     echo "error: could not remove isolated Codex crewmate home" >&2
@@ -350,7 +354,9 @@ spawn_abort_cleanup() {
   fi
   [ "$orca_cleanup_failed" -eq 0 ] || write_failed_treehouse_spawn_meta
   [ -z "$CODEX_ACTIVATION_TOKEN" ] || remove_codex_home_activation_result 2>/dev/null || true
-  [ -z "$TASK_TMP" ] || rm -rf -- "$TASK_TMP"
+  if [ "$preserve_task_tmp" -eq 0 ]; then
+    [ -z "$TASK_TMP" ] || rm -rf -- "$TASK_TMP"
+  fi
   if [ "$status" -ne 0 ] && [ "$SPAWN_META_WRITTEN" = 1 ] && [ "$FAILED_ENDPOINT_CLEANUP" != 1 ] && [ "$preserve_codex_home" -eq 0 ] && [ "$orca_cleanup_failed" -eq 0 ] && [ -z "$CODEX_CREWMATE_HOME" ]; then
     rm -f "$STATE/$ID.meta"
   fi

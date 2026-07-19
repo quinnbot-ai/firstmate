@@ -50,6 +50,16 @@ if [ "${FM_FAKE_HERDR_NO_ANSI:-0}" = 1 ]; then
   done
 fi
 n=$next
+if [ "$1" = pane ] && [ "${2:-}" = get ] && [ ! -f "$RESP/$n.out" ] && [ ! -f "$RESP/$n.exit" ]; then
+  printf '%s\n' "$n" > "$RESP/.preflight-live"
+  printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "${3:-}"
+  exit 0
+fi
+if [ "$1" = agent ] && [ "${2:-}" = get ] && [ -f "$RESP/.preflight-live" ]; then
+  rm -f "$RESP/.preflight-live"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n'
+  exit 0
+fi
 echo "$n" > "$COUNT_FILE"
 if [ -f "$RESP/$n.exit" ]; then
   exit "$(cat "$RESP/$n.exit")"
@@ -1546,7 +1556,9 @@ test_send_text_submit_slow_transition_within_one_enter_needs_no_extra_enter() {
 test_send_text_submit_send_failed() {
   local dir log resp fb out
   dir="$TMP_ROOT/submit-fail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '1\n' > "$resp/1.exit"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '1\n' > "$resp/3.exit"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "x" 2 0.01 0.01' "$ROOT" )
@@ -1566,6 +1578,51 @@ test_send_text_submit_unknown_on_capture_failure() {
   enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
   [ "$enter_count" -eq 1 ] || fail "send_text_submit must never retry past an unreadable target (that is a hard I/O failure, not a timing race), sent $enter_count Enter(s)"
   pass "fm_backend_herdr_send_text_submit: reports 'unknown' when the post-Enter agent-get read fails (never retries past an unreadable target)"
+}
+
+test_send_text_submit_rejects_agentless_pane_before_typing() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-agentless-before-type"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"error":{"code":"agent_not_found"}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = send-failed ] || fail "send_text_submit must reject an agent-less pane before typing, got '$out'"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''send-text' "$log")" -eq 0 ] \
+    || fail "send_text_submit typed into an agent-less bare shell"
+  pass "fm_backend_herdr_send_text_submit: rejects an agent-less pane before typing"
+}
+
+test_send_text_submit_rejects_missing_pane_before_typing() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-missing-pane-before-type"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"error":{"code":"pane_not_found"}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = send-failed ] || fail "send_text_submit must reject a missing pane before typing, got '$out'"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''send-text' "$log")" -eq 0 ] \
+    || fail "send_text_submit typed into a missing pane"
+  pass "fm_backend_herdr_send_text_submit: rejects a missing pane before typing"
+}
+
+test_send_text_submit_rejects_agentless_pane_after_unknown_confirmation() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-agentless-after-unknown"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
+  printf '1\n' > "$resp/6.exit"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/7.out"
+  printf '{"error":{"code":"agent_not_found"}}\n' > "$resp/8.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = send-failed ] || fail "send_text_submit must reject an agent-less pane after an unknown confirmation, got '$out'"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")" -eq 1 ] \
+    || fail "send_text_submit retried Enter after the pane became agent-less"
+  pass "fm_backend_herdr_send_text_submit: rejects an agent-less pane after unknown confirmation"
 }
 
 # --- fm-backend.sh dispatch wiring -------------------------------------------
@@ -2269,6 +2326,9 @@ test_composer_state_guard_still_refuses_real_pending_text_after_submit_confirmat
 test_send_text_submit_slow_transition_within_one_enter_needs_no_extra_enter
 test_send_text_submit_send_failed
 test_send_text_submit_unknown_on_capture_failure
+test_send_text_submit_rejects_agentless_pane_before_typing
+test_send_text_submit_rejects_missing_pane_before_typing
+test_send_text_submit_rejects_agentless_pane_after_unknown_confirmation
 test_dispatch_routes_herdr_backend
 test_dispatch_busy_state_unknown_for_tmux
 test_dispatch_composer_state_routes_by_backend

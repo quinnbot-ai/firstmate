@@ -1120,6 +1120,15 @@ fi
 
 validate_task_temp_for_removal "$TASK_TMP" || exit 1
 
+if [ "$KIND" != secondmate ] && [ -n "$WT" ] && [ -n "$PROJ" ]; then
+  WT_CANONICAL=$(canonical_existing_dir "$WT" || true)
+  PROJ_CANONICAL=$(canonical_existing_dir "$PROJ" || true)
+  if [ -n "$WT_CANONICAL" ] && [ "$WT_CANONICAL" = "$PROJ_CANONICAL" ]; then
+    echo "REFUSED: task worktree $WT resolves to its primary project checkout; preserving task state." >&2
+    exit 1
+  fi
+fi
+
 if [ "$KIND" = secondmate ] && [ "$FORCE" != "--force" ]; then
   SUB_STATE="$HOME_PATH/state"
   if [ -d "$SUB_STATE" ]; then
