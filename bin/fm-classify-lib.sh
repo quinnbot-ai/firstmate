@@ -59,6 +59,68 @@ FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 # shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
 FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 
+# Pane-progress extraction is shared by watcher classifications so the rendered
+# evidence contract has one owner. The watcher owns poll-to-poll state and wake
+# cadence; these pure readers identify durable progress counters and the two
+# known busy-but-not-working signatures. Context and token values deliberately
+# remain textual because only a changed value is meaningful across polls.
+FM_CLASSIFY_STARTUP_SPINNER_RE_DEFAULT='Starting MCP servers'
+FM_CLASSIFY_BUSY_WAIT_SPIN_RE_DEFAULT='Waiting for agents|No agents completed yet'
+
+normalize_pane_signature_regex() {  # <configured-regex> <default-regex>
+  local configured=$1 fallback=$2 status
+  if grep -Eq "$configured" </dev/null 2>/dev/null; then
+    printf '%s' "$configured"
+    return 0
+  fi
+  status=$?
+  if [ "$status" -eq 1 ]; then
+    printf '%s' "$configured"
+  else
+    printf '%s' "$fallback"
+  fi
+}
+
+FM_STARTUP_SPINNER_RE=$(normalize_pane_signature_regex \
+  "${FM_STARTUP_SPINNER_RE:-$FM_CLASSIFY_STARTUP_SPINNER_RE_DEFAULT}" \
+  "$FM_CLASSIFY_STARTUP_SPINNER_RE_DEFAULT")
+FM_BUSY_WAIT_SPIN_RE=$(normalize_pane_signature_regex \
+  "${FM_BUSY_WAIT_SPIN_RE:-$FM_CLASSIFY_BUSY_WAIT_SPIN_RE_DEFAULT}" \
+  "$FM_CLASSIFY_BUSY_WAIT_SPIN_RE_DEFAULT")
+
+pane_footer_control_lines() {
+  printf '%s\n' "$1" | grep -v '^[[:space:]]*$' | tail -6
+}
+
+pane_progress_snapshot() {  # <pane-text> -> context=<value>;tokens=<value>, or empty
+  local pane=$1 footer context tokens
+  footer=$(pane_footer_control_lines "$pane")
+  context=$(printf '%s\n' "$footer" | sed -nE 's/.*[Cc]ontext[^0-9]*([0-9]+([.][0-9]+)?%?).*/\1/p' | tail -1)
+  tokens=$(printf '%s\n' "$footer" | sed -nE 's/.*[Tt]okens?[^0-9]*([0-9][0-9,]*([.][0-9]+)?[KMGkmg]?).*/\1/p' | tail -1)
+  if [ -z "$tokens" ]; then
+    tokens=$(printf '%s\n' "$footer" | sed -nE 's/.*([0-9][0-9,]*([.][0-9]+)?[KMGkmg]?)[[:space:]]+[Tt]okens?.*/\1/p' | tail -1)
+  fi
+  [ -n "$context" ] && printf 'context=%s' "$context"
+  [ -n "$context" ] && [ -n "$tokens" ] && printf ';'
+  [ -n "$tokens" ] && printf 'tokens=%s' "$tokens"
+}
+
+pane_context_is_zero() {  # <pane-text>
+  local snapshot context
+  snapshot=$(pane_progress_snapshot "$1")
+  context=${snapshot#context=}
+  context=${context%%;*}
+  printf '%s' "$context" | grep -qE '^0+([.]0+)?%?$'
+}
+
+pane_is_startup_spinner() {  # <pane-text>
+  pane_footer_control_lines "$1" | grep -qiE "$FM_STARTUP_SPINNER_RE"
+}
+
+pane_is_busy_wait_spin() {  # <pane-text>
+  pane_footer_control_lines "$1" | grep -qiE "$FM_BUSY_WAIT_SPIN_RE"
+}
+
 # The resolution verb and durable-backlog-transfer verb that CLOSE a keyed
 # status decision opened by needs-decision or blocked. See status_open_decisions
 # below for the status-fold contract. The transfer verb is written only after

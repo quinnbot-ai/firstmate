@@ -1432,6 +1432,32 @@ test_local_only_force_overrides_unpushed() {
   pass "local-only worktree with unpushed work is torn down under --force (escape hatch)"
 }
 
+test_teardown_clears_busy_progress_tracking() {
+  local case_dir window key marker
+  case_dir=$(make_case busy-progress-cleanup)
+  write_meta "$case_dir" local-only ship
+  window='test:fm-busy-progress'
+  sed -i.bak "s/^window=.*/window=$window/" "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak"
+  key=$(printf '%s' "$window" | tr ':/. ' '____')
+  for marker in \
+    "$case_dir/state/.busy-progress-$key" \
+    "$case_dir/state/.busy-progress-since-$key" \
+    "$case_dir/state/.busy-progress-escalations-$key"; do
+    : > "$marker"
+  done
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "busy-progress-cleanup: forced teardown failed"
+  for marker in \
+    "$case_dir/state/.busy-progress-$key" \
+    "$case_dir/state/.busy-progress-since-$key" \
+    "$case_dir/state/.busy-progress-escalations-$key"; do
+    assert_absent "$marker" "busy-progress-cleanup: teardown left watcher progress state behind"
+  done
+  pass "teardown removes pane-owned busy-progress state"
+}
+
 test_legacy_task_temp_directory_allows_and_removes() {
   local case_dir rc task_tmp
   case_dir=$(make_case legacy-task-temp)
@@ -1550,6 +1576,7 @@ test_live_lock_refuses_before_returning_checked_out_task_branch
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
+test_teardown_clears_busy_progress_tracking
 test_legacy_task_temp_directory_allows_and_removes
 test_legacy_task_temp_adversarial_paths_refuse
 test_herdr_teardown_clears_escalation_marker
