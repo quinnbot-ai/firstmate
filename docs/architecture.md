@@ -102,6 +102,8 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
+For treehouse-backed spawns, the pane may remain in the physical primary-checkout path only while the lease command is taking effect, then it must enter the exact physical leased-worktree root.
+Any other reported pane path is an immediate isolation failure rather than a transient destination, so firstmate never launches into an unverified checkout.
 Codex ship and scout workers additionally run with a firstmate-managed, task-private `CODEX_HOME` under `data/codex-crewmate/`.
 That home copies only the captain's Codex authentication and model catalog, disables plugins, carries no MCP configuration, and excludes the project-local Codex configuration.
 It is recorded as `codex_crewmate_home=` in task metadata and removed only after endpoint cleanup succeeds; the full configuration contract is in [configuration.md](configuration.md#harness-support).
