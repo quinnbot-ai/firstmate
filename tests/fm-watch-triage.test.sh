@@ -21,6 +21,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$ROOT/bin/fm-classify-lib.sh"
+. "$ROOT/bin/fm-ops-inbox-lib.sh"
 
 WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
@@ -261,8 +262,8 @@ test_status_is_paused_classifier() {
 # (surface it) - so the watcher's stale path gets both for one bounded call.
 # crew_is_paused delegates to it exactly as crew_is_provably_working does.
 test_crew_absorb_class_classifier() {
-  local dir fakebin
-  dir=$(make_case absorb-class); fakebin="$dir/fakebin"
+  local dir fakebin state
+  dir=$(make_case absorb-class); fakebin="$dir/fakebin"; state="$dir/state"
   export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
   export FM_FAKE_CREW_STATE
   FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
@@ -278,6 +279,20 @@ test_crew_absorb_class_classifier() {
   FM_FAKE_CREW_STATE='state: unknown · source: none · worktree gone'
   [ "$(crew_absorb_class a)" = none ] || fail "unknown crew classed absorbable"
   ! crew_is_paused a || fail "unknown crew classed paused"
+  FM_FAKE_CREW_STATE='state: parked · source: run-step · awaiting no-mistakes gate'
+  printf 'paused: awaiting upstream\n' > "$state/a.status"
+  [ "$(STATE="$state" crew_absorb_class a)" = paused ] \
+    || fail "a latest declared pause did not override a parked gate"
+  printf 'working: resumed after the gate\n' > "$state/a.status"
+  [ "$(STATE="$state" crew_absorb_class a)" = none ] \
+    || fail "a parked gate without a latest declared pause was absorbed"
+  FM_FAKE_CREW_STATE='state: unknown · source: none · worktree gone'
+  printf 'paused: awaiting upstream\n' > "$state/a.status"
+  [ "$(STATE="$state" crew_absorb_class a)" = none ] || fail "unknown/none trusted an old paused status without a handoff"
+  printf 'paused: awaiting upstream\n' > "$state/.pause-handoff-a"
+  [ "$(STATE="$state" crew_absorb_class a)" = paused ] || fail "unknown/none did not recover a matching coalesced pause handoff"
+  printf 'paused: changed reason\n' > "$state/a.status"
+  [ "$(STATE="$state" crew_absorb_class a)" = none ] || fail "unknown/none trusted a stale coalesced pause handoff"
   [ "$(crew_absorb_class "")" = none ] || fail "empty id not classed none"
   unset FM_FAKE_CREW_STATE
   pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
@@ -565,8 +580,9 @@ test_nonterminal_stale_not_working_surfaced() {
   pane_hash=$(hash_text "idle prompt, finished")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
-  # No running pipeline; the pane is idle. NOT provably working.
-  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  # A parked no-mistakes gate is not active work. Without a declared pause, the
+  # idle pane must still surface immediately.
+  export FM_FAKE_CREW_STATE='state: parked · source: run-step · awaiting next gate'
 
   # Even with a high wedge threshold, a not-provably-working stale surfaces at once.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -580,7 +596,7 @@ test_nonterminal_stale_not_working_surfaced() {
   [ ! -e "$state/.stale-since-$key" ] || fail "stale-since timer should not be set when surfacing immediately"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the immediate stale failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "immediate stale wake was not queued"
-  pass "a not-provably-working non-terminal stale is surfaced immediately (never left to wait out the timer)"
+  pass "a non-paused parked stale is surfaced immediately (never left to wait out the timer)"
 }
 
 # --- non-terminal stale, crew DECLARED a pause: absorbed, re-surfaced on a long
@@ -648,6 +664,205 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the paused re-surface failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "paused re-surface was not queued"
   pass "a declared pause is absorbed on first sight, then re-surfaced as a recheck past the threshold, never wedge-escalated"
+}
+
+# A no-mistakes review gate reports parked rather than paused through
+# fm-crew-state.sh. The task's latest declared paused: status remains the
+# operator's explicit external-wait signal, so a stale pane must take the long
+# pause cadence instead of immediately ending the watcher with a bare stale.
+test_declared_pause_with_parked_gate_is_absorbed() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid
+  dir=$(make_case declared-pause-parked-gate); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-parked-pause"
+  printf 'idle, awaiting next gate\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/parked-pause.meta"
+  statusf="$state/parked-pause.status"
+  printf 'paused: no-mistakes review fix round running, awaiting next gate\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-parked-pause_status"
+  key=$(printf '%s' "$window" | tr ':/. ' '____')
+  pane_hash=$(hash_text 'idle, awaiting next gate')
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: parked · source: run-step · no-mistakes review awaiting next gate'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "declared pause behind a parked gate surfaced a bare stale wake: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "declared pause behind a parked gate printed a wake: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "declared pause behind a parked gate enqueued a wake"; }
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "declared pause behind a parked gate did not enter pause tracking"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "declared pause behind a parked gate started a wedge timer"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a latest declared pause absorbs a stale parked no-mistakes gate"
+}
+
+# A normal-mode watcher intentionally surfaces a newly declared pause once through
+# its status signal, then records .seen-*.  On a later watcher restart the
+# short-lived .paused-* marker may be absent, but that already-surfaced pause is
+# still durable in the task's final status line.  The stale path must recover that
+# declared pause from the status log rather than emit one fresh plain stale wake
+# before it rebuilds pause tracking.
+test_settled_pause_survives_watcher_restart_without_pause_marker() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid
+  dir=$(make_case settled-pause-restart); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-settled-pause"
+  printf 'idle, awaiting upstream\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/settled-pause.meta"
+  statusf="$state/settled-pause.status"
+  printf 'paused: awaiting the upstream release\n' > "$statusf"
+  # The initial status signal was already surfaced by the previous watcher cycle.
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-settled-pause_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text 'idle, awaiting upstream')
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # Simulate a fresh watcher after volatile pause tracking was lost.
+  rm -f "$state/.paused-$key" "$state/.paused-rechecked-$key" "$state/.stale-$key"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream release'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "settled paused pane surfaced a plain stale wake after watcher restart: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "settled paused pane printed a wake after watcher restart: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "settled paused pane enqueued a stale wake after watcher restart"; }
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "settled paused pane did not rebuild pause tracking"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a settled declared pause survives watcher restart without a .paused marker"
+}
+
+# A pause can land in the same grace-window batch as a different actionable
+# signal.
+# That first watcher must surface the batch and exit before its stale loop runs,
+# so it cannot create .paused-*.
+# The next watcher must rebuild pause tracking from the durable final paused event
+# rather than surface a bare stale wake on every re-arm while the current-state
+# reader is temporarily unavailable.
+test_coalesced_pause_signal_rebuilds_stale_pause_tracking() {
+  local dir state fakebin out drain_out capture_file statusf window key pane_hash pid
+  dir=$(make_case coalesced-pause-signal); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"; window="test:fm-coalesced-pause"
+  printf 'idle, awaiting upstream\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/held.meta"
+  statusf="$state/held.status"
+  printf 'paused: awaiting the upstream release\n' > "$statusf"
+  printf 'done: sibling task needs captain review\n' > "$state/sibling.status"
+  : > "$state/sibling.turn-ended"
+  key=${window//:/_}
+  key=${key//\//_}
+  key=${key//./_}
+  pane_hash=$(hash_text 'idle, awaiting upstream')
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state result during watcher handoff'
+
+  # The pause and sibling terminal signal coalesce.
+  # The watcher must surface the batch and exit, leaving stale pause tracking to
+  # its successor.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "coalesced pause/sibling signal did not surface"
+  grep -F "signal:" "$out" >/dev/null || fail "coalesced pause/sibling signal did not print a signal wake"
+  [ ! -e "$state/.paused-$key" ] || fail "first watcher unexpectedly reached stale pause tracking before its signal exit"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after coalesced pause/sibling signal failed"
+  [ -f "$state/.pause-handoff-held" ] || fail "coalesced pause signal did not leave a successor handoff"
+  [ "$(STATE="$state" crew_absorb_class held)" = paused ] || fail "coalesced pause handoff did not classify the successor as paused"
+
+  # Signal markers now suppress the already-surfaced batch.
+  # The stale path must use the durable pause tail to create the marker and stay
+  # quiet.
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "stale path surfaced a bare wake after a coalesced pause signal: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "stale path printed a wake after a coalesced pause signal: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "stale path enqueued a bare wake after a coalesced pause signal"; }
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "stale path did not rebuild pause tracking after a coalesced pause signal"; }
+  [ ! -e "$state/.pause-handoff-held" ] || { reap "$pid"; fail "stale path did not consume the coalesced pause handoff"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a coalesced paused signal rebuilds stale pause tracking on the successor watcher"
+}
+
+test_initial_pause_signal_rebuilds_stale_pause_tracking() {
+  local dir state fakebin out capture_file statusf window key pane_hash pid
+  dir=$(make_case initial-pause-signal); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-initial-pause"
+  printf 'idle, awaiting upstream\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/held.meta"
+  statusf="$state/held.status"
+  printf 'paused: awaiting the upstream release\n' > "$statusf"
+  key=$(printf '%s' "$window" | tr ':/. ' '____')
+  pane_hash=$(hash_text 'idle, awaiting upstream')
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state result during watcher handoff'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "initial pause signal did not surface"
+  [ -f "$state/.pause-handoff-held" ] || fail "initial pause signal did not leave a successor handoff"
+
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "stale path surfaced after an initial pause signal: $(cat "$out")"
+  fi
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "stale path did not rebuild pause tracking after an initial pause signal"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "an initial paused signal rebuilds stale pause tracking on the successor watcher"
+}
+
+test_gone_paused_target_surfaces_without_coalesced_handoff() {
+  local dir state fakebin out drain_out capture_file statusf window key pane_hash sig pid
+  dir=$(make_case gone-paused-target); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"; window="test:fm-gone-paused"
+  printf 'idle, old pause remains\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/gone-paused.meta"
+  statusf="$state/gone-paused.status"
+  printf 'paused: awaiting an upstream release\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-gone-paused_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text 'idle, old pause remains')
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · worktree gone'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "gone paused target was suppressed instead of surfaced"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "gone paused target did not print an immediate stale wake"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after gone paused target failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "gone paused target stale wake was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "a gone target with an old paused status surfaces without a coalesced handoff"
 }
 
 test_secondmate_paused_resurfaces_in_normal_mode() {
@@ -1067,6 +1282,195 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
   pass "heartbeat backstop fail-safe surfaces a captain-relevant status the per-wake path missed"
 }
 
+# --- operations inbox: task-poll and heartbeat wake classification -----------
+
+seed_ops_inbox_fingerprint() {  # <home> <state>
+  local home=$1 state=$2 fingerprint
+  fingerprint=$(bash -c '. "$1"; fm_ops_inbox_fingerprint "$2" "$3"' _ \
+    "$ROOT/bin/fm-ops-inbox-lib.sh" "$home" "$home/config") \
+    || fail "could not seed operations-inbox fingerprint"
+  printf '%s\n' "$fingerprint" > "$state/.hash-ops-inbox"
+}
+
+test_ops_inbox_new_event_wakes_with_task_in_flight() {
+  local dir state fakebin out home pid
+  dir=$(make_case ops-inbox-task); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  home="$dir/home"
+  mkdir -p "$home/ops-inbox" "$home/config"
+  printf 'project=firstmate\nkind=ship\n' > "$state/ops.meta"
+  seed_ops_inbox_fingerprint "$home" "$state"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 15 || { reap "$pid"; fail "watcher exited before an operations-inbox event landed: $(cat "$out")"; }
+  printf 'P1 failure\n' > "$home/ops-inbox/new.event"
+  wait_for_exit "$pid" 40 || fail "watcher did not wake for a new operations-inbox event while a task was in flight"
+  grep -Fx 'check: ops-inbox changed - inspect the OPS INBOX session-start digest' "$out" >/dev/null \
+    || fail "operations-inbox task wake did not use the actionable check classification: $(cat "$out")"
+  grep "$(printf '\tcheck\tops-inbox\t')" "$state/.wake-queue" >/dev/null \
+    || fail "operations-inbox task wake was not durably queued as a check"
+
+  pass "a new operations-inbox event wakes immediately with a task in flight"
+}
+
+test_ops_inbox_new_event_wakes_on_heartbeat_without_tasks() {
+  local dir state fakebin out home pid
+  dir=$(make_case ops-inbox-heartbeat); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  home="$dir/home"
+  mkdir -p "$home/ops-inbox" "$home/config"
+  seed_ops_inbox_fingerprint "$home" "$state"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 FM_HEARTBEAT_MAX=1 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 15 || { reap "$pid"; fail "watcher exited before heartbeat operations-inbox event: $(cat "$out")"; }
+  printf 'P0 failure\n' > "$home/ops-inbox/new.event"
+  wait_for_exit "$pid" 40 || fail "watcher did not wake for a new operations-inbox event on its heartbeat scan"
+  grep -Fx 'check: ops-inbox changed - inspect the OPS INBOX session-start digest' "$out" >/dev/null \
+    || fail "operations-inbox heartbeat wake did not use the actionable check classification: $(cat "$out")"
+  grep "$(printf '\tcheck\tops-inbox\t')" "$state/.wake-queue" >/dev/null \
+    || fail "operations-inbox heartbeat wake was not durably queued as a check"
+
+  pass "a new operations-inbox event wakes on heartbeat when no task is in flight"
+}
+
+test_ops_inbox_fingerprint_distinguishes_same_second_same_size_rewrite() {
+  local dir home before after
+  dir=$(make_case ops-inbox-subsecond); home="$dir/home"
+  mkdir -p "$home/ops-inbox" "$home/config"
+  printf 'first\n' > "$home/ops-inbox/event"
+  before=$(fm_ops_inbox_fingerprint "$home" "$home/config")
+  printf 'other\n' > "$home/ops-inbox/event"
+  after=$(fm_ops_inbox_fingerprint "$home" "$home/config")
+  [ "$before" != "$after" ] || fail "same-size operations-inbox rewrite did not change its fingerprint"
+  pass "operations-inbox fingerprints retain sub-second rewrite resolution"
+}
+
+test_ops_inbox_fingerprint_uses_bounded_one_level_markers() {
+  local dir home fakebin find_log find_count real_find before repeat after marker
+  dir=$(make_case ops-inbox-directory-marker); home="$dir/home"; fakebin="$dir/fakebin"
+  find_log="$dir/find.log"; find_count="$dir/find-count"; real_find=$(command -v find)
+  mkdir -p "$home/ops-inbox/source" "$home/config"
+  printf 'first\n' > "$home/ops-inbox/source/event"
+  cat > "$fakebin/find" <<SH
+#!/usr/bin/env bash
+printf '%s\\n' "\$*" >> "\$FM_OPS_INBOX_FIND_LOG"
+case " \$* " in
+  *' -mindepth 1 -maxdepth 1 -print0 '*)
+    count=\$(cat "\$FM_OPS_INBOX_FIND_COUNT" 2>/dev/null || echo 0)
+    count=\$((count + 1))
+    printf '%s\\n' "\$count" > "\$FM_OPS_INBOX_FIND_COUNT"
+    if [ "\$count" -eq 2 ]; then
+      "$real_find" "\$@" | perl -0 -e 'print for reverse <>'
+      exit "\${PIPESTATUS[0]}"
+    fi
+    ;;
+esac
+exec "$real_find" "\$@"
+SH
+  chmod +x "$fakebin/find"
+  before=$(PATH="$fakebin:$PATH" FM_OPS_INBOX_FIND_LOG="$find_log" FM_OPS_INBOX_FIND_COUNT="$find_count" fm_ops_inbox_fingerprint "$home" "$home/config")
+  repeat=$(PATH="$fakebin:$PATH" FM_OPS_INBOX_FIND_LOG="$find_log" FM_OPS_INBOX_FIND_COUNT="$find_count" fm_ops_inbox_fingerprint "$home" "$home/config")
+  [ "$before" = "$repeat" ] || fail "directory traversal order changed the operations-inbox fingerprint"
+  printf 'second\n' > "$home/ops-inbox/source/new-event"
+  after=$(PATH="$fakebin:$PATH" FM_OPS_INBOX_FIND_LOG="$find_log" FM_OPS_INBOX_FIND_COUNT="$find_count" fm_ops_inbox_fingerprint "$home" "$home/config")
+  [ "$before" != "$after" ] || fail "one-level operations-inbox event did not change its directory-marker fingerprint"
+  grep -F -- '-mindepth 1 -maxdepth 1 -print0' "$find_log" >/dev/null || fail "fingerprint did not restrict markers to top-level entries"
+  [ "$(wc -l < "$find_log" | tr -d '[:space:]')" -eq 3 ] || fail "fingerprint performed unexpected operations-inbox scans"
+
+  mkdir -p "$home/ops-inbox/overflow-a" "$home/ops-inbox/overflow-b" "$home/ops-inbox/overflow-c"
+  marker=$(FM_OPS_INBOX_MARKER_LIMIT=2 fm_ops_inbox_home_marker "$home")
+  printf '%s\n' "$marker" | grep -Fx '__FM_OPS_INBOX_MARKER_OVERFLOW__:2' >/dev/null \
+    || fail "bounded operations-inbox marker did not disclose overflow"
+  [ "$(printf '%s\n' "$marker" | awk 'END { print NR + 0 }')" -eq 3 ] \
+    || fail "bounded operations-inbox marker retained more than its limit"
+  pass "operations-inbox fingerprints use bounded one-level markers"
+}
+
+test_ops_inbox_external_output_is_bounded_and_timed() {
+  local dir home command output rc bytes started elapsed escaped_pid
+  dir=$(make_case ops-inbox-bounded-command); home="$dir/home"; command="$dir/external-inbox"
+  mkdir -p "$home/config"
+  cat > "$command" <<'SH'
+#!/usr/bin/env bash
+while :; do printf '0123456789abcdef'; done
+SH
+  chmod +x "$command"
+  printf '%s\n' "$command" > "$home/config/ops-inbox-cmd"
+  output=$(FM_OPS_INBOX_OUTPUT_MAX_BYTES=128 fm_ops_inbox_external_output "$home/config")
+  rc=$?
+  bytes=$(printf '%s' "$output" | LC_ALL=C wc -c | tr -d '[:space:]')
+  [ "$bytes" -le 128 ] || fail "external operations-inbox output exceeded its byte cap ($bytes)"
+  [ "$rc" -ne 0 ] || fail "capped external operations-inbox command unexpectedly succeeded"
+
+  cat > "$command" <<'SH'
+#!/usr/bin/env bash
+printf 'external failure\n'
+exit 42
+SH
+  chmod +x "$command"
+  output=$(fm_ops_inbox_external_output "$home/config")
+  rc=$?
+  [ "$output" = 'external failure' ] || fail "external operations-inbox command lost its output"
+  [ "$rc" -eq 42 ] || fail "external operations-inbox command returned $rc, expected 42"
+
+  cat > "$command" <<'SH'
+#!/usr/bin/env bash
+kill -TERM "$$"
+SH
+  chmod +x "$command"
+  output=$(fm_ops_inbox_external_output "$home/config")
+  rc=$?
+  [ -z "$output" ] || fail "signalled external operations-inbox command produced unexpected output"
+  [ "$rc" -eq 143 ] || fail "signalled external operations-inbox command returned $rc, expected 143"
+
+  cat > "$command" <<'SH'
+#!/usr/bin/env bash
+sleep 3
+SH
+  chmod +x "$command"
+  started=$SECONDS
+  output=$(FM_OPS_INBOX_TIMEOUT=1 fm_ops_inbox_external_output "$home/config")
+  rc=$?
+  elapsed=$((SECONDS - started))
+  [ -z "$output" ] || fail "timed external operations-inbox command produced unexpected output"
+  [ "$rc" -eq 124 ] || fail "timed external operations-inbox command returned $rc, expected 124"
+  [ "$elapsed" -lt 3 ] || fail "timed external operations-inbox command exceeded its deadline (${elapsed}s)"
+
+  cat > "$command" <<'SH'
+#!/usr/bin/env bash
+sleep 3 &
+SH
+  chmod +x "$command"
+  started=$SECONDS
+  output=$(FM_OPS_INBOX_TIMEOUT=1 fm_ops_inbox_external_output "$home/config")
+  rc=$?
+  elapsed=$((SECONDS - started))
+  [ -z "$output" ] || fail "background-child external command produced unexpected output"
+  [ "$rc" -eq 124 ] || fail "background-child external command returned $rc, expected 124"
+  [ "$elapsed" -lt 3 ] || fail "background-child external command bypassed its deadline (${elapsed}s)"
+
+  escaped_pid="$dir/escaped.pid"
+  cat > "$command" <<SH
+#!/usr/bin/env bash
+perl -MPOSIX=setsid -e 'setsid; sleep 10' &
+printf '%s\\n' "\\$!" > "$escaped_pid"
+SH
+  chmod +x "$command"
+  started=$SECONDS
+  output=$(FM_OPS_INBOX_TIMEOUT=1 fm_ops_inbox_external_output "$home/config")
+  rc=$?
+  elapsed=$((SECONDS - started))
+  [ -z "$output" ] || fail "setsid-child external command produced unexpected output"
+  [ "$rc" -eq 124 ] || fail "setsid-child external command returned $rc, expected 124"
+  [ "$elapsed" -lt 3 ] || fail "setsid-child external command bypassed the parent capture deadline (${elapsed}s)"
+  kill "$(cat "$escaped_pid")" 2>/dev/null || true
+  pass "external operations-inbox commands have bounded output and runtime"
+}
+
 # --- beacon stays fresh while absorbing -------------------------------------
 
 test_beacon_stays_fresh_while_absorbing() {
@@ -1458,7 +1862,12 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
+test_declared_pause_with_parked_gate_is_absorbed
 test_nonterminal_stale_paused_absorbed_then_resurfaced
+test_settled_pause_survives_watcher_restart_without_pause_marker
+test_coalesced_pause_signal_rebuilds_stale_pause_tracking
+test_initial_pause_signal_rebuilds_stale_pause_tracking
+test_gone_paused_target_surfaces_without_coalesced_handoff
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking
@@ -1469,6 +1878,11 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
+test_ops_inbox_new_event_wakes_with_task_in_flight
+test_ops_inbox_new_event_wakes_on_heartbeat_without_tasks
+test_ops_inbox_fingerprint_distinguishes_same_second_same_size_rewrite
+test_ops_inbox_fingerprint_uses_bounded_one_level_markers
+test_ops_inbox_external_output_is_bounded_and_timed
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale

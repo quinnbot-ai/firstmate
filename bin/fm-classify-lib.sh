@@ -7,11 +7,11 @@
 # overlapping triage policy lives in one place instead of two copies that can
 # drift apart.
 #
-# Most functions are pure, side-effect-free reads of status files: each takes
-# what it needs as arguments and touches no globals beyond the optional
-# FM_CAPTAIN_RE override. Consumers layer their own dedup/marker state on top (the
-# daemon keeps its escalation-digest seen-markers; the watcher keeps its .seen-*
-# signatures).
+# Most functions are pure, side-effect-free reads of status files or the
+# watcher-owned pause handoff record: each takes what it needs as arguments and
+# touches no globals beyond the optional FM_CAPTAIN_RE override. Consumers layer
+# their own dedup/marker state on top (the daemon keeps its escalation-digest
+# seen-markers; the watcher keeps its .seen-* signatures).
 #
 # The one exception is the absorb classification (crew_absorb_class and its
 # working/paused wrappers). It is NOT a pure status-file read: it reuses
@@ -335,6 +335,28 @@ signal_reason_is_actionable() {  # <file> ...
   return 1
 }
 
+# Return the watcher-owned, short-lived coalesced-pause handoff path for one
+# task, so successor stale triage can distinguish a pause that was surfaced in
+# an exiting signal batch from an arbitrary old paused status event.
+crew_pause_handoff_file() {  # <id> [state-dir]
+  local id=$1 state=${2:-${STATE:-${FM_STATE_OVERRIDE:-}}}
+  [ -n "$id" ] && [ -n "$state" ] || return 1
+  printf '%s/.pause-handoff-%s' "$state" "$id"
+}
+
+# Accept a handoff only when it is a regular file whose recorded final status
+# still exactly matches the task's final paused event; this prevents recovery
+# from masking a newer status transition or following a symlinked artifact.
+crew_pause_handoff_allows_recovery() {  # <id> [state-dir]
+  local id=$1 state=${2:-${STATE:-${FM_STATE_OVERRIDE:-}}} marker last recorded
+  marker=$(crew_pause_handoff_file "$id" "$state") || return 1
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  last=$(last_status_line "$state/$id.status")
+  status_is_paused "$last" || return 1
+  IFS= read -r recorded < "$marker" || return 1
+  [ "$recorded" = "$last" ]
+}
+
 # Classify WHY an idle/stale crew MIGHT be safely absorbed instead of surfaced,
 # from bin/fm-crew-state.sh's one authoritative current-state line
 # ("state: <s> · source: <src> · <detail>"). Prints exactly one token:
@@ -348,11 +370,14 @@ signal_reason_is_actionable() {  # <file> ...
 # One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
 # authoritatively (not the status log) is what keeps run-step precedence: a crew
 # that appended paused: but then STARTED a run reports working, never paused.
+# A parked no-mistakes gate is different: when the latest status explicitly says
+# paused:, that declaration is the worker's current external-wait instruction and
+# takes precedence over the gate's parked label until a later status replaces it.
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
 crew_absorb_class() {  # <id>
-  local id=$1 line state src
+  local id=$1 line state src state_dir last
   [ -n "$id" ] || { printf 'none'; return; }
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
@@ -361,6 +386,23 @@ crew_absorb_class() {  # <id>
   if [ "$state" = working ]; then
     src=${line#*source: }; src=${src%% *}
     case "$src" in run-step|pane) printf 'working'; return ;; esac
+  fi
+  if [ "$state" = parked ]; then
+    state_dir=${STATE:-${FM_STATE_OVERRIDE:-}}
+    if [ -n "$state_dir" ]; then
+      last=$(last_status_line "$state_dir/$id.status")
+      if status_is_paused "$last"; then
+        printf 'paused'
+        return
+      fi
+    fi
+  fi
+  if [ "$state" = unknown ]; then
+    src=${line#*source: }; src=${src%% *}
+    if [ "$src" = none ] && crew_pause_handoff_allows_recovery "$id"; then
+      printf 'paused'
+      return
+    fi
   fi
   printf 'none'
 }
