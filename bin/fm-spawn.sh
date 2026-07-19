@@ -698,6 +698,65 @@ real_path_or_raw() {  # <path>
   fi
 }
 
+git_common_dir_real() {  # <repository-or-worktree>
+  local repo=$1 common
+  common=$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null) || return 1
+  case "$common" in
+    /*) ;;
+    *) common="$repo/$common" ;;
+  esac
+  cd "$common" 2>/dev/null && pwd -P
+}
+
+recover_treehouse_lease_handoffs() {
+  local handoff lease_path lease_real lease_top lease_common project_common
+  [ -d "$STATE" ] || return 0
+  project_common=$(git_common_dir_real "$PROJ_ABS") || {
+    echo "error: cannot recover treehouse lease handoffs because $PROJ_ABS has no git common directory" >&2
+    return 1
+  }
+  for handoff in "$STATE/.${ID}.treehouse-lease."*; do
+    [ -f "$handoff" ] || continue
+    IFS= read -r lease_path < "$handoff" || true
+    case "$lease_path" in
+      '')
+        rm -f "$handoff" || {
+          echo "error: failed to remove empty treehouse lease handoff $handoff" >&2
+          return 1
+        }
+        continue
+        ;;
+      /*) ;;
+      *)
+        echo "error: refusing to recover invalid treehouse lease path '$lease_path' from $handoff; handoff retained" >&2
+        return 1
+        ;;
+    esac
+    lease_real=$(real_path_or_raw "$lease_path")
+    lease_top=$(git -C "$lease_path" rev-parse --show-toplevel 2>/dev/null || true)
+    lease_common=$(git_common_dir_real "$lease_path" || true)
+    if [ "$lease_real" = "$PROJ_ABS_REAL" ] || [ -z "$lease_top" ] \
+      || [ "$(real_path_or_raw "$lease_top")" != "$lease_real" ] || [ -z "$lease_common" ]; then
+      echo "error: refusing to recover invalid treehouse lease path '$lease_path' from $handoff; handoff retained" >&2
+      return 1
+    fi
+    if [ "$lease_common" != "$project_common" ]; then
+      echo "error: refusing to recover treehouse lease path '$lease_path' from $handoff because it belongs to another project; handoff retained" >&2
+      return 1
+    fi
+    if ( cd "$PROJ_ABS" && treehouse return --force "$lease_path" ); then
+      rm -f "$handoff" || {
+        echo "error: recovered treehouse lease $lease_path but failed to remove handoff $handoff" >&2
+        return 1
+      }
+      echo "recovered treehouse lease handoff $handoff" >&2
+    else
+      echo "error: failed to recover treehouse lease $lease_path from $handoff; handoff retained" >&2
+      return 1
+    fi
+  done
+}
+
 # Refuse allocation beside a live task created before treehouse leasing. That
 # meta's worktree is still authoritative, but an older treehouse get may treat
 # its detached pane as idle and reset it for this spawn. New task metas carry
@@ -724,6 +783,7 @@ refuse_unleased_treehouse_hold() {
 }
 
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  recover_treehouse_lease_handoffs || exit 1
   refuse_unleased_treehouse_hold || exit 1
 fi
 

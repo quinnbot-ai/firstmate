@@ -248,6 +248,7 @@ set -u
 printf 'treehouse %s\n' "$*" >> "${FM_TREEHOUSE_REC:?}"
 case "${1:-}" in
   get) printf '%s\n' "${FM_FAKE_LEASED_WORKTREE:?}" ;;
+  return) [ -z "${FM_FAKE_TREEHOUSE_RETURN_FAIL:-}" ] || exit 17 ;;
 esac
 exit 0
 SH
@@ -384,6 +385,65 @@ test_spawn_rolls_back_lease_after_setup_failure() {
   pass "fm-spawn: rolls back a leased slot when later setup fails"
 }
 
+test_spawn_recovers_failed_lease_rollback() {
+  local home proj wt invalid fakebin rec out status id handoff returns
+  home="$TMP_ROOT/lease-recovery-home"
+  mkdir -p "$home/state" "$home/data"
+  proj=$(make_repo "$TMP_ROOT/lease-recovery-proj")
+  wt="$TMP_ROOT/lease-recovery-wt"
+  invalid="$TMP_ROOT/lease-recovery-invalid"
+  mkdir -p "$invalid"
+  git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
+  fakebin=$(make_spawn_lease_fakebin "$TMP_ROOT/lease-recovery-fake")
+  rec="$TMP_ROOT/lease-recovery-treehouse.log"; : > "$rec"
+  id=lease-recovery-ff6
+
+  out=$(FM_FAKE_TREEHOUSE_RETURN_FAIL=1 run_spawn_lease_case "$home" "$id" "$proj" "$invalid" "$fakebin" "$rec" '' "$wt"); status=$?
+  expect_code 1 "$status" "spawn must fail when the initial lease rollback fails"
+  assert_contains "$out" "handoff retained" "failed lease rollback did not retain its durable handoff"
+  handoff=$(printf '%s\n' "$home/state/.${id}.treehouse-lease."*)
+  assert_present "$handoff" "failed lease rollback did not leave a recovery handoff"
+
+  out=$(run_spawn_lease_case "$home" "$id" "$proj" "$invalid" "$fakebin" "$rec" '' "$wt"); status=$?
+  expect_code 1 "$status" "recovery retry should continue to the expected isolation refusal"
+  assert_contains "$out" "recovered treehouse lease handoff" "retry did not recover the earlier failed lease rollback"
+  for handoff in "$home/state/.${id}.treehouse-lease."*; do
+    [ ! -e "$handoff" ] || fail "recovered lease handoff remained at $handoff"
+  done
+  returns=$(grep -Fc "treehouse return --force $wt" "$rec")
+  [ "$returns" -eq 3 ] || fail "expected failed rollback, recovery, and retry rollback returns; got $returns"
+  assert_absent "$home/state/$id.meta" "failed rollback recovery must not create task metadata"
+  pass "fm-spawn: recovers a retained lease handoff before retrying allocation"
+}
+
+test_spawn_refuses_cross_project_lease_handoff() {
+  local home proj wt invalid other fakebin rec out status id handoff gets
+  home="$TMP_ROOT/lease-cross-project-home"
+  mkdir -p "$home/state" "$home/data"
+  proj=$(make_repo "$TMP_ROOT/lease-cross-project-proj")
+  wt="$TMP_ROOT/lease-cross-project-wt"
+  invalid="$TMP_ROOT/lease-cross-project-invalid"
+  mkdir -p "$invalid"
+  git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
+  other=$(make_repo "$TMP_ROOT/lease-cross-project-other")
+  fakebin=$(make_spawn_lease_fakebin "$TMP_ROOT/lease-cross-project-fake")
+  rec="$TMP_ROOT/lease-cross-project-treehouse.log"; : > "$rec"
+  id=lease-cross-project-gg7
+
+  out=$(FM_FAKE_TREEHOUSE_RETURN_FAIL=1 run_spawn_lease_case "$home" "$id" "$proj" "$invalid" "$fakebin" "$rec" '' "$wt"); status=$?
+  expect_code 1 "$status" "spawn must retain a failed lease rollback before cross-project retry"
+  handoff=$(printf '%s\n' "$home/state/.${id}.treehouse-lease."*)
+  assert_present "$handoff" "failed lease rollback did not leave a cross-project recovery handoff"
+  gets=$(grep -Fc "treehouse get --lease" "$rec")
+
+  out=$(run_spawn_lease_case "$home" "$id" "$other" "$invalid" "$fakebin" "$rec" '' "$wt"); status=$?
+  expect_code 1 "$status" "spawn must refuse to reuse a task id with another project's lease handoff"
+  assert_contains "$out" "belongs to another project" "cross-project handoff refusal did not identify the ownership mismatch"
+  assert_present "$handoff" "cross-project handoff refusal must retain the original lease record"
+  [ "$(grep -Fc "treehouse get --lease" "$rec")" -eq "$gets" ] || fail "cross-project handoff refusal allocated another treehouse lease"
+  pass "fm-spawn: refuses a same-id handoff from another project before allocation"
+}
+
 # --- GUARD 1d: fm-spawn tmux window construction ----------------------------
 
 # The prevention guard also depends on fm-spawn building robust tmux commands
@@ -483,4 +543,6 @@ test_spawn_refuses_detached_legacy_held_worktree
 test_spawn_leases_normal_treehouse_allocation
 test_spawn_rolls_back_lease_after_isolation_failure
 test_spawn_rolls_back_lease_after_setup_failure
+test_spawn_recovers_failed_lease_rollback
+test_spawn_refuses_cross_project_lease_handoff
 test_spawn_tmux_window_construction
