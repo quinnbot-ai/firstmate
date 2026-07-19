@@ -323,14 +323,16 @@ run_spawn_lease_case() {
       FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
       FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
-      FM_FAKE_LEASED_WORKTREE="$lease_path" FM_TREEHOUSE_REC="$rec" PATH="$fakebin:$PATH" \
+      FM_FAKE_LEASED_WORKTREE="$lease_path" FM_TREEHOUSE_REC="$rec" \
+      FM_FAIL_TASK_MKTEMP="${FM_FAIL_TASK_MKTEMP:-0}" PATH="$fakebin:$PATH" \
       "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --scout 2>&1
   else
     FM_ROOT_OVERRIDE='' FM_HOME="$home" \
       FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
       FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
-      FM_FAKE_LEASED_WORKTREE="$lease_path" FM_TREEHOUSE_REC="$rec" PATH="$fakebin:$PATH" \
+      FM_FAKE_LEASED_WORKTREE="$lease_path" FM_TREEHOUSE_REC="$rec" \
+      FM_FAIL_TASK_MKTEMP="${FM_FAIL_TASK_MKTEMP:-0}" PATH="$fakebin:$PATH" \
       "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude 2>&1
   fi
 }
