@@ -1283,6 +1283,22 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   WT_REAL=$wt_real
 }
 
+reject_active_worktree_owner() {
+  local meta owner recorded recorded_real
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    recorded=$(fm_meta_get "$meta" worktree)
+    [ -n "$recorded" ] || continue
+    recorded_real=$(real_path_or_raw "$recorded")
+    [ "$recorded_real" != "$WT_REAL" ] || {
+      owner=${meta##*/}
+      owner=${owner%.meta}
+      echo "error: treehouse get --lease returned worktree '$WT' already recorded by active task '$owner'; refusing to return or launch it. Inspect target $T" >&2
+      return 1
+    }
+  done
+}
+
 W="fm-$ID"
 case "$BACKEND" in
   tmux)
@@ -1436,6 +1452,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     exit 1
   }
   validate_spawn_worktree "treehouse get --lease" "$T"
+  reject_active_worktree_owner || exit 1
   TREEHOUSE_ENDPOINT_CLEANUP=0
   TREEHOUSE_ABORT_CLEANUP=1
   spawn_send_text_line "$WT_TARGET" "cd $(shell_quote "$WT")"

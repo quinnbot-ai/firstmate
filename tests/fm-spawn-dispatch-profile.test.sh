@@ -342,7 +342,7 @@ test_codex_threads_model_and_effort() {
 }
 
 test_codex_crewmate_home_excludes_mcp_and_plugins() {
-  local rec ship scout out status launch crew_home source_home activation_result worktree_link worktree_real
+  local rec ship scout out status launch crew_home source_home activation_result worktree_link worktree_real scout_wt scout_worktree_real
   ship=profile-codex-home-ship-z17
   scout=profile-codex-home-scout-z18
   rec=$(make_spawn_case profile-codex-home codex "$ship" "$scout")
@@ -418,7 +418,10 @@ EOF
   [ ! -L "$crew_home/auth.json" ] || fail "isolated Codex auth must not point into the captain home"
 
   mkdir -p "$HOME_DIR/data/codex-crewmate/fm-crewmate-$scout/plugins/stale-plugin"
-  out=$(run_spawn "$HOME_DIR" "$worktree_link" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$scout" "$PROJ_DIR" --scout)
+  scout_wt="$CASE_DIR/scout-wt"
+  git -C "$PROJ_DIR" worktree add --quiet -b profile-codex-home-scout-wt "$scout_wt"
+  scout_worktree_real=$(cd "$scout_wt" && pwd -P)
+  out=$(run_spawn "$HOME_DIR" "$scout_wt" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$scout" "$PROJ_DIR" --scout)
   status=$?
   expect_code 0 "$status" "Codex scout spawn should use the isolated home"
   launch=$(cat "$LAUNCH_LOG")
@@ -430,7 +433,7 @@ EOF
     "Codex scout launch did not authenticate the isolated-home activation"
   assert_contains "$launch" "-- codex --profile 'fm-crewmate-$scout' --disable plugins" \
     "Codex scout launch did not activate the isolated CODEX_HOME"
-  materialize_codex_home "$crew_home" "$HOME_DIR/data" "$source_home" "fm-crewmate-$scout" "$worktree_real"
+  materialize_codex_home "$crew_home" "$HOME_DIR/data" "$source_home" "fm-crewmate-$scout" "$scout_worktree_real"
   assert_no_grep 'mcp_servers' "$crew_home/config.toml" \
     "Codex scout refresh reintroduced MCP server entries"
   assert_grep 'plugins = false' "$crew_home/config.toml" \
@@ -1546,12 +1549,18 @@ test_treehouse_spawn_preserves_unverified_worktree() {
 
 test_treehouse_lease_rejects_unverified_output() {
   local rec id out status foreign lease_output case_name
-  for case_name in primary foreign; do
+  for case_name in primary foreign active-task; do
     id="profile-treehouse-lease-$case_name-z24"
     rec=$(make_spawn_case "profile-treehouse-lease-$case_name" claude "$id")
     read_case_record "$rec"
     foreign="$CASE_DIR/foreign"
-    if [ "$case_name" = foreign ]; then
+    if [ "$case_name" = active-task ]; then
+      git -C "$PROJ_DIR" worktree add --quiet -b active-worktree "$foreign"
+      fm_write_meta "$HOME_DIR/state/active-task.meta" \
+        "window=firstmate:fm-active-task" "worktree=$foreign" "project=$PROJ_DIR" \
+        "harness=claude" "kind=ship" "mode=no-mistakes"
+      lease_output="$foreign"
+    elif [ "$case_name" = foreign ]; then
       git init --quiet "$foreign"
       lease_output="$foreign"
     else
@@ -1561,6 +1570,10 @@ test_treehouse_lease_rejects_unverified_output() {
     out=$(FM_FAKE_TREEHOUSE_LEASE_PATH="$lease_output" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
     status=$?
     expect_code 1 "$status" "spawn must reject an unverified $case_name lease output"
+    if [ "$case_name" = active-task ]; then
+      assert_contains "$out" "already recorded by active task 'active-task'" \
+        "spawn did not explain the active-task lease collision"
+    fi
     assert_no_grep "treehouse return --force $lease_output" "$CASE_DIR/backend.log" \
       "spawn cleanup returned an unverified $case_name lease output"
     assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
