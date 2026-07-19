@@ -169,18 +169,26 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  get) printf '%s\n' "${FM_FAKE_LEASED_WORKTREE:-${FM_FAKE_PANE_PATH:?}}" ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
 run_spawn() {
-  local home=$1 id=$2 proj=$3 pane=$4 fakebin=$5
+  local home=$1 id=$2 proj=$3 pane=$4 fakebin=$5 lease_path
+  lease_path=${6:-$pane}
   mkdir -p "$home/data/$id"
   printf 'brief\n' > "$home/data/$id/brief.md"
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" FM_FAKE_LEASED_WORKTREE="$lease_path" TMUX="fake,1,0" \
     PATH="$fakebin:$PATH" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex 2>&1
 }
@@ -196,13 +204,13 @@ test_spawn_isolation_abort() {
   mkdir -p "$TMP_ROOT/spawn-notgit" "$proj/sub"
 
   # Abort: the pane resolves to a plain non-git directory (not a worktree at all).
-  out=$(run_spawn "$home" abort-notgit-dd4 "$proj" "$TMP_ROOT/spawn-notgit" "$fakebin"); status=$?
+  out=$(run_spawn "$home" abort-notgit-dd4 "$proj" "$TMP_ROOT/spawn-notgit" "$fakebin" "$TMP_ROOT/spawn-wt"); status=$?
   expect_code 1 "$status" "spawn into a non-worktree dir should abort"
   assert_contains "$out" "did not yield an isolated worktree" "non-worktree spawn lacked the isolation error"
   assert_absent "$home/state/abort-notgit-dd4.meta" "aborted spawn must not record meta"
 
   # Abort: the pane resolves INTO the primary checkout (a subdir of PROJ_ABS).
-  out=$(run_spawn "$home" abort-primary-ee5 "$proj" "$proj/sub" "$fakebin"); status=$?
+  out=$(run_spawn "$home" abort-primary-ee5 "$proj" "$proj/sub" "$fakebin" "$TMP_ROOT/spawn-wt"); status=$?
   expect_code 1 "$status" "spawn landing inside the primary checkout should abort"
   assert_contains "$out" "did not yield an isolated worktree" "primary-checkout spawn lacked the isolation error"
 
@@ -247,7 +255,15 @@ SH
 set -u
 printf 'treehouse %s\n' "$*" >> "${FM_TREEHOUSE_REC:?}"
 case "${1:-}" in
-  get) printf '%s\n' "${FM_FAKE_LEASED_WORKTREE:?}" ;;
+  get)
+    if [ -n "${FM_FAKE_TREEHOUSE_GET_READY:-}" ]; then
+      : > "$FM_FAKE_TREEHOUSE_GET_READY"
+      while [ ! -e "${FM_FAKE_TREEHOUSE_GET_CONTINUE:?}" ]; do
+        sleep 0.05
+      done
+    fi
+    printf '%s\n' "${FM_FAKE_LEASED_WORKTREE:?}"
+    ;;
   return) [ -z "${FM_FAKE_TREEHOUSE_RETURN_FAIL:-}" ] || exit 17 ;;
 esac
 exit 0
@@ -333,7 +349,7 @@ test_spawn_leases_normal_treehouse_allocation() {
   out=$(run_spawn_lease_case "$home" normal-scout-cc3 "$proj" "$wt" "$fakebin" "$rec" scout); status=$?
   expect_code 0 "$status" "normal scout spawn should acquire a treehouse lease"
   assert_contains "$out" "spawned normal-scout-cc3" "normal leased spawn did not report success"
-  assert_grep "treehouse get --lease --lease-holder 'normal-scout-cc3'" "$rec" \
+  assert_grep "treehouse get --lease --lease-holder normal-scout-cc3" "$rec" \
     "normal spawn did not request a durable treehouse lease under its task id"
   assert_contains "$(cat "$home/state/normal-scout-cc3.meta")" "treehouse_lease=1" \
     "normal leased spawn did not record its durable pool hold"
@@ -438,6 +454,92 @@ test_spawn_recovers_failed_lease_rollback() {
   pass "fm-spawn: recovers a retained lease handoff before retrying allocation"
 }
 
+test_spawn_refuses_empty_lease_handoff() {
+  local home proj wt fakebin rec out status handoff
+  home="$TMP_ROOT/lease-empty-handoff-home"
+  mkdir -p "$home/state" "$home/data"
+  proj=$(make_repo "$TMP_ROOT/lease-empty-handoff-proj")
+  wt="$TMP_ROOT/lease-empty-handoff-wt"
+  git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
+  fakebin=$(make_spawn_lease_fakebin "$TMP_ROOT/lease-empty-handoff-fake")
+  rec="$TMP_ROOT/lease-empty-handoff-treehouse.log"; : > "$rec"
+  handoff="$home/state/.crashed.treehouse-lease.token"
+  : > "$handoff"
+
+  out=$(run_spawn_lease_case "$home" empty-handoff-jj1 "$proj" "$wt" "$fakebin" "$rec" scout); status=$?
+  expect_code 1 "$status" "spawn must refuse an empty lease handoff"
+  assert_contains "$out" "refusing to recover empty treehouse lease handoff" \
+    "empty lease handoff was not retained for safe inspection"
+  assert_present "$handoff" "empty lease handoff must remain durable"
+  [ ! -s "$rec" ] || fail "empty lease handoff must block allocation before treehouse runs"
+  pass "fm-spawn: retains an empty lease handoff instead of losing an in-flight acquisition"
+}
+
+test_spawn_serializes_lease_handoff_publication() {
+  local home proj wt fakebin rec first_out second_out ready go first_pid second_pid status gets
+  home="$TMP_ROOT/lease-transaction-home"
+  mkdir -p "$home/state" "$home/data"
+  proj=$(make_repo "$TMP_ROOT/lease-transaction-proj")
+  wt="$TMP_ROOT/lease-transaction-wt"
+  git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
+  fakebin=$(make_spawn_lease_fakebin "$TMP_ROOT/lease-transaction-fake")
+  rec="$TMP_ROOT/lease-transaction-treehouse.log"; : > "$rec"
+  first_out="$TMP_ROOT/lease-transaction-first.out"
+  second_out="$TMP_ROOT/lease-transaction-second.out"
+  ready="$TMP_ROOT/lease-transaction-ready"
+  go="$TMP_ROOT/lease-transaction-go"
+
+  FM_FAKE_TREEHOUSE_GET_READY="$ready" FM_FAKE_TREEHOUSE_GET_CONTINUE="$go" \
+    run_spawn_lease_case "$home" lease-transaction-first-kk2 "$proj" "$wt" "$fakebin" "$rec" > "$first_out" &
+  first_pid=$!
+  for _ in $(seq 1 100); do
+    [ -e "$ready" ] && break
+    sleep 0.05
+  done
+  assert_present "$ready" "first spawn did not reach treehouse acquisition"
+
+  run_spawn_lease_case "$home" lease-transaction-second-ll3 "$proj" "$wt" "$fakebin" "$rec" > "$second_out" &
+  second_pid=$!
+  sleep 0.2
+  kill -0 "$second_pid" 2>/dev/null || fail "second spawn did not wait for the active lease transaction"
+  gets=$(grep -Fc "treehouse get --lease" "$rec")
+  [ "$gets" -eq 1 ] || fail "second spawn reached treehouse before the first published its lease"
+  assert_no_grep "treehouse return --force $wt" "$rec" \
+    "second spawn reclaimed the first in-flight lease"
+
+  : > "$go"
+  wait "$first_pid"; status=$?
+  expect_code 0 "$status" "first spawn should publish its lease metadata"
+  wait "$second_pid"; status=$?
+  expect_code 0 "$status" "second spawn should proceed after the lease transaction completes"
+  pass "fm-spawn: serializes lease handoff recovery until task metadata is published"
+}
+
+test_spawn_clears_committed_lease_handoff() {
+  local home proj wt fakebin rec out status handoff
+  home="$TMP_ROOT/lease-committed-handoff-home"
+  mkdir -p "$home/state" "$home/data"
+  proj=$(make_repo "$TMP_ROOT/lease-committed-handoff-proj")
+  wt="$TMP_ROOT/lease-committed-handoff-wt"
+  git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
+  fakebin=$(make_spawn_lease_fakebin "$TMP_ROOT/lease-committed-handoff-fake")
+  rec="$TMP_ROOT/lease-committed-handoff-treehouse.log"; : > "$rec"
+
+  out=$(run_spawn_lease_case "$home" lease-committed-first-mm4 "$proj" "$wt" "$fakebin" "$rec"); status=$?
+  expect_code 0 "$status" "first spawn should commit its durable lease metadata"
+  handoff="$home/state/.stale.treehouse-lease.token"
+  printf '%s\n' "$wt" > "$handoff"
+
+  out=$(run_spawn_lease_case "$home" lease-committed-second-nn5 "$proj" "$wt" "$fakebin" "$rec"); status=$?
+  expect_code 0 "$status" "spawn should clear a handoff superseded by committed metadata"
+  assert_contains "$out" "cleared committed treehouse lease handoff" \
+    "committed handoff was not recognized as superseded"
+  assert_absent "$handoff" "superseded committed handoff must be removed"
+  assert_no_grep "treehouse return --force $wt" "$rec" \
+    "committed task worktree must never be reclaimed from a stale handoff"
+  pass "fm-spawn: clears stale handoffs without returning committed leased worktrees"
+}
+
 test_spawn_recovers_lease_handoff_for_another_task() {
   local home proj wt invalid fakebin rec out status id retry_id handoff returns
   home="$TMP_ROOT/lease-recovery-other-task-home"
@@ -531,7 +633,16 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -n "${FM_TMUX_REC:-}" ] && printf 'treehouse %s\n' "$*" >> "$FM_TMUX_REC"
+case "${1:-}" in
+  get) printf '%s\n' "${FM_FAKE_PANE_PATH:?}" ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
@@ -575,11 +686,11 @@ test_spawn_tmux_window_construction() {
   assert_grep "set-window-option -t @spawnwid allow-rename off" "$rec" \
     "must disable allow-rename on the spawned window"
 
-  # Bug 2 fix (b): treehouse lease acquisition and the worktree wait loop target the stable id.
-  assert_grep "send-keys -t @spawnwid treehouse get --lease" "$rec" \
-    "treehouse lease acquisition must be sent to the stable window id"
-  assert_grep "treehouse get --lease --lease-holder 'rec-win-gg7'" "$rec" \
+  # Bug 2 fix (b): treehouse lease acquisition records the task id before its stable window enters the worktree.
+  assert_grep "treehouse get --lease --lease-holder rec-win-gg7" "$rec" \
     "treehouse acquisition must request a durable lease under the task id"
+  assert_grep "send-keys -t @spawnwid cd " "$rec" \
+    "the leased worktree cd must target the stable window id"
   assert_grep "display-message -p -t @spawnwid #{pane_current_path}" "$rec" \
     "the worktree wait loop must query the stable window id, not the name"
 
@@ -598,6 +709,9 @@ test_spawn_rolls_back_lease_after_isolation_failure
 test_spawn_refuses_to_roll_back_primary_checkout
 test_spawn_rolls_back_lease_after_setup_failure
 test_spawn_recovers_failed_lease_rollback
+test_spawn_refuses_empty_lease_handoff
+test_spawn_serializes_lease_handoff_publication
+test_spawn_clears_committed_lease_handoff
 test_spawn_recovers_lease_handoff_for_another_task
 test_spawn_refuses_cross_project_lease_handoff
 test_spawn_tmux_window_construction

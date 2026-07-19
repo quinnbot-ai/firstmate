@@ -112,6 +112,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -198,6 +200,8 @@ ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
 TREEHOUSE_LEASE_PATH_FILE=
 TREEHOUSE_LEASE_COMMITTED=0
+TREEHOUSE_LEASE_LOCK=
+TREEHOUSE_LEASE_LOCK_HELD=0
 TASK_META_TMP=
 
 parse_orca_worktree_result() {
@@ -223,7 +227,7 @@ treehouse_spawn_abort_cleanup() {
   [ -n "$TREEHOUSE_LEASE_PATH_FILE" ] || return "$status"
   IFS= read -r lease_path < "$TREEHOUSE_LEASE_PATH_FILE" || true
   case "$lease_path" in
-    '') rm -f "$TREEHOUSE_LEASE_PATH_FILE" || true ;;
+    '') echo "error: treehouse lease handoff has no path after spawn abort; handoff retained at $TREEHOUSE_LEASE_PATH_FILE" >&2 ;;
     /*)
       lease_validation=$(treehouse_lease_path_validation "$lease_path")
       if [ "$lease_validation" != valid ]; then
@@ -239,6 +243,12 @@ treehouse_spawn_abort_cleanup() {
     *) echo "error: refusing to roll back invalid treehouse lease path '$lease_path'; handoff retained at $TREEHOUSE_LEASE_PATH_FILE" >&2 ;;
   esac
   return "$status"
+}
+
+treehouse_lease_transaction_release() {
+  [ "$TREEHOUSE_LEASE_LOCK_HELD" = 1 ] || return 0
+  fm_lock_release "$TREEHOUSE_LEASE_LOCK" 2>/dev/null || true
+  TREEHOUSE_LEASE_LOCK_HELD=0
 }
 
 orca_spawn_abort_cleanup() {
@@ -278,6 +288,7 @@ spawn_abort_cleanup() {
   treehouse_spawn_abort_cleanup "$status" || true
   orca_spawn_abort_cleanup "$status" || true
   [ -z "$TASK_META_TMP" ] || rm -f "$TASK_META_TMP" || true
+  treehouse_lease_transaction_release
   return "$status"
 }
 trap spawn_abort_cleanup EXIT
@@ -736,6 +747,21 @@ treehouse_lease_path_validation() {  # <lease-path>
   fi
 }
 
+treehouse_lease_handoff_is_committed() {  # <lease-path>
+  local lease_path=$1 lease_real meta held_project held_worktree
+  lease_real=$(real_path_or_raw "$lease_path")
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    [ "$(fm_meta_get "$meta" treehouse_lease)" = 1 ] || continue
+    held_project=$(fm_meta_get "$meta" project)
+    [ "$(real_path_or_raw "$held_project")" = "$PROJ_ABS_REAL" ] || continue
+    held_worktree=$(fm_meta_get "$meta" worktree)
+    [ "$(real_path_or_raw "$held_worktree")" = "$lease_real" ] || continue
+    return 0
+  done
+  return 1
+}
+
 recover_treehouse_lease_handoffs() {
   local handoff lease_path lease_validation
   [ -d "$STATE" ] || return 0
@@ -744,11 +770,8 @@ recover_treehouse_lease_handoffs() {
     IFS= read -r lease_path < "$handoff" || true
     case "$lease_path" in
       '')
-        rm -f "$handoff" || {
-          echo "error: failed to remove empty treehouse lease handoff $handoff" >&2
-          return 1
-        }
-        continue
+        echo "error: refusing to recover empty treehouse lease handoff $handoff; handoff retained" >&2
+        return 1
         ;;
       /*) ;;
       *)
@@ -765,6 +788,14 @@ recover_treehouse_lease_handoffs() {
       echo "error: refusing to recover treehouse lease path '$lease_path' from $handoff because it belongs to another project; handoff retained" >&2
       return 1
     fi
+    if treehouse_lease_handoff_is_committed "$lease_path"; then
+      rm -f "$handoff" || {
+        echo "error: committed treehouse lease $lease_path has a stale handoff that could not be removed: $handoff" >&2
+        return 1
+      }
+      echo "cleared committed treehouse lease handoff $handoff" >&2
+      continue
+    fi
     if ( cd "$PROJ_ABS" && treehouse return --force "$lease_path" ); then
       rm -f "$handoff" || {
         echo "error: recovered treehouse lease $lease_path but failed to remove handoff $handoff" >&2
@@ -776,6 +807,13 @@ recover_treehouse_lease_handoffs() {
       return 1
     fi
   done
+}
+
+begin_treehouse_lease_transaction() {
+  TREEHOUSE_LEASE_LOCK="$STATE/.treehouse-lease.lock"
+  mkdir -p "$STATE" || return 1
+  fm_lock_acquire_wait "$TREEHOUSE_LEASE_LOCK"
+  TREEHOUSE_LEASE_LOCK_HELD=1
 }
 
 # Refuse allocation beside a live task created before treehouse leasing. That
@@ -804,6 +842,10 @@ refuse_unleased_treehouse_hold() {
 }
 
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  begin_treehouse_lease_transaction || {
+    echo "error: could not acquire treehouse lease transaction lock" >&2
+    exit 1
+  }
   recover_treehouse_lease_handoffs || exit 1
   refuse_unleased_treehouse_hold || exit 1
 fi
@@ -982,13 +1024,19 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     echo "error: could not create treehouse lease handoff for $ID" >&2
     exit 1
   }
-  sq_treehouse_lease_path_file=$(shell_quote "$TREEHOUSE_LEASE_PATH_FILE")
-  # A durable lease survives a detached window, so treehouse cannot hand this
-  # slot to another spawn before fm-teardown releases it. `get --lease` prints
-  # only the absolute path, and the pane changes into that leased worktree.
-  spawn_send_text_line "$WT_TARGET" "treehouse get --lease --lease-holder $(shell_quote "$ID") > $sq_treehouse_lease_path_file && IFS= read -r fm_treehouse_worktree < $sq_treehouse_lease_path_file && cd \"\$fm_treehouse_worktree\""
+  if ! ( cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID" > "$TREEHOUSE_LEASE_PATH_FILE" ); then
+    echo "error: treehouse could not acquire a leased worktree for $ID" >&2
+    exit 1
+  fi
+  IFS= read -r TREEHOUSE_LEASE_PATH < "$TREEHOUSE_LEASE_PATH_FILE" || true
+  if [ "$(treehouse_lease_path_validation "$TREEHOUSE_LEASE_PATH")" != valid ]; then
+    echo "error: treehouse returned an invalid leased worktree path '$TREEHOUSE_LEASE_PATH' for $ID" >&2
+    exit 1
+  fi
+  sq_treehouse_lease_path=$(shell_quote "$TREEHOUSE_LEASE_PATH")
+  spawn_send_text_line "$WT_TARGET" "cd $sq_treehouse_lease_path"
 
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
+  # Wait for the pane's cwd to move from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
   # automatic-rename slips through), display-message -t <bad-name> falls back to the
   # active client's window, which would misread firstmate's OWN pane path as the
@@ -1188,8 +1236,11 @@ TASK_META_TMP=$(mktemp "$STATE/.${ID}.meta.XXXXXX") || {
 mv "$TASK_META_TMP" "$STATE/$ID.meta"
 TASK_META_TMP=
 TREEHOUSE_LEASE_COMMITTED=1
-[ -z "$TREEHOUSE_LEASE_PATH_FILE" ] || rm -f "$TREEHOUSE_LEASE_PATH_FILE" || true
+if [ -n "$TREEHOUSE_LEASE_PATH_FILE" ] && ! rm -f "$TREEHOUSE_LEASE_PATH_FILE"; then
+  echo "warning: committed treehouse lease handoff retained at $TREEHOUSE_LEASE_PATH_FILE; a later spawn will clear it without returning the committed worktree" >&2
+fi
 TREEHOUSE_LEASE_PATH_FILE=
+treehouse_lease_transaction_release
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
