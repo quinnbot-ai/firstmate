@@ -1730,10 +1730,10 @@ fi
 # Nested (not a bare /tmp/fm-<id>.<random>/gotmp) so other per-task temp can live alongside
 # later, and teardown cleans the recorded path. GOTMPDIR (not TMPDIR) is the
 # targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
-TASK_TMP=$(mktemp -d "/tmp/fm-$ID.XXXXXXXX") || {
+if ! TASK_TMP=$(mktemp -d "/tmp/fm-$ID.XXXXXXXX"); then
   echo "error: could not create private task temporary directory" >&2
   exit 1
-}
+fi
 mkdir "$TASK_TMP/gotmp" || exit 1
 if [ -n "$CODEX_CREWMATE_HOME" ]; then
   CODEX_ACTIVATION_TOKEN=$(python3 "$FM_ROOT/bin/fm-codex-home.py" --new-result-token) || {
