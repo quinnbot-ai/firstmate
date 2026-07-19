@@ -74,13 +74,31 @@ fm_git_identity_expected_for_project() {  # <project-dir> [projects-dir]
   esac
 }
 
+fm_git_identity_enable_worktree_config() {  # <repository>
+  local repository=$1 attempt setting
+  setting=$(git -C "$repository" config --get extensions.worktreeConfig 2>/dev/null || true)
+  [ "$setting" = true ] && return 0
+
+  for attempt in {1..20}; do
+    if git -C "$repository" config extensions.worktreeConfig true >/dev/null 2>&1; then
+      return 0
+    fi
+    setting=$(git -C "$repository" config --get extensions.worktreeConfig 2>/dev/null || true)
+    [ "$setting" = true ] && return 0
+    sleep 0.05
+  done
+
+  echo "error: could not enable worktree-specific Git config for $repository after 20 attempts" >&2
+  return 1
+}
+
 fm_git_identity_pin_worktree() {  # <task-worktree> <project-dir> [projects-dir]
   local worktree=$1 project=$2 projects=${3:-} expected name email
   expected=$(fm_git_identity_expected_for_project "$project" "$projects")
   IFS=$'\t' read -r name email <<EOF
 $expected
 EOF
-  git -C "$worktree" config extensions.worktreeConfig true
+  fm_git_identity_enable_worktree_config "$worktree"
   git -C "$worktree" config --worktree user.name "$name"
   git -C "$worktree" config --worktree user.email "$email"
 }

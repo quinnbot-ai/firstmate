@@ -645,6 +645,12 @@ else
   BRIEF="$DATA/$ID/brief.md"
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
+if [ "$KIND" != secondmate ]; then
+  fm_git_identity_enable_worktree_config "$PROJ_ABS" || {
+    echo "error: failed to enable worktree-specific Git config for $PROJ_ABS" >&2
+    exit 1
+  }
+fi
 
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
 # /private/tmp) when it came from the ship/scout branch's logical `pwd` above.

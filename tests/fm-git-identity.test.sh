@@ -16,7 +16,14 @@ make_fakebin() {
 #!/usr/bin/env bash
 case "${1:-}" in
   display-message) printf '%s\n' "${FM_FAKE_PANE_PATH:-}" ;;
-  list-windows|has-session|new-session|new-window|kill-window|send-keys) exit 0 ;;
+  new-window)
+    if [ -n "${FM_FAKE_REQUIRE_WORKTREE_CONFIG:-}" ] \
+      && [ "$(git -C "$FM_FAKE_REQUIRE_WORKTREE_CONFIG" config --get extensions.worktreeConfig 2>/dev/null || true)" != true ]; then
+      exit 99
+    fi
+    exit 0
+    ;;
+  list-windows|has-session|new-session|kill-window|send-keys) exit 0 ;;
 esac
 SH
   chmod +x "$fakebin/tmux"
@@ -116,6 +123,25 @@ test_registered_epstein_clone_gets_dedicated_identity() {
   pass 'fm-spawn uses the dedicated identity for registered Epstein clones'
 }
 
+test_spawn_retries_shared_worktree_config_before_allocating_task_window() {
+  local rec project lock out status lock_pid
+  project="$TMP_ROOT/concurrent/home/projects/ordinary"
+  rec=$(make_spawn_fixture concurrent "$project")
+  read_fixture "$rec"
+  lock="$project/.git/config.lock"
+  : > "$lock"
+  (sleep 0.1; rm -f "$lock") &
+  lock_pid=$!
+
+  out=$(FM_FAKE_REQUIRE_WORKTREE_CONFIG="$project" run_spawn "$HOME_DIR" "$PROJECTS_DIR" "$WORKTREE_DIR" "$FAKEBIN" "$GLOBAL_CONFIG" "$CAPTAIN_HOME" "$ID" "$project")
+  status=$?
+  wait "$lock_pid"
+  expect_code 0 "$status" "spawn should retry a transient shared config lock before task allocation: $out"
+  [ "$(git -C "$project" config --get extensions.worktreeConfig)" = true ] \
+    || fail 'spawn did not enable worktree-specific config during preflight'
+  pass 'fm-spawn retries shared Git config initialization before task allocation'
+}
+
 test_audit_reports_effective_identities_without_rewriting_clones() {
   local projects captain_home ordinary epstein wrong out status before after
   projects="$TMP_ROOT/audit/projects"
@@ -152,6 +178,7 @@ test_audit_reports_effective_identities_without_rewriting_clones() {
 test_spawn_pins_fleet_identity_without_changing_other_identity_scopes
 test_epstein_directory_gets_dedicated_identity
 test_registered_epstein_clone_gets_dedicated_identity
+test_spawn_retries_shared_worktree_config_before_allocating_task_window
 test_audit_reports_effective_identities_without_rewriting_clones
 
 echo '# fm-git-identity.test.sh: all assertions passed'
