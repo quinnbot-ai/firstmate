@@ -629,6 +629,31 @@ test_spawn_clears_committed_lease_handoff() {
   pass "fm-spawn: clears stale handoffs without returning committed leased worktrees"
 }
 
+test_spawn_refuses_returned_handoff_with_live_metadata() {
+  local home proj wt fakebin rec out status handoff gets
+  home="$TMP_ROOT/lease-returned-live-meta-home"
+  mkdir -p "$home/state" "$home/data"
+  proj=$(make_repo "$TMP_ROOT/lease-returned-live-meta-proj")
+  wt="$TMP_ROOT/lease-returned-live-meta-wt"
+  git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
+  fakebin=$(make_spawn_lease_fakebin "$TMP_ROOT/lease-returned-live-meta-fake")
+  rec="$TMP_ROOT/lease-returned-live-meta-treehouse.log"; : > "$rec"
+
+  out=$(run_spawn_lease_case "$home" lease-returned-first-oo6 "$proj" "$wt" "$fakebin" "$rec"); status=$?
+  expect_code 0 "$status" "first spawn should commit lease metadata"
+  handoff="$home/state/.lease-returned-first-oo6.treehouse-lease.returned"
+  printf 'returned=%s\n' "$wt" > "$handoff"
+
+  out=$(run_spawn_lease_case "$home" lease-returned-second-pp7 "$proj" "$wt" "$fakebin" "$rec"); status=$?
+  expect_code 1 "$status" "spawn must refuse a returned handoff while its metadata remains"
+  assert_contains "$out" "matching task metadata remains" \
+    "spawn did not identify the unsafe returned handoff state"
+  assert_present "$handoff" "spawn must retain the returned handoff for fm-teardown recovery"
+  gets=$(grep -Fc "treehouse get --lease" "$rec")
+  [ "$gets" -eq 1 ] || fail "spawn allocated despite a returned handoff with live metadata"
+  pass "fm-spawn: refuses returned handoffs until teardown finalizes metadata"
+}
+
 test_spawn_recovers_lease_handoff_for_another_task() {
   local home proj wt invalid fakebin rec out status id retry_id handoff returns
   home="$TMP_ROOT/lease-recovery-other-task-home"
@@ -803,6 +828,7 @@ test_spawn_keeps_published_lease_on_abort
 test_spawn_refuses_empty_lease_handoff
 test_spawn_serializes_lease_handoff_publication
 test_spawn_clears_committed_lease_handoff
+test_spawn_refuses_returned_handoff_with_live_metadata
 test_spawn_recovers_lease_handoff_for_another_task
 test_spawn_refuses_cross_project_lease_handoff
 test_spawn_tmux_window_construction

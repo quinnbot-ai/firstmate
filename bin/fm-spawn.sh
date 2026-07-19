@@ -825,6 +825,14 @@ EOF
       echo "error: refusing to recover treehouse lease path '$lease_path' from $handoff because it belongs to another project; handoff retained" >&2
       return 1
     fi
+    if [ "$lease_state" = returning ]; then
+      echo "error: refusing to recover treehouse lease handoff $handoff because its return is indeterminate; handoff retained" >&2
+      return 1
+    fi
+    if [ "$lease_state" = returned ] && treehouse_lease_handoff_is_committed "$lease_path"; then
+      echo "error: refusing to recover returned treehouse lease handoff $handoff while matching task metadata remains; rerun fm-teardown.sh for that task to finalize cleanup" >&2
+      return 1
+    fi
     if treehouse_lease_handoff_is_committed "$lease_path"; then
       rm -f "$handoff" || {
         echo "error: committed treehouse lease $lease_path has a stale handoff that could not be removed: $handoff" >&2
@@ -840,10 +848,6 @@ EOF
       }
       echo "cleared returned treehouse lease handoff $handoff" >&2
       continue
-    fi
-    if [ "$lease_state" = returning ]; then
-      echo "error: refusing to retry treehouse lease return with an indeterminate handoff $handoff; handoff retained" >&2
-      return 1
     fi
     if ! treehouse_lease_handoff_return "$handoff" "$lease_path"; then
       echo "error: failed to recover treehouse lease $lease_path from $handoff; handoff retained" >&2

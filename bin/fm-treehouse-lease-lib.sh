@@ -21,6 +21,16 @@ fm_treehouse_lease_handoff_read() {
 }
 
 fm_treehouse_lease_handoff_write() {
-  local handoff=$1 handoff_state=$2 lease_path=$3
-  printf '%s=%s\n' "$handoff_state" "$lease_path" > "$handoff"
+  local handoff=$1 handoff_state=$2 lease_path=$3 handoff_dir handoff_base handoff_tmp
+  handoff_dir=$(dirname "$handoff")
+  handoff_base=$(basename "$handoff")
+  handoff_tmp=$(mktemp "$handoff_dir/.${handoff_base}.tmp.XXXXXX") || return 1
+  if ! printf '%s=%s\n' "$handoff_state" "$lease_path" > "$handoff_tmp"; then
+    rm -f "$handoff_tmp"
+    return 1
+  fi
+  if ! mv -f "$handoff_tmp" "$handoff"; then
+    rm -f "$handoff_tmp"
+    return 1
+  fi
 }

@@ -98,6 +98,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-treehouse-lease-lib.sh
 . "$SCRIPT_DIR/fm-treehouse-lease-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
@@ -131,6 +133,16 @@ ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
 ORCA_PATH_MATCH_VERIFIED=0
 TREEHOUSE_LEASE_HANDOFF=
 TREEHOUSE_LEASE_RETURN_NEEDED=1
+TREEHOUSE_LEASE_LOCK="$STATE/.treehouse-lease.lock"
+TREEHOUSE_LEASE_LOCK_HELD=0
+
+release_treehouse_lease_transaction() {
+  [ "$TREEHOUSE_LEASE_LOCK_HELD" = 1 ] || return 0
+  fm_lock_release "$TREEHOUSE_LEASE_LOCK" 2>/dev/null || true
+  TREEHOUSE_LEASE_LOCK_HELD=0
+}
+
+trap release_treehouse_lease_transaction EXIT
 
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
@@ -158,6 +170,21 @@ meta_value() {
   fm_meta_get "$meta" "$key"
 }
 
+canonical_path_or_raw() {
+  local path=$1
+  cd "$path" 2>/dev/null && pwd -P || printf '%s\n' "$path"
+}
+
+treehouse_lease_paths_match() {
+  [ "$(canonical_path_or_raw "$1")" = "$(canonical_path_or_raw "$2")" ]
+}
+
+begin_treehouse_lease_return_transaction() {
+  [ "$(meta_value "$META" treehouse_lease)" = 1 ] || return 0
+  fm_lock_acquire_wait "$TREEHOUSE_LEASE_LOCK"
+  TREEHOUSE_LEASE_LOCK_HELD=1
+}
+
 prepare_treehouse_lease_handoff_return() {
   local handoff handoff_state handoff_path handoff_record matches=0
   [ "$(meta_value "$META" treehouse_lease)" = 1 ] || return 0
@@ -168,6 +195,16 @@ prepare_treehouse_lease_handoff_return() {
       echo "error: multiple treehouse lease handoffs found for $ID; refusing teardown" >&2
       return 1
     fi
+    if [ ! -s "$handoff" ]; then
+      [ -d "$WT" ] || {
+        echo "error: empty treehouse lease handoff $handoff has no worktree at $WT; refusing teardown" >&2
+        return 1
+      }
+      fm_treehouse_lease_handoff_write "$handoff" leased "$WT" || {
+        echo "error: could not restore empty treehouse lease handoff $handoff; refusing teardown" >&2
+        return 1
+      }
+    fi
     handoff_record=$(fm_treehouse_lease_handoff_read "$handoff") || {
       echo "error: malformed treehouse lease handoff $handoff; refusing teardown" >&2
       return 1
@@ -175,7 +212,7 @@ prepare_treehouse_lease_handoff_return() {
     IFS=$'\t' read -r handoff_state handoff_path <<EOF
 $handoff_record
 EOF
-    if [ "$handoff_path" != "$WT" ]; then
+    if ! treehouse_lease_paths_match "$handoff_path" "$WT"; then
       echo "error: treehouse lease handoff $handoff does not match task worktree $WT; refusing teardown" >&2
       return 1
     fi
@@ -200,6 +237,24 @@ EOF
         ;;
     esac
   done
+  if [ "$matches" -eq 0 ]; then
+    TREEHOUSE_LEASE_HANDOFF=$(mktemp "$STATE/.${ID}.treehouse-lease.XXXXXX") || {
+      echo "error: could not create treehouse lease handoff for $ID; refusing teardown" >&2
+      return 1
+    }
+    [ -d "$WT" ] || {
+      echo "error: leased treehouse handoff $TREEHOUSE_LEASE_HANDOFF has no worktree at $WT; refusing teardown" >&2
+      return 1
+    }
+    fm_treehouse_lease_handoff_write "$TREEHOUSE_LEASE_HANDOFF" leased "$WT" || {
+      echo "error: could not record treehouse lease handoff $TREEHOUSE_LEASE_HANDOFF; refusing teardown" >&2
+      return 1
+    }
+    fm_treehouse_lease_handoff_write "$TREEHOUSE_LEASE_HANDOFF" returning "$WT" || {
+      echo "error: could not mark treehouse lease handoff $TREEHOUSE_LEASE_HANDOFF as returning; refusing teardown" >&2
+      return 1
+    }
+  fi
 }
 
 finish_treehouse_lease_handoff_return() {
@@ -210,8 +265,6 @@ finish_treehouse_lease_handoff_return() {
       return 1
     }
   fi
-  rm -f "$TREEHOUSE_LEASE_HANDOFF" || \
-    echo "warning: returned treehouse lease handoff retained at $TREEHOUSE_LEASE_HANDOFF" >&2
 }
 
 restore_treehouse_lease_handoff() {
@@ -1150,6 +1203,7 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
 fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
+begin_treehouse_lease_return_transaction || exit 1
 prepare_treehouse_lease_handoff_return || exit 1
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
@@ -1167,7 +1221,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   fi
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
-elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
+elif [ -d "$WT" ] && [ "$KIND" != secondmate ] && [ "$TREEHOUSE_LEASE_RETURN_NEEDED" = 1 ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
     if git -C "$WT" checkout --detach -q 2>/dev/null; then
@@ -1209,7 +1263,13 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
-rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
+rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
+rm -f "$STATE/$ID.meta"
+if [ -n "$TREEHOUSE_LEASE_HANDOFF" ]; then
+  rm -f "$TREEHOUSE_LEASE_HANDOFF" || \
+    echo "warning: returned treehouse lease handoff retained at $TREEHOUSE_LEASE_HANDOFF" >&2
+fi
+release_treehouse_lease_transaction
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi

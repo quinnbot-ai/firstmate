@@ -519,8 +519,6 @@ test_teardown_tombstones_retained_treehouse_lease_handoff() {
   case_dir=$(make_case teardown-lease-handoff)
   write_meta "$case_dir" local-only ship
   printf 'treehouse_lease=1\n' >> "$case_dir/state/task-x1.meta"
-  handoff="$case_dir/state/.task-x1.treehouse-lease.stale"
-  printf 'leased=%s\n' "$case_dir/wt" > "$handoff"
   cat > "$case_dir/fakebin/rm" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
@@ -539,6 +537,7 @@ SH
 
   expect_code 0 "$rc" "teardown should complete when only stale-handoff removal fails"
   assert_absent "$case_dir/state/task-x1.meta" "teardown should remove completed task metadata"
+  handoff=$(printf '%s\n' "$case_dir/state/.task-x1.treehouse-lease."*)
   assert_present "$handoff" "failed handoff removal should retain a return tombstone"
   assert_contains "$(cat "$handoff")" "returned=$case_dir/wt" \
     "teardown did not tombstone the returned lease handoff"
@@ -572,6 +571,75 @@ SH
   assert_contains "$(cat "$handoff")" "leased=$case_dir/wt" \
     "failed return did not restore the lease handoff for a retry"
   pass "teardown restores a treehouse lease handoff after return failure"
+}
+
+test_teardown_persists_returning_handoff_across_return_crash() {
+  local case_dir handoff out rc
+  case_dir=$(make_case teardown-lease-return-crash)
+  write_meta "$case_dir" local-only ship
+  printf 'treehouse_lease=1\n' >> "$case_dir/state/task-x1.meta"
+  handoff="$case_dir/state/.task-x1.treehouse-lease.returning"
+  printf 'returning=%s\n' "$case_dir/wt" > "$handoff"
+  wt_commit "$case_dir" "lease return crash"
+  add_fork_with_pushed_branch "$case_dir"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "treehouse should not replay an indeterminate return" >&2
+exit 31
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  out=$(run_teardown "$case_dir" 2>&1)
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "teardown must refuse to replay an indeterminate return"
+  assert_present "$handoff" "return crash must retain a durable handoff"
+  assert_contains "$(cat "$handoff")" "returning=$case_dir/wt" \
+    "return crash did not record an indeterminate return"
+  assert_present "$case_dir/state/task-x1.meta" "return crash must retain task metadata"
+  assert_contains "$out" "already returning" \
+    "teardown did not identify the indeterminate return handoff"
+  pass "teardown preserves an indeterminate lease return across a crash"
+}
+
+test_teardown_accepts_canonical_treehouse_handoff_path() {
+  local case_dir handoff logical_path
+  case_dir=$(make_case teardown-lease-canonical-path)
+  write_meta "$case_dir" local-only ship
+  printf 'treehouse_lease=1\n' >> "$case_dir/state/task-x1.meta"
+  logical_path="$case_dir/wt-logical"
+  ln -s "$case_dir/wt" "$logical_path"
+  handoff="$case_dir/state/.task-x1.treehouse-lease.logical"
+  printf 'leased=%s\n' "$logical_path" > "$handoff"
+  wt_commit "$case_dir" "canonical lease handoff"
+  add_fork_with_pushed_branch "$case_dir"
+
+  run_teardown "$case_dir" >/dev/null \
+    || fail "teardown should accept a logical handoff path for the recorded worktree"
+
+  assert_absent "$case_dir/state/task-x1.meta" "canonical handoff teardown should remove task metadata"
+  assert_absent "$handoff" "canonical handoff teardown should clear the completed handoff"
+  pass "teardown compares treehouse handoff paths canonically"
+}
+
+test_teardown_recovers_its_empty_initial_handoff() {
+  local case_dir handoff
+  case_dir=$(make_case teardown-lease-empty-handoff)
+  write_meta "$case_dir" local-only ship
+  printf 'treehouse_lease=1\n' >> "$case_dir/state/task-x1.meta"
+  handoff="$case_dir/state/.task-x1.treehouse-lease.initial"
+  : > "$handoff"
+  wt_commit "$case_dir" "empty lease handoff"
+  add_fork_with_pushed_branch "$case_dir"
+
+  run_teardown "$case_dir" >/dev/null \
+    || fail "teardown should restore its initial empty lease handoff before returning"
+
+  assert_absent "$case_dir/state/task-x1.meta" "empty handoff recovery should remove task metadata"
+  assert_absent "$handoff" "empty handoff recovery should clear the completed handoff"
+  pass "teardown restores an empty initial lease handoff"
 }
 
 test_teardown_prompts_tasks_axi_done_when_compatible() {
@@ -1326,6 +1394,9 @@ SH
 test_local_only_fork_remote_allows
 test_teardown_tombstones_retained_treehouse_lease_handoff
 test_teardown_restores_lease_handoff_after_return_failure
+test_teardown_persists_returning_handoff_across_return_crash
+test_teardown_accepts_canonical_treehouse_handoff_path
+test_teardown_recovers_its_empty_initial_handoff
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
