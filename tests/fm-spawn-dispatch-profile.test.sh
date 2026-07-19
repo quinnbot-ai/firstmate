@@ -1316,7 +1316,7 @@ SH
     "failed lease return must not retain a task after its endpoint is closed"
   handoff=$(find "$HOME_DIR/state" -name ".${id}.treehouse-lease.*" -type f -print -quit)
   [ -n "$handoff" ] || fail "failed lease return did not retain a recovery handoff"
-  assert_contains "$(cat "$handoff")" $'leased\t' \
+  assert_contains "$(cat "$handoff")" "leased=$WT_DIR" \
     "failed lease return did not restore its handoff to leased state"
   pass "Codex spawn retains a closed-endpoint lease handoff for recovery"
 }
