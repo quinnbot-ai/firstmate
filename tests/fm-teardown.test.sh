@@ -38,17 +38,23 @@
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
+#   (r) local-only + rebased-equivalent patches in local main    -> ALLOW  (git cherry)
+#   (s) local-only + one unlanded patch after a rebase           -> REFUSE (fail-safe)
+#   (t) worktree checked out on default branch                   -> preserve default branch
+#   (u) branch-unique merge with no `git cherry` '+' patch       -> REFUSE (safety)
+#   (v) legacy exact task temporary directory                    -> ALLOW and remove
+#   (w) malformed, non-directory, or symlinked task temp path    -> REFUSE (safety)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
-#   (r) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
-#   (s) index.lock with a live holder, any age                -> lock kept, REFUSE
-#   (t) lsof error while checking index.lock                  -> lock kept, REFUSE
-#   (u) dirty worktree after stale lock cleanup               -> lock removed, REFUSE
-#   (v) non-linked repo index.lock                            -> lock removed, ALLOW
-#   (w) index.lock mtime read failure                         -> lock kept, REFUSE
-#   (x) transient lock cleared after first failed return      -> retry ALLOW
-#   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
+#   (u) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
+#   (v) index.lock with a live holder, any age                -> lock kept, REFUSE
+#   (w) lsof error while checking index.lock                  -> lock kept, REFUSE
+#   (x) dirty worktree after stale lock cleanup               -> lock removed, REFUSE
+#   (y) non-linked repo index.lock                            -> lock removed, ALLOW
+#   (z) index.lock mtime read failure                         -> lock kept, REFUSE
+#   (aa) transient lock cleared after first failed return     -> retry ALLOW
+#   (ab) persistent lock (never clears, not provably stale)   -> REFUSE loudly
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -205,6 +211,18 @@ land_on_origin_main() {
   git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "squash $file"
   git -C "$tmp" push -q origin HEAD:main
   rm -rf "$tmp"
+}
+
+# Land the same patch independently on the local main branch, retaining the task
+# branch's original commit. This models a rebase or cherry-pick landing where the
+# change is on main but its SHA is not an ancestor of the task branch. Args: case_dir
+# file content
+land_equivalent_patch_on_local_main() {
+  local case_dir=$1 file=$2 content=$3
+  printf '%s\n' "$content" > "$case_dir/project/$file"
+  git -C "$case_dir/project" add -- "$file"
+  git -C "$case_dir/project" -c user.email=t@t -c user.name=t \
+    commit -q -m "rebased $file"
 }
 
 # Override GitHub lookups to report PR 7 as merged with the supplied head.
@@ -716,6 +734,169 @@ test_local_only_merged_to_local_main_allows() {
   pass "local-only worktree with work merged into local main is torn down (no regression)"
 }
 
+test_local_only_rebased_equivalent_patches_allow() {
+  local case_dir rc branch_head main_head cherry
+  case_dir=$(make_case rebased-equivalent)
+  write_meta "$case_dir" local-only ship
+  wt_commit_file "$case_dir" feature.txt hello "original task patch"
+  branch_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  land_equivalent_patch_on_local_main "$case_dir" feature.txt hello
+  main_head=$(git -C "$case_dir/project" rev-parse main)
+  ! git -C "$case_dir/wt" merge-base --is-ancestor "$branch_head" "$main_head" \
+    || fail "rebased-equivalent: setup requires the original task SHA not to be on main"
+  cherry=$(git -C "$case_dir/wt" cherry main fm/task-x1)
+  printf '%s\n' "$cherry" | grep -Eq '^- [0-9a-f]+$' \
+    || fail "rebased-equivalent: setup requires git cherry to prove the patch is equivalent: $cherry"
+  ! printf '%s\n' "$cherry" | grep -q '^+ ' \
+    || fail "rebased-equivalent: setup unexpectedly has an unlanded patch: $cherry"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "rebased-equivalent: teardown should accept git-cherry-equivalent work"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "rebased-equivalent: teardown printed a REFUSED line"
+  pass "local-only rebased-equivalent patches are recognized as landed by git cherry"
+}
+
+test_local_only_rebased_branch_with_unlanded_patch_refuses() {
+  local case_dir rc cherry
+  case_dir=$(make_case rebased-with-extra)
+  write_meta "$case_dir" local-only ship
+  wt_commit_file "$case_dir" feature.txt hello "original task patch"
+  land_equivalent_patch_on_local_main "$case_dir" feature.txt hello
+  wt_commit_file "$case_dir" later.txt local-only "unlanded follow-up"
+  cherry=$(git -C "$case_dir/wt" cherry main fm/task-x1)
+  printf '%s\n' "$cherry" | grep -q '^+ ' \
+    || fail "rebased-with-extra: setup requires git cherry to report an unlanded patch: $cherry"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "rebased-with-extra: teardown should refuse an unlanded patch"
+  grep -q REFUSED "$case_dir/stderr" || fail "rebased-with-extra: no REFUSED line in stderr"
+  pass "local-only rebased branches with any git-cherry '+' patch remain refused"
+}
+
+test_local_only_unique_merge_without_cherry_patch_refuses() {
+  local case_dir rc task_head main_head merge_tree merge_head
+  case_dir=$(make_case unique-merge)
+  write_meta "$case_dir" local-only ship
+  wt_commit_file "$case_dir" feature.txt hello "original task patch"
+  task_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  land_equivalent_patch_on_local_main "$case_dir" feature.txt hello
+  main_head=$(git -C "$case_dir/project" rev-parse main)
+  printf '%s\n' resolution > "$case_dir/wt/merge-resolution.txt"
+  git -C "$case_dir/wt" add -- merge-resolution.txt
+  merge_tree=$(git -C "$case_dir/wt" write-tree)
+  merge_head=$(printf '%s\n' "unlanded merge resolution" | git -C "$case_dir/wt" commit-tree "$merge_tree" -p "$task_head" -p "$main_head")
+  git -C "$case_dir/wt" reset -q --hard "$merge_head"
+  git -C "$case_dir/wt" rev-list --min-parents=2 main..fm/task-x1 | grep -q . \
+    || fail "unique-merge: setup requires a branch-unique merge commit"
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -C ]; then
+  worktree=$2
+  shift 2
+else
+  worktree=
+fi
+if [ "${1:-}" = cherry ]; then
+  printf '%s\n' '- deadbeef'
+  exit 0
+fi
+if [ -n "$worktree" ]; then
+  exec "$REAL_GIT_FOR_TEST" -C "$worktree" "$@"
+fi
+exec "$REAL_GIT_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "unique-merge: teardown must refuse a merge git cherry cannot represent"
+  grep -q REFUSED "$case_dir/stderr" || fail "unique-merge: no REFUSED line in stderr"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "unique-merge: teardown discarded recovery metadata"
+  pass "local-only teardown refuses branch-unique merges hidden from git cherry"
+}
+
+test_teardown_preserves_default_branch_when_worktree_is_parked_on_it() {
+  local case_dir rc
+  case_dir=$(make_case default-branch-parked)
+  write_meta "$case_dir" no-mistakes ship
+  git -C "$case_dir/project" checkout -q -b project-anchor
+  git -C "$case_dir/wt" checkout -q main
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = return ]; then
+  shift
+  for arg in "$@"; do
+    case "$arg" in
+      --force) ;;
+      *) git -C "$arg" rev-parse --abbrev-ref HEAD > "${TREEHOUSE_RETURN_HEAD:?}" ; break ;;
+    esac
+  done
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  TREEHOUSE_RETURN_HEAD="$case_dir/return-head" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "default-branch-parked: teardown should succeed after detaching main"
+  [ "$(cat "$case_dir/return-head")" = HEAD ] \
+    || fail "default-branch-parked: treehouse return saw a checked-out branch"
+  git -C "$case_dir/project" show-ref --verify --quiet refs/heads/main \
+    || fail "default-branch-parked: teardown deleted the project default branch"
+  pass "teardown detaches a parked default branch before return without deleting it"
+}
+
+test_live_lock_refuses_before_returning_checked_out_task_branch() {
+  local case_dir rc lock
+  case_dir=$(make_case live-lock-checked-out-task-branch)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  add_lsof_live_holder "$case_dir"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' invoked > "${TREEHOUSE_RETURN_MARKER:?}"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+  touch -t 200001010000 "$lock"
+
+  set +e
+  TREEHOUSE_RETURN_MARKER="$case_dir/return-invoked" \
+    FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "live-lock-checked-out-task-branch: teardown must refuse before return"
+  assert_absent "$case_dir/return-invoked" \
+    "live-lock-checked-out-task-branch: treehouse return ran with the branch still checked out"
+  [ "$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)" = fm/task-x1 ] \
+    || fail "live-lock-checked-out-task-branch: teardown detached despite the live lock"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "live-lock-checked-out-task-branch: teardown discarded recovery metadata"
+  pass "live git locks refuse teardown before a checked-out task branch can return"
+}
+
 test_no_mistakes_origin_remote_allows() {
   local case_dir rc
   case_dir=$(make_case nm-origin)
@@ -1225,16 +1406,22 @@ test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds() {
   # Fresh lock: not old enough for the force-remove path; patience must win.
   touch "$lock"
 
+  # Detach now runs before treehouse return so it cannot delete the checked-out
+  # branch. Model the real owner exiting while that pre-return safety wait runs.
+  ( sleep 0.01; rm -f "$lock" ) &
+  local lock_clear_pid=$!
+
   attempt_file="$case_dir/treehouse-attempts"
   : > "$attempt_file"
 
   set +e
   TREEHOUSE_ATTEMPT_FILE="$attempt_file" \
   FM_TREEHOUSE_RETURN_LOCK_RETRIES=2 \
-  FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=0 \
+  FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=0.1 \
   FM_STALE_WORKTREE_LOCK_AGE_SECS=3600 \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
+  wait "$lock_clear_pid"
   set -e
 
   expect_code 0 "$rc" "transient-index-lock: teardown should succeed on retry after lock self-clears"
@@ -1259,6 +1446,7 @@ test_persistent_index_lock_exhausts_retries_and_refuses_loudly() {
   add_persistent_lock_treehouse "$case_dir"
   # Fresh lock with a live holder: never provably stale, never force-removed.
   add_lsof_live_holder "$case_dir"
+  git -C "$case_dir/wt" checkout --detach -q
 
   lock=$(git_index_lock_path "$case_dir/wt")
   mkdir -p "$(dirname "$lock")"
@@ -1296,6 +1484,7 @@ test_empty_retry_wait_uses_default_without_aborting() {
 
   add_transient_lock_treehouse "$case_dir"
   add_lsof_no_holder "$case_dir"
+  git -C "$case_dir/wt" checkout --detach -q
 
   lock=$(git_index_lock_path "$case_dir/wt")
   mkdir -p "$(dirname "$lock")"
@@ -1332,6 +1521,7 @@ test_fractional_legacy_retry_wait_refuses_without_arithmetic_error() {
 
   add_persistent_lock_treehouse "$case_dir"
   add_lsof_live_holder "$case_dir"
+  git -C "$case_dir/wt" checkout --detach -q
 
   lock=$(git_index_lock_path "$case_dir/wt")
   mkdir -p "$(dirname "$lock")"
@@ -1370,6 +1560,90 @@ test_local_only_force_overrides_unpushed() {
   pass "local-only worktree with unpushed work is torn down under --force (escape hatch)"
 }
 
+test_legacy_task_temp_directory_allows_and_removes() {
+  local case_dir rc task_tmp
+  case_dir=$(make_case legacy-task-temp)
+  write_meta "$case_dir" local-only ship
+  task_tmp=/tmp/fm-task-x1
+  [ ! -e "$task_tmp" ] && [ ! -L "$task_tmp" ] \
+    || fail "legacy-task-temp: fixture path already exists: $task_tmp"
+  mkdir -m 700 "$task_tmp"
+  printf 'tasktmp=%s\n' "$task_tmp" >> "$case_dir/state/task-x1.meta"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "legacy-task-temp: exact legacy path should be accepted"
+  [ ! -e "$task_tmp" ] && [ ! -L "$task_tmp" ] \
+    || fail "legacy-task-temp: teardown did not remove the accepted temporary directory"
+  pass "teardown accepts and removes an exact legacy task temporary directory"
+}
+
+test_legacy_task_temp_adversarial_paths_refuse() {
+  local target case_dir rc task_tmp
+  for target in /tmp/fm-task-x10 /tmp/fm-task-x1. /tmp/fm-task-x1/child; do
+    case_dir=$(make_case "unsafe-task-temp-${target##*/}")
+    write_meta "$case_dir" local-only ship
+    printf 'tasktmp=%s\n' "$target" >> "$case_dir/state/task-x1.meta"
+
+    set +e
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "unsafe-task-temp: $target should be refused"
+    assert_grep "does not match task task-x1" "$case_dir/stderr" \
+      "unsafe-task-temp: $target was not rejected as a mismatched task path"
+    [ -f "$case_dir/state/task-x1.meta" ] \
+      || fail "unsafe-task-temp: teardown discarded metadata for $target"
+  done
+
+  case_dir=$(make_case legacy-task-temp-symlink)
+  write_meta "$case_dir" local-only ship
+  task_tmp=/tmp/fm-task-x1
+  [ ! -e "$task_tmp" ] && [ ! -L "$task_tmp" ] \
+    || fail "legacy-task-temp-symlink: fixture path already exists: $task_tmp"
+  mkdir "$case_dir/private"
+  ln -s "$case_dir/private" "$task_tmp"
+  printf 'tasktmp=%s\n' "$task_tmp" >> "$case_dir/state/task-x1.meta"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "legacy-task-temp-symlink: symlink should be refused"
+  assert_grep "is not a private directory" "$case_dir/stderr" \
+    "legacy-task-temp-symlink: symlink was not rejected as unsafe"
+  [ -L "$task_tmp" ] || fail "legacy-task-temp-symlink: teardown removed the refused symlink"
+  unlink "$task_tmp"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "legacy-task-temp-symlink: teardown discarded metadata"
+
+  case_dir=$(make_case legacy-task-temp-file)
+  write_meta "$case_dir" local-only ship
+  [ ! -e "$task_tmp" ] && [ ! -L "$task_tmp" ] \
+    || fail "legacy-task-temp-file: fixture path already exists: $task_tmp"
+  : > "$task_tmp"
+  printf 'tasktmp=%s\n' "$task_tmp" >> "$case_dir/state/task-x1.meta"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "legacy-task-temp-file: regular file should be refused"
+  assert_grep "is not a private directory" "$case_dir/stderr" \
+    "legacy-task-temp-file: regular file was not rejected as unsafe"
+  [ -f "$task_tmp" ] || fail "legacy-task-temp-file: teardown removed the refused file"
+  unlink "$task_tmp"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "legacy-task-temp-file: teardown discarded metadata"
+  pass "teardown refuses malformed, non-directory, and symlinked task temporary paths"
+}
+
 test_herdr_teardown_clears_escalation_marker() {
   local case_dir marker
   case_dir=$(make_case herdr-marker-cleanup)
@@ -1401,9 +1675,16 @@ test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_local_only_rebased_equivalent_patches_allow
+test_local_only_rebased_branch_with_unlanded_patch_refuses
+test_local_only_unique_merge_without_cherry_patch_refuses
+test_teardown_preserves_default_branch_when_worktree_is_parked_on_it
+test_live_lock_refuses_before_returning_checked_out_task_branch
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
+test_legacy_task_temp_directory_allows_and_removes
+test_legacy_task_temp_adversarial_paths_refuse
 test_herdr_teardown_clears_escalation_marker
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head

@@ -77,6 +77,11 @@
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
+# Codex ship and scout launches receive a firstmate-managed CODEX_HOME under
+# data/codex-crewmate, each in a fresh private directory with only copied
+# auth/model catalog files and a config.toml with no MCP servers, disabled plugins, and a per-task
+# profile that excludes project-local Codex configuration.
+# Codex secondmate launches retain their existing home and are not changed here.
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
@@ -205,6 +210,15 @@ TREEHOUSE_LEASE_COMMITTED=0
 TREEHOUSE_LEASE_LOCK=
 TREEHOUSE_LEASE_LOCK_HELD=0
 TASK_META_TMP=
+ORCA_WORKTREE_CLEANUP_COMPLETE=0
+ORCA_ABORT_CLEANUP_FAILED=0
+ORCA_ABORT_ENDPOINT_ABSENT=1
+FAILED_ENDPOINT_CLEANUP=0
+TREEHOUSE_ABORT_CLEANUP=0
+TASK_TMP=
+CODEX_CREWMATE_HOME=
+CODEX_ACTIVATION_TOKEN=
+SPAWN_META_WRITTEN=0
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -267,42 +281,133 @@ treehouse_lease_transaction_release() {
   TREEHOUSE_LEASE_LOCK_HELD=0
 }
 
+write_failed_treehouse_spawn_meta() {
+  mkdir -p "$STATE" 2>/dev/null || return 0
+  {
+    if [ "$BACKEND" = orca ]; then
+      echo "window=$W"
+    else
+      echo "window=${T:-}"
+    fi
+    echo "worktree=$WT"
+    echo "project=$PROJ_ABS"
+    echo "harness=$HARNESS"
+    echo "kind=$KIND"
+    echo "mode=${MODE:-no-mistakes}"
+    echo "yolo=${YOLO:-off}"
+    echo "tasktmp=${TASK_TMP:-}"
+    echo "failed_spawn=1"
+    [ "$FAILED_ENDPOINT_CLEANUP" != 1 ] || echo "endpoint_cleanup_pending=1"
+    [ -z "${CODEX_CREWMATE_HOME:-}" ] || echo "codex_crewmate_home=$CODEX_CREWMATE_HOME"
+    echo "model=${MODEL:-default}"
+    echo "effort=${EFFORT:-default}"
+    [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
+    if [ "$BACKEND" = herdr ]; then
+      echo "herdr_session=${HERDR_SES:-}"
+      echo "herdr_workspace_id=${HERDR_WORKSPACE_ID:-}"
+      echo "herdr_tab_id=${HERDR_TAB_ID:-}"
+      echo "herdr_pane_id=${HERDR_PANE_ID:-}"
+    fi
+    if [ "$BACKEND" = zellij ]; then
+      echo "zellij_session=${ZELLIJ_SES:-}"
+      echo "zellij_tab_id=${ZELLIJ_TAB_ID:-}"
+      echo "zellij_pane_id=${ZELLIJ_PANE_ID:-}"
+    fi
+    if [ "$BACKEND" = cmux ]; then
+      echo "cmux_workspace_id=${CMUX_WORKSPACE_ID:-}"
+      echo "cmux_surface_id=${CMUX_SURFACE_ID:-}"
+    fi
+    if [ "$BACKEND" = orca ]; then
+      echo "orca_worktree_id=${ORCA_WORKTREE_ID:-}"
+      [ "${ORCA_WORKTREE_CLEANUP_COMPLETE:-0}" != 1 ] || echo "orca_worktree_cleanup_complete=1"
+      [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
+    fi
+  } > "$STATE/$ID.meta" 2>/dev/null || true
+}
+
+remove_codex_crewmate_home() {
+  local home=${CODEX_CREWMATE_HOME:-}
+  [ -n "$home" ] || return 0
+  python3 "$FM_ROOT/bin/fm-codex-home.py" --remove --data "$DATA" --state "$STATE" --task-id "$ID" --home "$home"
+}
+
+remove_codex_home_activation_result() {
+  local home=${CODEX_CREWMATE_HOME:-}
+  [ -n "$home" ] || return 0
+  python3 "$FM_ROOT/bin/fm-codex-home.py" --remove-activation-result --data "$DATA" --home "$home"
+}
+
 orca_spawn_abort_cleanup() {
-  local status=$1
-  [ "$ORCA_ABORT_CLEANUP" = 1 ] || return "$status"
+  local cleanup_failed=0 terminal_absent=1
+  [ "$ORCA_ABORT_CLEANUP" = 1 ] || return 0
   ORCA_ABORT_CLEANUP=0
   if [ -n "${ORCA_TERMINAL:-}" ]; then
-    fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
-  fi
-  if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
-    if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
-      mkdir -p "$STATE" 2>/dev/null || true
-      if [ -d "$STATE" ]; then
-        {
-          echo "window=$W"
-          echo "worktree=${WT:-}"
-          echo "project=$PROJ_ABS"
-          echo "harness=$HARNESS"
-          echo "kind=$KIND"
-          echo "mode=${MODE:-no-mistakes}"
-          echo "yolo=${YOLO:-off}"
-          echo "tasktmp=${TASK_TMP:-}"
-          echo "model=${MODEL:-default}"
-          echo "effort=${EFFORT:-default}"
-          echo "backend=orca"
-          echo "orca_worktree_id=$ORCA_WORKTREE_ID"
-          [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
-        } > "$STATE/$ID.meta" 2>/dev/null || true
+    terminal_absent=0
+    if fm_backend_target_absent orca "$ORCA_TERMINAL"; then
+      ORCA_TERMINAL=
+      T=
+      terminal_absent=1
+    elif FM_BACKEND_KILL_STRICT=1 fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null; then
+      if fm_backend_target_absent orca "$ORCA_TERMINAL"; then
+        ORCA_TERMINAL=
+        T=
+        terminal_absent=1
+      else
+        cleanup_failed=1
+        FAILED_ENDPOINT_CLEANUP=1
       fi
+    elif fm_backend_target_absent orca "$ORCA_TERMINAL"; then
+      ORCA_TERMINAL=
+      T=
+      terminal_absent=1
+    else
+      cleanup_failed=1
+      FAILED_ENDPOINT_CLEANUP=1
     fi
   fi
-  return "$status"
+  if [ "$terminal_absent" = 1 ] && [ -n "${ORCA_WORKTREE_ID:-}" ]; then
+    if fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
+      ORCA_WORKTREE_ID=
+      ORCA_WORKTREE_CLEANUP_COMPLETE=1
+      WT=
+    else
+      cleanup_failed=1
+    fi
+  elif [ -n "${ORCA_WORKTREE_ID:-}" ]; then
+    cleanup_failed=1
+  fi
+  ORCA_ABORT_ENDPOINT_ABSENT=$terminal_absent
+  ORCA_ABORT_CLEANUP_FAILED=$cleanup_failed
+  return 0
 }
 
 spawn_abort_cleanup() {
-  local status=$?
-  treehouse_spawn_abort_cleanup "$status" || true
-  orca_spawn_abort_cleanup "$status" || true
+  local status=$? preserve_codex_home=0 clean_codex_home=0 orca_cleanup_failed=0
+  if [ -n "$TREEHOUSE_LEASE_PATH_FILE" ]; then
+    TREEHOUSE_ABORT_CLEANUP=0
+    clean_codex_home=1
+    treehouse_spawn_abort_cleanup "$status" || true
+  fi
+  if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
+    clean_codex_home=1
+    orca_spawn_abort_cleanup
+    orca_cleanup_failed=$ORCA_ABORT_CLEANUP_FAILED
+    [ "$FAILED_ENDPOINT_CLEANUP" != 1 ] || preserve_codex_home=1
+  fi
+  if [ "$clean_codex_home" -eq 1 ] && [ "$preserve_codex_home" -eq 0 ] && ! remove_codex_crewmate_home; then
+    echo "error: could not remove isolated Codex crewmate home" >&2
+    write_failed_treehouse_spawn_meta
+  elif [ "$clean_codex_home" -eq 1 ] && [ "$preserve_codex_home" -eq 0 ]; then
+    CODEX_CREWMATE_HOME=
+  fi
+  [ "$orca_cleanup_failed" -eq 0 ] || write_failed_treehouse_spawn_meta
+  [ -z "$CODEX_ACTIVATION_TOKEN" ] || remove_codex_home_activation_result 2>/dev/null || true
+  if [ -n "$TASK_TMP" ] && { [ "$BACKEND" != orca ] || [ "$ORCA_ABORT_ENDPOINT_ABSENT" = 1 ]; }; then
+    rm -rf -- "$TASK_TMP"
+  fi
+  if [ "$status" -ne 0 ] && [ "$SPAWN_META_WRITTEN" = 1 ] && [ "$FAILED_ENDPOINT_CLEANUP" != 1 ] && [ "$preserve_codex_home" -eq 0 ] && [ "$orca_cleanup_failed" -eq 0 ] && [ -z "$CODEX_CREWMATE_HOME" ]; then
+    rm -f "$STATE/$ID.meta"
+  fi
   [ -z "$TASK_META_TMP" ] || rm -f "$TASK_META_TMP" || true
   treehouse_lease_transaction_release
   return "$status"
@@ -395,7 +500,7 @@ launch_template() {
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(cat __BRIEF__)"'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(cat __BRIEF__)"'
+        printf '%s' 'codex --profile __CODEXPROFILE__ --disable plugins __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(cat __BRIEF__)"'
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(cat __BRIEF__)"' ;;
@@ -418,13 +523,443 @@ launch_template() {
   esac
 }
 
+raw_launch_word_is() {
+  local word=$1 expected=$2 base lowered
+  base=${word##*/}
+  lowered=$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]') || return 1
+  [ "$lowered" = "$expected" ]
+}
+
+raw_launch_word_is_codex() {
+  raw_launch_word_is "$1" codex
+}
+
+raw_launch_word_is_dynamic_dispatcher() {
+  local word=$1
+  raw_launch_word_is "$word" find || raw_launch_word_is "$word" xargs || raw_launch_word_is "$word" parallel
+}
+
+raw_launch_word_is_indirect_dispatcher() {
+  local word=$1
+  raw_launch_word_is "$word" eval || raw_launch_word_is "$word" python || raw_launch_word_is "$word" python3 || raw_launch_word_is "$word" pypy || raw_launch_word_is "$word" perl || raw_launch_word_is "$word" ruby || raw_launch_word_is "$word" node || raw_launch_word_is "$word" nodejs || raw_launch_word_is "$word" php || raw_launch_word_is "$word" lua
+}
+
+raw_launch_word_is_script_dispatcher() {
+  local word=$1 base
+  raw_launch_word_is "$word" source || [ "$word" = . ] && return 0
+  base=${word##*/}
+  case "$base" in
+    *.sh|*.bash|*.zsh|*.command) return 0 ;;
+  esac
+  case "$word" in
+    ./*|../*) return 0 ;;
+  esac
+  return 1
+}
+
+raw_launch_mentions_codex() {
+  local raw=$1 status
+  while [ -n "$raw" ]; do
+    raw_launch_read_word "$raw"
+    status=$?
+    [ "$status" -eq 0 ] || return "$status"
+    raw_launch_word_is_codex "$RAW_LAUNCH_WORD" && return 0
+    raw=$RAW_LAUNCH_REST
+  done
+  return 1
+}
+
+raw_launch_has_codex_dispatch_argument() {
+  local raw=$1 previous='' status
+  while [ -n "$raw" ]; do
+    raw_launch_read_word "$raw"
+    status=$?
+    [ "$status" -eq 0 ] || return "$status"
+    if raw_launch_word_is_codex "$RAW_LAUNCH_WORD" && [[ "$previous" != -* ]]; then
+      return 0
+    fi
+    previous=$RAW_LAUNCH_WORD
+    raw=$RAW_LAUNCH_REST
+  done
+  return 1
+}
+
+raw_launch_has_dynamic_execution() {
+  local raw=$1 len=${#1} i=0 char next quote=''
+  while [ "$i" -lt "$len" ]; do
+    char=${raw:i:1}
+    next=${raw:i+1:1}
+    case "$quote" in
+      "'")
+        [ "$char" = "'" ] && quote=
+        ;;
+      '"')
+        case "$char" in
+          '"') quote= ;;
+          \\) i=$((i + 1)) ;;
+          '$') [ "$next" = '(' ] && return 0 ;;
+          '`') return 0 ;;
+        esac
+        ;;
+      '')
+        case "$char" in
+          "'") quote="'" ;;
+          '"') quote='"' ;;
+          \\) i=$((i + 1)) ;;
+          '$') [ "$next" = '(' ] && return 0 ;;
+          '`') return 0 ;;
+          ';'|'&'|'|'|'('|')'|$'\n'|$'\r') return 0 ;;
+          '<'|'>') [ "$next" = '(' ] && return 0 ;;
+        esac
+        ;;
+    esac
+    i=$((i + 1))
+  done
+  return 1
+}
+
+raw_launch_wrapped_command_status() {
+  raw_launch_starts_codex "$1"
+  local status=$?
+  [ "$status" -ne 0 ] || return 2
+  return "$status"
+}
+
+raw_launch_read_word() {
+  local raw=$1 len=${#1} i=0 char quote='' word=
+  while [ "$i" -lt "$len" ]; do
+    char=${raw:i:1}
+    case "$char" in
+      ' '|$'\t'|$'\n'|$'\r') i=$((i + 1)) ;;
+      *) break ;;
+    esac
+  done
+  [ "$i" -lt "$len" ] || return 1
+  while [ "$i" -lt "$len" ]; do
+    char=${raw:i:1}
+    case "$quote" in
+      "'")
+        if [ "$char" = "'" ]; then quote=; else word+=$char; fi
+        ;;
+      '"')
+        case "$char" in
+          '"') quote= ;;
+          \\)
+            i=$((i + 1))
+            [ "$i" -lt "$len" ] || return 2
+            word+=${raw:i:1}
+            ;;
+          '$'|'`') return 2 ;;
+          *) word+=$char ;;
+        esac
+        ;;
+      '')
+        case "$char" in
+          ' '|$'\t'|$'\n'|$'\r') break ;;
+          "'") quote="'" ;;
+          '"') quote='"' ;;
+          \\)
+            i=$((i + 1))
+            [ "$i" -lt "$len" ] || return 2
+            word+=${raw:i:1}
+            ;;
+          '$'|'`'|';'|'&'|'|'|'('|')'|'<'|'>'|'*'|'?'|'['|']'|'{'|'}'|'!'|'~') return 2 ;;
+          *) word+=$char ;;
+        esac
+        ;;
+    esac
+    i=$((i + 1))
+  done
+  [ -z "$quote" ] || return 2
+  RAW_LAUNCH_WORD=$word
+  RAW_LAUNCH_REST=${raw:i}
+}
+
+raw_launch_starts_codex() {
+  local raw=$1 word status state=prefix nested
+  while :; do
+    raw_launch_read_word "$raw"
+    status=$?
+    [ "$status" -eq 0 ] || return "$status"
+    word=$RAW_LAUNCH_WORD
+    raw=$RAW_LAUNCH_REST
+    case "$state" in
+      prefix)
+        case "$word" in
+          [A-Za-z_][A-Za-z0-9_]*=*) ;;
+          *)
+            if raw_launch_word_is "$word" env; then
+              state='env'
+            elif raw_launch_word_is "$word" command; then
+              state='command'
+            elif raw_launch_word_is "$word" exec; then
+              state='command'
+            elif raw_launch_word_is "$word" builtin; then
+              state='builtin'
+            elif raw_launch_word_is "$word" sh || raw_launch_word_is "$word" bash || raw_launch_word_is "$word" zsh || raw_launch_word_is "$word" dash || raw_launch_word_is "$word" ksh; then
+              state=shell
+            elif raw_launch_word_is "$word" nice; then
+              state='nice'
+            elif raw_launch_word_is "$word" timeout; then
+              state=timeout
+            elif raw_launch_word_is "$word" sudo; then
+              state=sudo
+            elif raw_launch_word_is_script_dispatcher "$word"; then
+              return 2
+            elif raw_launch_word_is_dynamic_dispatcher "$word"; then
+              return 2
+            elif raw_launch_word_is_indirect_dispatcher "$word"; then
+              return 2
+            elif raw_launch_word_is "$word" nohup || raw_launch_word_is "$word" time || raw_launch_word_is "$word" stdbuf || raw_launch_word_is "$word" setsid || raw_launch_word_is "$word" chrt || raw_launch_word_is "$word" ionice || raw_launch_word_is "$word" taskset || raw_launch_word_is "$word" script; then
+              state=wrapper
+            else
+              raw_launch_word_is_codex "$word"
+              return $?
+            fi
+            ;;
+        esac
+        ;;
+      env)
+        case "$word" in
+          [A-Za-z_][A-Za-z0-9_]*=*) ;;
+          -i|--ignore-environment|--null) ;;
+          -u|--unset|-C|--chdir)
+            raw_launch_read_word "$raw" || return 2
+            raw=$RAW_LAUNCH_REST
+            ;;
+          -S|--split-string)
+            raw_launch_read_word "$raw" || return 2
+            nested=$RAW_LAUNCH_WORD
+            if raw_launch_starts_codex "$nested"; then return 0; else return $?; fi
+            ;;
+          --unset=*|--chdir=*) ;;
+          --split-string=*)
+            nested=${word#*=}
+            if raw_launch_starts_codex "$nested"; then return 0; else return $?; fi
+            ;;
+          --) state=env-command ;;
+          -*) return 2 ;;
+          *)
+            if raw_launch_starts_codex "$word$raw"; then return 0; else return $?; fi
+            ;;
+        esac
+        ;;
+      command)
+        case "$word" in
+          --) state=command-command ;;
+          -*) ;;
+          *)
+            if raw_launch_starts_codex "$word$raw"; then return 0; else return $?; fi
+            ;;
+        esac
+        ;;
+      env-command|command-command)
+        if raw_launch_starts_codex "$word$raw"; then return 0; else return $?; fi
+        ;;
+      builtin)
+        case "$word" in
+          -p|--) ;;
+          eval|source|.) return 2 ;;
+          command|exec)
+            raw_launch_wrapped_command_status "$word$raw"
+            return $?
+            ;;
+          *) return 1 ;;
+        esac
+        ;;
+      nice)
+        case "$word" in
+          -n|--adjustment)
+            raw_launch_read_word "$raw" || return 2
+            raw=$RAW_LAUNCH_REST
+            ;;
+          --adjustment=*) ;;
+          --) state=prefix ;;
+          -*) ;;
+          *)
+            raw_launch_wrapped_command_status "$word$raw"
+            return $?
+            ;;
+        esac
+        ;;
+      timeout)
+        case "$word" in
+          -k|--kill-after|-s|--signal)
+            raw_launch_read_word "$raw" || return 2
+            raw=$RAW_LAUNCH_REST
+            ;;
+          --kill-after=*|--signal=*|-k*|-s*) ;;
+          --) state='timeout-duration' ;;
+          -*) ;;
+          *)
+            raw_launch_read_word "$raw" || return 2
+            raw_launch_wrapped_command_status "$RAW_LAUNCH_WORD$RAW_LAUNCH_REST"
+            return $?
+            ;;
+        esac
+        ;;
+      timeout-duration)
+        raw_launch_read_word "$raw" || return 2
+        raw_launch_wrapped_command_status "$RAW_LAUNCH_WORD$RAW_LAUNCH_REST"
+        return $?
+        ;;
+      sudo)
+        case "$word" in
+          -C|-D|-g|-h|-p|-r|-t|-T|-u|--close-from|--chdir|--group|--host|--prompt|--role|--type|--command-timeout|--user)
+            raw_launch_read_word "$raw" || return 2
+            raw=$RAW_LAUNCH_REST
+            ;;
+          --close-from=*|--chdir=*|--group=*|--host=*|--prompt=*|--role=*|--type=*|--command-timeout=*|--user=*) ;;
+          --) state=sudo-command ;;
+          -*)
+            raw_launch_mentions_codex "$word$raw"
+            status=$?
+            [ "$status" -ne 0 ] || return 2
+            return "$status"
+            ;;
+          *)
+            raw_launch_wrapped_command_status "$word$raw"
+            return $?
+            ;;
+        esac
+        ;;
+      sudo-command)
+        raw_launch_wrapped_command_status "$word$raw"
+        return $?
+        ;;
+      wrapper)
+        raw_launch_mentions_codex "$word$raw"
+        status=$?
+        [ "$status" -ne 0 ] || return 2
+        return "$status"
+        ;;
+      shell)
+        case "$word" in
+          -c)
+            raw_launch_read_word "$raw"
+            status=$?
+            [ "$status" -eq 0 ] || return 2
+            nested=$RAW_LAUNCH_WORD
+            raw_launch_is_simple "$nested" || return 2
+            raw_launch_starts_codex "$nested"
+            status=$?
+            [ "$status" -eq 1 ] || return 2
+            raw_launch_read_word "$nested" || return 2
+            case "$RAW_LAUNCH_WORD" in
+              ./*|../*|*.sh|*.bash|*.zsh|*.command) return 2 ;;
+            esac
+            return 1
+            ;;
+          *) return 2 ;;
+        esac
+        ;;
+    esac
+  done
+}
+
+raw_launch_is_simple() {
+  local raw=$1
+  case "$raw" in
+    *[\'\"\\\`\$\;\&\|\(\)\<\>\*\?\[\]\{\}\!\~$'\n'$'\r']*) return 1 ;;
+  esac
+}
+
+normalize_raw_codex_launch() {
+  raw_launch_is_simple "$1" || return 1
+  raw_launch_starts_codex "$1"
+}
+
+raw_codex_launch_is_normalizable() {
+  local raw=$1 seen_codex=0
+  while [ -n "$raw" ]; do
+    raw_launch_read_word "$raw" || return 1
+    raw=$RAW_LAUNCH_REST
+    if raw_launch_word_is_codex "$RAW_LAUNCH_WORD"; then
+      [ "$seen_codex" -eq 0 ] || return 1
+      seen_codex=1
+    elif [ "$seen_codex" -eq 0 ] && { raw_launch_word_is "$RAW_LAUNCH_WORD" env || raw_launch_word_is "$RAW_LAUNCH_WORD" command || raw_launch_word_is "$RAW_LAUNCH_WORD" exec; }; then
+      :
+    elif case "$RAW_LAUNCH_WORD" in CODEX_HOME=*) true ;; *) false ;; esac; then
+      :
+    else
+      return 1
+    fi
+  done
+  [ "$seen_codex" -eq 1 ]
+}
+
+refresh_codex_crewmate_home() {
+  local name
+  name=$(python3 "$FM_ROOT/bin/fm-codex-home.py" --data "$DATA" --new-home-name) || return 1
+  CODEX_CREWMATE_HOME="$DATA/codex-crewmate/$name"
+}
+
+wait_for_codex_home_activation() {
+  local home=$1 token=$2 deadline status read_status
+  deadline=$(( $(date +%s) + 10 ))
+  while [ "$(date +%s)" -le "$deadline" ]; do
+    set +e
+    status=$(python3 "$FM_ROOT/bin/fm-codex-home.py" --data "$DATA" --read-activation-result --home "$home" --result-token "$token" 2>&1)
+    read_status=$?
+    set -e
+    if [ "$read_status" -eq 0 ]; then
+      remove_codex_home_activation_result 2>/dev/null || true
+      [ "$status" = ready ] && return 0
+      echo "error: isolated Codex home activation failed" >&2
+      return 1
+    fi
+    if [ "$read_status" -ne 3 ]; then
+      remove_codex_home_activation_result 2>/dev/null || true
+      echo "error: isolated Codex home activation result is unsafe" >&2
+      return 1
+    fi
+    sleep 0.1
+  done
+  remove_codex_home_activation_result 2>/dev/null || true
+  echo "error: isolated Codex home activation did not report ready within 10s" >&2
+  return 1
+}
+
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
-    LAUNCH=$ARG3
-    HARNESS=""
-    for word in $LAUNCH; do
-      case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
-    done
+    set +e
+    raw_launch_starts_codex "$ARG3"
+    raw_codex_status=$?
+    if [ "$raw_codex_status" -eq 1 ]; then
+      raw_launch_has_codex_dispatch_argument "$ARG3"
+      raw_codex_mentions=$?
+      [ "$raw_codex_mentions" -ne 0 ] || raw_codex_status=2
+      if [ "$raw_codex_status" -eq 1 ] && raw_launch_has_dynamic_execution "$ARG3"; then
+        raw_codex_status=2
+      fi
+    fi
+    set -e
+    if [ "$KIND" != secondmate ] && [ "$raw_codex_status" -eq 2 ]; then
+      echo "error: unsafe raw launch command at executable position; use --harness codex for Codex" >&2
+      exit 1
+    fi
+    if [ "$KIND" != secondmate ] && [ "$raw_codex_status" -eq 0 ]; then
+      raw_launch_is_simple "$ARG3" || {
+        echo "error: unsafe raw launch command; quote, escape, and shell syntax are not supported - use --harness codex for Codex" >&2
+        exit 1
+      }
+      normalize_raw_codex_launch "$ARG3" || {
+        echo "error: unsafe raw Codex launch command; use --harness codex for Codex options" >&2
+        exit 1
+      }
+      raw_codex_launch_is_normalizable "$ARG3" || {
+        echo "error: raw Codex launch options are not supported; use --harness codex with --model/--effort" >&2
+        exit 1
+      }
+      HARNESS=codex
+      LAUNCH=$(launch_template "$HARNESS" "$KIND")
+    else
+      LAUNCH=$ARG3
+      HARNESS=""
+      for word in $LAUNCH; do
+        case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
+      done
+    fi
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
@@ -705,9 +1240,21 @@ if [ "$KIND" = secondmate ]; then
 else
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
   WT=""
+  WT_REAL=""
   BRIEF="$DATA/$ID/brief.md"
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
+
+CODEX_CREWMATE_PROFILE=
+if [ "$HARNESS" = codex ] && [ "$KIND" != secondmate ]; then
+  case "$ID" in
+    ''|*[!A-Za-z0-9_-]*)
+      echo "error: Codex crewmate task id must contain only letters, digits, hyphens, or underscores" >&2
+      exit 1
+      ;;
+  esac
+  CODEX_CREWMATE_PROFILE="fm-crewmate-$ID"
+fi
 
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
 # /private/tmp) when it came from the ship/scout branch's logical `pwd` above.
@@ -930,6 +1477,7 @@ validate_spawn_worktree() {  # <source> <inspect-target>
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
+  WT_REAL=$wt_real
 }
 
 W="fm-$ID"
@@ -1114,15 +1662,35 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+  TREEHOUSE_ABORT_CLEANUP=1
 fi
 
-# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
+if [ "$HARNESS" = codex ] && [ "$KIND" != secondmate ]; then
+  refresh_codex_crewmate_home || {
+    echo "error: could not prepare isolated Codex crewmate home" >&2
+    exit 1
+  }
+  if [ -f "$WT_REAL/.codex/config.toml" ]; then
+    echo "warning: Codex crewmate ignores project config $WT_REAL/.codex/config.toml to keep MCPs and plugins disabled" >&2
+  fi
+fi
+
+# Per-task temp root is atomically created with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
-# Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
-# later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
+# Nested (not a bare /tmp/fm-<id>.<random>/gotmp) so other per-task temp can live alongside
+# later, and teardown cleans the recorded path. GOTMPDIR (not TMPDIR) is the
 # targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
-TASK_TMP="/tmp/fm-$ID"
-mkdir -p "$TASK_TMP/gotmp"
+TASK_TMP=$(mktemp -d "/tmp/fm-$ID.XXXXXXXX") || {
+  echo "error: could not create private task temporary directory" >&2
+  exit 1
+}
+mkdir "$TASK_TMP/gotmp" || exit 1
+if [ -n "$CODEX_CREWMATE_HOME" ]; then
+  CODEX_ACTIVATION_TOKEN=$(python3 "$FM_ROOT/bin/fm-codex-home.py" --new-result-token) || {
+    echo "error: could not create isolated Codex home activation token" >&2
+    exit 1
+  }
+fi
 
 # Per-harness turn-end hook: a file that touches state/<id>.turn-ended when the
 # agent finishes a turn. Worktree-resident hooks are kept out of git's view so
@@ -1259,6 +1827,7 @@ TASK_META_TMP=$(mktemp "$STATE/.${ID}.meta.XXXXXX") || {
   echo "mode=$MODE"
   echo "yolo=$YOLO"
   echo "tasktmp=$TASK_TMP"
+  [ -z "$CODEX_CREWMATE_HOME" ] || echo "codex_crewmate_home=$CODEX_CREWMATE_HOME"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   # backend= is written only for a non-default (non-tmux) backend, so the
@@ -1298,6 +1867,7 @@ fi
 TREEHOUSE_LEASE_PATH_FILE=
 treehouse_lease_transaction_release
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+SPAWN_META_WRITTEN=1
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
@@ -1313,6 +1883,17 @@ LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
+if [ -n "$CODEX_CREWMATE_HOME" ]; then
+  sq_codex_crewmate_home=$(shell_quote "$CODEX_CREWMATE_HOME")
+  sq_codex_crewmate_profile=$(shell_quote "$CODEX_CREWMATE_PROFILE")
+  LAUNCH=${LAUNCH//__CODEXPROFILE__/$sq_codex_crewmate_profile}
+  sq_codex_home_helper=$(shell_quote "$FM_ROOT/bin/fm-codex-home.py")
+  sq_codex_data=$(shell_quote "$DATA")
+  sq_codex_source=$(shell_quote "${CODEX_HOME:-$HOME/.codex}")
+  sq_codex_worktree=$(shell_quote "$WT_REAL")
+  sq_codex_activation_token=$(shell_quote "$CODEX_ACTIVATION_TOKEN")
+  LAUNCH="exec python3 $sq_codex_home_helper --create-activate --data $sq_codex_data --source $sq_codex_source --profile $sq_codex_crewmate_profile --worktree $sq_codex_worktree --home $sq_codex_crewmate_home --result-token $sq_codex_activation_token -- $LAUNCH"
+fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
@@ -1325,5 +1906,11 @@ sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 spawn_send_key "$T" Enter
+if [ -n "$CODEX_ACTIVATION_TOKEN" ]; then
+  wait_for_codex_home_activation "$CODEX_CREWMATE_HOME" "$CODEX_ACTIVATION_TOKEN" || exit 1
+  CODEX_ACTIVATION_TOKEN=
+fi
+TREEHOUSE_ABORT_CLEANUP=0
+[ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"

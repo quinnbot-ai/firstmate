@@ -117,10 +117,9 @@ fm_backend_tmux_send_literal() {  # <target> <text>
   tmux send-keys -t "$1" -l "$2"
 }
 
-# fm_backend_tmux_kill: remove the task's window, best-effort. Mirrors
-# fm-teardown.sh's `tmux kill-window -t "$T" 2>/dev/null || true`.
+# fm_backend_tmux_kill: remove the task's window.
 fm_backend_tmux_kill() {  # <target>
-  tmux kill-window -t "$1" 2>/dev/null || true
+  tmux kill-window -t "$1" 2>/dev/null || [ "${FM_BACKEND_KILL_STRICT:-0}" != 1 ]
 }
 
 # fm_backend_tmux_current_command: <target>'s live foreground process name -
