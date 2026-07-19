@@ -67,12 +67,17 @@ FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 FM_CLASSIFY_STARTUP_SPINNER_RE_DEFAULT='Starting MCP servers'
 FM_CLASSIFY_BUSY_WAIT_SPIN_RE_DEFAULT='Waiting for agents|No agents completed yet'
 
+pane_footer_control_lines() {
+  printf '%s\n' "$1" | grep -v '^[[:space:]]*$' | tail -6
+}
+
 pane_progress_snapshot() {  # <pane-text> -> context=<value>;tokens=<value>, or empty
-  local pane=$1 context tokens
-  context=$(printf '%s\n' "$pane" | sed -nE 's/.*[Cc]ontext[^0-9]*([0-9]+([.][0-9]+)?%?).*/\1/p' | tail -1)
-  tokens=$(printf '%s\n' "$pane" | sed -nE 's/.*[Tt]okens?[^0-9]*([0-9][0-9,]*([.][0-9]+)?[KMGkmg]?).*/\1/p' | tail -1)
+  local pane=$1 footer context tokens
+  footer=$(pane_footer_control_lines "$pane")
+  context=$(printf '%s\n' "$footer" | sed -nE 's/.*[Cc]ontext[^0-9]*([0-9]+([.][0-9]+)?%?).*/\1/p' | tail -1)
+  tokens=$(printf '%s\n' "$footer" | sed -nE 's/.*[Tt]okens?[^0-9]*([0-9][0-9,]*([.][0-9]+)?[KMGkmg]?).*/\1/p' | tail -1)
   if [ -z "$tokens" ]; then
-    tokens=$(printf '%s\n' "$pane" | sed -nE 's/.*([0-9][0-9,]*([.][0-9]+)?[KMGkmg]?)[[:space:]]+[Tt]okens?.*/\1/p' | tail -1)
+    tokens=$(printf '%s\n' "$footer" | sed -nE 's/.*([0-9][0-9,]*([.][0-9]+)?[KMGkmg]?)[[:space:]]+[Tt]okens?.*/\1/p' | tail -1)
   fi
   [ -n "$context" ] && printf 'context=%s' "$context"
   [ -n "$context" ] && [ -n "$tokens" ] && printf ';'
@@ -84,16 +89,15 @@ pane_context_is_zero() {  # <pane-text>
   snapshot=$(pane_progress_snapshot "$1")
   context=${snapshot#context=}
   context=${context%%;*}
-  case "$context" in 0|0%|0.0|0.0%) return 0 ;; esac
-  return 1
+  printf '%s' "$context" | grep -qE '^0+([.]0+)?%?$'
 }
 
 pane_is_startup_spinner() {  # <pane-text>
-  printf '%s' "$1" | grep -qiE "${FM_STARTUP_SPINNER_RE:-$FM_CLASSIFY_STARTUP_SPINNER_RE_DEFAULT}"
+  pane_footer_control_lines "$1" | grep -qiE "${FM_STARTUP_SPINNER_RE:-$FM_CLASSIFY_STARTUP_SPINNER_RE_DEFAULT}"
 }
 
 pane_is_busy_wait_spin() {  # <pane-text>
-  printf '%s' "$1" | grep -qiE "${FM_BUSY_WAIT_SPIN_RE:-$FM_CLASSIFY_BUSY_WAIT_SPIN_RE_DEFAULT}"
+  pane_footer_control_lines "$1" | grep -qiE "${FM_BUSY_WAIT_SPIN_RE:-$FM_CLASSIFY_BUSY_WAIT_SPIN_RE_DEFAULT}"
 }
 
 # The resolution verb and durable-backlog-transfer verb that CLOSE a keyed

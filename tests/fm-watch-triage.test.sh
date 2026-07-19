@@ -167,6 +167,32 @@ EOF
   pass "classifier primitives: keyed decisions and activity phases, captain relevance, window-to-task, and overrides"
 }
 
+test_pane_progress_classifier_uses_current_footer() {
+  local pane
+  pane=$(cat <<'EOF'
+Starting MCP servers ... (esc to interrupt) 10:41
+Context: 0.00%
+Waiting for agents / No agents completed yet (esc to interrupt) 23:39
+Tokens: 3.09M
+Earlier transcript output
+More earlier transcript output
+Current request output
+Current operation output
+Current tool output
+Working on the next request (esc to interrupt)
+Context: 73%
+Tokens: 3.10M
+EOF
+)
+  [ "$(pane_progress_snapshot "$pane")" = 'context=73%;tokens=3.10M' ] \
+    || fail "progress snapshot read historical transcript metrics"
+  pane_is_startup_spinner "$pane" && fail "startup signature read historical transcript text"
+  pane_is_busy_wait_spin "$pane" && fail "subagent wait signature read historical transcript text"
+  pane_context_is_zero 'Working on the next request (esc to interrupt)
+Context: 0.00%' || fail "zero context with decimal precision was not recognized"
+  pass "pane progress reads current footer controls and recognizes decimal zero context"
+}
+
 # crew_is_provably_working: the absorb-only-when-provably-working predicate. It is
 # benign (absorb) ONLY when fm-crew-state.sh reports the crew as working from an
 # actively-running pipeline step (source run-step) or a busy pane (source pane);
@@ -1129,7 +1155,7 @@ test_busy_startup_spinner_context_zero_surfaces() {
   window="test:fm-startup"
   cat > "$capture_file" <<'EOF'
 Starting MCP servers ... (esc to interrupt) 10:41
-Context: 0%
+Context: 0.00%
 EOF
   printf 'window=%s\nkind=ship\n' "$window" > "$state/startup.meta"
   printf 'working: starting the task\n' > "$statusf"
@@ -1302,6 +1328,7 @@ test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives
+test_pane_progress_classifier_uses_current_footer
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
