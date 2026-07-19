@@ -217,7 +217,6 @@ ORCA_WORKTREE_CLEANUP_COMPLETE=0
 ORCA_ABORT_CLEANUP_FAILED=0
 ORCA_ABORT_ENDPOINT_ABSENT=1
 FAILED_ENDPOINT_CLEANUP=0
-TREEHOUSE_ABORT_CLEANUP=0
 TASK_TMP=
 CODEX_CREWMATE_HOME=
 CODEX_ACTIVATION_TOKEN=
@@ -387,7 +386,6 @@ orca_spawn_abort_cleanup() {
 spawn_abort_cleanup() {
   local status=$? preserve_codex_home=0 clean_codex_home=0 orca_cleanup_failed=0
   if [ -n "$TREEHOUSE_LEASE_PATH_FILE" ]; then
-    TREEHOUSE_ABORT_CLEANUP=0
     clean_codex_home=1
     treehouse_spawn_abort_cleanup "$status" || true
   fi
@@ -1671,7 +1669,6 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
-  TREEHOUSE_ABORT_CLEANUP=1
 fi
 
 if [ "$KIND" != secondmate ]; then
@@ -1925,7 +1922,6 @@ if [ -n "$CODEX_ACTIVATION_TOKEN" ]; then
   wait_for_codex_home_activation "$CODEX_CREWMATE_HOME" "$CODEX_ACTIVATION_TOKEN" || exit 1
   CODEX_ACTIVATION_TOKEN=
 fi
-TREEHOUSE_ABORT_CLEANUP=0
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"
