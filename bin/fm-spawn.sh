@@ -57,6 +57,7 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   Every ship/scout task worktree receives a pinned worktree-local author identity.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -113,6 +114,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-git-identity.sh
+. "$SCRIPT_DIR/fm-git-identity.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -1205,6 +1208,12 @@ else
   BRIEF="$DATA/$ID/brief.md"
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
+if [ "$KIND" != secondmate ]; then
+  fm_git_identity_enable_worktree_config "$PROJ_ABS" || {
+    echo "error: failed to enable worktree-specific Git config for $PROJ_ABS" >&2
+    exit 1
+  }
+fi
 
 CODEX_CREWMATE_PROFILE=
 if [ "$HARNESS" = codex ] && [ "$KIND" != secondmate ]; then
@@ -1436,6 +1445,13 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 
   validate_spawn_worktree "treehouse get" "$T"
   TREEHOUSE_ABORT_CLEANUP=1
+fi
+
+if [ "$KIND" != secondmate ]; then
+  fm_git_identity_pin_worktree "$WT" "$PROJ_ABS" "$PROJECTS" || {
+    echo "error: failed to pin the worktree-local git identity for $WT" >&2
+    exit 1
+  }
 fi
 
 if [ "$HARNESS" = codex ] && [ "$KIND" != secondmate ]; then
