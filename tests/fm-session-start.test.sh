@@ -383,9 +383,9 @@ exec "$real_stat" "\$@"
 SH
   chmod +x "$fakebin/stat"
   out=$(FM_SESSION_START_OPS_INBOX_LIMIT=2 FM_SESSION_START_OPS_INBOX_SCAN_LIMIT=2 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_contains "$out" "home ops-inbox: at least 3 event file(s); retained newest 2 with full paths:" "bounded inbox digest did not disclose overflow"
-  assert_contains "$out" "(truncated at least 1 older event file(s))" "bounded inbox digest did not disclose retained overflow"
-  [ "$(wc -l < "$stat_log" | tr -d '[:space:]')" -eq 3 ] || fail "operations-inbox digest did not inspect every monitored event"
+  assert_contains "$out" "home ops-inbox: at least 3 event file(s); bounded scan reached 2; up to 2 newest paths within the traversal sample:" "bounded inbox scan did not disclose overflow"
+  assert_contains "$out" "(scan stopped after 2 event file(s); retained inbox exceeds the bounded startup scan)" "bounded inbox scan did not disclose retained overflow"
+  [ "$(wc -l < "$stat_log" | tr -d '[:space:]')" -eq 2 ] || fail "bounded inbox scan statted more than its configured record limit"
 
   pass "OPS INBOX digest distinguishes absent sources and bounds home and configured-inbox scans"
 }
