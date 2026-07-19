@@ -154,10 +154,12 @@ fm_ops_inbox_external_run() {
         if ($read > $remaining) {
           print substr($chunk, 0, $remaining) if $remaining > 0;
           $written += $remaining;
-          kill "TERM", -$pid;
-          $capped = 1;
-          $kill_deadline = time + 0.2;
-          $capture_deadline = $kill_deadline + 0.1;
+          if (!$capped) {
+            kill "TERM", -$pid;
+            $capped = 1;
+            $kill_deadline = time + 0.2;
+            $capture_deadline = $kill_deadline + 0.1;
+          }
           next;
         }
         print $chunk;

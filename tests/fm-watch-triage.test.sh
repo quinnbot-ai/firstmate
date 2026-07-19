@@ -1425,6 +1425,22 @@ SH
 
   cat > "$command" <<'SH'
 #!/usr/bin/env bash
+trap '' TERM
+stop_at=$((SECONDS + 3))
+while [ "$SECONDS" -lt "$stop_at" ]; do printf '0123456789abcdef'; done
+SH
+  chmod +x "$command"
+  started=$SECONDS
+  output=$(FM_OPS_INBOX_OUTPUT_MAX_BYTES=128 fm_ops_inbox_external_output "$home/config")
+  rc=$?
+  elapsed=$((SECONDS - started))
+  bytes=$(printf '%s' "$output" | LC_ALL=C wc -c | tr -d '[:space:]')
+  [ "$bytes" -le 128 ] || fail "TERM-ignoring capped command exceeded the output cap ($bytes)"
+  [ "$rc" -eq 125 ] || fail "TERM-ignoring capped command returned $rc, expected 125"
+  [ "$elapsed" -lt 2 ] || fail "TERM-ignoring capped command exceeded the cap deadline (${elapsed}s)"
+
+  cat > "$command" <<'SH'
+#!/usr/bin/env bash
 printf 'external failure\n'
 exit 42
 SH
