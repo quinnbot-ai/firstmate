@@ -12,6 +12,7 @@ This section is the single owner of the top-level operational-home layout; produ
 The tracked code root contains the shared instruction, skill, documentation, workflow, and `bin/` surfaces, while each effective `FM_HOME` contains private operational directories.
 `data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, and scout reports.
 `state/` holds volatile runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, away-mode state, and generated X-mode artifacts.
+`ops-inbox/` holds local operational-failure event files delivered to this home.
 `config/` holds local gitignored operating choices, and `projects/` holds the local project clones that Firstmate reads but changes only through the guarded exceptions in `AGENTS.md`.
 
 `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
@@ -22,6 +23,24 @@ Wake, watcher, away-mode, and X-specific state mechanics remain with their named
 `docs/sessionstart-nudge.md` owns the native session-open adapter mechanics that nudge the digest command.
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
+
+## Operations inbox (ops-inbox/ / config/ops-inbox-cmd)
+
+Each home may receive operational-failure event files directly in its local `ops-inbox/` directory or one source directory below it (`ops-inbox/<source>/<event>`).
+Write each event once or atomically replace it so the watcher can detect the event or source marker without rescanning retained event files.
+Deeper paths are outside the monitored layout.
+`bin/fm-session-start.sh` reports a bounded count and newest full paths from that directory without changing any event or acknowledgement state.
+Set the local, gitignored `config/ops-inbox-cmd` to one list-only shell command when this machine also has a durable machine-level inbox.
+The first non-empty, non-comment line is the command, and firstmate runs it through `bash -c` with combined stdout and stderr.
+The command must be trusted local code and print only its current unhandled critical listing, starting with `unacked_criticals: <count>`; its exit status is displayed but does not suppress its output because some list commands use a non-zero status when criticals exist.
+The command is intentionally operator-owned and generic, so firstmate does not encode a machine-specific inbox path or acknowledgement implementation.
+The watcher fingerprints both sources, wakes immediately for a changed inbox while a regular task is in flight, and checks the same fingerprint on its existing heartbeat cadence otherwise.
+`FM_SESSION_START_OPS_INBOX_LIMIT` bounds both the home-event paths and configured-command output lines in the digest, defaulting to 5.
+`FM_SESSION_START_OPS_INBOX_SCAN_LIMIT` bounds retained home-event records inspected at startup, defaulting to 256, and reports an explicit sampled overflow when reached.
+`FM_OPS_INBOX_TIMEOUT` bounds each configured command invocation to 10 seconds by default.
+`FM_OPS_INBOX_OUTPUT_MAX_BYTES` bounds each configured command capture to 32768 bytes by default.
+`FM_OPS_INBOX_MARKER_LIMIT` bounds the top-level entries tracked by each watcher fingerprint, defaulting to 256.
+When that limit is exceeded, the fingerprint records an overflow sentinel and the inbox must be retained below the limit before individual changes can be surfaced again.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
@@ -182,6 +201,12 @@ The inherited-local-material contract is owned by `secondmate-provisioning`; for
 `config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
 For Pi secondmate launches, `fm-spawn.sh` starts Pi with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
+For Codex ship and scout launches, `fm-spawn.sh` creates one private task home under `data/codex-crewmate/` and runs the process with that directory as `CODEX_HOME`.
+The helper copies only `auth.json` and `models_cache.json` from the captain's current `CODEX_HOME`, or `~/.codex` when it is unset, then writes an isolated configuration that disables plugins, contains no MCP configuration, and keeps the task worktree untrusted.
+Project-local `.codex/config.toml` is deliberately excluded from those launches, so it cannot re-enable MCP servers or plugins.
+The captain's Codex home is never modified, and Codex secondmate launches intentionally keep their existing home behavior.
+The task metadata records `codex_crewmate_home=`, and normal teardown removes that managed home after endpoint cleanup succeeds.
+If a spawn or teardown cannot confirm endpoint cleanup, firstmate preserves the metadata and managed home for a later safe recovery attempt.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
@@ -360,12 +385,17 @@ FM_BACKEND_CMUX_COMPOSER_LINES=20  # cmux-only: tail lines scanned to locate the
 FM_BACKEND_CMUX_IDLE_RE='^Type a message\.\.\.$'  # cmux-only: empty-composer placeholder regex after border/prompt stripping
 CMUX_SOCKET_PASSWORD=   # cmux-only: socket password fallback when config/cmux-socket-password is absent (docs/cmux-backend.md)
 FM_SESSION_START_STATUS_TAIL=5   # state/*.status lines printed per task in the session-start digest
+FM_SESSION_START_OPS_INBOX_LIMIT=5   # home-event paths and external-command output lines printed in the operations-inbox digest
+FM_SESSION_START_OPS_INBOX_SCAN_LIMIT=256   # home-event records inspected for the bounded operations-inbox startup digest
 FM_BOOTSTRAP_DETECT_ONLY=0   # internal/read-only session-start mode: skip bootstrap's mutating sweeps and print advisory TANGLE wording
 FM_GUARD_READ_ONLY=0    # internal/read-only guard mode: keep alarms but suppress drain, supervision repair, and checkout repair commands
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the guarded operation WILL still run.'   # banner continuation line; fm-send.sh overrides it to name the requested message specifically
 FM_POLL=15              # seconds between watcher poll cycles
 FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartbeats are absorbed while idle
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
+FM_OPS_INBOX_TIMEOUT=10   # seconds allowed for each configured operations-inbox command capture
+FM_OPS_INBOX_OUTPUT_MAX_BYTES=32768   # byte cap for each configured operations-inbox command capture
+FM_OPS_INBOX_MARKER_LIMIT=256   # top-level operations-inbox entries included in each watcher fingerprint
 FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls, custom checks, or X-mode dispatch)
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
