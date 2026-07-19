@@ -31,6 +31,14 @@
 #                          wake payload itself, not just repetition, forces a
 #                          closer look instead of another routine supervision
 #                          resume. Unless afk is active.
+#                          A busy pane with unchanged footer progress is also
+#                          surfaced as stale: Codex's zero-context startup spinner
+#                          after FM_STARTUP_ZERO_CONTEXT_SECS, or an unchanged
+#                          context/token snapshot or no-completed-subagent spinner
+#                          after FM_BUSY_NO_PROGRESS_SECS when no recent status
+#                          write is within FM_BUSY_STATUS_GRACE_SECS. Every such
+#                          busy-progress wake carries an escalation count and
+#                          demand-deep-inspection marker.
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
