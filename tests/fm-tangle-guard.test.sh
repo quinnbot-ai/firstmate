@@ -362,6 +362,28 @@ test_spawn_rolls_back_lease_after_isolation_failure() {
   pass "fm-spawn: rolls back a leased slot when isolation validation fails"
 }
 
+test_spawn_refuses_to_roll_back_primary_checkout() {
+  local home proj invalid fakebin rec out status id handoff
+  home="$TMP_ROOT/lease-primary-rollback-home"
+  mkdir -p "$home/state" "$home/data"
+  proj=$(make_repo "$TMP_ROOT/lease-primary-rollback-proj")
+  invalid="$TMP_ROOT/lease-primary-rollback-invalid"
+  mkdir -p "$invalid"
+  fakebin=$(make_spawn_lease_fakebin "$TMP_ROOT/lease-primary-rollback-fake")
+  rec="$TMP_ROOT/lease-primary-rollback-treehouse.log"; : > "$rec"
+  id=lease-primary-rollback-dd5
+
+  out=$(run_spawn_lease_case "$home" "$id" "$proj" "$invalid" "$fakebin" "$rec" '' "$proj"); status=$?
+  expect_code 1 "$status" "spawn must fail when the pane path is not an isolated worktree"
+  assert_contains "$out" "refusing to roll back invalid treehouse lease path '$proj'" \
+    "primary-checkout lease rollback was not rejected"
+  assert_no_grep "treehouse return --force $proj" "$rec" \
+    "rollback must not force-return the primary checkout"
+  handoff=$(printf '%s\n' "$home/state/.${id}.treehouse-lease."*)
+  assert_present "$handoff" "rejected primary-checkout rollback must retain its handoff"
+  pass "fm-spawn: never force-returns a primary checkout from a lease handoff"
+}
+
 test_spawn_rolls_back_lease_after_setup_failure() {
   local home proj wt fakebin rec out status id task_tmp
   home="$TMP_ROOT/lease-setup-rollback-home"
@@ -416,8 +438,38 @@ test_spawn_recovers_failed_lease_rollback() {
   pass "fm-spawn: recovers a retained lease handoff before retrying allocation"
 }
 
+test_spawn_recovers_lease_handoff_for_another_task() {
+  local home proj wt invalid fakebin rec out status id retry_id handoff returns
+  home="$TMP_ROOT/lease-recovery-other-task-home"
+  mkdir -p "$home/state" "$home/data"
+  proj=$(make_repo "$TMP_ROOT/lease-recovery-other-task-proj")
+  wt="$TMP_ROOT/lease-recovery-other-task-wt"
+  invalid="$TMP_ROOT/lease-recovery-other-task-invalid"
+  mkdir -p "$invalid"
+  git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
+  fakebin=$(make_spawn_lease_fakebin "$TMP_ROOT/lease-recovery-other-task-fake")
+  rec="$TMP_ROOT/lease-recovery-other-task-treehouse.log"; : > "$rec"
+  id=lease-recovery-source-hh8
+  retry_id=lease-recovery-retry-ii9
+
+  out=$(FM_FAKE_TREEHOUSE_RETURN_FAIL=1 run_spawn_lease_case "$home" "$id" "$proj" "$invalid" "$fakebin" "$rec" '' "$wt"); status=$?
+  expect_code 1 "$status" "spawn must retain a failed lease rollback"
+  handoff=$(printf '%s\n' "$home/state/.${id}.treehouse-lease."*)
+  assert_present "$handoff" "failed rollback did not leave a recovery handoff"
+
+  out=$(run_spawn_lease_case "$home" "$retry_id" "$proj" "$invalid" "$fakebin" "$rec" '' "$wt"); status=$?
+  expect_code 1 "$status" "recovery with another task id should continue to the expected isolation refusal"
+  assert_contains "$out" "recovered treehouse lease handoff" \
+    "different task id did not recover the earlier failed lease rollback"
+  [ ! -e "$handoff" ] || fail "recovered lease handoff remained at $handoff"
+  returns=$(grep -Fc "treehouse return --force $wt" "$rec")
+  [ "$returns" -eq 3 ] || fail "expected failed rollback, recovery, and retry rollback returns; got $returns"
+  assert_absent "$home/state/$retry_id.meta" "handoff recovery must not create task metadata"
+  pass "fm-spawn: recovers retained same-project leases regardless of retry task id"
+}
+
 test_spawn_refuses_cross_project_lease_handoff() {
-  local home proj wt invalid other fakebin rec out status id handoff gets
+  local home proj wt invalid other fakebin rec out status id retry_id handoff gets
   home="$TMP_ROOT/lease-cross-project-home"
   mkdir -p "$home/state" "$home/data"
   proj=$(make_repo "$TMP_ROOT/lease-cross-project-proj")
@@ -429,6 +481,7 @@ test_spawn_refuses_cross_project_lease_handoff() {
   fakebin=$(make_spawn_lease_fakebin "$TMP_ROOT/lease-cross-project-fake")
   rec="$TMP_ROOT/lease-cross-project-treehouse.log"; : > "$rec"
   id=lease-cross-project-gg7
+  retry_id=lease-cross-project-retry-jj0
 
   out=$(FM_FAKE_TREEHOUSE_RETURN_FAIL=1 run_spawn_lease_case "$home" "$id" "$proj" "$invalid" "$fakebin" "$rec" '' "$wt"); status=$?
   expect_code 1 "$status" "spawn must retain a failed lease rollback before cross-project retry"
@@ -436,12 +489,12 @@ test_spawn_refuses_cross_project_lease_handoff() {
   assert_present "$handoff" "failed lease rollback did not leave a cross-project recovery handoff"
   gets=$(grep -Fc "treehouse get --lease" "$rec")
 
-  out=$(run_spawn_lease_case "$home" "$id" "$other" "$invalid" "$fakebin" "$rec" '' "$wt"); status=$?
-  expect_code 1 "$status" "spawn must refuse to reuse a task id with another project's lease handoff"
+  out=$(run_spawn_lease_case "$home" "$retry_id" "$other" "$invalid" "$fakebin" "$rec" '' "$wt"); status=$?
+  expect_code 1 "$status" "spawn must refuse a different task id with another project's lease handoff"
   assert_contains "$out" "belongs to another project" "cross-project handoff refusal did not identify the ownership mismatch"
   assert_present "$handoff" "cross-project handoff refusal must retain the original lease record"
   [ "$(grep -Fc "treehouse get --lease" "$rec")" -eq "$gets" ] || fail "cross-project handoff refusal allocated another treehouse lease"
-  pass "fm-spawn: refuses a same-id handoff from another project before allocation"
+  pass "fm-spawn: refuses cross-project lease handoffs before allocation"
 }
 
 # --- GUARD 1d: fm-spawn tmux window construction ----------------------------
@@ -542,7 +595,9 @@ test_spawn_refuses_legacy_held_worktree
 test_spawn_refuses_detached_legacy_held_worktree
 test_spawn_leases_normal_treehouse_allocation
 test_spawn_rolls_back_lease_after_isolation_failure
+test_spawn_refuses_to_roll_back_primary_checkout
 test_spawn_rolls_back_lease_after_setup_failure
 test_spawn_recovers_failed_lease_rollback
+test_spawn_recovers_lease_handoff_for_another_task
 test_spawn_refuses_cross_project_lease_handoff
 test_spawn_tmux_window_construction

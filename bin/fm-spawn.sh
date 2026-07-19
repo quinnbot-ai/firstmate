@@ -218,13 +218,18 @@ parse_orca_worktree_result() {
 }
 
 treehouse_spawn_abort_cleanup() {
-  local status=$1 lease_path=
+  local status=$1 lease_path= lease_validation=
   [ "$TREEHOUSE_LEASE_COMMITTED" = 1 ] && return "$status"
   [ -n "$TREEHOUSE_LEASE_PATH_FILE" ] || return "$status"
   IFS= read -r lease_path < "$TREEHOUSE_LEASE_PATH_FILE" || true
   case "$lease_path" in
     '') rm -f "$TREEHOUSE_LEASE_PATH_FILE" || true ;;
     /*)
+      lease_validation=$(treehouse_lease_path_validation "$lease_path")
+      if [ "$lease_validation" != valid ]; then
+        echo "error: refusing to roll back invalid treehouse lease path '$lease_path'; handoff retained at $TREEHOUSE_LEASE_PATH_FILE" >&2
+        return "$status"
+      fi
       if ( cd "$PROJ_ABS" && treehouse return --force "$lease_path" ); then
         rm -f "$TREEHOUSE_LEASE_PATH_FILE" || true
       else
@@ -708,14 +713,33 @@ git_common_dir_real() {  # <repository-or-worktree>
   cd "$common" 2>/dev/null && pwd -P
 }
 
-recover_treehouse_lease_handoffs() {
-  local handoff lease_path lease_real lease_top lease_common project_common
-  [ -d "$STATE" ] || return 0
+treehouse_lease_path_validation() {  # <lease-path>
+  local lease_path=$1 lease_real lease_top lease_common project_common
+  case "$lease_path" in
+    /*) ;;
+    *) printf '%s\n' invalid; return 0 ;;
+  esac
   project_common=$(git_common_dir_real "$PROJ_ABS") || {
-    echo "error: cannot recover treehouse lease handoffs because $PROJ_ABS has no git common directory" >&2
-    return 1
+    printf '%s\n' invalid
+    return 0
   }
-  for handoff in "$STATE/.${ID}.treehouse-lease."*; do
+  lease_real=$(real_path_or_raw "$lease_path")
+  lease_top=$(git -C "$lease_path" rev-parse --show-toplevel 2>/dev/null || true)
+  lease_common=$(git_common_dir_real "$lease_path" || true)
+  if [ "$lease_real" = "$PROJ_ABS_REAL" ] || [ -z "$lease_top" ] \
+    || [ "$(real_path_or_raw "$lease_top")" != "$lease_real" ] || [ -z "$lease_common" ]; then
+    printf '%s\n' invalid
+  elif [ "$lease_common" != "$project_common" ]; then
+    printf '%s\n' cross-project
+  else
+    printf '%s\n' valid
+  fi
+}
+
+recover_treehouse_lease_handoffs() {
+  local handoff lease_path lease_validation
+  [ -d "$STATE" ] || return 0
+  for handoff in "$STATE"/.*.treehouse-lease.*; do
     [ -f "$handoff" ] || continue
     IFS= read -r lease_path < "$handoff" || true
     case "$lease_path" in
@@ -732,15 +756,12 @@ recover_treehouse_lease_handoffs() {
         return 1
         ;;
     esac
-    lease_real=$(real_path_or_raw "$lease_path")
-    lease_top=$(git -C "$lease_path" rev-parse --show-toplevel 2>/dev/null || true)
-    lease_common=$(git_common_dir_real "$lease_path" || true)
-    if [ "$lease_real" = "$PROJ_ABS_REAL" ] || [ -z "$lease_top" ] \
-      || [ "$(real_path_or_raw "$lease_top")" != "$lease_real" ] || [ -z "$lease_common" ]; then
+    lease_validation=$(treehouse_lease_path_validation "$lease_path")
+    if [ "$lease_validation" = invalid ]; then
       echo "error: refusing to recover invalid treehouse lease path '$lease_path' from $handoff; handoff retained" >&2
       return 1
     fi
-    if [ "$lease_common" != "$project_common" ]; then
+    if [ "$lease_validation" = cross-project ]; then
       echo "error: refusing to recover treehouse lease path '$lease_path' from $handoff because it belongs to another project; handoff retained" >&2
       return 1
     fi
