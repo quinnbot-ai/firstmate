@@ -818,7 +818,7 @@ fm_backend_herdr_bare_prompt_is_editable() {
 
 fm_backend_herdr_composer_state() {  # <target> [guard|post-submit] -> empty|pending|unknown
   local target=$1 mode=${2:-guard} session pane cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped
-  local after_match="" last_nonblank="" verdict
+  local after_match="" verdict
   local identity agent agent_status row=0 generic_line=0
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   session=$FM_BACKEND_HERDR_SESSION
@@ -838,7 +838,6 @@ fm_backend_herdr_composer_state() {  # <target> [guard|post-submit] -> empty|pen
     trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
     trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
     [ -n "$trimmed" ] || continue
-    last_nonblank=$trimmed
     case "$trimmed" in
       '│'*'│'|'┃'*'┃'|'|'*'|')
         shape=bordered
