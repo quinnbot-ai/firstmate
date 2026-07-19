@@ -1279,10 +1279,9 @@ SH
   PATH="$fakebin:$PATH" FM_FAKE_HERDR_CAPTURE="$capture_file" FM_FAKE_HERDR_BUSY_CALLS="$dir/busy-calls" \
     FM_FAKE_CREW_STATE='state: working · source: pane · harness busy' \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_POLL=30 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_numeric_file "$dir/busy-calls" 30 || fail "herdr watcher poll never queried native busy state: $(cat "$out")"
-  sleep 0.1
   reap "$pid"
   calls=$(wc -l < "$dir/busy-calls" | tr -d '[:space:]')
   [ "$calls" -eq 1 ] || fail "native busy state was queried $calls times in one watcher poll"
