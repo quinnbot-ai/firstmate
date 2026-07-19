@@ -195,15 +195,16 @@ SH
 }
 
 run_spawn() {
-  local home=$1 id=$2 proj=$3 pane=$4 fakebin=$5 target_state
+  local home=$1 id=$2 proj=$3 pane=$4 fakebin=$5 target_state lease_path
   mkdir -p "$home/data/$id" "$home/state"
   printf 'brief\n' > "$home/data/$id/brief.md"
   target_state=${FM_FAKE_TMUX_TARGET_STATE:-"$home/state/.fake-tmux-$id"}
+  lease_path=${FM_FAKE_TREEHOUSE_LEASE_PATH:-$pane}
   [ -f "$target_state" ] || printf 'live\n' > "$target_state"
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" FM_FAKE_TREEHOUSE_LEASE_PATH="$pane" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" FM_FAKE_TREEHOUSE_LEASE_PATH="$lease_path" \
     FM_FAKE_TMUX_TARGET_STATE="$target_state" TMUX="fake,1,0" \
     PATH="$fakebin:$PATH" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude 2>&1
@@ -235,10 +236,10 @@ test_spawn_isolation_abort() {
   target_state="$TMP_ROOT/spawn-cleanup-target-state"
   printf 'live\n' > "$target_state"
   out=$(FM_FAKE_TREEHOUSE_LOG="$treehouse_log" FM_FAKE_TMUX_LOG="$tmux_log" \
-    FM_FAKE_TMUX_TARGET_STATE="$target_state" \
+    FM_FAKE_TMUX_TARGET_STATE="$target_state" FM_FAKE_TREEHOUSE_LEASE_PATH="$TMP_ROOT/spawn-wt" \
     run_spawn "$home" abort-cleanup-ff6 "$proj" "$TMP_ROOT/spawn-notgit" "$fakebin"); status=$?
   expect_code 1 "$status" "spawn into a non-worktree dir should abort after cleanup"
-  assert_grep "return --force $TMP_ROOT/spawn-notgit" "$treehouse_log" \
+  assert_grep "return --force $TMP_ROOT/spawn-wt" "$treehouse_log" \
     "non-worktree spawn did not return its acquired worktree"
   assert_grep "kill-window -t firstmate:fm-abort-cleanup-ff6" "$tmux_log" \
     "non-worktree spawn did not remove its task endpoint"

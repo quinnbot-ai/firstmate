@@ -21,7 +21,18 @@ make_spawn_fakebin() {
 #!/usr/bin/env bash
 set -u
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_path}"*)
+    if [ -n "${FM_FAKE_PANE_PATHS_FILE:-}" ]; then
+      count=0
+      [ ! -f "${FM_FAKE_PANE_COUNTER:?}" ] || count=$(cat "${FM_FAKE_PANE_COUNTER}")
+      count=$((count + 1))
+      printf '%s\n' "$count" > "${FM_FAKE_PANE_COUNTER}"
+      sed -n "${count}p" "${FM_FAKE_PANE_PATHS_FILE}"
+    else
+      printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
+    fi
+    exit 0
+    ;;
   *"#{pane_id}"*)
     [ "${FM_FAKE_TARGET_QUERY_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_TARGET_QUERY_STATUS}"
     if [ "$(cat "${FM_FAKE_TARGET_STATE:?}" 2>/dev/null)" != live ]; then
@@ -84,7 +95,18 @@ cat > "$fakebin/treehouse" <<'SH'
 set -u
 [ -z "${FM_FAKE_BACKEND_LOG:-}" ] || printf 'treehouse %s\n' "$*" >> "$FM_FAKE_BACKEND_LOG"
 case "$*" in
-  "get --lease"*) printf '%s\n' "${FM_FAKE_TREEHOUSE_LEASE_PATH:?}"; exit "${FM_FAKE_TREEHOUSE_GET_STATUS:-0}" ;;
+  "get --lease"*)
+    if [ -n "${FM_FAKE_TREEHOUSE_LEASE_PATHS_FILE:-}" ]; then
+      count=0
+      [ ! -f "${FM_FAKE_TREEHOUSE_LEASE_COUNTER:?}" ] || count=$(cat "${FM_FAKE_TREEHOUSE_LEASE_COUNTER}")
+      count=$((count + 1))
+      printf '%s\n' "$count" > "${FM_FAKE_TREEHOUSE_LEASE_COUNTER}"
+      sed -n "${count}p" "${FM_FAKE_TREEHOUSE_LEASE_PATHS_FILE}"
+    else
+      printf '%s\n' "${FM_FAKE_TREEHOUSE_LEASE_PATH:?}"
+    fi
+    exit "${FM_FAKE_TREEHOUSE_GET_STATUS:-0}"
+    ;;
   "return --force"*)
     [ "${FM_FAKE_TREEHOUSE_CLOSE_EFFECT:-none}" != gone ] || printf '%s\n' gone > "${FM_FAKE_TARGET_STATE:?}"
     exit "${FM_FAKE_TREEHOUSE_RETURN_STATUS:-0}"
@@ -147,7 +169,11 @@ run_spawn() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="${FM_FAKE_PANE_PATH:-$wt}" \
+    FM_FAKE_PANE_PATHS_FILE="${FM_FAKE_PANE_PATHS_FILE:-}" \
+    FM_FAKE_PANE_COUNTER="${FM_FAKE_PANE_COUNTER:-}" \
     FM_FAKE_TREEHOUSE_LEASE_PATH="${FM_FAKE_TREEHOUSE_LEASE_PATH:-$wt}" TMUX="fake,1,0" \
+    FM_FAKE_TREEHOUSE_LEASE_PATHS_FILE="${FM_FAKE_TREEHOUSE_LEASE_PATHS_FILE:-}" \
+    FM_FAKE_TREEHOUSE_LEASE_COUNTER="${FM_FAKE_TREEHOUSE_LEASE_COUNTER:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_BACKEND_LOG="$(dirname "$launchlog")/backend.log" \
     FM_FAKE_TREEHOUSE_RETURN_STATUS="${FM_FAKE_TREEHOUSE_RETURN_STATUS:-0}" \
     FM_FAKE_TREEHOUSE_GET_STATUS="${FM_FAKE_TREEHOUSE_GET_STATUS:-0}" \
@@ -1756,14 +1782,22 @@ test_pi_threads_model_and_max_effort() {
 }
 
 test_batch_forwards_shared_profile_flags() {
-  local rec id1 id2 out status
+  local rec id1 id2 out status wt2 lease_paths lease_counter pane_counter
   id1=profile-batch-a-z9
   id2=profile-batch-b-z10
   rec=$(make_spawn_case profile-batch claude "$id1" "$id2")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
+  wt2="$CASE_DIR/wt-2"
+  git -C "$PROJ_DIR" worktree add --quiet -b "wt-profile-batch-2" "$wt2"
+  lease_paths="$CASE_DIR/lease-paths"
+  lease_counter="$CASE_DIR/lease-counter"
+  pane_counter="$CASE_DIR/pane-counter"
+  printf '%s\n%s\n' "$WT_DIR" "$wt2" > "$lease_paths"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+  out=$(FM_FAKE_TREEHOUSE_LEASE_PATHS_FILE="$lease_paths" FM_FAKE_TREEHOUSE_LEASE_COUNTER="$lease_counter" \
+    FM_FAKE_PANE_PATHS_FILE="$lease_paths" FM_FAKE_PANE_COUNTER="$pane_counter" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high)
   status=$?
   expect_code 0 "$status" "batch spawn with shared profile flags should succeed"
