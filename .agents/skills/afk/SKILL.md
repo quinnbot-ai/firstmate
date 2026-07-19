@@ -143,6 +143,7 @@ Classify each wake this way:
 - `signal` or `stale` for a declared `paused:` external wait -> self-handle and track the pause rather than a wedge.
   If it remains declared and idle past `FM_PAUSE_RESURFACE_SECS` (default 3600s), housekeeping sends one awaiting-external recheck and resets the pause window.
 - `check` -> always escalate. Check scripts print only when firstmate should wake.
+- `stale` whose reason reports a busy pane with zero progress -> escalate immediately for deep inspection; `docs/architecture.md` owns the watcher-side progress signatures and thresholds.
 - `stale` with a terminal status -> escalate. Non-terminal stale is transient:
   record a marker and self-handle. If the pane is still idle past
   `FM_STALE_ESCALATE_SECS` (default 240s), housekeeping escalates it as a

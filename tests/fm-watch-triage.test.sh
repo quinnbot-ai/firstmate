@@ -168,6 +168,44 @@ EOF
   pass "classifier primitives: keyed decisions and activity phases, captain relevance, window-to-task, and overrides"
 }
 
+test_pane_progress_classifier_uses_current_footer() {
+  local pane
+  pane=$(cat <<'EOF'
+Starting MCP servers ... (esc to interrupt) 10:41
+Context: 0.00%
+Waiting for agents / No agents completed yet (esc to interrupt) 23:39
+Tokens: 3.09M
+Earlier transcript output
+More earlier transcript output
+Current request output
+Current operation output
+Current tool output
+Working on the next request (esc to interrupt)
+Context: 73%
+Tokens: 3.10M
+EOF
+)
+  [ "$(pane_progress_snapshot "$pane")" = 'context=73%;tokens=3.10M' ] \
+    || fail "progress snapshot read historical transcript metrics"
+  pane_is_startup_spinner "$pane" && fail "startup signature read historical transcript text"
+  pane_is_busy_wait_spin "$pane" && fail "subagent wait signature read historical transcript text"
+  pane_context_is_zero 'Working on the next request (esc to interrupt)
+Context: 0.00%' || fail "zero context with decimal precision was not recognized"
+  pass "pane progress reads current footer controls and recognizes decimal zero context"
+}
+
+test_invalid_busy_signature_regexes_fall_back_once() {
+  local out pane
+  pane='Starting MCP servers
+Waiting for agents'
+  out=$(FM_STARTUP_SPINNER_RE='[' FM_BUSY_WAIT_SPIN_RE='(' \
+    bash -c '. "$1"; pane_is_startup_spinner "$2" && printf startup; pane_is_busy_wait_spin "$2" && printf busy' \
+    _ "$ROOT/bin/fm-classify-lib.sh" "$pane" 2>&1) \
+    || fail "invalid busy signature regexes prevented classifier initialization"
+  [ "$out" = 'startupbusy' ] || fail "invalid busy signature regexes did not fall back silently: $out"
+  pass "invalid busy signature regexes fall back to defaults without diagnostics"
+}
+
 # crew_is_provably_working: the absorb-only-when-provably-working predicate. It is
 # benign (absorb) ONLY when fm-crew-state.sh reports the crew as working from an
 # actively-running pipeline step (source run-step) or a busy pane (source pane);
@@ -1555,10 +1593,293 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   pass "AFK changed paused panes hand off plain stale identities for daemon-owned pause triage"
 }
 
+# Busy footers used to exempt a pane from stale hashing forever. These fixtures
+# keep the footer busy while representing the three real zero-progress classes.
+# Seed the cross-poll progress marker to make the bounded window elapsed without
+# turning this suite into a minutes-long sleep.
+test_busy_startup_spinner_context_zero_surfaces() {
+  local dir state fakebin out capture_file statusf window key pid
+  dir=$(make_case busy-startup-zero); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/startup.status"
+  window="test:fm-startup"
+  cat > "$capture_file" <<'EOF'
+Starting MCP servers ... (esc to interrupt) 10:41
+Context: 0.00%
+EOF
+  printf 'window=%s\nharness=codex\nkind=ship\n' "$window" > "$state/startup.meta"
+  printf 'working: starting the task\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-startup_status"
+  key=$(printf '%s' "$window" | tr ':/. ' '____')
+  printf 'startup-context=0' > "$state/.busy-progress-$key"
+  printf '%s\n' $(( $(date +%s) - 700 )) > "$state/.busy-progress-since-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STARTUP_ZERO_CONTEXT_SECS=600 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "startup spinner at context 0% was absorbed forever: $(cat "$out")"
+  grep -F 'busy but zero progress' "$out" >/dev/null || fail "startup spinner wake omitted zero-progress evidence: $(cat "$out")"
+  grep -F 'startup spinner remains at context 0%' "$out" >/dev/null || fail "startup spinner wake omitted its signature: $(cat "$out")"
+  grep -F 'demand-deep-inspection' "$out" >/dev/null || fail "startup spinner wake did not demand deep inspection"
+  pass "busy startup spinner at context 0% surfaces a deep-inspection wake"
+}
+
+test_busy_progress_corrupt_escalation_marker_recovers() {
+  local dir state fakebin out capture_file statusf window key pid
+  dir=$(make_case busy-corrupt-escalation); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/startup.status"
+  window="test:fm-corrupt-escalation"
+  cat > "$capture_file" <<'EOF'
+Starting MCP servers ... (esc to interrupt) 10:41
+Context: 0%
+EOF
+  printf 'window=%s\nharness=codex\nkind=ship\n' "$window" > "$state/startup.meta"
+  printf 'working: starting the task\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-startup_status"
+  key=$(printf '%s' "$window" | tr ':/. ' '____')
+  printf 'startup-context=0' > "$state/.busy-progress-$key"
+  printf '%s\n' $(( $(date +%s) - 700 )) > "$state/.busy-progress-since-$key"
+  printf 'corrupt' > "$state/.busy-progress-escalations-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STARTUP_ZERO_CONTEXT_SECS=600 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "corrupt busy-progress escalation marker prevented the zero-progress wake: $(cat "$out")"
+  grep -F 'busy but zero progress' "$out" >/dev/null || fail "corrupt marker recovery omitted the busy-progress wake: $(cat "$out")"
+  [ "$(cat "$state/.busy-progress-escalations-$key")" = 1 ] || fail "corrupt busy-progress escalation marker was not reset"
+  pass "corrupt busy-progress escalation marker resets and surfaces"
+}
+
+test_busy_startup_spinner_non_codex_remains_healthy() {
+  local dir state fakebin out capture_file statusf window key pid
+  dir=$(make_case busy-startup-noncodex); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/startup.status"
+  window="test:fm-startup-noncodex"
+  cat > "$capture_file" <<'EOF'
+Starting MCP servers ... (esc to interrupt) 10:41
+Context: 0%
+EOF
+  printf 'window=%s\nharness=claude\nkind=ship\n' "$window" > "$state/startup.meta"
+  printf 'working: starting the task\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-startup_status"
+  key=$(printf '%s' "$window" | tr ':/. ' '____')
+  printf 'startup-context=0' > "$state/.busy-progress-$key"
+  printf '%s\n' $(( $(date +%s) - 700 )) > "$state/.busy-progress-since-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STARTUP_ZERO_CONTEXT_SECS=600 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 30 || fail "non-Codex startup footer triggered the Codex-only startup escalation: $(cat "$out")"
+  [ "$(cat "$state/.busy-progress-$key")" = 'context=0%' ] || { reap "$pid"; fail "non-Codex startup footer did not use ordinary progress tracking"; }
+  reap "$pid"
+  pass "non-Codex startup footers do not trigger the Codex-only startup escalation"
+}
+
+test_busy_progress_thresholds_normalize_invalid_overrides() {
+  local state out
+  state="$TMP_ROOT/busy-progress-thresholds/state"
+  out=$(FM_STATE_OVERRIDE="$state" FM_STARTUP_ZERO_CONTEXT_SECS=invalid FM_BUSY_NO_PROGRESS_SECS=invalid \
+    FM_BUSY_STATUS_GRACE_SECS=invalid bash -c '. "$1"; printf "%s/%s/%s\n" "$STARTUP_ZERO_CONTEXT_SECS" "$BUSY_NO_PROGRESS_SECS" "$BUSY_STATUS_GRACE_SECS"' _ "$WATCH") \
+    || fail "invalid busy-progress thresholds prevented watcher initialization"
+  [ "$out" = '600/1800/900' ] || fail "invalid busy-progress thresholds did not reset to defaults: $out"
+  pass "invalid busy-progress thresholds reset to safe defaults"
+}
+
+test_native_busy_state_is_cached_per_watcher_poll() {
+  local dir state fakebin out capture_file statusf window key h pid calls
+  dir=$(make_case native-busy-cache); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/native-busy.status"
+  window='default:w1:p2'
+  cat > "$capture_file" <<'EOF'
+Working on the next request (esc to interrupt)
+Context: 73%
+EOF
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}:${2:-}" in
+  status:--json) printf '{"server":{"running":true}}\n' ;;
+  pane:read) cat "$FM_FAKE_HERDR_CAPTURE" ;;
+  agent:get) printf '1\n' >> "$FM_FAKE_HERDR_BUSY_CALLS"; printf '{"result":{"agent":{"agent_status":"working"}}}\n' ;;
+esac
+SH
+  chmod +x "$fakebin/herdr"
+  printf 'window=%s\nbackend=herdr\nkind=ship\n' "$window" > "$state/native-busy.meta"
+  printf 'working: active\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-native-busy_status"
+  key=$(printf '%s' "$window" | tr ':/. ' '____')
+  if command -v md5 >/dev/null 2>&1; then h=$(printf '%s' "$(cat "$capture_file")" | md5 -q); else h=$(printf '%s' "$(cat "$capture_file")" | md5sum | cut -d' ' -f1); fi
+  printf '%s' "$h" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_HERDR_CAPTURE="$capture_file" FM_FAKE_HERDR_BUSY_CALLS="$dir/busy-calls" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_numeric_file "$dir/busy-calls" 30 || fail "herdr watcher poll never queried native busy state: $(cat "$out")"
+  reap "$pid"
+  calls=$(wc -l < "$dir/busy-calls" | tr -d '[:space:]')
+  [ "$calls" -eq 1 ] || fail "native busy state was queried $calls times in one watcher poll"
+  pass "native busy state is queried once and reused by stale triage"
+}
+
+test_busy_token_burn_without_progress_surfaces() {
+  local dir state fakebin out capture_file statusf window key pid back
+  dir=$(make_case busy-token-burn); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/token-burn.status"
+  window="test:fm-token-burn"
+  cat > "$capture_file" <<'EOF'
+Polling the same endpoint again (esc to interrupt)
+Context: 72%
+Tokens: 3.09M
+EOF
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/token-burn.meta"
+  printf 'working: researching authentication\n' > "$statusf"
+  back=$(( $(date +%s) - 700 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"; else touch -m -d "@$back" "$statusf"; fi
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-token-burn_status"
+  key=$(printf '%s' "$window" | tr ':/. ' '____')
+  printf 'context=72%%;tokens=3.09M' > "$state/.busy-progress-$key"
+  printf '%s\n' $(( $(date +%s) - 700 )) > "$state/.busy-progress-since-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_BUSY_NO_PROGRESS_SECS=600 FM_BUSY_STATUS_GRACE_SECS=300 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "busy token-burn loop was absorbed forever: $(cat "$out")"
+  grep -F 'unchanged context=72%;tokens=3.09M' "$out" >/dev/null || fail "token-burn wake omitted unchanged counters: $(cat "$out")"
+  grep -F 'last status write' "$out" >/dev/null || fail "token-burn wake omitted stale status evidence: $(cat "$out")"
+  pass "busy token-burn loop with unchanged counters and status surfaces"
+}
+
+test_busy_subagent_wait_spin_surfaces() {
+  local dir state fakebin out capture_file statusf window key pid back
+  dir=$(make_case busy-subagent-wait); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/subagent-wait.status"
+  window="test:fm-subagent-wait"
+  cat > "$capture_file" <<'EOF'
+Waiting for agents / No agents completed yet (esc to interrupt) 23:39
+Context: 72%
+Tokens: 3.09M
+EOF
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/subagent-wait.meta"
+  printf 'working: waiting for parallel research\n' > "$statusf"
+  back=$(( $(date +%s) - 700 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"; else touch -m -d "@$back" "$statusf"; fi
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-subagent-wait_status"
+  key=$(printf '%s' "$window" | tr ':/. ' '____')
+  printf 'subagent-wait-spin' > "$state/.busy-progress-$key"
+  printf '%s\n' $(( $(date +%s) - 700 )) > "$state/.busy-progress-since-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_BUSY_NO_PROGRESS_SECS=600 FM_BUSY_STATUS_GRACE_SECS=300 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "busy subagent wait spin was absorbed forever: $(cat "$out")"
+  grep -F 'subagent wait reports no agents completed' "$out" >/dev/null || fail "subagent wait wake omitted its signature: $(cat "$out")"
+  grep -F 'demand-deep-inspection' "$out" >/dev/null || fail "subagent wait wake did not demand deep inspection"
+  pass "busy subagent wait spin surfaces a deep-inspection wake"
+}
+
+test_busy_progress_afk_enqueues_for_daemon_escalation() {
+  local dir state fakebin out capture_file statusf window key pid
+  dir=$(make_case busy-progress-afk); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/afk-busy.status"
+  window="test:fm-afk-busy"
+  cat > "$capture_file" <<'EOF'
+Starting MCP servers ... (esc to interrupt) 10:41
+Context: 0%
+EOF
+  printf 'window=%s\nharness=codex\nkind=ship\n' "$window" > "$state/afk-busy.meta"
+  printf 'working: starting the task\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-afk-busy_status"
+  date '+%s' > "$state/.afk"
+  key=$(printf '%s' "$window" | tr ':/. ' '____')
+  printf 'startup-context=0' > "$state/.busy-progress-$key"
+  printf '%s\n' $(( $(date +%s) - 700 )) > "$state/.busy-progress-since-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STARTUP_ZERO_CONTEXT_SECS=600 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "AFK busy zero-progress pane was not queued: $(cat "$out")"
+  grep -F 'busy but zero progress' "$out" >/dev/null || fail "AFK busy wake omitted zero-progress evidence: $(cat "$out")"
+  grep "$(printf '\tstale\t')" "$state/.wake-queue" | grep -F "$window (busy but zero progress" >/dev/null \
+    || fail "AFK busy progress wedge was not durably queued"
+  pass "AFK busy zero-progress panes enqueue a daemon escalation"
+}
+
+test_busy_progress_or_recent_status_remains_healthy() {
+  local dir state fakebin out capture_file statusf window key pid
+  dir=$(make_case busy-progress-healthy); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/healthy.status"
+  window="test:fm-healthy-busy"
+  cat > "$capture_file" <<'EOF'
+Working on the next request (esc to interrupt)
+Context: 73%
+Tokens: 3.10M
+EOF
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/healthy.meta"
+  printf 'working: current phase just advanced\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-healthy_status"
+  key=$(printf '%s' "$window" | tr ':/. ' '____')
+  printf 'context=72%%;tokens=3.09M' > "$state/.busy-progress-$key"
+  printf '%s\n' $(( $(date +%s) - 700 )) > "$state/.busy-progress-since-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_BUSY_NO_PROGRESS_SECS=60 FM_BUSY_STATUS_GRACE_SECS=30 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 30 || fail "moving busy counters surfaced unexpectedly: $(cat "$out")"
+  [ "$(cat "$state/.busy-progress-$key")" = 'context=73%;tokens=3.10M' ] || { reap "$pid"; fail "moving busy counters did not reset the progress snapshot"; }
+  reap "$pid"
+
+  # The counters now stop, but a freshly written working status remains an
+  # explicit progress signal and restarts the no-progress timer instead of waking.
+  printf 'context=73%%;tokens=3.10M' > "$state/.busy-progress-$key"
+  printf '%s\n' $(( $(date +%s) - 700 )) > "$state/.busy-progress-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_BUSY_NO_PROGRESS_SECS=60 FM_BUSY_STATUS_GRACE_SECS=30 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 30 || fail "recent busy status surfaced unexpectedly: $(cat "$out")"
+  reap "$pid"
+  pass "moving busy counters or a recent status write remain healthy"
+}
+
+test_declared_paused_busy_wait_retains_pause_handling() {
+  local dir state fakebin out capture_file statusf window key pid
+  dir=$(make_case paused-busy-wait); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/paused-busy.status"
+  window="test:fm-paused-busy"
+  printf 'Waiting for agents / No agents completed yet (esc to interrupt)\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/paused-busy.meta"
+  printf 'paused: awaiting an upstream release\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-paused-busy_status"
+  key=$(printf '%s' "$window" | tr ':/. ' '____')
+  printf 'subagent-wait-spin' > "$state/.busy-progress-$key"
+  printf '%s\n' $(( $(date +%s) - 700 )) > "$state/.busy-progress-since-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting an upstream release' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_BUSY_NO_PROGRESS_SECS=60 FM_BUSY_STATUS_GRACE_SECS=30 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 30 || fail "declared paused busy wait surfaced as a wedge: $(cat "$out")"
+  [ ! -e "$state/.busy-progress-$key" ] || { reap "$pid"; fail "declared pause retained busy-progress tracking"; }
+  reap "$pid"
+  pass "declared paused busy waits retain the long-cadence pause path"
+}
+
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives
+test_pane_progress_classifier_uses_current_footer
+test_invalid_busy_signature_regexes_fall_back_once
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
@@ -1598,3 +1919,13 @@ test_ops_inbox_external_output_is_bounded_and_timed
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
+test_busy_startup_spinner_context_zero_surfaces
+test_busy_progress_corrupt_escalation_marker_recovers
+test_busy_startup_spinner_non_codex_remains_healthy
+test_busy_progress_thresholds_normalize_invalid_overrides
+test_native_busy_state_is_cached_per_watcher_poll
+test_busy_token_burn_without_progress_surfaces
+test_busy_subagent_wait_spin_surfaces
+test_busy_progress_afk_enqueues_for_daemon_escalation
+test_busy_progress_or_recent_status_remains_healthy
+test_declared_paused_busy_wait_retains_pause_handling
