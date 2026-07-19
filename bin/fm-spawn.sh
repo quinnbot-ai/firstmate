@@ -243,6 +243,9 @@ treehouse_spawn_abort_cleanup() {
   local status=$1 lease_path='' lease_validation='' lease_state='' handoff_record
   [ "$TREEHOUSE_LEASE_COMMITTED" = 1 ] && return "$status"
   [ -n "$TREEHOUSE_LEASE_PATH_FILE" ] || return "$status"
+  if ! treehouse_abort_endpoint_cleanup; then
+    return "$status"
+  fi
   handoff_record=$(fm_treehouse_lease_handoff_read "$TREEHOUSE_LEASE_PATH_FILE") || {
     echo "error: refusing to roll back malformed treehouse lease handoff $TREEHOUSE_LEASE_PATH_FILE; handoff retained" >&2
     return "$status"
@@ -277,6 +280,19 @@ EOF
   return "$status"
 }
 
+treehouse_abort_endpoint_cleanup() {
+  [ -n "${T:-}" ] || return 0
+  if fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
+    return 0
+  fi
+  if FM_BACKEND_KILL_STRICT=1 fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "fm-$ID" 2>/dev/null \
+    && fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
+    return 0
+  fi
+  FAILED_ENDPOINT_CLEANUP=1
+  return 1
+}
+
 treehouse_lease_transaction_release() {
   [ "$TREEHOUSE_LEASE_LOCK_HELD" = 1 ] || return 0
   fm_lock_release "$TREEHOUSE_LEASE_LOCK" 2>/dev/null || true
@@ -298,6 +314,7 @@ write_failed_treehouse_spawn_meta() {
     echo "mode=${MODE:-no-mistakes}"
     echo "yolo=${YOLO:-off}"
     echo "tasktmp=${TASK_TMP:-}"
+    [ -z "$TREEHOUSE_LEASE_PATH_FILE" ] || echo "treehouse_lease=1"
     echo "failed_spawn=1"
     [ "$FAILED_ENDPOINT_CLEANUP" != 1 ] || echo "endpoint_cleanup_pending=1"
     [ -z "${CODEX_CREWMATE_HOME:-}" ] || echo "codex_crewmate_home=$CODEX_CREWMATE_HOME"
@@ -388,6 +405,10 @@ spawn_abort_cleanup() {
   if [ -n "$TREEHOUSE_LEASE_PATH_FILE" ]; then
     clean_codex_home=1
     treehouse_spawn_abort_cleanup "$status" || true
+    if [ "$FAILED_ENDPOINT_CLEANUP" = 1 ]; then
+      preserve_codex_home=1
+      write_failed_treehouse_spawn_meta
+    fi
   fi
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
     clean_codex_home=1
