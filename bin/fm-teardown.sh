@@ -141,10 +141,15 @@ MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 
 default_branch() {
-  local ref branch
+  local ref branch current
   ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
   if [ -n "$ref" ]; then
     echo "${ref#origin/}"
+    return 0
+  fi
+  current=$(git -C "$PROJ" branch --show-current 2>/dev/null || true)
+  if [ -n "$current" ]; then
+    echo "$current"
     return 0
   fi
   for branch in main master; do
