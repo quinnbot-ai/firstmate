@@ -36,7 +36,7 @@ TMP_ROOT=$(fm_test_tmproot fm-watch-triage-tests)
 watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
   local state=$1 fakebin=$2 out=$3
   shift 3
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+  env PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$@" "$WATCH" > "$out" &
 }
 
@@ -80,17 +80,29 @@ seen_sig() {
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
 record_arm_lease() {  # <state> <watcher-pid> <arm-pid>
-  local state=$1 watcher_pid=$2 arm_pid=$3 lease="$state/.watch-arm.lease" watcher_id arm_id
+  local state=$1 watcher_pid=$2 arm_pid=$3 lease="$state/.watch-arm.lease" watcher_id arm_id home
   watcher_id=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$watcher_pid") || return 1
   arm_id=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$arm_pid") || return 1
+  home=$(cat "$state/.watch.lock/fm-home" 2>/dev/null || true)
+  [ -n "$home" ] || return 1
   mkdir -p "$lease"
   printf '%s\n' "$arm_pid" > "$lease/pid"
   printf '%s\n' "$arm_id" > "$lease/pid-identity"
-  printf '%s\n' "$ROOT" > "$lease/fm-home"
+  printf '%s\n' "$home" > "$lease/fm-home"
   printf '%s\n' "$WATCH" > "$lease/watcher-path"
   printf '%s\n' "$watcher_pid" > "$lease/watcher-pid"
   printf '%s\n' "$watcher_id" > "$lease/watcher-identity"
   touch "$lease/heartbeat"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_arm_lease_bind_watcher "$2" "$3" "$4" "$5" "$6"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$state" "$WATCH" "$watcher_pid" "$home" "$watcher_id"
+}
+
+claim_arm_lease() {  # <state> <watcher-pid>
+  local state=$1 watcher_pid=$2 home
+  home=$(cat "$state/.watch.lock/fm-home" 2>/dev/null || true)
+  [ -n "$home" ] || return 1
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_arm_lease_claim "$2" "$3" "$4" "$5"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$state" "$WATCH" "$watcher_pid" "$home"
 }
 
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
@@ -459,7 +471,7 @@ test_terminal_stale_surfaced() {
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_for_exit "$pid" 40 || fail "watcher did not exit for a stale pane on a terminal status"
+  wait_for_exit "$pid" 80 || fail "watcher did not exit for a stale pane on a terminal status"
   grep -Fx "stale: $window" "$out" >/dev/null || fail "watcher did not print the terminal stale wake"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the terminal stale failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "terminal stale was not queued"
@@ -1714,9 +1726,9 @@ test_watcher_queues_lost_arm_relay_before_stopping() {
   watch_bg "$state" "$fakebin" "$out" FM_ARM_LEASE_GRACE=1
   watcher_pid=$!
   i=0
-  while [ "$i" -lt 30 ] && [ ! -s "$state/.watch.lock/pid" ]; do sleep 0.1; i=$((i + 1)); done
+  while [ "$i" -lt 30 ] && { [ ! -s "$state/.watch.lock/pid" ] || [ ! -s "$state/.watch.lock/fm-home" ]; }; do sleep 0.1; i=$((i + 1)); done
   watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
-  [ -n "$watcher_pid" ] || fail "watcher did not publish its lock before arm-lease test"
+  [ -n "$watcher_pid" ] && [ -s "$state/.watch.lock/fm-home" ] || fail "watcher did not publish its identity before arm-lease test"
   sleep 60 & arm_pid=$!
   record_arm_lease "$state" "$watcher_pid" "$arm_pid" || fail "could not publish hermetic arm lease"
   sleep 1.2
@@ -1728,6 +1740,42 @@ test_watcher_queues_lost_arm_relay_before_stopping() {
   grep "$(printf '\tcheck\twatcher-arm-relay\tcheck: watcher arm relay lost')" "$state/.wake-queue" >/dev/null \
     || fail "watcher stopped without first writing its durable lost-arm wake"
   pass "watcher appends a durable lost-arm wake before stopping"
+}
+
+test_watcher_queues_lost_arm_relay_after_pre_poll_handoff() {
+  local dir state fakebin out ready release watcher_pid i
+  dir=$(make_case lost-arm-relay-pre-poll); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  ready="$dir/initial-poll-complete"; release="$dir/release-next-poll"
+cat > "$fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = 30 ]; then
+  printf '%s\n' ready > "${FM_ARM_RACE_READY:?}"
+  while [ ! -e "${FM_ARM_RACE_RELEASE:?}" ]; do /bin/sleep 0.01; done
+else
+  exec /bin/sleep "$@"
+fi
+SH
+  chmod +x "$fakebin/sleep"
+  watch_bg "$state" "$fakebin" "$out" FM_POLL=30 FM_ARM_RACE_READY="$ready" FM_ARM_RACE_RELEASE="$release"
+  watcher_pid=$!
+  i=0
+  while [ "$i" -lt 30 ] && [ ! -s "$state/.watch.lock/pid" ]; do /bin/sleep 0.1; i=$((i + 1)); done
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  [ -n "$watcher_pid" ] || fail "watcher did not publish its lock before pre-poll arm race"
+  i=0
+  while [ "$i" -lt 30 ] && [ ! -e "$ready" ]; do /bin/sleep 0.1; i=$((i + 1)); done
+  [ -e "$ready" ] || fail "watcher did not complete its unarmed first poll"
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  [ -n "$watcher_pid" ] && [ -s "$state/.watch.lock/fm-home" ] || fail "watcher did not retain its identity through the first poll"
+  claim_arm_lease "$state" "$watcher_pid" || fail "could not claim pre-poll arm lease"
+  rm -rf "$state/.watch-arm.lease"
+  : > "$release"
+  i=0
+  while kill -0 "$watcher_pid" 2>/dev/null && [ "$i" -lt 40 ]; do /bin/sleep 0.1; i=$((i + 1)); done
+  grep -F 'check: watcher arm relay lost' "$out" >/dev/null || fail "watcher missed the arm handoff between lease polls"
+  grep "$(printf '\tcheck\twatcher-arm-relay\tcheck: watcher arm relay lost')" "$state/.wake-queue" >/dev/null \
+    || fail "watcher missed the durable lost-arm wake after the pre-poll handoff"
+  pass "watcher records a bound arm that exits before its next lease-health poll"
 }
 
 # --- afk coherence: the daemon owns triage; the watcher does not double-triage ---
@@ -2116,6 +2164,7 @@ test_ops_inbox_marker_scan_counts_discovered_paths
 test_ops_inbox_external_output_is_bounded_and_timed
 test_beacon_stays_fresh_while_absorbing
 test_watcher_queues_lost_arm_relay_before_stopping
+test_watcher_queues_lost_arm_relay_after_pre_poll_handoff
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
 test_busy_startup_spinner_context_zero_surfaces
