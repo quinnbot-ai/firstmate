@@ -196,6 +196,9 @@ fi
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+TREEHOUSE_LEASE_PATH_FILE=
+TREEHOUSE_LEASE_COMMITTED=0
+TASK_META_TMP=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -214,8 +217,27 @@ parse_orca_worktree_result() {
   fi
 }
 
+treehouse_spawn_abort_cleanup() {
+  local status=$1 lease_path=
+  [ "$TREEHOUSE_LEASE_COMMITTED" = 1 ] && return "$status"
+  [ -n "$TREEHOUSE_LEASE_PATH_FILE" ] || return "$status"
+  IFS= read -r lease_path < "$TREEHOUSE_LEASE_PATH_FILE" || true
+  case "$lease_path" in
+    '') rm -f "$TREEHOUSE_LEASE_PATH_FILE" || true ;;
+    /*)
+      if ( cd "$PROJ_ABS" && treehouse return --force "$lease_path" ); then
+        rm -f "$TREEHOUSE_LEASE_PATH_FILE" || true
+      else
+        echo "error: failed to roll back treehouse lease $lease_path after spawn abort; handoff retained at $TREEHOUSE_LEASE_PATH_FILE" >&2
+      fi
+      ;;
+    *) echo "error: refusing to roll back invalid treehouse lease path '$lease_path'; handoff retained at $TREEHOUSE_LEASE_PATH_FILE" >&2 ;;
+  esac
+  return "$status"
+}
+
 orca_spawn_abort_cleanup() {
-  local status=$?
+  local status=$1
   [ "$ORCA_ABORT_CLEANUP" = 1 ] || return "$status"
   ORCA_ABORT_CLEANUP=0
   if [ -n "${ORCA_TERMINAL:-}" ]; then
@@ -245,7 +267,15 @@ orca_spawn_abort_cleanup() {
   fi
   return "$status"
 }
-trap orca_spawn_abort_cleanup EXIT
+
+spawn_abort_cleanup() {
+  local status=$?
+  treehouse_spawn_abort_cleanup "$status" || true
+  orca_spawn_abort_cleanup "$status" || true
+  [ -z "$TASK_META_TMP" ] || rm -f "$TASK_META_TMP" || true
+  return "$status"
+}
+trap spawn_abort_cleanup EXIT
 
 # Batch dispatch (see header): when the first positional is an `id=repo` pair, treat every
 # positional as one and spawn each by re-execing this script in single-task mode. We use
@@ -866,10 +896,16 @@ spawn_send_key() {  # <target> <key>
   esac
 }
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  mkdir -p "$STATE"
+  TREEHOUSE_LEASE_PATH_FILE=$(mktemp "$STATE/.${ID}.treehouse-lease.XXXXXX") || {
+    echo "error: could not create treehouse lease handoff for $ID" >&2
+    exit 1
+  }
+  sq_treehouse_lease_path_file=$(shell_quote "$TREEHOUSE_LEASE_PATH_FILE")
   # A durable lease survives a detached window, so treehouse cannot hand this
   # slot to another spawn before fm-teardown releases it. `get --lease` prints
   # only the absolute path, and the pane changes into that leased worktree.
-  spawn_send_text_line "$WT_TARGET" "fm_treehouse_worktree=\$(treehouse get --lease --lease-holder $(shell_quote "$ID")) && cd \"\$fm_treehouse_worktree\""
+  spawn_send_text_line "$WT_TARGET" "treehouse get --lease --lease-holder $(shell_quote "$ID") > $sq_treehouse_lease_path_file && IFS= read -r fm_treehouse_worktree < $sq_treehouse_lease_path_file && cd \"\$fm_treehouse_worktree\""
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -1024,6 +1060,10 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+TASK_META_TMP=$(mktemp "$STATE/.${ID}.meta.XXXXXX") || {
+  echo "error: could not create task metadata for $ID" >&2
+  exit 1
+}
 {
   echo "window=$META_WINDOW"
   echo "worktree=$WT"
@@ -1063,7 +1103,12 @@ META_WINDOW=$T
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-} > "$STATE/$ID.meta"
+} > "$TASK_META_TMP"
+mv "$TASK_META_TMP" "$STATE/$ID.meta"
+TASK_META_TMP=
+TREEHOUSE_LEASE_COMMITTED=1
+[ -z "$TREEHOUSE_LEASE_PATH_FILE" ] || rm -f "$TREEHOUSE_LEASE_PATH_FILE" || true
+TREEHOUSE_LEASE_PATH_FILE=
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")

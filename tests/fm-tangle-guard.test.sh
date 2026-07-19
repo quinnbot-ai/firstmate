@@ -232,7 +232,13 @@ case "$*" in
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows|has-session|new-session|new-window|send-keys) exit 0 ;;
+  send-keys)
+    case "$*" in
+      *"treehouse get --lease"*) bash -c "$4" ;;
+    esac
+    exit 0
+    ;;
+  list-windows|has-session|new-session|new-window) exit 0 ;;
 esac
 exit 0
 SH
@@ -240,6 +246,9 @@ SH
 #!/usr/bin/env bash
 set -u
 printf 'treehouse %s\n' "$*" >> "${FM_TREEHOUSE_REC:?}"
+case "${1:-}" in
+  get) printf '%s\n' "${FM_FAKE_LEASED_WORKTREE:?}" ;;
+esac
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
@@ -247,7 +256,8 @@ SH
 }
 
 run_spawn_lease_case() {
-  local home=$1 id=$2 proj=$3 pane=$4 fakebin=$5 rec=$6 kind=${7:-}
+  local home=$1 id=$2 proj=$3 pane=$4 fakebin=$5 rec=$6 kind=${7:-} lease_path
+  lease_path=${8:-$pane}
   mkdir -p "$home/data/$id"
   printf 'brief\n' > "$home/data/$id/brief.md"
   if [ "$kind" = scout ]; then
@@ -255,14 +265,14 @@ run_spawn_lease_case() {
       FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
       FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
-      FM_TREEHOUSE_REC="$rec" PATH="$fakebin:$PATH" \
+      FM_FAKE_LEASED_WORKTREE="$lease_path" FM_TREEHOUSE_REC="$rec" PATH="$fakebin:$PATH" \
       "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex --scout 2>&1
   else
     FM_ROOT_OVERRIDE='' FM_HOME="$home" \
       FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
       FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
-      FM_TREEHOUSE_REC="$rec" PATH="$fakebin:$PATH" \
+      FM_FAKE_LEASED_WORKTREE="$lease_path" FM_TREEHOUSE_REC="$rec" PATH="$fakebin:$PATH" \
       "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex 2>&1
   fi
 }
@@ -327,6 +337,51 @@ test_spawn_leases_normal_treehouse_allocation() {
   assert_contains "$(cat "$home/state/normal-scout-cc3.meta")" "treehouse_lease=1" \
     "normal leased spawn did not record its durable pool hold"
   pass "fm-spawn: normal allocation leases its treehouse slot until teardown"
+}
+
+test_spawn_rolls_back_lease_after_isolation_failure() {
+  local home proj wt invalid fakebin rec out status id
+  home="$TMP_ROOT/lease-isolation-rollback-home"
+  mkdir -p "$home/state" "$home/data"
+  proj=$(make_repo "$TMP_ROOT/lease-isolation-rollback-proj")
+  wt="$TMP_ROOT/lease-isolation-rollback-wt"
+  invalid="$TMP_ROOT/lease-isolation-rollback-invalid"
+  mkdir -p "$invalid"
+  git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
+  fakebin=$(make_spawn_lease_fakebin "$TMP_ROOT/lease-isolation-rollback-fake")
+  rec="$TMP_ROOT/lease-isolation-rollback-treehouse.log"; : > "$rec"
+  id=lease-isolation-rollback-dd4
+
+  out=$(run_spawn_lease_case "$home" "$id" "$proj" "$invalid" "$fakebin" "$rec" '' "$wt"); status=$?
+  expect_code 1 "$status" "spawn must fail when the pane path is not an isolated worktree"
+  assert_contains "$out" "did not yield an isolated worktree" "isolation failure did not reach the spawn guard"
+  assert_grep "treehouse return --force $wt" "$rec" \
+    "isolation failure did not return the leased worktree recorded by the handoff"
+  assert_absent "$home/state/$id.meta" "isolation failure must not create a task meta"
+  pass "fm-spawn: rolls back a leased slot when isolation validation fails"
+}
+
+test_spawn_rolls_back_lease_after_setup_failure() {
+  local home proj wt fakebin rec out status id task_tmp
+  home="$TMP_ROOT/lease-setup-rollback-home"
+  mkdir -p "$home/state" "$home/data"
+  proj=$(make_repo "$TMP_ROOT/lease-setup-rollback-proj")
+  wt="$TMP_ROOT/lease-setup-rollback-wt"
+  git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
+  fakebin=$(make_spawn_lease_fakebin "$TMP_ROOT/lease-setup-rollback-fake")
+  rec="$TMP_ROOT/lease-setup-rollback-treehouse.log"; : > "$rec"
+  id="lease-setup-rollback-${RANDOM}${RANDOM}"
+  task_tmp="/tmp/fm-$id"
+  [ ! -e "$task_tmp" ] || fail "test task temp already exists: $task_tmp"
+  : > "$task_tmp"
+
+  out=$(run_spawn_lease_case "$home" "$id" "$proj" "$wt" "$fakebin" "$rec"); status=$?
+  rm -f "$task_tmp"
+  expect_code 1 "$status" "spawn must fail when post-lease task temp setup fails"
+  assert_grep "treehouse return --force $wt" "$rec" \
+    "post-lease setup failure did not return the leased worktree"
+  assert_absent "$home/state/$id.meta" "post-lease setup failure must not create a task meta"
+  pass "fm-spawn: rolls back a leased slot when later setup fails"
 }
 
 # --- GUARD 1d: fm-spawn tmux window construction ----------------------------
@@ -408,7 +463,7 @@ test_spawn_tmux_window_construction() {
     "must disable allow-rename on the spawned window"
 
   # Bug 2 fix (b): treehouse lease acquisition and the worktree wait loop target the stable id.
-  assert_grep "send-keys -t @spawnwid fm_treehouse_worktree=" "$rec" \
+  assert_grep "send-keys -t @spawnwid treehouse get --lease" "$rec" \
     "treehouse lease acquisition must be sent to the stable window id"
   assert_grep "treehouse get --lease --lease-holder 'rec-win-gg7'" "$rec" \
     "treehouse acquisition must request a durable lease under the task id"
@@ -426,4 +481,6 @@ test_spawn_isolation_abort
 test_spawn_refuses_legacy_held_worktree
 test_spawn_refuses_detached_legacy_held_worktree
 test_spawn_leases_normal_treehouse_allocation
+test_spawn_rolls_back_lease_after_isolation_failure
+test_spawn_rolls_back_lease_after_setup_failure
 test_spawn_tmux_window_construction
