@@ -664,6 +664,12 @@ real_path_or_raw() {  # <path>
   fi
 }
 
+path_is_git_worktree_root() {  # <path>
+  local path=$1 top
+  top=$(git -C "$path" rev-parse --show-toplevel 2>/dev/null) || return 1
+  [ "$(real_path_or_raw "$path")" = "$(real_path_or_raw "$top")" ]
+}
+
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
 # a herdr spawn goes through the version-gated, workspace-per-HOME,
@@ -845,7 +851,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # PROJ_ABS on the very first poll, before the pane has actually moved.
   for _ in $(seq 1 60); do
     p=$(spawn_current_path "$WT_TARGET" || true)
-    if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
+    if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ] && path_is_git_worktree_root "$p"; then
       WT="$p"
       break
     fi
