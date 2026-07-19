@@ -443,7 +443,9 @@ test_watch_restart_attaches_to_healthy_peer() {
   fakebin="$dir/fakebin"
   out="$dir/restart.out"
   mark_pr_check_migration_complete "$state"
-  node -e 'process.on("SIGTERM", () => {}); setTimeout(() => {}, 300000)' &
+  # Keep the peer owned by this test and explicitly TERM-resistant: --restart
+  # must attach to it after its scoped signal, never rely on Node signal timing.
+  bash -c 'trap "" TERM; while :; do sleep 1; done' &
   peer=$!
   identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify peer pid"
   mkdir "$state/.watch.lock"
@@ -680,7 +682,7 @@ test_arm_hup_cleans_child_and_temp_output() {
 }
 
 test_arm_propagates_immediate_wake_before_confirmation() {
-  local dir state fakebin armout drain_out check_file rc
+  local dir state fakebin armout drain_out rearm_out check_file rc rearm_pid watcher_pid i
   dir=$(make_case arm-immediate-wake)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -704,7 +706,26 @@ SH
   ! grep -qF 'watcher: FAILED' "$armout" || fail "arm printed FAILED after a valid immediate wake"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after immediate arm wake failed"
   grep "$(printf '\tcheck\t')" "$drain_out" | grep -F "$check_file" | grep -F 'merged: https://example.test/pr/7' >/dev/null || fail "immediate check wake was not queued"
-  pass "arm propagates an immediate watcher wake before confirmation"
+  # A normal actionable close clears its lease before the next arm starts.  The
+  # replacement must not mistake that handoff for a lost relay and manufacture
+  # a second check wake.
+  rm -f "$check_file" "$state/task.check-trust"
+  rearm_out="$dir/rearm.out"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$rearm_out" &
+  rearm_pid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$rearm_out" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  grep -qF "watcher: started pid=$watcher_pid" "$rearm_out" || fail "normal close did not re-arm a replacement watcher"
+  ! grep -F 'watcher arm relay lost' "$rearm_out" "$state/.wake-queue" >/dev/null 2>&1 \
+    || fail "normal close followed by immediate re-arm falsely reported a lost relay"
+  kill "$rearm_pid" "$watcher_pid" 2>/dev/null || true
+  wait "$rearm_pid" 2>/dev/null || true
+  pass "arm propagates an immediate watcher wake before confirmation and re-arms without a false lost-relay wake"
 }
 
 test_arm_waits_for_peer_beacon_after_child_stands_down() {
@@ -909,8 +930,34 @@ test_pid_identity_is_locale_invariant() {
   pass "fm_pid_identity is locale-invariant across LC_ALL/LC_TIME"
 }
 
+test_arm_lease_rejects_reused_pid_identity() {
+  local dir state watcher_pid arm_pid watcher_identity
+  dir=$(make_case arm-lease-pid-reuse)
+  state="$dir/state"
+  sleep 60 & watcher_pid=$!
+  sleep 60 & arm_pid=$!
+  watcher_identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$watcher_pid") \
+    || fail "could not identify watcher for arm-lease reuse test"
+  mkdir "$state/.watch-arm.lease"
+  printf '%s\n' "$arm_pid" > "$state/.watch-arm.lease/pid"
+  printf '%s\n' 'reused-pid-old-identity' > "$state/.watch-arm.lease/pid-identity"
+  printf '%s\n' "$dir" > "$state/.watch-arm.lease/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch-arm.lease/watcher-path"
+  printf '%s\n' "$watcher_pid" > "$state/.watch-arm.lease/watcher-pid"
+  printf '%s\n' "$watcher_identity" > "$state/.watch-arm.lease/watcher-identity"
+  touch "$state/.watch-arm.lease/heartbeat"
+  if FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_arm_lease_healthy "$2" "$3" "$4" "$5" 300' _ "$LIB" "$state" "$WATCH" "$watcher_pid" "$dir"; then
+    fail "a live PID with a mismatched old identity passed the arm lease predicate"
+  fi
+  kill "$watcher_pid" "$arm_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+  wait "$arm_pid" 2>/dev/null || true
+  pass "arm lease rejects a recycled PID whose process identity changed"
+}
+
 test_singleton_start
 test_pid_identity_is_locale_invariant
+test_arm_lease_rejects_reused_pid_identity
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings

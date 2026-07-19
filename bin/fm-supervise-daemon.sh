@@ -1280,6 +1280,12 @@ fm_super_main() {
   fi
   echo "$$" > "$PIDFILE"
   fm_pid_identity "${BASHPID:-$$}" > "$LOCK/pid-identity" 2>/dev/null || true
+  fm_daemon_lease_publish "$STATE" "$FM_DAEMON_DIR/fm-supervise-daemon.sh" "$FM_HOME" "$LOCK" || {
+    echo "error: could not publish supervise-daemon lease" >&2
+    fm_lock_release "$LOCK" 2>/dev/null || true
+    rm -f "$PIDFILE" 2>/dev/null || true
+    exit 1
+  }
 
   # --- auto-discover the supervisor BACKEND (tmux vs herdr) first -----------
   # Priority: FM_SUPERVISOR_BACKEND override > $TMUX_PANE (tmux) > $HERDR_ENV=1
@@ -1408,6 +1414,10 @@ fm_super_main() {
 
   local rc reason
   while true; do
+    fm_daemon_lease_heartbeat "$LOCK" || {
+      log "ERROR: supervise-daemon lease ownership lost; stopping"
+      exit 1
+    }
     # --- pane-gone guard (preserved) ---------------------------------------
     # With the #29 watcher's enqueue-before-suppress, a wake is no longer
     # swallowed by running the watcher with no injection target. We still back
