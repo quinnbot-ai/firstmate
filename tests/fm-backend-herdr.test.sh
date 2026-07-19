@@ -1363,6 +1363,20 @@ test_send_text_submit_preexisting_working_does_not_false_confirm_swallowed_enter
   pass "fm_backend_herdr_send_text_submit: preexisting working is not accepted as submit proof when the composer still holds the message"
 }
 
+test_send_text_submit_preexisting_working_shell_after_enter_is_unknown() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-preexisting-working-shell"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  printf '$\n' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = unknown ] || fail "a fallback shell after a preexisting-working Enter must be unknown, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "an unverified fallback shell must stop retries, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: a fallback shell after a preexisting-working Enter is never accepted as delivery"
+}
+
 # Regression for the 2026-07-08 false-negative sends.
 test_send_text_submit_confirms_codex_busy_redraw_transcript() {
   local dir log resp fb out enter_count
@@ -2242,6 +2256,7 @@ test_send_text_submit_detects_swallowed_enter
 test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_text_submit_confirms_blocked_after_enter
 test_send_text_submit_preexisting_working_does_not_false_confirm_swallowed_enter
+test_send_text_submit_preexisting_working_shell_after_enter_is_unknown
 test_send_text_submit_confirms_codex_busy_redraw_transcript
 test_send_text_submit_codex_editable_draft_with_preexisting_busy_footer_stays_pending
 test_send_text_submit_codex_busy_redraw_without_ansi_stays_pending

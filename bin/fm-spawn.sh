@@ -199,7 +199,6 @@ ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
 ORCA_WORKTREE_CLEANUP_COMPLETE=0
 ORCA_ABORT_CLEANUP_FAILED=0
-ORCA_ABORT_ENDPOINT_ABSENT=1
 FAILED_ENDPOINT_CLEANUP=0
 TREEHOUSE_ABORT_CLEANUP=0
 TASK_TMP=
@@ -271,7 +270,7 @@ write_failed_treehouse_spawn_meta() {
 remove_codex_crewmate_home() {
   local home=${CODEX_CREWMATE_HOME:-}
   [ -n "$home" ] || return 0
-  python3 "$FM_ROOT/bin/fm-codex-home.py" --remove --data "$DATA" --state "$STATE" --task-id "$ID" --home "$home"
+  python3 "$FM_ROOT/bin/fm-codex-home.py" --remove --data "$DATA" --home "$home"
 }
 
 remove_codex_home_activation_result() {
@@ -281,34 +280,20 @@ remove_codex_home_activation_result() {
 }
 
 orca_spawn_abort_cleanup() {
-  local cleanup_failed=0 terminal_absent=1
+  local cleanup_failed=0
   [ "$ORCA_ABORT_CLEANUP" = 1 ] || return 0
   ORCA_ABORT_CLEANUP=0
   if [ -n "${ORCA_TERMINAL:-}" ]; then
-    terminal_absent=0
+    FM_BACKEND_KILL_STRICT=1 fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
     if fm_backend_target_absent orca "$ORCA_TERMINAL"; then
       ORCA_TERMINAL=
       T=
-      terminal_absent=1
-    elif FM_BACKEND_KILL_STRICT=1 fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null; then
-      if fm_backend_target_absent orca "$ORCA_TERMINAL"; then
-        ORCA_TERMINAL=
-        T=
-        terminal_absent=1
-      else
-        cleanup_failed=1
-        FAILED_ENDPOINT_CLEANUP=1
-      fi
-    elif fm_backend_target_absent orca "$ORCA_TERMINAL"; then
-      ORCA_TERMINAL=
-      T=
-      terminal_absent=1
     else
       cleanup_failed=1
       FAILED_ENDPOINT_CLEANUP=1
     fi
   fi
-  if [ "$terminal_absent" = 1 ] && [ -n "${ORCA_WORKTREE_ID:-}" ]; then
+  if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
     if fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
       ORCA_WORKTREE_ID=
       ORCA_WORKTREE_CLEANUP_COMPLETE=1
@@ -316,10 +301,7 @@ orca_spawn_abort_cleanup() {
     else
       cleanup_failed=1
     fi
-  elif [ -n "${ORCA_WORKTREE_ID:-}" ]; then
-    cleanup_failed=1
   fi
-  ORCA_ABORT_ENDPOINT_ABSENT=$terminal_absent
   ORCA_ABORT_CLEANUP_FAILED=$cleanup_failed
   return 0
 }
@@ -330,20 +312,11 @@ spawn_abort_cleanup() {
     TREEHOUSE_ABORT_CLEANUP=0
     clean_codex_home=1
     if ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) 2>/dev/null; then
-      if fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
-        :
-      else
-        if ! FM_BACKEND_KILL_STRICT=1 fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "fm-$ID" 2>/dev/null; then
-          if ! fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
-            FAILED_ENDPOINT_CLEANUP=1
-            write_failed_treehouse_spawn_meta
-            preserve_codex_home=1
-          fi
-        elif ! fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
-          FAILED_ENDPOINT_CLEANUP=1
-          write_failed_treehouse_spawn_meta
-          preserve_codex_home=1
-        fi
+      FM_BACKEND_KILL_STRICT=1 fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "fm-$ID" 2>/dev/null || true
+      if ! fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
+        FAILED_ENDPOINT_CLEANUP=1
+        write_failed_treehouse_spawn_meta
+        preserve_codex_home=1
       fi
     else
       FAILED_ENDPOINT_CLEANUP=1
@@ -355,7 +328,6 @@ spawn_abort_cleanup() {
     clean_codex_home=1
     orca_spawn_abort_cleanup
     orca_cleanup_failed=$ORCA_ABORT_CLEANUP_FAILED
-    [ "$FAILED_ENDPOINT_CLEANUP" != 1 ] || preserve_codex_home=1
   fi
   if [ "$clean_codex_home" -eq 1 ] && [ "$preserve_codex_home" -eq 0 ] && ! remove_codex_crewmate_home; then
     echo "error: could not remove isolated Codex crewmate home" >&2
@@ -365,9 +337,7 @@ spawn_abort_cleanup() {
   fi
   [ "$orca_cleanup_failed" -eq 0 ] || write_failed_treehouse_spawn_meta
   [ -z "$CODEX_ACTIVATION_TOKEN" ] || remove_codex_home_activation_result 2>/dev/null || true
-  if [ -n "$TASK_TMP" ] && { [ "$BACKEND" != orca ] || [ "$ORCA_ABORT_ENDPOINT_ABSENT" = 1 ]; }; then
-    rm -rf -- "$TASK_TMP"
-  fi
+  [ -z "$TASK_TMP" ] || rm -rf -- "$TASK_TMP"
   if [ "$status" -ne 0 ] && [ "$SPAWN_META_WRITTEN" = 1 ] && [ "$FAILED_ENDPOINT_CLEANUP" != 1 ] && [ "$preserve_codex_home" -eq 0 ] && [ "$orca_cleanup_failed" -eq 0 ] && [ -z "$CODEX_CREWMATE_HOME" ]; then
     rm -f "$STATE/$ID.meta"
   fi

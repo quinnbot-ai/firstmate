@@ -896,15 +896,6 @@ EOF
     found=0
   fi
   if [ "$found" -ne 1 ]; then
-    # A bare shell is never an empty agent composer for the away-mode guard.
-    # After sending Enter, though, a prompt with no editable text confirms that
-    # a shell consumed the command; prompt plus text remains a real swallow.
-    if [ "$mode" = post-submit ]; then
-      case "$last_nonblank" in
-        '>'|'$'|'%'|'#') printf 'empty'; return 0 ;;
-        '>'[[:space:]]*|'$'[[:space:]]*|'%'[[:space:]]*|'#'[[:space:]]*) printf 'pending'; return 0 ;;
-      esac
-    fi
     printf 'unknown'
     return 0
   fi

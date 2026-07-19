@@ -38,7 +38,9 @@ case "${1:-}" in
   kill-window)
     [ -z "${FM_FAKE_BACKEND_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_BACKEND_LOG"
     status=${FM_FAKE_BACKEND_KILL_STATUS:-0}
-    [ "$status" -ne 0 ] || [ "${FM_FAKE_BACKEND_CLOSE_EFFECT:-gone}" != gone ] || printf '%s\n' gone > "${FM_FAKE_TARGET_STATE:?}"
+    { [ "$status" -eq 0 ] || [ "${FM_FAKE_BACKEND_CLOSE_ON_ERROR:-0}" = 1 ]; } \
+      && [ "${FM_FAKE_BACKEND_CLOSE_EFFECT:-gone}" = gone ] \
+      && printf '%s\n' gone > "${FM_FAKE_TARGET_STATE:?}"
     exit "$status"
     ;;
   has-session|new-session|new-window)
@@ -1200,6 +1202,25 @@ test_codex_home_activation_failure_aborts_spawn() {
   pass "Codex spawn synchronizes terminal activation failures"
 }
 
+test_codex_activation_failure_accepts_absent_endpoint_after_close_error() {
+  local rec id out status launch crew_home
+  id=profile-codex-home-close-error-z79
+  rec=$(make_spawn_case profile-codex-home-close-error codex "$id")
+  read_case_record "$rec"
+
+  out=$(FM_FAKE_ACTIVATION_RESULT=failed FM_FAKE_BACKEND_KILL_STATUS=75 FM_FAKE_BACKEND_CLOSE_ON_ERROR=1 \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "Codex spawn must report its terminal activation failure"
+  launch=$(cat "$LAUNCH_LOG")
+  crew_home=$(codex_home_from_launch "$launch")
+  assert_absent "$HOME_DIR/state/$id.meta" "an absent endpoint after close error must not retain failed-spawn metadata"
+  [ ! -e "$crew_home" ] || fail "an absent endpoint after close error retained the isolated Codex home"
+  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+    "terminal activation failure did not attempt endpoint cleanup"
+  pass "Codex spawn accepts a self-closed endpoint after close reports an error"
+}
+
 test_codex_activation_uses_managed_data_root() {
   local rec id out status target legacy_path launch activation_result
   id=profile-codex-activation-parent-z67
@@ -1691,6 +1712,7 @@ test_codex_home_activation_result_refuses_symlink
 test_codex_home_activation_result_waits_for_empty_file
 test_codex_home_activation_refuses_existing_result
 test_codex_home_activation_failure_aborts_spawn
+test_codex_activation_failure_accepts_absent_endpoint_after_close_error
 test_codex_activation_uses_managed_data_root
 test_codex_teardown_preserves_failed_endpoint_metadata
 test_codex_teardown_accepts_absent_endpoint_after_close_error
