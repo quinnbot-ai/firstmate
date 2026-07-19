@@ -241,6 +241,7 @@ TASK_TMP=
 CODEX_CREWMATE_HOME=
 CODEX_ACTIVATION_TOKEN=
 SPAWN_META_WRITTEN=0
+TMUX_WINDOW_ID=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -301,12 +302,13 @@ EOF
 }
 
 treehouse_abort_endpoint_cleanup() {
-  [ -n "${T:-}" ] || return 0
-  if fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
+  local endpoint_target=${TMUX_WINDOW_ID:-${T:-}}
+  [ -n "$endpoint_target" ] || return 0
+  if fm_backend_target_absent "$BACKEND" "$endpoint_target" "fm-$ID"; then
     return 0
   fi
-  if FM_BACKEND_KILL_STRICT=1 fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "fm-$ID" 2>/dev/null \
-    && fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
+  if FM_BACKEND_KILL_STRICT=1 fm_backend_kill "$BACKEND" "$endpoint_target" "${ZELLIJ_TAB_ID:-}" "fm-$ID" 2>/dev/null \
+    && fm_backend_target_absent "$BACKEND" "$endpoint_target" "fm-$ID"; then
     return 0
   fi
   FAILED_ENDPOINT_CLEANUP=1
@@ -326,6 +328,7 @@ write_failed_treehouse_spawn_meta() {
       echo "window=$W"
     else
       echo "window=${T:-}"
+      [ -z "$TMUX_WINDOW_ID" ] || echo "tmux_window_id=$TMUX_WINDOW_ID"
     fi
     echo "worktree=$WT"
     echo "project=$PROJ_ABS"
@@ -1616,6 +1619,7 @@ case "$BACKEND" in
     # rename-critical worktree-detection steps below; the persisted window= handle
     # stays $T (the name form), which is safe now that rename is disabled.
     WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+    TMUX_WINDOW_ID=$WID
     WT_TARGET="$WID"
     ;;
   herdr)
@@ -2029,6 +2033,7 @@ TASK_META_TMP=$(mktemp "$STATE/.${ID}.meta.XXXXXX") || {
 }
 {
   echo "window=$META_WINDOW"
+  [ "$BACKEND" != tmux ] || echo "tmux_window_id=$TMUX_WINDOW_ID"
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
