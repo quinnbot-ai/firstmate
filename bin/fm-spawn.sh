@@ -114,6 +114,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-treehouse-lease-lib.sh
+. "$SCRIPT_DIR/fm-treehouse-lease-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -222,15 +224,16 @@ parse_orca_worktree_result() {
 }
 
 treehouse_spawn_abort_cleanup() {
-  local status=$1 lease_path= lease_validation= lease_state=
+  local status=$1 lease_path='' lease_validation='' lease_state='' handoff_record
   [ "$TREEHOUSE_LEASE_COMMITTED" = 1 ] && return "$status"
   [ -n "$TREEHOUSE_LEASE_PATH_FILE" ] || return "$status"
-  treehouse_lease_handoff_read "$TREEHOUSE_LEASE_PATH_FILE" || {
+  handoff_record=$(fm_treehouse_lease_handoff_read "$TREEHOUSE_LEASE_PATH_FILE") || {
     echo "error: refusing to roll back malformed treehouse lease handoff $TREEHOUSE_LEASE_PATH_FILE; handoff retained" >&2
     return "$status"
   }
-  lease_path=$TREEHOUSE_LEASE_HANDOFF_PATH
-  lease_state=$TREEHOUSE_LEASE_HANDOFF_STATE
+  IFS=$'\t' read -r lease_state lease_path <<EOF
+$handoff_record
+EOF
   case "$lease_path" in
     '') echo "error: treehouse lease handoff has no path after spawn abort; handoff retained at $TREEHOUSE_LEASE_PATH_FILE" >&2 ;;
     /*)
@@ -775,53 +778,19 @@ treehouse_lease_handoff_is_committed() {  # <lease-path>
   return 1
 }
 
-TREEHOUSE_LEASE_HANDOFF_STATE=
-TREEHOUSE_LEASE_HANDOFF_PATH=
-
-treehouse_lease_handoff_read() {  # <handoff>
-  local handoff=$1 record=
-  TREEHOUSE_LEASE_HANDOFF_STATE=
-  TREEHOUSE_LEASE_HANDOFF_PATH=
-  IFS= read -r record < "$handoff" || true
-  case "$record" in
-    leased=/*)
-      TREEHOUSE_LEASE_HANDOFF_STATE=leased
-      TREEHOUSE_LEASE_HANDOFF_PATH=${record#leased=}
-      ;;
-    returning=/*)
-      TREEHOUSE_LEASE_HANDOFF_STATE=returning
-      TREEHOUSE_LEASE_HANDOFF_PATH=${record#returning=}
-      ;;
-    returned=/*)
-      TREEHOUSE_LEASE_HANDOFF_STATE=returned
-      TREEHOUSE_LEASE_HANDOFF_PATH=${record#returned=}
-      ;;
-    /*)
-      TREEHOUSE_LEASE_HANDOFF_STATE=leased
-      TREEHOUSE_LEASE_HANDOFF_PATH=$record
-      ;;
-    *) return 1 ;;
-  esac
-}
-
-treehouse_lease_handoff_write() {  # <handoff> <state> <lease-path>
-  local handoff=$1 handoff_state=$2 lease_path=$3
-  printf '%s=%s\n' "$handoff_state" "$lease_path" > "$handoff"
-}
-
 treehouse_lease_handoff_return() {  # <handoff> <lease-path>
   local handoff=$1 lease_path=$2
-  treehouse_lease_handoff_write "$handoff" returning "$lease_path" || return 1
+  fm_treehouse_lease_handoff_write "$handoff" returning "$lease_path" || return 1
   if ! ( cd "$PROJ_ABS" && treehouse return --force "$lease_path" ); then
-    treehouse_lease_handoff_write "$handoff" leased "$lease_path" || true
+    fm_treehouse_lease_handoff_write "$handoff" leased "$lease_path" || true
     return 1
   fi
-  treehouse_lease_handoff_write "$handoff" returned "$lease_path" || return 1
+  fm_treehouse_lease_handoff_write "$handoff" returned "$lease_path" || return 1
   rm -f "$handoff"
 }
 
 recover_treehouse_lease_handoffs() {
-  local handoff lease_path lease_state lease_validation
+  local handoff lease_path lease_state lease_validation handoff_record
   [ -d "$STATE" ] || return 0
   for handoff in "$STATE"/.*.treehouse-lease.*; do
     [ -f "$handoff" ] || continue
@@ -829,12 +798,13 @@ recover_treehouse_lease_handoffs() {
       echo "error: refusing to recover empty treehouse lease handoff $handoff; handoff retained" >&2
       return 1
     fi
-    treehouse_lease_handoff_read "$handoff" || {
+    handoff_record=$(fm_treehouse_lease_handoff_read "$handoff") || {
       echo "error: refusing to recover malformed treehouse lease handoff $handoff; handoff retained" >&2
       return 1
     }
-    lease_path=$TREEHOUSE_LEASE_HANDOFF_PATH
-    lease_state=$TREEHOUSE_LEASE_HANDOFF_STATE
+    IFS=$'\t' read -r lease_state lease_path <<EOF
+$handoff_record
+EOF
     case "$lease_path" in
       '')
         echo "error: refusing to recover empty treehouse lease handoff $handoff; handoff retained" >&2

@@ -98,6 +98,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-treehouse-lease-lib.sh
+. "$SCRIPT_DIR/fm-treehouse-lease-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -127,6 +129,8 @@ PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
 ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
 ORCA_PATH_MATCH_VERIFIED=0
+TREEHOUSE_LEASE_HANDOFF=
+TREEHOUSE_LEASE_RETURN_NEEDED=1
 
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
@@ -152,6 +156,69 @@ default_branch() {
 meta_value() {
   local meta=$1 key=$2
   fm_meta_get "$meta" "$key"
+}
+
+prepare_treehouse_lease_handoff_return() {
+  local handoff handoff_state handoff_path handoff_record matches=0
+  [ "$(meta_value "$META" treehouse_lease)" = 1 ] || return 0
+  for handoff in "$STATE"/."$ID".treehouse-lease.*; do
+    [ -f "$handoff" ] || continue
+    matches=$(( matches + 1 ))
+    if [ "$matches" -gt 1 ]; then
+      echo "error: multiple treehouse lease handoffs found for $ID; refusing teardown" >&2
+      return 1
+    fi
+    handoff_record=$(fm_treehouse_lease_handoff_read "$handoff") || {
+      echo "error: malformed treehouse lease handoff $handoff; refusing teardown" >&2
+      return 1
+    }
+    IFS=$'\t' read -r handoff_state handoff_path <<EOF
+$handoff_record
+EOF
+    if [ "$handoff_path" != "$WT" ]; then
+      echo "error: treehouse lease handoff $handoff does not match task worktree $WT; refusing teardown" >&2
+      return 1
+    fi
+    TREEHOUSE_LEASE_HANDOFF=$handoff
+    case "$handoff_state" in
+      leased)
+        [ -d "$WT" ] || {
+          echo "error: leased treehouse handoff $handoff has no worktree at $WT; refusing teardown" >&2
+          return 1
+        }
+        fm_treehouse_lease_handoff_write "$handoff" returning "$WT" || {
+          echo "error: could not mark treehouse lease handoff $handoff as returning; refusing teardown" >&2
+          return 1
+        }
+        ;;
+      returning)
+        echo "error: treehouse lease handoff $handoff is already returning; refusing to replay an indeterminate return" >&2
+        return 1
+        ;;
+      returned)
+        TREEHOUSE_LEASE_RETURN_NEEDED=0
+        ;;
+    esac
+  done
+}
+
+finish_treehouse_lease_handoff_return() {
+  [ -n "$TREEHOUSE_LEASE_HANDOFF" ] || return 0
+  if [ "$TREEHOUSE_LEASE_RETURN_NEEDED" = 1 ]; then
+    fm_treehouse_lease_handoff_write "$TREEHOUSE_LEASE_HANDOFF" returned "$WT" || {
+      echo "error: treehouse lease returned but handoff $TREEHOUSE_LEASE_HANDOFF could not be tombstoned; preserving task metadata" >&2
+      return 1
+    }
+  fi
+  rm -f "$TREEHOUSE_LEASE_HANDOFF" || \
+    echo "warning: returned treehouse lease handoff retained at $TREEHOUSE_LEASE_HANDOFF" >&2
+}
+
+restore_treehouse_lease_handoff() {
+  [ -n "$TREEHOUSE_LEASE_HANDOFF" ] || return 0
+  [ "$TREEHOUSE_LEASE_RETURN_NEEDED" = 1 ] || return 0
+  fm_treehouse_lease_handoff_write "$TREEHOUSE_LEASE_HANDOFF" leased "$WT" || \
+    echo "error: could not restore treehouse lease handoff $TREEHOUSE_LEASE_HANDOFF after return failure" >&2
 }
 
 require_orca_worktree_id() {
@@ -1083,6 +1150,7 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
 fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
+prepare_treehouse_lease_handoff_return || exit 1
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
@@ -1116,11 +1184,16 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety
   fi
-  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
-    echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
-    exit 1
-  }
+  if [ "$TREEHOUSE_LEASE_RETURN_NEEDED" = 1 ]; then
+    teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
+      restore_treehouse_lease_handoff
+      echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
+      exit 1
+    }
+  fi
 fi
+
+finish_treehouse_lease_handoff_return || exit 1
 
 if [ "$BACKEND" != orca ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
