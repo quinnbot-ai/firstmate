@@ -434,7 +434,9 @@ spawn_abort_cleanup() {
   if [ -n "$TASK_TMP" ] && { [ "$BACKEND" != orca ] || [ "$ORCA_ABORT_ENDPOINT_ABSENT" = 1 ]; }; then
     rm -rf -- "$TASK_TMP"
   fi
-  if [ "$status" -ne 0 ] && [ "$SPAWN_META_WRITTEN" = 1 ] && [ "$FAILED_ENDPOINT_CLEANUP" != 1 ] && [ "$preserve_codex_home" -eq 0 ] && [ "$orca_cleanup_failed" -eq 0 ] && [ -z "$CODEX_CREWMATE_HOME" ]; then
+  if [ "$status" -ne 0 ] && [ "$SPAWN_META_WRITTEN" = 1 ] && [ "$TREEHOUSE_LEASE_COMMITTED" != 1 ] \
+    && [ "$FAILED_ENDPOINT_CLEANUP" != 1 ] && [ "$preserve_codex_home" -eq 0 ] \
+    && [ "$orca_cleanup_failed" -eq 0 ] && [ -z "$CODEX_CREWMATE_HOME" ]; then
     rm -f "$STATE/$ID.meta"
   fi
   [ -z "$TASK_META_TMP" ] || rm -f "$TASK_META_TMP" || true
