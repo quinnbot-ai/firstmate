@@ -1157,7 +1157,7 @@ test_busy_startup_spinner_context_zero_surfaces() {
 Starting MCP servers ... (esc to interrupt) 10:41
 Context: 0.00%
 EOF
-  printf 'window=%s\nkind=ship\n' "$window" > "$state/startup.meta"
+  printf 'window=%s\nharness=codex\nkind=ship\n' "$window" > "$state/startup.meta"
   printf 'working: starting the task\n' > "$statusf"
   printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-startup_status"
   key=$(printf '%s' "$window" | tr ':/. ' '____')
@@ -1173,6 +1173,42 @@ EOF
   grep -F 'startup spinner remains at context 0%' "$out" >/dev/null || fail "startup spinner wake omitted its signature: $(cat "$out")"
   grep -F 'demand-deep-inspection' "$out" >/dev/null || fail "startup spinner wake did not demand deep inspection"
   pass "busy startup spinner at context 0% surfaces a deep-inspection wake"
+}
+
+test_busy_startup_spinner_non_codex_remains_healthy() {
+  local dir state fakebin out capture_file statusf window key pid
+  dir=$(make_case busy-startup-noncodex); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/startup.status"
+  window="test:fm-startup-noncodex"
+  cat > "$capture_file" <<'EOF'
+Starting MCP servers ... (esc to interrupt) 10:41
+Context: 0%
+EOF
+  printf 'window=%s\nharness=claude\nkind=ship\n' "$window" > "$state/startup.meta"
+  printf 'working: starting the task\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-startup_status"
+  key=$(printf '%s' "$window" | tr ':/. ' '____')
+  printf 'startup-context=0' > "$state/.busy-progress-$key"
+  printf '%s\n' $(( $(date +%s) - 700 )) > "$state/.busy-progress-since-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STARTUP_ZERO_CONTEXT_SECS=600 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 30 || fail "non-Codex startup footer triggered the Codex-only startup escalation: $(cat "$out")"
+  [ "$(cat "$state/.busy-progress-$key")" = 'context=0%' ] || { reap "$pid"; fail "non-Codex startup footer did not use ordinary progress tracking"; }
+  reap "$pid"
+  pass "non-Codex startup footers do not trigger the Codex-only startup escalation"
+}
+
+test_busy_progress_thresholds_normalize_invalid_overrides() {
+  local state out
+  state="$TMP_ROOT/busy-progress-thresholds/state"
+  out=$(FM_STATE_OVERRIDE="$state" FM_STARTUP_ZERO_CONTEXT_SECS=invalid FM_BUSY_NO_PROGRESS_SECS=invalid \
+    FM_BUSY_STATUS_GRACE_SECS=invalid bash -c '. "$1"; printf "%s/%s/%s\n" "$STARTUP_ZERO_CONTEXT_SECS" "$BUSY_NO_PROGRESS_SECS" "$BUSY_STATUS_GRACE_SECS"' _ "$WATCH") \
+    || fail "invalid busy-progress thresholds prevented watcher initialization"
+  [ "$out" = '600/1800/900' ] || fail "invalid busy-progress thresholds did not reset to defaults: $out"
+  pass "invalid busy-progress thresholds reset to safe defaults"
 }
 
 test_busy_token_burn_without_progress_surfaces() {
@@ -1242,7 +1278,7 @@ test_busy_progress_afk_enqueues_for_daemon_escalation() {
 Starting MCP servers ... (esc to interrupt) 10:41
 Context: 0%
 EOF
-  printf 'window=%s\nkind=ship\n' "$window" > "$state/afk-busy.meta"
+  printf 'window=%s\nharness=codex\nkind=ship\n' "$window" > "$state/afk-busy.meta"
   printf 'working: starting the task\n' > "$statusf"
   printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-afk-busy_status"
   date '+%s' > "$state/.afk"
@@ -1359,6 +1395,8 @@ test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
 test_busy_startup_spinner_context_zero_surfaces
+test_busy_startup_spinner_non_codex_remains_healthy
+test_busy_progress_thresholds_normalize_invalid_overrides
 test_busy_token_burn_without_progress_surfaces
 test_busy_subagent_wait_spin_surfaces
 test_busy_progress_afk_enqueues_for_daemon_escalation

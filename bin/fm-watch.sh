@@ -145,6 +145,9 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 STARTUP_ZERO_CONTEXT_SECS=${FM_STARTUP_ZERO_CONTEXT_SECS:-600}
 BUSY_NO_PROGRESS_SECS=${FM_BUSY_NO_PROGRESS_SECS:-1800}
 BUSY_STATUS_GRACE_SECS=${FM_BUSY_STATUS_GRACE_SECS:-900}
+case "$STARTUP_ZERO_CONTEXT_SECS" in ''|*[!0-9]*|0) STARTUP_ZERO_CONTEXT_SECS=600 ;; esac
+case "$BUSY_NO_PROGRESS_SECS" in ''|*[!0-9]*|0) BUSY_NO_PROGRESS_SECS=1800 ;; esac
+case "$BUSY_STATUS_GRACE_SECS" in ''|*[!0-9]*|0) BUSY_STATUS_GRACE_SECS=900 ;; esac
 # A crew that DECLARED a pause (paused: <reason>, fm-classify-lib.sh) is idling on
 # a known external wait, so its stale pane is absorbed rather than wedge-escalated;
 # it re-surfaces once for a recheck every PAUSE_RESURFACE_SECS - far longer than the
@@ -305,18 +308,19 @@ busy_progress_surface() {  # <window> <since-file> <escalations-file> <label> <a
 }
 
 busy_progress_check() {  # <window> <task> <pane-text>
-  local win=$1 task=$2 pane=$3 key snapshot metrics prior since_file progress_file escalations_file now since age status_age label
+  local win=$1 task=$2 pane=$3 key snapshot metrics prior since_file progress_file escalations_file now since age status_age label harness
   key=$(printf '%s' "$win" | tr ':/. ' '____')
   progress_file="$STATE/.busy-progress-$key"
   since_file="$STATE/.busy-progress-since-$key"
   escalations_file="$STATE/.busy-progress-escalations-$key"
   now=$(date +%s)
   metrics=$(pane_progress_snapshot "$pane")
+  harness=$(fm_meta_get "$STATE/$task.meta" harness)
 
   # Startup is independently conclusive: context 0% while MCP servers spin is
   # neither model progress nor a declared external wait, even when the timer
   # itself makes the pane hash change every poll.
-  if pane_is_startup_spinner "$pane" && pane_context_is_zero "$pane"; then
+  if [ "$harness" = codex ] && pane_is_startup_spinner "$pane" && pane_context_is_zero "$pane"; then
     snapshot='startup-context=0'
     label='startup spinner remains at context 0%'
   elif pane_is_busy_wait_spin "$pane"; then
