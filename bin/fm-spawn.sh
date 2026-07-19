@@ -314,7 +314,7 @@ write_failed_treehouse_spawn_meta() {
     echo "mode=${MODE:-no-mistakes}"
     echo "yolo=${YOLO:-off}"
     echo "tasktmp=${TASK_TMP:-}"
-    [ -z "$TREEHOUSE_LEASE_PATH_FILE" ] || echo "treehouse_lease=1"
+    [ "$KIND" = secondmate ] || [ "$BACKEND" = orca ] || echo "treehouse_lease=1"
     echo "failed_spawn=1"
     [ "$FAILED_ENDPOINT_CLEANUP" != 1 ] || echo "endpoint_cleanup_pending=1"
     [ -z "${CODEX_CREWMATE_HOME:-}" ] || echo "codex_crewmate_home=$CODEX_CREWMATE_HOME"
@@ -409,6 +409,13 @@ spawn_abort_cleanup() {
       preserve_codex_home=1
       write_failed_treehouse_spawn_meta
     fi
+  fi
+  if [ "$status" -ne 0 ] && [ "$TREEHOUSE_LEASE_COMMITTED" = 1 ] && [ "$SPAWN_META_WRITTEN" = 1 ]; then
+    clean_codex_home=1
+    if ! treehouse_abort_endpoint_cleanup; then
+      preserve_codex_home=1
+    fi
+    write_failed_treehouse_spawn_meta
   fi
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
     clean_codex_home=1

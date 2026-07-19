@@ -1077,15 +1077,18 @@ test_codex_home_activation_failure_aborts_spawn() {
   expect_code 1 "$status" "Codex spawn must fail when terminal activation fails"
   assert_contains "$out" "isolated Codex home activation failed" \
     "Codex spawn did not report terminal activation failure"
-  assert_absent "$HOME_DIR/state/$id.meta" "terminal activation failure must not retain task metadata"
-  assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
-    "terminal activation failure did not return its worktree"
+  assert_grep 'failed_spawn=1' "$HOME_DIR/state/$id.meta" \
+    "terminal activation failure did not retain recovery metadata"
+  assert_grep 'treehouse_lease=1' "$HOME_DIR/state/$id.meta" \
+    "terminal activation failure did not retain its committed lease"
+  assert_no_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
+    "terminal activation failure must not return a committed lease implicitly"
   assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
     "terminal activation failure did not remove its task endpoint"
   for task_tmp in "/tmp/fm-$id".*; do
     [ ! -e "$task_tmp" ] || fail "terminal activation failure left task temporary root: $task_tmp"
   done
-  pass "Codex spawn synchronizes terminal activation failures"
+  pass "Codex spawn retains terminal activation failures for safe teardown"
 }
 
 test_codex_activation_uses_managed_data_root() {
