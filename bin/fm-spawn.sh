@@ -1866,7 +1866,6 @@ if [ -n "$TREEHOUSE_LEASE_PATH_FILE" ] && ! rm -f "$TREEHOUSE_LEASE_PATH_FILE"; 
 fi
 TREEHOUSE_LEASE_PATH_FILE=
 treehouse_lease_transaction_release
-[ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 SPAWN_META_WRITTEN=1
 
 sq_brief=$(shell_quote "$BRIEF")

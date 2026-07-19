@@ -289,7 +289,15 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fakebin/treehouse"
+  cat > "$fakebin/mktemp" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${FM_FAIL_TASK_MKTEMP:-0}" = 1 ] && [[ "$*" == *'/tmp/fm-'* ]]; then
+  exit 1
+fi
+exec /usr/bin/mktemp "$@"
+SH
+  chmod +x "$fakebin/treehouse" "$fakebin/mktemp"
   printf '%s\n' "$fakebin"
 }
 
@@ -304,14 +312,14 @@ run_spawn_lease_case() {
       FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
       FM_FAKE_LEASED_WORKTREE="$lease_path" FM_TREEHOUSE_REC="$rec" PATH="$fakebin:$PATH" \
-      "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex --scout 2>&1
+      "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --scout 2>&1
   else
     FM_ROOT_OVERRIDE='' FM_HOME="$home" \
       FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
       FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
       FM_FAKE_LEASED_WORKTREE="$lease_path" FM_TREEHOUSE_REC="$rec" PATH="$fakebin:$PATH" \
-      "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex 2>&1
+      "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude 2>&1
   fi
 }
 
@@ -422,7 +430,7 @@ test_spawn_refuses_to_roll_back_primary_checkout() {
 }
 
 test_spawn_rolls_back_lease_after_setup_failure() {
-  local home proj wt fakebin rec out status id task_tmp
+  local home proj wt fakebin rec out status id
   home="$TMP_ROOT/lease-setup-rollback-home"
   mkdir -p "$home/state" "$home/data"
   proj=$(make_repo "$TMP_ROOT/lease-setup-rollback-proj")
@@ -431,12 +439,8 @@ test_spawn_rolls_back_lease_after_setup_failure() {
   fakebin=$(make_spawn_lease_fakebin "$TMP_ROOT/lease-setup-rollback-fake")
   rec="$TMP_ROOT/lease-setup-rollback-treehouse.log"; : > "$rec"
   id="lease-setup-rollback-${RANDOM}${RANDOM}"
-  task_tmp="/tmp/fm-$id"
-  [ ! -e "$task_tmp" ] || fail "test task temp already exists: $task_tmp"
-  : > "$task_tmp"
 
-  out=$(run_spawn_lease_case "$home" "$id" "$proj" "$wt" "$fakebin" "$rec"); status=$?
-  rm -f "$task_tmp"
+  out=$(FM_FAIL_TASK_MKTEMP=1 run_spawn_lease_case "$home" "$id" "$proj" "$wt" "$fakebin" "$rec"); status=$?
   expect_code 1 "$status" "spawn must fail when post-lease task temp setup fails"
   assert_grep "treehouse return --force $wt" "$rec" \
     "post-lease setup failure did not return the leased worktree"
