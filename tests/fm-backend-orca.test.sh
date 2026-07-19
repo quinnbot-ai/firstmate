@@ -605,10 +605,9 @@ test_spawn_refuses_orca_nonisolated_worktree() {
   printf '1\n' > "$RESP/1.exit"
   printf '{"ok":true,"result":{"repo":{"id":"repo-bad"}}}\n' > "$RESP/2.out"
   printf '{"ok":true,"result":{"worktree":{"id":"wt-bad","path":"%s"},"terminal":{"handle":"term-bad"}}}\n' "$proj" > "$RESP/3.out"
-  printf '{"ok":true,"result":{"terminal":{"tail":["still live"]}}}\n' > "$RESP/4.out"
-  printf '{"ok":true,"result":{"closed":true}}\n' > "$RESP/5.out"
-  printf '{"ok":false,"error":{"code":"terminal_not_found","message":"terminal not found"}}\n' > "$RESP/6.out"
-  printf '{"ok":true,"result":{"removed":true}}\n' > "$RESP/7.out"
+  printf '{"ok":true,"result":{"closed":true}}\n' > "$RESP/4.out"
+  printf '{"ok":false,"error":{"code":"terminal_not_found","message":"terminal not found"}}\n' > "$RESP/5.out"
+  printf '{"ok":true,"result":{"removed":true}}\n' > "$RESP/6.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
