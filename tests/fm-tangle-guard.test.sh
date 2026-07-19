@@ -450,66 +450,73 @@ test_spawn_rolls_back_lease_after_isolation_failure() {
 }
 
 # A foreground-cwd read is a snapshot of whatever process currently owns the
-# pane. The real herdr incident observed git-upload-pack temporarily cwd'd
-# into a local origin's git directory before treehouse returned the shell to
-# its leased worktree. The fixture deliberately returns that non-root git
-# directory once, then the real linked-worktree root.
-test_spawn_retries_transient_non_worktree_cwd() {
-  local home proj wt origin_git fakebin rec out status id sequence polls
+# pane. The fixture deliberately returns an unrelated linked-worktree root
+# once, then the leased linked-worktree root.
+test_spawn_retries_transient_unrelated_worktree_cwd() {
+  local home proj wt unrelated fakebin rec out status id sequence polls
   home="$TMP_ROOT/cwd-race-home"
   mkdir -p "$home/state" "$home/data"
   proj=$(make_repo "$TMP_ROOT/cwd-race-proj")
   wt="$TMP_ROOT/cwd-race-wt"
-  origin_git="$TMP_ROOT/cwd-race-local-origin.git"
-  git init -q --bare "$origin_git"
+  unrelated="$TMP_ROOT/cwd-race-unrelated-wt"
   git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
+  git -C "$proj" worktree add -q --detach "$unrelated" >/dev/null 2>&1
   fakebin=$(make_spawn_lease_fakebin "$TMP_ROOT/cwd-race-fake")
   rec="$TMP_ROOT/cwd-race-treehouse.log"; : > "$rec"
   id=cwd-race-aa1
   sequence="$TMP_ROOT/cwd-race-paths"
   polls="$TMP_ROOT/cwd-race-polls"
-  printf '%s\n%s\n' "$origin_git" "$wt" > "$sequence"
+  printf '%s\n%s\n' "$unrelated" "$wt" > "$sequence"
 
   out=$(FM_FAKE_PANE_PATH_SEQUENCE="$sequence" FM_FAKE_PANE_POLL_FILE="$polls" \
     run_spawn_lease_case "$home" "$id" "$proj" "$wt" "$fakebin" "$rec"); status=$?
-  expect_code 0 "$status" "a transient git-directory cwd must not refuse a healthy spawn"$'\n'"$out"
+  expect_code 0 "$status" "a transient unrelated worktree cwd must not refuse a healthy spawn"$'\n'"$out"
   [ "$(cat "$polls")" -eq 2 ] || fail "transient cwd fixture did not advance to the worktree poll"
   assert_not_contains "$out" "did not yield an isolated worktree" \
-    "transient git-directory cwd reached the isolation refusal"
+    "transient unrelated worktree cwd reached the isolation refusal"
   assert_no_grep "treehouse return --force $wt" "$rec" \
     "healthy spawn returned its newly leased worktree after a transient cwd"
-  pass "fm-spawn: retries a transient non-worktree foreground cwd until the leased worktree appears"
+  assert_grep "worktree=$wt" "$home/state/$id.meta" \
+    "spawn metadata used the transient unrelated worktree instead of the leased worktree"
+  assert_absent "$unrelated/.claude/settings.local.json" \
+    "spawn installed a hook in the transient unrelated worktree"
+  assert_present "$wt/.claude/settings.local.json" \
+    "spawn did not install its hook in the leased worktree"
+  pass "fm-spawn: retries a transient unrelated worktree cwd until the leased worktree appears"
 }
 
 test_spawn_refusal_closes_pane_and_returns_lease() {
-  local home proj wt invalid fakebin rec out status id sequence polls closed
+  local home proj wt unrelated fakebin rec out status id sequence polls closed
   home="$TMP_ROOT/cwd-refusal-cleanup-home"
   mkdir -p "$home/state" "$home/data"
   proj=$(make_repo "$TMP_ROOT/cwd-refusal-cleanup-proj")
   wt="$TMP_ROOT/cwd-refusal-cleanup-wt"
-  invalid="$TMP_ROOT/cwd-refusal-cleanup-invalid"
-  mkdir -p "$invalid"
+  unrelated="$TMP_ROOT/cwd-refusal-cleanup-unrelated-wt"
   git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
+  git -C "$proj" worktree add -q --detach "$unrelated" >/dev/null 2>&1
   fakebin=$(make_spawn_lease_fakebin "$TMP_ROOT/cwd-refusal-cleanup-fake")
   rec="$TMP_ROOT/cwd-refusal-cleanup-treehouse.log"; : > "$rec"
   id=cwd-refusal-cleanup-bb2
   sequence="$TMP_ROOT/cwd-refusal-cleanup-paths"
   polls="$TMP_ROOT/cwd-refusal-cleanup-polls"
   closed="$TMP_ROOT/cwd-refusal-cleanup-closed"
-  printf '%s\n%s\n' "$invalid" "$invalid" > "$sequence"
+  printf '%s\n%s\n' "$unrelated" "$unrelated" > "$sequence"
 
   out=$(FM_FAKE_PANE_PATH_SEQUENCE="$sequence" FM_FAKE_PANE_POLL_FILE="$polls" \
     FM_FAKE_PANE_CLOSED_FILE="$closed" \
-    run_spawn_lease_case "$home" "$id" "$proj" "$invalid" "$fakebin" "$rec" '' "$wt"); status=$?
-  expect_code 1 "$status" "a stable non-worktree cwd must refuse the spawn"
-  assert_contains "$out" "did not yield an isolated worktree" "stable invalid cwd did not reach isolation refusal"
+    run_spawn_lease_case "$home" "$id" "$proj" "$unrelated" "$fakebin" "$rec" '' "$wt"); status=$?
+  expect_code 1 "$status" "a stable non-leased worktree cwd must refuse the spawn"
+  [ "$(cat "$polls")" -eq 2 ] || fail "stable non-leased worktree did not reach the refusal poll"
+  assert_contains "$out" "did not yield an isolated worktree" "stable non-leased worktree did not reach isolation refusal"
   assert_present "$closed" "isolation refusal left the launched pane open"
   assert_grep "tmux kill-window -t firstmate:fm-$id" "$rec" \
     "isolation refusal did not ask the backend to close its launched pane"
   assert_grep "treehouse return --force $wt" "$rec" \
     "isolation refusal did not return its leased worktree"
   assert_absent "$home/state/$id.meta" "refused spawn must not retain task metadata"
-  pass "fm-spawn: a genuine isolation refusal closes its pane and returns its lease"
+  assert_absent "$unrelated/.claude/settings.local.json" \
+    "refused spawn installed a hook in the non-leased worktree"
+  pass "fm-spawn: a genuine non-leased-worktree refusal closes its pane and returns its lease"
 }
 
 test_spawn_refuses_to_roll_back_primary_checkout() {
@@ -953,7 +960,7 @@ test_spawn_refuses_legacy_held_worktree
 test_spawn_refuses_detached_legacy_held_worktree
 test_spawn_leases_normal_treehouse_allocation
 test_spawn_rolls_back_lease_after_isolation_failure
-test_spawn_retries_transient_non_worktree_cwd
+test_spawn_retries_transient_unrelated_worktree_cwd
 test_spawn_refusal_closes_pane_and_returns_lease
 test_spawn_refuses_to_roll_back_primary_checkout
 test_spawn_rolls_back_lease_after_setup_failure

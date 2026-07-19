@@ -1502,7 +1502,7 @@ fi
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
 validate_spawn_worktree() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
+  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real lease_real
   wt_real=
   if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
     wt_real=
@@ -1513,7 +1513,12 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   if ! wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P); then
     wt_top_real=
   fi
-  if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
+  lease_real=
+  if [ -n "${TREEHOUSE_LEASE_PATH:-}" ]; then
+    lease_real=$(real_path_or_raw "$TREEHOUSE_LEASE_PATH")
+  fi
+  if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ] || \
+    { [ -n "$lease_real" ] && [ "$wt_real" != "$lease_real" ]; }; then
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
@@ -1702,7 +1707,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # A live foreground-cwd read can catch a short-lived child of `treehouse
   # get` instead of the pane shell itself. In particular, git-upload-pack for
   # a local-path origin temporarily reports that origin's git directory. A
-  # candidate that is already a worktree root is safe immediately; every
+  # candidate that is the canonical leased worktree root is safe immediately; every
   # other candidate needs two consecutive polls before validation may refuse
   # the spawn, so a child-process cwd cannot strand its pane or lease.
   cwd_candidate=''
@@ -1713,11 +1718,11 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     # Every other changed cwd is treehouse's result and must hit the isolation
     # validator, including invalid destinations, instead of timing out.
     if [ -n "$p" ] && [ "$p" != / ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
-      if spawn_path_is_worktree_root "$p"; then
+      p_real=$(real_path_or_raw "$p")
+      if spawn_path_is_worktree_root "$p" && [ "$p_real" = "$(real_path_or_raw "$TREEHOUSE_LEASE_PATH")" ]; then
         WT="$p"
         break
       fi
-      p_real=$(real_path_or_raw "$p")
       if [ "$p_real" = "$cwd_candidate" ]; then
         cwd_candidate_polls=$((cwd_candidate_polls + 1))
       else
