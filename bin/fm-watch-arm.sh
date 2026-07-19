@@ -269,6 +269,11 @@ arm_lease_stop() {
   fi
 }
 
+arm_lease_follow() {  # <watcher-pid>
+  arm_lease_stop
+  arm_lease_start "$1"
+}
+
 report_attached() {
   local age
   age=$(fm_path_age "$BEAT")
@@ -305,6 +310,7 @@ attach_and_wait() {
         if [ "$HEALTHY_PID" != "$attached_pid" ]; then
           cycle_log_append unknown unknown lock-replaced "attached:$HEALTHY_PID"
           attached_pid=$HEALTHY_PID
+          arm_lease_follow "$attached_pid" || return 1
           report_attached
           cycle_begin "$attached_pid" attached
       fi
@@ -314,6 +320,7 @@ attach_and_wait() {
     if wait_for_healthy_successor; then
       cycle_log_append unknown unknown attached-cycle-ended "attached:$HEALTHY_PID"
       attached_pid=$HEALTHY_PID
+      arm_lease_follow "$attached_pid" || return 1
       cycle_begin "$attached_pid" attached
       report_attached
       continue

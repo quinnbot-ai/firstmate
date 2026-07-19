@@ -91,12 +91,55 @@ pr_number_from_target() {
   printf '%s' "$n"
 }
 
+remote_repository() {  # <remote>
+  local remote=$1 url repository host path
+  url=$(git -C "$WT" remote get-url "$remote" 2>/dev/null) || return 1
+  case "$url" in
+    *://*) repository=${url#*://} ;;
+    *@*:* )
+      host=${url#*@}
+      host=${host%%:*}
+      path=${url#*:}
+      repository=$host/$path
+      ;;
+    *) repository=$url ;;
+  esac
+  repository=${repository%/}
+  repository=${repository%.git}
+  [ -n "$repository" ] || return 1
+  printf '%s' "$repository"
+}
+
+pr_repository() {  # <PR URL>
+  local target=$1 repository
+  case "$target" in
+    *"/pull/"*) repository=${target%/pull/*} ;;
+    *) return 1 ;;
+  esac
+  case "$repository" in
+    *://*) repository=${repository#*://} ;;
+  esac
+  repository=${repository%/}
+  repository=${repository%.git}
+  [ -n "$repository" ] || return 1
+  printf '%s' "$repository"
+}
+
+remote_for_pr() {  # <PR URL>
+  local target=$1 repository remote candidate
+  repository=$(pr_repository "$target") || return 1
+  while IFS= read -r remote; do
+    candidate=$(remote_repository "$remote" 2>/dev/null || true)
+    [ "$candidate" = "$repository" ] && { printf '%s' "$remote"; return 0; }
+  done < <(git -C "$WT" remote)
+  return 1
+}
+
 fetch_pull_head() {
-  local n=$1 resolved
-  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
+  local remote=$1 n=$2 resolved
   # Fetch into a private ref so a later base-branch fetch cannot clobber the
   # compare tip via FETCH_HEAD, and so we never review a stale local object.
-  git -C "$WT" fetch --quiet origin \
+  git -C "$WT" fetch --quiet "$remote" \
     "+refs/pull/$n/head:refs/fm-review/pull/$n/head" >/dev/null 2>&1 || return 1
   resolved=$(git -C "$WT" rev-parse --verify "refs/fm-review/pull/$n/head^{commit}" 2>/dev/null) || return 1
   [ -n "$resolved" ] || return 1
@@ -104,10 +147,14 @@ fetch_pull_head() {
 }
 
 resolve_pr_head() {
-  local pr_url=$1 recorded_head=$2 n resolved
+  local pr_url=$1 recorded_head=$2 n remote resolved
   n=$(pr_number_from_target "$pr_url") || true
-  if [ -n "$n" ]; then
-    if resolved=$(fetch_pull_head "$n"); then
+  remote=$(remote_for_pr "$pr_url" 2>/dev/null || true)
+  case "$pr_url" in
+    [0-9]*) [ -n "$remote" ] || remote=origin ;;
+  esac
+  if [ -n "$n" ] && [ -n "$remote" ]; then
+    if resolved=$(fetch_pull_head "$remote" "$n"); then
       printf '%s' "$resolved"
       return 0
     fi

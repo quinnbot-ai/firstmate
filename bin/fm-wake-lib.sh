@@ -116,7 +116,7 @@ fm_arm_lease_healthy() {  # <state> <watch-path> <watcher-pid> <home> [grace]
 
 fm_arm_lease_remove_stale() {  # <state> <watch-path> <watcher-pid> <home> [grace]
   local state=$1 watch_path=$2 watcher_pid=$3 home=$4 grace=${5:-${FM_ARM_LEASE_GRACE:-45}}
-  local lease owner pid identity current snapshot
+  local lease owner pid identity current watcher_pid_bound watcher_identity_bound watcher_current snapshot
   lease="$state/.watch-arm.lease"
   owner=$(fm_arm_lease_owner "$state" 2>/dev/null || true)
   [ -n "$owner" ] || return 1
@@ -124,9 +124,14 @@ fm_arm_lease_remove_stale() {  # <state> <watch-path> <watcher-pid> <home> [grac
   pid=$(cat "$owner/pid" 2>/dev/null || true)
   identity=$(cat "$owner/pid-identity" 2>/dev/null || true)
   current=$(fm_pid_identity "$pid" 2>/dev/null || true)
+  watcher_pid_bound=$(cat "$owner/watcher-pid" 2>/dev/null || true)
+  watcher_identity_bound=$(cat "$owner/watcher-identity" 2>/dev/null || true)
+  watcher_current=$(fm_pid_identity "$watcher_pid_bound" 2>/dev/null || true)
   # A live relay gets a short publication grace, but a stale heartbeat is a
   # failed relay even if its pid still exists and may be wedged.
-  if [ "$current" = "$identity" ] && [ "$(fm_path_age "$owner/heartbeat")" -lt "$grace" ]; then
+  if [ "$current" = "$identity" ] \
+    && [ "$watcher_current" = "$watcher_identity_bound" ] \
+    && [ "$(fm_path_age "$owner/heartbeat")" -lt "$grace" ]; then
     return 1
   fi
   [ "$(cat "$owner/pid" "$owner/pid-identity" "$owner/fm-home" "$owner/watcher-path" "$owner/watcher-pid" "$owner/watcher-identity" 2>/dev/null || true)" = "$snapshot" ] || return 1
@@ -232,6 +237,10 @@ fm_lock_clean_known_files() {
     "$lockdir/fm-home" \
     "$lockdir/pid-identity" \
     "$lockdir/watcher-path" \
+    "$lockdir/watcher-pid" \
+    "$lockdir/watcher-identity" \
+    "$lockdir/daemon-path" \
+    "$lockdir/heartbeat" \
     2>/dev/null || true
 }
 

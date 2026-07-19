@@ -510,6 +510,16 @@ test_meta_get_and_backend_of_meta() {
   pass "fm_meta_get / fm_backend_of_meta: read key=value, default backend to tmux"
 }
 
+test_tmux_meta_prefers_stable_window_id() {
+  local meta=$TMP_ROOT/tmux-window-id.meta
+  fm_write_meta "$meta" "window=firstmate:fm-old-label" "tmux_window_id=@42"
+  [ "$(fm_backend_target_of_meta "$meta")" = '@42' ] \
+    || fail "tmux metadata did not prefer its captured stable window id"
+  [ "$(fm_backend_meta_for_window '@42' "$TMP_ROOT")" = "$meta" ] \
+    || fail "stable tmux window id did not resolve back to its task metadata"
+  pass "tmux metadata uses a stable window id instead of the recyclable label"
+}
+
 test_resolve_selector_three_forms() {
   local state=$TMP_ROOT/resolve-state fakebin out
   mkdir -p "$state"
@@ -1097,6 +1107,7 @@ test_backend_validate_refuses_unknown
 test_backend_source_shell_portable
 test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta
+test_tmux_meta_prefers_stable_window_id
 test_resolve_selector_three_forms
 test_backend_of_selector_matches_explicit_target_meta
 test_send_conformance_old_vs_new
