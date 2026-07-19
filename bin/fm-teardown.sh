@@ -895,7 +895,7 @@ validate_task_temp_for_removal() {
 remove_codex_crewmate_home() {
   local home=$1
   [ -n "$home" ] || return 0
-  python3 "$FM_ROOT/bin/fm-codex-home.py" --remove --data "$DATA" --home "$home"
+  python3 "$FM_ROOT/bin/fm-codex-home.py" --remove --data "$DATA" --state "$STATE" --task-id "$ID" --home "$home"
 }
 
 close_recorded_endpoint() {

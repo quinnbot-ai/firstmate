@@ -270,7 +270,7 @@ write_failed_treehouse_spawn_meta() {
 remove_codex_crewmate_home() {
   local home=${CODEX_CREWMATE_HOME:-}
   [ -n "$home" ] || return 0
-  python3 "$FM_ROOT/bin/fm-codex-home.py" --remove --data "$DATA" --home "$home"
+  python3 "$FM_ROOT/bin/fm-codex-home.py" --remove --data "$DATA" --state "$STATE" --task-id "$ID" --home "$home"
 }
 
 remove_codex_home_activation_result() {

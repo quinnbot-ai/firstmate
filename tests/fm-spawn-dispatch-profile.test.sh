@@ -1202,6 +1202,46 @@ test_codex_home_activation_failure_aborts_spawn() {
   pass "Codex spawn synchronizes terminal activation failures"
 }
 
+test_codex_spawn_abort_passes_home_cleanup_identity() {
+  local rec id out status cleanup_args real_python
+  id=profile-codex-home-cleanup-z49
+  rec=$(make_spawn_case profile-codex-home-cleanup codex "$id")
+  read_case_record "$rec"
+  cleanup_args="$CASE_DIR/cleanup-args"
+  real_python=$(command -v python3)
+  cat > "$FAKEBIN_DIR/python3" <<SH
+#!/usr/bin/env bash
+set -u
+if [ "\${2:-}" = --remove ]; then
+  state=
+  task_id=
+  args=("\$@")
+  while [ "\$#" -gt 0 ]; do
+    case "\$1" in
+      --state) state=\${2:-}; shift 2 ;;
+      --task-id) task_id=\${2:-}; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  [ "\$state" = "\${FM_EXPECTED_STATE:?}" ] || exit 73
+  [ "\$task_id" = "\${FM_EXPECTED_TASK_ID:?}" ] || exit 74
+  printf '%s|%s\n' "\$state" "\$task_id" > "\${FM_CLEANUP_ARGS:?}"
+  exec "$real_python" "\${args[@]}"
+fi
+exec "$real_python" "\$@"
+SH
+  chmod +x "$FAKEBIN_DIR/python3"
+
+  out=$(FM_FAKE_ACTIVATION_RESULT=failed FM_EXPECTED_STATE="$HOME_DIR/state" \
+    FM_EXPECTED_TASK_ID="$id" FM_CLEANUP_ARGS="$cleanup_args" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "Codex spawn must fail when terminal activation fails"
+  [ "$(cat "$cleanup_args")" = "$HOME_DIR/state|$id" ] \
+    || fail "failed Codex spawn did not pass the cleanup task identity"
+  pass "Codex spawn identifies failed-home cleanup"
+}
+
 test_codex_activation_failure_accepts_absent_endpoint_after_close_error() {
   local rec id out status launch crew_home
   id=profile-codex-home-close-error-z79
@@ -1712,6 +1752,7 @@ test_codex_home_activation_result_refuses_symlink
 test_codex_home_activation_result_waits_for_empty_file
 test_codex_home_activation_refuses_existing_result
 test_codex_home_activation_failure_aborts_spawn
+test_codex_spawn_abort_passes_home_cleanup_identity
 test_codex_activation_failure_accepts_absent_endpoint_after_close_error
 test_codex_activation_uses_managed_data_root
 test_codex_teardown_preserves_failed_endpoint_metadata
