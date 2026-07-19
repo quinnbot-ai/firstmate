@@ -794,6 +794,14 @@ recover_treehouse_lease_handoffs() {
   [ -d "$STATE" ] || return 0
   for handoff in "$STATE"/.*.treehouse-lease.*; do
     [ -f "$handoff" ] || continue
+    if fm_treehouse_lease_handoff_is_writer_temp "$handoff"; then
+      rm -f "$handoff" || {
+        echo "error: stale treehouse lease handoff writer temporary could not be removed: $handoff" >&2
+        return 1
+      }
+      echo "cleared stale treehouse lease handoff writer temporary $handoff" >&2
+      continue
+    fi
     if [ ! -s "$handoff" ]; then
       echo "error: refusing to recover empty treehouse lease handoff $handoff; handoff retained" >&2
       return 1
