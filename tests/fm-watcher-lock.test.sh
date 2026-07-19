@@ -977,7 +977,7 @@ test_arm_lease_rejects_reused_pid_identity() {
 }
 
 test_arm_lease_reclaims_replaced_watcher() {
-  local dir state old_watcher new_watcher old_arm old_watcher_identity old_arm_identity
+  local dir state old_watcher new_watcher old_arm old_watcher_identity new_watcher_identity old_arm_identity
   dir=$(make_case arm-lease-replaced-watcher)
   state="$dir/state"
   sleep 60 & old_watcher=$!
@@ -985,6 +985,8 @@ test_arm_lease_reclaims_replaced_watcher() {
   sleep 60 & old_arm=$!
   old_watcher_identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$old_watcher") \
     || fail "could not identify replaced watcher fixture"
+  new_watcher_identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$new_watcher") \
+    || fail "could not identify replacement watcher fixture"
   old_arm_identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$old_arm") \
     || fail "could not identify prior arm fixture"
   mkdir "$state/.watch-arm.lease.owner"
@@ -998,6 +1000,11 @@ test_arm_lease_reclaims_replaced_watcher() {
   touch "$state/.watch-arm.lease.owner/heartbeat"
   kill "$old_watcher" 2>/dev/null || true
   wait "$old_watcher" 2>/dev/null || true
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$new_watcher" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$new_watcher_identity" > "$state/.watch.lock/pid-identity"
   FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_arm_lease_claim "$2" "$3" "$4" "$5"' _ "$LIB" "$state" "$WATCH" "$new_watcher" "$dir" \
     || fail "replacement arm could not reclaim a fresh lease bound to a dead watcher"
   [ "$(cat "$state/.watch-arm.lease/watcher-pid")" = "$new_watcher" ] \

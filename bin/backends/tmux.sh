@@ -170,8 +170,9 @@ fm_backend_tmux_current_command() {  # <target>
 #             pane. Callers must never treat unknown as a confirmed-dead
 #             signal (bin/fm-bootstrap.sh's secondmate-liveness sweep gates a
 #             respawn on `dead` only).
-fm_backend_tmux_agent_alive() {  # <target>
-  local target=$1 comm
+fm_backend_tmux_agent_alive() {  # <target> [expected-label]
+  local target=$1 expected_label=${2:-} comm
+  fm_backend_tmux_target_ready "$target" "$expected_label" || { printf 'unknown'; return 0; }
   comm=$(fm_backend_tmux_current_command "$target") || { printf 'unknown'; return 0; }
   comm=${comm#-}
   case "$comm" in

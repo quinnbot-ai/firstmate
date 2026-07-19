@@ -937,6 +937,9 @@ while :; do
   # identity-matched relay means future watcher exits could no longer notify the
   # primary.  Persist the failure before stopping so a replacement session sees
   # it even if the harness killed the only background relay.
+  if fm_arm_lease_watcher_bound "$STATE" "$WATCH_PATH" "$WATCHER_PID" "$FM_HOME"; then
+    ARM_LEASE_SEEN=1
+  fi
   if fm_arm_lease_healthy "$STATE" "$WATCH_PATH" "$WATCHER_PID" "$FM_HOME"; then
     ARM_LEASE_SEEN=1
   elif [ "$ARM_LEASE_SEEN" -eq 1 ]; then
