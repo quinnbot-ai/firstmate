@@ -160,7 +160,11 @@ make_spawn_fakebin() {
 set -u
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
-  *"#{pane_id}"*) exit 1 ;;
+  *"#{pane_id}"*)
+    case "$*" in
+      *:fm-abort-*) printf '%s\n' "can't find window: ${4:-unknown}" >&2; exit 1 ;;
+    esac
+    printf '%s\n' '@1'; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
@@ -210,7 +214,8 @@ run_spawn() {
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" FM_FAKE_LEASED_WORKTREE="$lease_path" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" FM_FAKE_LEASED_WORKTREE="$lease_path" \
+    FM_FAKE_PANE_ABSENT="${FM_FAKE_PANE_ABSENT:-0}" TMUX="fake,1,0" \
     PATH="$fakebin:$PATH" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude 2>&1
 }
@@ -226,13 +231,13 @@ test_spawn_isolation_abort() {
   mkdir -p "$TMP_ROOT/spawn-notgit" "$proj/sub"
 
   # Abort: the pane resolves to a plain non-git directory (not a worktree at all).
-  out=$(run_spawn "$home" abort-notgit-dd4 "$proj" "$TMP_ROOT/spawn-notgit" "$fakebin" "$TMP_ROOT/spawn-wt"); status=$?
+  out=$(FM_FAKE_PANE_ABSENT=1 run_spawn "$home" abort-notgit-dd4 "$proj" "$TMP_ROOT/spawn-notgit" "$fakebin" "$TMP_ROOT/spawn-wt"); status=$?
   expect_code 1 "$status" "spawn into a non-worktree dir should abort"
   assert_contains "$out" "did not yield an isolated worktree" "non-worktree spawn lacked the isolation error"
   assert_absent "$home/state/abort-notgit-dd4.meta" "aborted spawn must not record meta"
 
   # Abort: the pane resolves INTO the primary checkout (a subdir of PROJ_ABS).
-  out=$(run_spawn "$home" abort-primary-ee5 "$proj" "$proj/sub" "$fakebin" "$TMP_ROOT/spawn-wt"); status=$?
+  out=$(FM_FAKE_PANE_ABSENT=1 run_spawn "$home" abort-primary-ee5 "$proj" "$proj/sub" "$fakebin" "$TMP_ROOT/spawn-wt"); status=$?
   expect_code 1 "$status" "spawn landing inside the primary checkout should abort"
   assert_contains "$out" "did not yield an isolated worktree" "primary-checkout spawn lacked the isolation error"
 
@@ -259,6 +264,12 @@ set -u
 [ -z "${FM_TREEHOUSE_REC:-}" ] || printf 'tmux %s\n' "$*" >> "$FM_TREEHOUSE_REC"
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_id}"*)
+    case "$*" in
+      *:fm-lease-isolation-rollback-*|*:fm-lease-primary-rollback-*|*:fm-lease-setup-rollback-*|*:fm-lease-recovery-*|*:fm-lease-returned-tombstone-ff7*)
+        printf '%s\n' "can't find window: ${4:-unknown}" >&2; exit 1 ;;
+    esac
+    printf '%s\n' '@1'; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;

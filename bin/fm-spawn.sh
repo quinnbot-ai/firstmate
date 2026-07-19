@@ -1370,7 +1370,10 @@ treehouse_lease_handoff_return() {  # <handoff> <lease-path>
     return 1
   fi
   fm_treehouse_lease_handoff_write "$handoff" returned "$lease_path" || return 1
-  rm -f "$handoff"
+  if ! rm -f "$handoff"; then
+    echo "warning: returned treehouse lease handoff retained at $handoff" >&2
+  fi
+  return 0
 }
 
 recover_treehouse_lease_handoffs() {
@@ -1672,6 +1675,10 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   IFS= read -r TREEHOUSE_LEASE_PATH < "$TREEHOUSE_LEASE_PATH_FILE" || true
   if [ "$(treehouse_lease_path_validation "$TREEHOUSE_LEASE_PATH")" != valid ]; then
     echo "error: treehouse returned an invalid leased worktree path '$TREEHOUSE_LEASE_PATH' for $ID" >&2
+    exit 1
+  fi
+  if ! fm_treehouse_lease_handoff_write "$TREEHOUSE_LEASE_PATH_FILE" leased "$TREEHOUSE_LEASE_PATH"; then
+    echo "error: could not durably record treehouse lease $TREEHOUSE_LEASE_PATH for $ID" >&2
     exit 1
   fi
   sq_treehouse_lease_path=$(shell_quote "$TREEHOUSE_LEASE_PATH")
