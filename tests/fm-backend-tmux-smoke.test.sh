@@ -48,6 +48,12 @@ TARGET="$SESSION:$WINDOW"
 
 tmux new-session -d -s "$SESSION" -x 200 -y 50 \
   || fail "real tmux: new-session failed"
+# Keep the real-adapter smoke isolated from the user's interactive shell
+# startup.  Some shells accept text sent to a detached pane before they accept
+# Enter, which makes this adapter test exercise shell configuration rather than
+# tmux's send/capture contract.
+tmux set-option -t "$SESSION" default-command 'exec /bin/bash --noprofile --norc -i' \
+  || fail "real tmux: unable to configure the isolated test shell"
 fm_backend_tmux_create_task "$SESSION" "$WINDOW" "$HOME" \
   || fail "fm_backend_tmux_create_task failed to create the task window"
 tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -qx "$WINDOW" \
