@@ -33,8 +33,10 @@ They were exercised against a disposable `--no-hardlinks` scratch clone during t
 
 ```sh
 # From inside any clone of the firstmate repo:
-git fetch fork '+refs/heads/main:refs/remotes/fork/main'
-git fetch origin '+refs/heads/main:refs/remotes/origin/main'
+git fetch fork '+refs/heads/main:refs/remotes/fork/main' \
+  || { echo "STOP: could not refresh fork/main"; exit 1; }
+git fetch origin '+refs/heads/main:refs/remotes/origin/main' \
+  || { echo "STOP: could not refresh origin/main"; exit 1; }
 
 # 1. Prove local main's content is fully contained in fork/main (not just
 #    similar - a literal ancestor relationship, the strongest possible proof).
@@ -64,7 +66,8 @@ The sequence below updates ref, index, and working tree together in one atomic `
 cd /Users/nick/ventures/agent-ops/firstmate   # the primary checkout - confirm this before running anything
 
 # 0. Re-run the pre-checks above against THIS checkout first.
-git fetch fork '+refs/heads/main:refs/remotes/fork/main'
+git fetch fork '+refs/heads/main:refs/remotes/fork/main' \
+  || { echo "STOP: could not refresh fork/main"; exit 1; }
 git merge-base --is-ancestor main fork/main \
   && echo "OK: proceeding" || { echo "STOP: see pre-checks above"; exit 1; }
 git log --oneline fork/main..main   # must be empty
