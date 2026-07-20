@@ -153,11 +153,8 @@ remote_for_pr() {  # <PR URL>
 
 fetch_pull_head() {
   local remote=$1 n=$2 resolved
-  # Fetch into a private ref so a later base-branch fetch cannot clobber the
-  # compare tip via FETCH_HEAD, and so we never review a stale local object.
-  git -C "$WT" fetch --quiet "$remote" \
-    "+refs/pull/$n/head:refs/fm-review/pull/$n/head" >/dev/null 2>&1 || return 1
-  resolved=$(git -C "$WT" rev-parse --verify "refs/fm-review/pull/$n/head^{commit}" 2>/dev/null) || return 1
+  git -C "$WT" fetch --quiet "$remote" "refs/pull/$n/head" >/dev/null 2>&1 || return 1
+  resolved=$(git -C "$WT" rev-parse --verify 'FETCH_HEAD^{commit}' 2>/dev/null) || return 1
   [ -n "$resolved" ] || return 1
   printf '%s' "$resolved"
 }
