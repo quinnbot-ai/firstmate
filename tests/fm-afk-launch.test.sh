@@ -75,7 +75,7 @@ unit_clear_stale() {
 # current session's buffered escalations.
 # ---------------------------------------------------------------------------
 unit_fresh_vs_refresh() {
-  local st sleep_pid lock owner
+  local st sleep_pid lock owner identity
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-refresh.XXXXXX")
   mkdir -p "$st/state"
   : > "$st/state/.subsuper-escalations"
@@ -89,7 +89,9 @@ unit_fresh_vs_refresh() {
   mkdir "$owner"
   ln -s "$owner" "$lock"
   printf '%s' "$sleep_pid" > "$owner/pid"
-  ( FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleep_pid" > "$owner/pid-identity" 2>/dev/null ) || true
+  identity=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c \
+    '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$sleep_pid" 2>/dev/null) || true
+  printf '%s\n' "$identity" > "$owner/pid-identity"
   printf '%s\n' "$st" > "$owner/fm-home"
   printf '%s\n' "$ROOT/bin/fm-supervise-daemon.sh" > "$owner/daemon-path"
   touch "$owner/heartbeat"
