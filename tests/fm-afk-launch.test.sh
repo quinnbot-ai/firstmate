@@ -75,7 +75,7 @@ unit_clear_stale() {
 # current session's buffered escalations.
 # ---------------------------------------------------------------------------
 unit_fresh_vs_refresh() {
-  local st sleep_pid lock
+  local st sleep_pid lock owner
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-refresh.XXXXXX")
   mkdir -p "$st/state"
   : > "$st/state/.subsuper-escalations"
@@ -85,9 +85,14 @@ unit_fresh_vs_refresh() {
   sleep 600 &
   sleep_pid=$!
   lock="$st/state/.supervise-daemon.lock"
-  mkdir -p "$lock"
-  printf '%s' "$sleep_pid" > "$lock/pid"
-  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleep_pid" > "$lock/pid-identity" 2>/dev/null ) || true
+  owner="$lock.owner"
+  mkdir "$owner"
+  ln -s "$owner" "$lock"
+  printf '%s' "$sleep_pid" > "$owner/pid"
+  ( FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleep_pid" > "$owner/pid-identity" 2>/dev/null ) || true
+  printf '%s\n' "$st" > "$owner/fm-home"
+  printf '%s\n' "$ROOT/bin/fm-supervise-daemon.sh" > "$owner/daemon-path"
+  touch "$owner/heartbeat"
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$START" >/dev/null 2>&1
   if [ -e "$st/state/.subsuper-escalations" ] && [ -e "$st/state/.subsuper-inject-wedged" ]; then
     pass "refresh: daemon already alive - stale artifacts preserved (current session's buffer kept)"
@@ -671,13 +676,20 @@ unit_stop_confirms_daemon_exit() {
 }
 
 unit_refresh_validates_record() {
-  local st daemon_pid
+  local st daemon_pid lock owner
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-refresh-record.XXXXXX")
-  mkdir -p "$st/state/.supervise-daemon.lock"
+  mkdir -p "$st/state"
+  lock="$st/state/.supervise-daemon.lock"
+  owner="$lock.owner"
+  mkdir "$owner"
+  ln -s "$owner" "$lock"
   printf 'tmux\tonly-two-fields\n' > "$st/state/.afk-daemon-terminal"
   sleep 30 & daemon_pid=$!
-  printf '%s' "$daemon_pid" > "$st/state/.supervise-daemon.lock/pid"
-  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$st/state/.supervise-daemon.lock/pid-identity" )
+  printf '%s' "$daemon_pid" > "$owner/pid"
+  ( FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$owner/pid-identity" )
+  printf '%s\n' "$st" > "$owner/fm-home"
+  printf '%s\n' "$ROOT/bin/fm-supervise-daemon.sh" > "$owner/daemon-path"
+  touch "$owner/heartbeat"
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
     FM_SUPERVISOR_BACKEND=tmux bash -c '
       . "$1"
@@ -686,6 +698,38 @@ unit_refresh_validates_record() {
     pass "refresh record: malformed terminal identity fails closed"
   else
     fail "refresh record: malformed terminal identity was accepted"
+  fi
+  kill "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  rm -rf "$st"
+}
+
+unit_stale_lease_restarts_launch_paths() {
+  local st daemon_pid lock owner started native
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stale-lease.XXXXXX")
+  mkdir -p "$st/state"
+  sleep 60 & daemon_pid=$!
+  lock="$st/state/.supervise-daemon.lock"
+  owner="$lock.owner"
+  mkdir "$owner"
+  ln -s "$owner" "$lock"
+  printf '%s\n' "$daemon_pid" > "$owner/pid"
+  ( FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$owner/pid-identity" )
+  printf '%s\n' "$st" > "$owner/fm-home"
+  printf '%s\n' "$ROOT/bin/fm-supervise-daemon.sh" > "$owner/daemon-path"
+  touch -t 200001010000 "$owner/heartbeat"
+  started="$st/started"
+  native="$st/state/.afk-daemon-terminal"
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused FM_SUPERVISOR_BACKEND=tmux bash -c '
+    . "$1"
+    marker=$2
+    fm_afk_launch_create_tmux() { : > "$marker"; }
+    fm_afk_launch_start
+    fm_afk_launch_start_native
+  ' _ "$LAUNCH" "$started" && [ -e "$started" ] && [ -f "$native" ]; then
+    pass "stale lease: launch and native entry both replace a stale daemon lease"
+  else
+    fail "stale lease: a launch path refreshed the identity-matched stale daemon"
   fi
   kill "$daemon_pid" 2>/dev/null || true
   wait "$daemon_pid" 2>/dev/null || true
@@ -887,6 +931,7 @@ unit_lock_requires_complete_metadata
 unit_stop_surfaces_afk_removal_failure
 unit_stop_confirms_daemon_exit
 unit_refresh_validates_record
+unit_stale_lease_restarts_launch_paths
 unit_clear_failure_aborts_entry
 unit_confirmed_absence_succeeds
 unit_incomplete_restore_retains_backup

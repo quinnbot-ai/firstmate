@@ -327,7 +327,7 @@ fm_afk_launch_herdr_recover_created() {  # <session> <label>
 # owns it, close the leaked terminal by exact id and drop the record.
 fm_afk_launch_reconcile() {
   local read_result
-  if daemon_lock_held_by_live_daemon; then
+  if fm_daemon_lease_healthy "$FM_AFK_STATE" "$FM_AFK_DAEMON" "$FM_HOME"; then
     return 0
   fi
   fm_afk_launch_record_read
@@ -457,7 +457,7 @@ fm_afk_launch_start() {
 
   mkdir -p "$FM_AFK_LAUNCH_STATE"
 
-  if daemon_lock_held_by_live_daemon; then
+  if fm_daemon_lease_healthy "$FM_AFK_STATE" "$FM_AFK_DAEMON" "$FM_HOME"; then
     fm_afk_launch_record_validate_if_present || return 1
     if ! fm_afk_launch_flag_write; then
       fm_afk_launch_log "failed to refresh away-mode flag"
@@ -519,7 +519,7 @@ fm_afk_launch_start_native() {
     fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering away mode"
     return 1
   fi
-  if daemon_lock_held_by_live_daemon; then
+  if fm_daemon_lease_healthy "$FM_AFK_STATE" "$FM_AFK_DAEMON" "$FM_HOME"; then
     fm_afk_launch_record_validate_if_present || return 1
     fm_afk_launch_flag_write || return 1
     fm_afk_launch_log "daemon already running; refreshed away-mode flag"
