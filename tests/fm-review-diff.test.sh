@@ -134,6 +134,9 @@ test_pr_meta_fetches_pull_head_without_recorded_sha() {
   assert_not_contains "$out" 'stale-local' "pr-fetch: diff must not use the stale local branch"
   assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
     "pr-fetch: should not warn when fetch succeeds"
+  if git -C "$case_dir/wt" show-ref --verify --quiet 'refs/fm-review/pull/9/head'; then
+    fail "pr-fetch: review fetch must not create a shared pull-head ref"
+  fi
   pass "fm-review-diff fetches refs/pull/<n>/head when pr_head= is absent"
 }
 
