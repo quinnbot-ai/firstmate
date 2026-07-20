@@ -493,6 +493,7 @@ test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails() {
   assert_grep "window=fm-$id" "$state/$id.meta" "preserved pathless metadata missing stable window alias"
   assert_grep "backend=orca" "$state/$id.meta" "preserved pathless metadata missing backend=orca"
   assert_grep "orca_worktree_id=wt-pathless-cleanup" "$state/$id.meta" "preserved pathless metadata missing Orca worktree id"
+  assert_grep "orca_terminal_absent=1" "$state/$id.meta" "preserved pathless metadata missing confirmed terminal absence"
   assert_no_grep "terminal=" "$state/$id.meta" "preserved pathless metadata should not invent a terminal handle"
   pass "fm-spawn.sh --backend orca: preserves metadata when pathless cleanup fails"
 }
@@ -1038,13 +1039,14 @@ test_peek_send_and_crew_state_route_through_orca_meta() {
     FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_SEND_SETTLE=0 \
     "$ROOT/bin/fm-peek.sh" "fm-$id" 10 )
   [ "$out" = ready ] || fail "fm-peek should read through Orca metadata, got '$out'"
-  printf '{"ok":true,"result":{"send":{"handle":"term-io","accepted":true}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["│ > │"]}}}\n' > "$RESP/2.out"
   printf '{"ok":true,"result":{"send":{"handle":"term-io","accepted":true}}}\n' > "$RESP/3.out"
-  printf '{"ok":true,"result":{"terminal":{"tail":["│ > │"]}}}\n' > "$RESP/4.out"
+  printf '{"ok":true,"result":{"send":{"handle":"term-io","accepted":true}}}\n' > "$RESP/4.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["│ > │"]}}}\n' > "$RESP/5.out"
   PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$neutral" FM_HOME="$neutral" FM_STATE_OVERRIDE="$state" FM_SEND_SETTLE=0 \
     "$ROOT/bin/fm-send.sh" "fm-$id" "hello orca"
-  printf '{"ok":true,"result":{"terminal":{"tail":["idle prompt"]}}}\n' > "$RESP/5.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["idle prompt"]}}}\n' > "$RESP/6.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-crew-state.sh" "$id" )
   assert_contains "$out" "state: unknown" "crew-state should fall back cleanly for an idle Orca scout"

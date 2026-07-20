@@ -153,13 +153,20 @@ fm_backend_tmux_current_command() {  # <target>
 #             pane. Callers must never treat unknown as a confirmed-dead
 #             signal (bin/fm-bootstrap.sh's secondmate-liveness sweep gates a
 #             respawn on `dead` only).
-fm_backend_tmux_agent_alive() {  # <target>
-  local target=$1 comm
+fm_backend_tmux_agent_alive() {  # <target> [harness] [isolated-codex-home]
+  local target=$1 harness=${2:-} isolated_codex_home=${3:-} comm
   comm=$(fm_backend_tmux_current_command "$target") || { printf 'unknown'; return 0; }
   comm=${comm#-}
   case "$comm" in
     '') printf 'unknown' ;;
     *claude*|*codex*|*opencode*|*grok*) printf 'alive' ;;
+    python|python3)
+      if [ "$harness" = codex ] && [ -n "$isolated_codex_home" ]; then
+        printf 'alive'
+      else
+        printf 'unknown'
+      fi
+      ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'dead' ;;
     *) printf 'unknown' ;;
   esac

@@ -337,6 +337,27 @@ test_dispatch_composer_state_routes_cmux() {
   pass "fm_backend_composer_state: routes cmux to the cmux composer classifier"
 }
 
+test_dispatch_agent_liveness_requires_visible_composer() {
+  local dir fb out target
+  target="aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"
+  dir="$TMP_ROOT/agent-liveness"; mkdir -p "$dir/responses"
+  cmux_panes_response "$dir" 1 "bbbbbbbb-1111-1111-1111-111111111111"
+  cmux_read_screen_response "$dir" 2 $'  ╭────────────────────────╮\n  │ ❯                      │\n  ╰──────── Composer ─────╯'
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive cmux "$1"' "$ROOT" "$target" )
+  [ "$out" = alive ] || fail "a visible cmux composer should confirm agent liveness, got '$out'"
+
+  dir="$TMP_ROOT/agent-liveness-shell"; mkdir -p "$dir/responses"
+  cmux_panes_response "$dir" 1 "bbbbbbbb-1111-1111-1111-111111111111"
+  cmux_read_screen_response "$dir" 2 'plain-shell-prompt$ '
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive cmux "$1"' "$ROOT" "$target" )
+  [ "$out" = unknown ] || fail "a bare cmux shell must not confirm agent liveness, got '$out'"
+  pass "fm_backend_agent_alive: cmux requires a visible composer before send"
+}
+
 # --- ping_state / ensure_running ---------------------------------------------
 
 test_ping_state_ok() {
@@ -1118,6 +1139,7 @@ test_scoped_title_changes_with_root_path
 test_dispatch_routes_cmux_backend
 test_dispatch_busy_state_unknown_for_cmux
 test_dispatch_composer_state_routes_cmux
+test_dispatch_agent_liveness_requires_visible_composer
 test_ping_state_ok
 test_ping_state_denied
 test_ping_state_unauth

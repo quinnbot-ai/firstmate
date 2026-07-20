@@ -777,23 +777,32 @@ process.exit(process.argv[1] === "0" ? 1 : 2);
 #   dead    - CONFIDENTLY not an agent: a bare shell (tmux) or a
 #             structurally-gone/no-agent-registered pane (herdr).
 #   unknown - anything ambiguous, unreadable, or unverified for this backend.
-# Scoped to today's --secondmate-spawn-capable backends with an empirically
-# verified classifier: tmux (docs/tmux-backend.md "Agent liveness probe") and
-# herdr (docs/herdr-backend.md "Agent liveness probe reuses the husk
-# classifier"). zellij, orca, and cmux report unknown until independently
-# verified - future work, not a functional gap for the two backends
-# --secondmate spawns actually support today plus tmux's reference path.
+# Tmux and herdr classify their native process state directly.
+# Orca and cmux classify a visible harness composer as alive, because a bare
+# shell cannot produce that bounded composer structure.
+# Zellij reports unknown until it has an equally reliable classifier.
 # Callers must treat unknown exactly like an unreadable target: NEVER license
 # an action from it alone - the secondmate-liveness sweep gates a respawn on
 # `dead` only, precisely so a momentary read glitch can never duplicate a
 # live supervisor.
-fm_backend_agent_alive() {  # <backend> <target>
-  local backend=$1 target=$2
+fm_backend_agent_alive() {  # <backend> <target> [harness] [isolated-codex-home] [expected-label]
+  local backend=$1 target=$2 harness=${3:-} isolated_codex_home=${4:-} expected_label=${5:-} composer
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   case "$backend" in
-    tmux) fm_backend_tmux_agent_alive "$target" ;;
+    tmux) fm_backend_tmux_agent_alive "$target" "$harness" "$isolated_codex_home" ;;
     herdr) fm_backend_herdr_agent_alive "$target" ;;
-    *) printf 'unknown' ;;
+    zellij) printf 'unknown'; return 0 ;;
+    orca) composer=$(fm_backend_orca_composer_state "$target") ;;
+    cmux) composer=$(fm_backend_cmux_composer_state "$target" "$expected_label") ;;
+    *) printf 'unknown'; return 0 ;;
+  esac
+  case "$backend" in
+    orca|cmux)
+      case "$composer" in
+        empty|pending) printf 'alive' ;;
+        *) printf 'unknown' ;;
+      esac
+      ;;
   esac
 }
 

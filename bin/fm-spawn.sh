@@ -287,6 +287,9 @@ orca_spawn_abort_cleanup() {
   local cleanup_failed=0 terminal_absent=1
   [ "$ORCA_ABORT_CLEANUP" = 1 ] || return 0
   ORCA_ABORT_CLEANUP=0
+  if [ -z "${ORCA_TERMINAL:-}" ]; then
+    ORCA_TERMINAL_CONFIRMED_ABSENT=1
+  fi
   if [ -n "${ORCA_TERMINAL:-}" ]; then
     terminal_absent=0
     if fm_backend_target_absent orca "$ORCA_TERMINAL"; then

@@ -221,6 +221,23 @@ test_metadata_target_requires_confirmed_harness_agent() {
   pass "fm-send strict: metadata target requires confirmed harness liveness before typing"
 }
 
+test_isolated_codex_worker_uses_wrapper_liveness() {
+  local dir fb home err log rc got
+  dir="$TMP_ROOT/isolated-codex"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home isolated-codex); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  fm_write_meta "$home/state/isolated-codex.meta" \
+    "window=sess:fm-isolated-codex" "kind=ship" "harness=codex" "codex_crewmate_home=$home/codex-home"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=python3 FM_SEND_SETTLE=0 \
+    "$SEND" isolated-codex "hello from the coordinator" >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "isolated Codex workers should accept sends while their wrapper owns the foreground Python process"
+  got=$(cat "$log")
+  assert_contains "$got" "target=sess:fm-isolated-codex literal=1 arg=hello from the coordinator" "isolated Codex send should type to the wrapper-owned pane"
+  assert_contains "$got" "target=sess:fm-isolated-codex literal=0 arg=Enter" "isolated Codex send should submit to the wrapper-owned pane"
+  pass "fm-send strict: isolated Codex wrapper is recognized as a live agent"
+}
+
 test_herdr_unknown_submit_confirmation_fails() {
   local dir fb home err rc
   dir="$TMP_ROOT/herdr-unknown-submit"; mkdir -p "$dir"
@@ -246,4 +263,5 @@ test_unmatched_single_colon_target_must_exist
 test_healthy_fm_id_send_still_works
 test_metadata_target_requires_live_harness_agent
 test_metadata_target_requires_confirmed_harness_agent
+test_isolated_codex_worker_uses_wrapper_liveness
 test_herdr_unknown_submit_confirmation_fails
