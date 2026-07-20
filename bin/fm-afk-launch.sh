@@ -52,7 +52,8 @@ FM_AFK_LAUNCH_STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 FM_AFK_LAUNCH_RECORD="$FM_AFK_LAUNCH_STATE/.afk-daemon-terminal"
 FM_AFK_LAUNCH_LOCK="$FM_AFK_LAUNCH_STATE/.afk-launch.lock"
 FM_AFK_LAUNCH_WS_LABEL="firstmate-afk-daemon"
-FM_AFK_LAUNCH_LOCK_CREATING=0
+FM_AFK_LAUNCH_LOCK_OWNER=
+FM_AFK_LAUNCH_LOCK_NONCE="${BASHPID:-$$}.${RANDOM}.${RANDOM}"
 
 # shellcheck source=bin/fm-backend.sh
 . "$FM_AFK_LAUNCH_DIR/fm-backend.sh"
@@ -69,37 +70,46 @@ set +e
 fm_afk_launch_log() { printf 'fm-afk-launch: %s\n' "$*" >&2; }
 
 fm_afk_launch_lock_owned() {
-  local pid expected actual
-  [ -d "$FM_AFK_LAUNCH_LOCK" ] || return 1
-  pid=$(cat "$FM_AFK_LAUNCH_LOCK/pid" 2>/dev/null) || return 1
-  expected=$(cat "$FM_AFK_LAUNCH_LOCK/pid-identity" 2>/dev/null) || return 1
+  local pid expected actual nonce owner
+  [ -L "$FM_AFK_LAUNCH_LOCK" ] || return 1
+  owner=$(readlink "$FM_AFK_LAUNCH_LOCK" 2>/dev/null) || return 1
+  [ -n "$owner" ] && [ -d "$owner" ] || return 1
+  pid=$(cat "$owner/pid" 2>/dev/null) || return 1
+  expected=$(cat "$owner/pid-identity" 2>/dev/null) || return 1
+  nonce=$(cat "$owner/nonce" 2>/dev/null) || return 1
   actual=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
-  [ -n "$expected" ] && [ "$actual" = "$expected" ]
+  [ -n "$expected" ] && [ -n "$nonce" ] && [ "$actual" = "$expected" ]
 }
 
 fm_afk_launch_lock_acquire() {
-  local i incomplete=0 identity
+  local i incomplete=0 identity owner
   mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
   for i in $(seq 1 200); do
-    if mkdir "$FM_AFK_LAUNCH_LOCK" 2>/dev/null; then
-      FM_AFK_LAUNCH_LOCK_CREATING=1
-      if ! printf '%s' "$$" > "$FM_AFK_LAUNCH_LOCK/pid"; then
-        FM_AFK_LAUNCH_LOCK_CREATING=0
-        rm -rf "$FM_AFK_LAUNCH_LOCK"
+    owner="$FM_AFK_LAUNCH_LOCK.owner.$$.$FM_AFK_LAUNCH_LOCK_NONCE"
+    if mkdir "$owner" 2>/dev/null; then
+      FM_AFK_LAUNCH_LOCK_OWNER=$owner
+      if ! printf '%s' "$$" > "$owner/pid"; then
+        rm -rf "$owner"
+        FM_AFK_LAUNCH_LOCK_OWNER=
         return 1
       fi
       identity=$(fm_pid_identity "$$" 2>/dev/null) || {
-        FM_AFK_LAUNCH_LOCK_CREATING=0
-        rm -rf "$FM_AFK_LAUNCH_LOCK"
+        rm -rf "$owner"
+        FM_AFK_LAUNCH_LOCK_OWNER=
         return 1
       }
-      if [ -z "$identity" ] || ! printf '%s' "$identity" > "$FM_AFK_LAUNCH_LOCK/pid-identity"; then
-        FM_AFK_LAUNCH_LOCK_CREATING=0
-        rm -rf "$FM_AFK_LAUNCH_LOCK"
+      if [ -z "$identity" ] \
+        || ! printf '%s' "$identity" > "$owner/pid-identity" \
+        || ! printf '%s' "$FM_AFK_LAUNCH_LOCK_NONCE" > "$owner/nonce"; then
+        rm -rf "$owner"
+        FM_AFK_LAUNCH_LOCK_OWNER=
         return 1
       fi
-      FM_AFK_LAUNCH_LOCK_CREATING=0
-      return 0
+      if ln -s "$owner" "$FM_AFK_LAUNCH_LOCK" 2>/dev/null; then
+        return 0
+      fi
+      rm -rf "$owner"
+      FM_AFK_LAUNCH_LOCK_OWNER=
     fi
     if [ ! -s "$FM_AFK_LAUNCH_LOCK/pid" ] || [ ! -s "$FM_AFK_LAUNCH_LOCK/pid-identity" ]; then
       incomplete=$((incomplete + 1))
@@ -122,12 +132,17 @@ fm_afk_launch_lock_acquire() {
 }
 
 fm_afk_launch_lock_release() {
-  local pid
-  pid=$(cat "$FM_AFK_LAUNCH_LOCK/pid" 2>/dev/null || true)
-  if [ "$pid" != "$$" ] && [ "$FM_AFK_LAUNCH_LOCK_CREATING" != "1" ]; then
+  local owner
+  owner=$FM_AFK_LAUNCH_LOCK_OWNER
+  [ -n "$owner" ] || return 0
+  if [ ! -L "$FM_AFK_LAUNCH_LOCK" ] || [ "$(readlink "$FM_AFK_LAUNCH_LOCK" 2>/dev/null || true)" != "$owner" ]; then
+    rm -rf "$owner"
+    FM_AFK_LAUNCH_LOCK_OWNER=
     return 0
   fi
-  rm -rf "$FM_AFK_LAUNCH_LOCK"
+  rm -f "$FM_AFK_LAUNCH_LOCK" || return 1
+  rm -rf "$owner"
+  FM_AFK_LAUNCH_LOCK_OWNER=
 }
 
 fm_afk_launch_usage() {
