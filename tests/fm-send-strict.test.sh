@@ -175,6 +175,20 @@ test_unmatched_single_colon_target_must_exist() {
   pass "fm-send strict: unmatched single-colon explicit targets must verify live before sending"
 }
 
+test_explicit_target_requires_live_harness_agent() {
+  local dir fb home err log rc
+  dir="$TMP_ROOT/dead-explicit-agent"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home dead-explicit-agent); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_SEND_SETTLE=0 \
+    "$SEND" sess:live "must not reach the shell" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "fm-send must reject an explicit target whose harness has exited"
+  assert_contains "$(cat "$err")" "harness agent is dead" "explicit target refusal should explain the liveness verdict"
+  [ ! -s "$log" ] || fail "fm-send typed into an explicit dead agent shell"$'\n'"$(cat "$log")"
+  pass "fm-send strict: explicit targets require a live harness agent before typing"
+}
+
 test_healthy_fm_id_send_still_works() {
   local dir fb home err log rc got
   dir="$TMP_ROOT/healthy"; mkdir -p "$dir"
@@ -260,6 +274,7 @@ test_unset_fm_home_fails
 test_unresolvable_target_does_not_tmux_fallback
 test_prefixless_herdr_pane_id_fails
 test_unmatched_single_colon_target_must_exist
+test_explicit_target_requires_live_harness_agent
 test_healthy_fm_id_send_still_works
 test_metadata_target_requires_live_harness_agent
 test_metadata_target_requires_confirmed_harness_agent
