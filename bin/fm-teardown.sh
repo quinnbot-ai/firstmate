@@ -820,6 +820,13 @@ validate_worktree_teardown_safety() {
     secondmate|scout) return 0 ;;
   esac
 
+  # Read-only git queries may succeed while an active index lock still blocks
+  # the destructive return below, so prove the lock safe before treating this
+  # worktree as teardown-eligible.
+  if worktree_safety_blocked_by_lock "teardown safety checks"; then
+    return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
+  fi
+
   if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
     if worktree_safety_blocked_by_lock "uncommitted changes"; then
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
