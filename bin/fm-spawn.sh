@@ -204,6 +204,7 @@ ORCA_TERMINAL_CONFIRMED_ABSENT=0
 FAILED_ENDPOINT_CLEANUP=0
 TREEHOUSE_ABORT_CLEANUP=0
 TREEHOUSE_ENDPOINT_CLEANUP=0
+TREEHOUSE_ABORT_RETURN_FIRST=0
 TASK_TMP=
 CODEX_CREWMATE_HOME=
 CODEX_ACTIVATION_TOKEN=
@@ -330,7 +331,11 @@ spawn_abort_cleanup() {
   if [ "$TREEHOUSE_ABORT_CLEANUP" = 1 ]; then
     TREEHOUSE_ABORT_CLEANUP=0
     clean_codex_home=1
-    if ! fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
+    if [ "$TREEHOUSE_ABORT_RETURN_FIRST" = 1 ] && ! ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) 2>/dev/null; then
+      FAILED_ENDPOINT_CLEANUP=1
+      write_failed_treehouse_spawn_meta
+      preserve_codex_home=1
+    elif ! fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
       FM_BACKEND_KILL_STRICT=1 fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "fm-$ID" 2>/dev/null || true
       if ! fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
         FAILED_ENDPOINT_CLEANUP=1
@@ -338,7 +343,7 @@ spawn_abort_cleanup() {
         preserve_codex_home=1
       fi
     fi
-    if [ "$FAILED_ENDPOINT_CLEANUP" != 1 ] && ! ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) 2>/dev/null; then
+    if [ "$FAILED_ENDPOINT_CLEANUP" != 1 ] && [ "$TREEHOUSE_ABORT_RETURN_FIRST" != 1 ] && ! ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) 2>/dev/null; then
       FAILED_ENDPOINT_CLEANUP=1
       write_failed_treehouse_spawn_meta
       preserve_codex_home=1
@@ -1492,6 +1497,13 @@ fi
 
 if [ "$HARNESS" = codex ] && [ "$KIND" != secondmate ]; then
   refresh_codex_crewmate_home || {
+    if fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
+      TREEHOUSE_ABORT_RETURN_FIRST=1
+    else
+      case "$?" in
+        1) TREEHOUSE_ABORT_RETURN_FIRST=1 ;;
+      esac
+    fi
     echo "error: could not prepare isolated Codex crewmate home" >&2
     exit 1
   }
