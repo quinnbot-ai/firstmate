@@ -29,12 +29,12 @@ This PR (`fm/fm-main-divergence`) merges `origin/main` into a branch off `fork/m
 ## Pre-checks (copy-paste runnable, exercised against a scratch clone)
 
 Run these from *any* clone of the repo (a scratch clone is safest for a first read) to establish that `fork/main`'s current tip fully contains local `main`'s content before touching the primary checkout.
-They were exercised against a disposable `--no-hardlinks` scratch clone during this task (see "Verification" below) and are safe to re-run at any time - they make no changes.
+They were exercised against a disposable `--no-hardlinks` scratch clone during this task (see "Verification" below) and are safe to re-run at any time - they update only remote-tracking refs, never local branches or the working tree.
 
 ```sh
 # From inside any clone of the firstmate repo:
-git fetch fork main
-git fetch origin main
+git fetch fork '+refs/heads/main:refs/remotes/fork/main'
+git fetch origin '+refs/heads/main:refs/remotes/origin/main'
 
 # 1. Prove local main's content is fully contained in fork/main (not just
 #    similar - a literal ancestor relationship, the strongest possible proof).
@@ -64,7 +64,7 @@ The sequence below updates ref, index, and working tree together in one atomic `
 cd /Users/nick/ventures/agent-ops/firstmate   # the primary checkout - confirm this before running anything
 
 # 0. Re-run the pre-checks above against THIS checkout first.
-git fetch fork main
+git fetch fork '+refs/heads/main:refs/remotes/fork/main'
 git merge-base --is-ancestor main fork/main \
   && echo "OK: proceeding" || { echo "STOP: see pre-checks above"; exit 1; }
 git log --oneline fork/main..main   # must be empty
