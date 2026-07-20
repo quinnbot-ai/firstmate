@@ -1379,7 +1379,7 @@ treehouse_lease_handoff_return() {  # <handoff> <lease-path>
 recover_treehouse_lease_handoffs() {
   local handoff lease_path lease_state lease_validation handoff_record
   [ -d "$STATE" ] || return 0
-  for handoff in "$STATE"/.*.treehouse-lease.*; do
+  for handoff in "$STATE"/.*.treehouse-lease.* "$STATE"/.treehouse-handoff-write.*; do
     [ -f "$handoff" ] || continue
     if fm_treehouse_lease_handoff_is_writer_temp "$handoff"; then
       rm -f "$handoff" || {

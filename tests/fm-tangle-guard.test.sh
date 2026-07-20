@@ -680,8 +680,8 @@ test_spawn_refuses_empty_lease_handoff() {
   pass "fm-spawn: retains an empty lease handoff instead of losing an in-flight acquisition"
 }
 
-test_spawn_discards_legacy_handoff_writer_temporary() {
-  local home proj wt fakebin rec out status writer_temp gets
+test_spawn_discards_handoff_writer_temporaries() {
+  local home proj wt fakebin rec out status legacy_writer_temp writer_temp gets
   home="$TMP_ROOT/lease-writer-temp-home"
   mkdir -p "$home/state" "$home/data"
   proj=$(make_repo "$TMP_ROOT/lease-writer-temp-proj")
@@ -689,19 +689,22 @@ test_spawn_discards_legacy_handoff_writer_temporary() {
   git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
   fakebin=$(make_spawn_lease_fakebin "$TMP_ROOT/lease-writer-temp-fake")
   rec="$TMP_ROOT/lease-writer-temp-treehouse.log"; : > "$rec"
+  legacy_writer_temp="$home/state/.treehouse-handoff-write.interrupted"
   writer_temp="$home/state/..interrupted-writer-kk2.treehouse-lease.token.tmp.partial"
+  printf 'returning=%s\n' "$wt" > "$legacy_writer_temp"
   printf 'returning=%s\n' "$wt" > "$writer_temp"
 
   out=$(run_spawn_lease_case "$home" lease-writer-temp-ll3 "$proj" "$wt" "$fakebin" "$rec"); status=$?
-  expect_code 0 "$status" "spawn should ignore an interrupted legacy handoff writer temporary"
+  expect_code 0 "$status" "spawn should ignore interrupted handoff writer temporaries"
   assert_contains "$out" "cleared stale treehouse lease handoff writer temporary" \
     "spawn did not identify the interrupted writer temporary"
+  assert_absent "$legacy_writer_temp" "spawn retained a legacy interrupted writer temporary"
   assert_absent "$writer_temp" "spawn retained an interrupted writer temporary"
   gets=$(grep -Fc "treehouse get --lease" "$rec")
   [ "$gets" -eq 1 ] || fail "interrupted writer temporary blocked or altered normal allocation"
   assert_no_grep "treehouse return --force $wt" "$rec" \
     "interrupted writer temporary was mistaken for a durable handoff"
-  pass "fm-spawn: discards interrupted legacy handoff writer temporaries"
+  pass "fm-spawn: discards interrupted handoff writer temporaries"
 }
 
 test_spawn_serializes_lease_handoff_publication() {
@@ -968,7 +971,7 @@ test_spawn_recovers_failed_lease_rollback
 test_spawn_tombstones_returned_lease_handoff
 test_spawn_keeps_published_lease_on_abort
 test_spawn_refuses_empty_lease_handoff
-test_spawn_discards_legacy_handoff_writer_temporary
+test_spawn_discards_handoff_writer_temporaries
 test_spawn_serializes_lease_handoff_publication
 test_spawn_clears_committed_lease_handoff
 test_spawn_refuses_returned_handoff_with_live_metadata
