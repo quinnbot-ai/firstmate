@@ -28,8 +28,9 @@ case "$*" in
       printf '%s\n' "can't find window: ${3:-unknown}" >&2
       exit 1
     fi
-    if [ -n "${FM_FAKE_WINDOW_NAME_FILE:-}" ] && [ -f "$FM_FAKE_WINDOW_NAME_FILE" ]; then
-      cat "$FM_FAKE_WINDOW_NAME_FILE"
+    window_name_file=${FM_FAKE_WINDOW_NAME_FILE:-"$(dirname "${FM_FAKE_TARGET_STATE:?}")/target-window-name"}
+    if [ -f "$window_name_file" ]; then
+      cat "$window_name_file"
     else
       printf '%s\n' 'firstmate'
     fi
@@ -707,7 +708,7 @@ test_codex_crewmate_home_refuses_symlinked_data_root() {
   assert_absent "$real_data/codex-crewmate" "data-root symlink rejection must not create a Codex home"
   assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
     "data-root symlink rejection did not return its worktree"
-  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+  assert_grep 'kill-window -t @1' "$CASE_DIR/backend.log" \
     "data-root symlink rejection did not remove its task endpoint"
   [ ! -s "$LAUNCH_LOG" ] || fail "data-root symlink rejection must not launch Codex"
   pass "Codex spawn refuses a symlinked data root"
@@ -749,7 +750,7 @@ SH
   assert_absent "$HOME_DIR/state/$id.meta" "private-home preparation failure must not create task metadata"
   assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
     "private-home preparation failure did not return its worktree"
-  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+  assert_grep 'kill-window -t @1' "$CASE_DIR/backend.log" \
     "private-home preparation failure did not remove its task endpoint"
   [ ! -s "$LAUNCH_LOG" ] || fail "private-home preparation failure must not launch Codex"
   pass "Codex spawn cleans up a failed private-home allocation"
@@ -1113,7 +1114,7 @@ test_codex_home_activation_failure_aborts_spawn() {
     "terminal activation failure did not retain its committed lease"
   assert_no_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
     "terminal activation failure must not return a committed lease implicitly"
-  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+  assert_grep 'kill-window -t @1' "$CASE_DIR/backend.log" \
     "terminal activation failure did not remove its task endpoint"
   for task_tmp in "/tmp/fm-$id".*; do
     [ ! -e "$task_tmp" ] || fail "terminal activation failure left task temporary root: $task_tmp"
@@ -1338,7 +1339,7 @@ SH
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "Codex spawn must fail when private-home creation and return fail"
-  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+  assert_grep 'kill-window -t @1' "$CASE_DIR/backend.log" \
     "failed spawn cleanup did not close its endpoint before returning the lease"
   assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
     "failed isolated-home cleanup did not attempt to return its worktree"
@@ -1362,7 +1363,7 @@ test_codex_spawn_abort_accepts_an_already_absent_endpoint() {
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "Codex spawn should report the isolated-home activation failure"
-  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+  assert_grep 'kill-window -t @1' "$CASE_DIR/backend.log" \
     "failed spawn cleanup should close a live endpoint before releasing its lease"
   assert_grep 'failed_spawn=1' "$HOME_DIR/state/$id.meta" \
     "failed spawn cleanup did not retain recovery metadata after endpoint closure"
@@ -1389,7 +1390,7 @@ SH
   expect_code 1 "$status" "Codex spawn must fail when private-home creation and endpoint removal fail"
   assert_no_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
     "failed endpoint removal must not return a lease that still has a live endpoint"
-  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+  assert_grep 'kill-window -t @1' "$CASE_DIR/backend.log" \
     "failed endpoint removal was not attempted"
   assert_grep "window=firstmate:fm-$id" "$HOME_DIR/state/$id.meta" \
     "failed endpoint removal did not record the task endpoint"
