@@ -1263,6 +1263,7 @@ fm_super_main() {
   local LOG="$STATE/.supervise-daemon.log"
   local WATCH_ERR="$STATE/.supervise-daemon.watcher.err"
   local LOCK="$STATE/.supervise-daemon.lock"
+  local DAEMON_OWNER="" DAEMON_IDENTITY="" DAEMON_PID=""
   local PIDFILE="$STATE/.supervise-daemon.pid"
   local INJECT_FAIL_SLEEP=${FM_INJECT_FAIL_SLEEP:-$INJECT_FAIL_SLEEP_DEFAULT}
   local CRASH_THRESHOLD=${FM_CRASH_THRESHOLD:-$CRASH_THRESHOLD_DEFAULT}
@@ -1281,9 +1282,26 @@ fm_super_main() {
     fi
     exit 1
   fi
+  DAEMON_OWNER=${FM_LOCK_OWNER_DIR:-}
+  if [ -z "$DAEMON_OWNER" ]; then
+    echo "error: could not retain supervise-daemon lease owner" >&2
+    fm_lock_release "$LOCK" 2>/dev/null || true
+    exit 1
+  fi
+  DAEMON_PID=${BASHPID:-$$}
+  fm_pid_identity "$DAEMON_PID" > "$DAEMON_OWNER/pid-identity" || {
+    echo "error: could not identify supervise-daemon lease owner" >&2
+    fm_lock_release "$LOCK" 2>/dev/null || true
+    exit 1
+  }
+  DAEMON_IDENTITY=$(cat "$DAEMON_OWNER/pid-identity" 2>/dev/null || true)
+  if [ -z "$DAEMON_IDENTITY" ]; then
+    echo "error: could not retain supervise-daemon lease identity" >&2
+    fm_lock_release "$LOCK" 2>/dev/null || true
+    exit 1
+  fi
   echo "$$" > "$PIDFILE"
-  fm_pid_identity "${BASHPID:-$$}" > "$LOCK/pid-identity" 2>/dev/null || true
-  fm_daemon_lease_publish "$STATE" "$FM_DAEMON_DIR/fm-supervise-daemon.sh" "$FM_HOME" "$LOCK" || {
+  fm_daemon_lease_publish "$STATE" "$FM_DAEMON_DIR/fm-supervise-daemon.sh" "$FM_HOME" "$LOCK" "$DAEMON_OWNER" || {
     echo "error: could not publish supervise-daemon lease" >&2
     fm_lock_release "$LOCK" 2>/dev/null || true
     rm -f "$PIDFILE" 2>/dev/null || true
@@ -1417,7 +1435,7 @@ fm_super_main() {
 
   local rc reason
   while true; do
-    fm_daemon_lease_heartbeat "$LOCK" || {
+    fm_daemon_lease_heartbeat "$LOCK" "$DAEMON_OWNER" "$DAEMON_IDENTITY" || {
       log "ERROR: supervise-daemon lease ownership lost; stopping"
       exit 1
     }
