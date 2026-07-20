@@ -4,6 +4,9 @@
 # clear volatile state, refresh/prune the project's clone for PR-based ship
 # tasks, then print a backlog-refresh reminder for ship and scout teardowns
 # (a secondmate teardown prints none, since secondmates are not backlog items).
+# A treehouse-backed ship or scout meta with treehouse_lease=1 retains its
+# durable lease until this script returns that exact worktree. A failed or
+# indeterminate return preserves task state and the handoff record for recovery.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
@@ -12,7 +15,11 @@
 # GitHub reports a PR head that contains the current local work, or its content is
 # already present in the up-to-date default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
-# on a remote yet the change is fully in main.
+# on a remote yet the change is fully in main. Local-only containment also accepts a
+# branch when git cherry proves every branch patch is already equivalent in the local
+# default branch, even though rebasing or cherry-picking gave the landed commits new
+# SHAs. That proof rejects merge commits, malformed or failed git cherry output, and
+# any '+' patch result.
 # The PR itself is resolved from the task's recorded pr= when present, or - when
 # no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
 # where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
@@ -25,6 +32,9 @@
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
+# Before returning a task worktree to treehouse, teardown detaches its checked-out
+# branch because treehouse may clean it up. It deletes only a named non-default task
+# branch, and preserves the detached branch when the project default cannot be known.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
@@ -36,12 +46,11 @@
 # quarantine entries with the rest of the volatile state.
 # Codex ship and scout tasks record a firstmate-managed private home under
 # data/codex-crewmate in codex_crewmate_home= metadata.
-# Teardown removes that home only after endpoint cleanup confirms absence.
-# When a managed Codex home or Orca task cannot confirm its recorded endpoint
-# absent, teardown preserves metadata and task-private resources for a later safe
-# recovery attempt. Orca tasks otherwise use the same safety checks, close the
-# recorded terminal, and remove the recorded worktree through `orca worktree rm`;
-# teardown never guesses an Orca target from ambient CLI state.
+# Teardown removes that home only after endpoint cleanup succeeds.
+# When failed-spawn cleanup cannot confirm the endpoint absent, it preserves the metadata and private home for a later safe recovery attempt.
+# Orca tasks use the same safety checks, then close the recorded terminal and
+# remove the recorded worktree through `orca worktree rm`; teardown never guesses
+# an Orca target from ambient CLI state.
 # Secondmates (kind=secondmate in meta) are retired explicitly. Normal
 # teardown refuses while their home has in-flight crewmate meta files; --force
 # is the approved discard path that prevalidates child removal targets, discards
@@ -103,17 +112,21 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-treehouse-lease-lib.sh
+. "$SCRIPT_DIR/fm-treehouse-lease-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
 fi
+ID=$1
+FORCE=${2:-}
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never tear
 # down a worktree (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
 FM_LOCK_LOG_PREFIX=teardown
 "$FM_ROOT/bin/fm-guard.sh" || true
-ID=$1
-FORCE=${2:-}
 
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
@@ -134,8 +147,19 @@ CODEX_CREWMATE_HOME=$(grep '^codex_crewmate_home=' "$META" | cut -d= -f2- || tru
 ENDPOINT_CLEANUP_PENDING=$(grep '^endpoint_cleanup_pending=' "$META" | tail -1 | cut -d= -f2- || true)
 ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
 ORCA_WORKTREE_CLEANUP_COMPLETE=$(fm_meta_get "$META" orca_worktree_cleanup_complete)
-ORCA_TERMINAL_CONFIRMED_ABSENT=$(fm_meta_get "$META" orca_terminal_absent)
 ORCA_PATH_MATCH_VERIFIED=0
+TREEHOUSE_LEASE_HANDOFF=
+TREEHOUSE_LEASE_RETURN_NEEDED=1
+TREEHOUSE_LEASE_LOCK="$STATE/.treehouse-lease.lock"
+TREEHOUSE_LEASE_LOCK_HELD=0
+
+release_treehouse_lease_transaction() {
+  [ "$TREEHOUSE_LEASE_LOCK_HELD" = 1 ] || return 0
+  fm_lock_release "$TREEHOUSE_LEASE_LOCK" 2>/dev/null || true
+  TREEHOUSE_LEASE_LOCK_HELD=0
+}
+
+trap release_treehouse_lease_transaction EXIT
 
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
@@ -163,6 +187,110 @@ meta_value() {
   fm_meta_get "$meta" "$key"
 }
 
+canonical_path_or_raw() {
+  local path=$1
+  cd "$path" 2>/dev/null && pwd -P || printf '%s\n' "$path"
+}
+
+treehouse_lease_paths_match() {
+  [ "$(canonical_path_or_raw "$1")" = "$(canonical_path_or_raw "$2")" ]
+}
+
+begin_treehouse_lease_return_transaction() {
+  [ "$(meta_value "$META" treehouse_lease)" = 1 ] || return 0
+  fm_lock_acquire_wait "$TREEHOUSE_LEASE_LOCK"
+  TREEHOUSE_LEASE_LOCK_HELD=1
+}
+
+prepare_treehouse_lease_handoff_return() {
+  local handoff handoff_state handoff_path handoff_record matches=0
+  [ "$(meta_value "$META" treehouse_lease)" = 1 ] || return 0
+  for handoff in "$STATE"/."$ID".treehouse-lease.*; do
+    [ -f "$handoff" ] || continue
+    matches=$(( matches + 1 ))
+    if [ "$matches" -gt 1 ]; then
+      echo "error: multiple treehouse lease handoffs found for $ID; refusing teardown" >&2
+      return 1
+    fi
+    if [ ! -s "$handoff" ]; then
+      [ -d "$WT" ] || {
+        echo "error: empty treehouse lease handoff $handoff has no worktree at $WT; refusing teardown" >&2
+        return 1
+      }
+      fm_treehouse_lease_handoff_write "$handoff" leased "$WT" || {
+        echo "error: could not restore empty treehouse lease handoff $handoff; refusing teardown" >&2
+        return 1
+      }
+    fi
+    handoff_record=$(fm_treehouse_lease_handoff_read "$handoff") || {
+      echo "error: malformed treehouse lease handoff $handoff; refusing teardown" >&2
+      return 1
+    }
+    IFS=$'\t' read -r handoff_state handoff_path <<EOF
+$handoff_record
+EOF
+    if ! treehouse_lease_paths_match "$handoff_path" "$WT"; then
+      echo "error: treehouse lease handoff $handoff does not match task worktree $WT; refusing teardown" >&2
+      return 1
+    fi
+    TREEHOUSE_LEASE_HANDOFF=$handoff
+    case "$handoff_state" in
+      leased)
+        [ -d "$WT" ] || {
+          echo "error: leased treehouse handoff $handoff has no worktree at $WT; refusing teardown" >&2
+          return 1
+        }
+        fm_treehouse_lease_handoff_write "$handoff" returning "$WT" || {
+          echo "error: could not mark treehouse lease handoff $handoff as returning; refusing teardown" >&2
+          return 1
+        }
+        ;;
+      returning)
+        echo "error: treehouse lease handoff $handoff is already returning; refusing to replay an indeterminate return" >&2
+        return 1
+        ;;
+      returned)
+        TREEHOUSE_LEASE_RETURN_NEEDED=0
+        ;;
+    esac
+  done
+  if [ "$matches" -eq 0 ]; then
+    TREEHOUSE_LEASE_HANDOFF=$(mktemp "$STATE/.${ID}.treehouse-lease.XXXXXX") || {
+      echo "error: could not create treehouse lease handoff for $ID; refusing teardown" >&2
+      return 1
+    }
+    [ -d "$WT" ] || {
+      echo "error: leased treehouse handoff $TREEHOUSE_LEASE_HANDOFF has no worktree at $WT; refusing teardown" >&2
+      return 1
+    }
+    fm_treehouse_lease_handoff_write "$TREEHOUSE_LEASE_HANDOFF" leased "$WT" || {
+      echo "error: could not record treehouse lease handoff $TREEHOUSE_LEASE_HANDOFF; refusing teardown" >&2
+      return 1
+    }
+    fm_treehouse_lease_handoff_write "$TREEHOUSE_LEASE_HANDOFF" returning "$WT" || {
+      echo "error: could not mark treehouse lease handoff $TREEHOUSE_LEASE_HANDOFF as returning; refusing teardown" >&2
+      return 1
+    }
+  fi
+}
+
+finish_treehouse_lease_handoff_return() {
+  [ -n "$TREEHOUSE_LEASE_HANDOFF" ] || return 0
+  if [ "$TREEHOUSE_LEASE_RETURN_NEEDED" = 1 ]; then
+    fm_treehouse_lease_handoff_write "$TREEHOUSE_LEASE_HANDOFF" returned "$WT" || {
+      echo "error: treehouse lease returned but handoff $TREEHOUSE_LEASE_HANDOFF could not be tombstoned; preserving task metadata" >&2
+      return 1
+    }
+  fi
+}
+
+restore_treehouse_lease_handoff() {
+  [ -n "$TREEHOUSE_LEASE_HANDOFF" ] || return 0
+  [ "$TREEHOUSE_LEASE_RETURN_NEEDED" = 1 ] || return 0
+  fm_treehouse_lease_handoff_write "$TREEHOUSE_LEASE_HANDOFF" leased "$WT" || \
+    echo "error: could not restore treehouse lease handoff $TREEHOUSE_LEASE_HANDOFF after return failure" >&2
+}
+
 require_orca_worktree_id() {
   local meta=$1 id
   id=$(meta_value "$meta" orca_worktree_id)
@@ -183,18 +311,12 @@ require_orca_terminal() {
   printf '%s\n' "$terminal"
 }
 
-orca_terminal_confirmed_absent() {
-  [ "$(meta_value "$1" orca_terminal_absent)" = 1 ]
-}
-
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_WORKTREE_CLEANUP_COMPLETE" != 1 ]; then
     ORCA_WORKTREE_ID=$(require_orca_worktree_id "$META") || exit 1
   fi
-  if [ "$ORCA_TERMINAL_CONFIRMED_ABSENT" != 1 ]; then
-    T_ORCA=$(require_orca_terminal "$META") || exit 1
-    T=$T_ORCA
-  fi
+  T_ORCA=$(meta_value "$META" terminal)
+  [ -z "$T_ORCA" ] || T=$T_ORCA
 fi
 
 remove_grok_turnend_auth() {
@@ -203,6 +325,13 @@ remove_grok_turnend_auth() {
   case "$token" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
   hooks_dir="${GROK_HOME:-$HOME/.grok}/hooks/fm-turn-end.d"
   rm -f "$hooks_dir/$token"
+}
+
+remove_busy_progress_tracking() {
+  local state_dir=$1 window=$2 key
+  key=$(printf '%s' "$window" | tr ':/. ' '____')
+  rm -f "$state_dir/.busy-progress-$key" "$state_dir/.busy-progress-since-$key" \
+    "$state_dir/.busy-progress-escalations-$key"
 }
 
 validate_pr_poll_cleanup() {
@@ -396,6 +525,28 @@ content_in_default() {
   merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
   merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
   [ "$merged_tree" = "$default_tree" ]
+}
+
+# Is every commit unique to HEAD patch-equivalent to a commit already on the local
+# default branch? git cherry prints '-' for equivalent commits and '+' for commits
+# that are not present upstream. Any '+' line, malformed output, or git error is
+# ambiguous and fails closed.
+patches_are_in_default() {
+  local default=$1 cherry line merge_commits
+  [ -n "$default" ] || return 1
+  merge_commits=$(git -C "$WT" rev-list --min-parents=2 "$default..HEAD" 2>/dev/null) || return 1
+  [ -z "$merge_commits" ] || return 1
+  cherry=$(git -C "$WT" cherry "$default" HEAD 2>/dev/null) || return 1
+  [ -n "$cherry" ] || return 0
+  while IFS= read -r line; do
+    case "$line" in
+      '- '*) ;;
+      '+ '*) return 1 ;;
+      *) return 1 ;;
+    esac
+  done <<EOF
+$cherry
+EOF
 }
 
 # Has the worktree's committed work actually LANDED, though its commits are not
@@ -655,16 +806,12 @@ teardown_treehouse_return() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT cherry_raw unlanded_patches unique_merges branch
+  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
     secondmate|scout) return 0 ;;
   esac
-
-  if worktree_safety_blocked_by_lock "safety checks"; then
-    return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
-  fi
 
   if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
     if worktree_safety_blocked_by_lock "uncommitted changes"; then
@@ -688,7 +835,7 @@ validate_worktree_teardown_safety() {
 
   if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
     DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
-    if ! unique_merges=$(git -C "$WT" rev-list --min-parents=2 "$DEFAULT..HEAD" 2>/dev/null); then
+    if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null); then
       if worktree_safety_blocked_by_lock "commits not on $DEFAULT"; then
         return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
       fi
@@ -696,20 +843,11 @@ validate_worktree_teardown_safety() {
       echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
-    if ! cherry_raw=$(git -C "$WT" cherry "$DEFAULT" HEAD 2>/dev/null); then
-      if worktree_safety_blocked_by_lock "patches not on $DEFAULT"; then
-        return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
-      fi
-      echo "REFUSED: cannot inspect worktree $WT for patches not on $DEFAULT." >&2
-      echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
-      return 1
-    fi
-    unlanded_patches=$(printf '%s\n' "$cherry_raw" | grep '^+ ' | head -5 || true)
-    if [ -n "$dirty" ] || [ -n "$unique_merges" ] || [ -n "$unlanded_patches" ]; then
+    unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
+    if [ -n "$dirty" ] || { [ -n "$unmerged" ] && ! patches_are_in_default "$DEFAULT"; }; then
       echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
       [ -n "$dirty" ] && echo "uncommitted changes present" >&2
-      [ -n "$unique_merges" ] && printf 'branch-unique merge commits not yet on %s:\n%s\n' "$DEFAULT" "$unique_merges" >&2
-      [ -n "$unlanded_patches" ] && printf 'patches not yet on %s:\n%s\n' "$DEFAULT" "$unlanded_patches" >&2
+      [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
       echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
@@ -731,6 +869,33 @@ validate_worktree_teardown_safety() {
       return 1
     fi
   fi
+}
+
+# Detach before treehouse returns a worktree, because treehouse may clean up the
+# checked-out branch. Never delete the project default branch when a landed task is
+# parked on it. If the default cannot be identified, preserve the detached branch
+# rather than guessing that it is safe to delete.
+detach_and_drop_task_branch() {
+  local branch default
+  branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+  [ "$branch" = HEAD ] && return 0
+  default=$(default_branch 2>/dev/null || true)
+  if worktree_safety_blocked_by_lock "detaching its checked-out branch"; then
+    cleanup_stale_lock_for_safety_check "$WT" || {
+      echo "REFUSED: cannot detach worktree $WT from checked-out branch $branch while its git lock is not provably stale; preserving it before treehouse return." >&2
+      return 1
+    }
+  fi
+  if ! git -C "$WT" checkout --detach -q; then
+    echo "REFUSED: cannot detach worktree $WT from checked-out branch $branch; preserving it before treehouse return." >&2
+    return 1
+  fi
+  if [ -z "$default" ]; then
+    echo "teardown: cannot determine the project default branch; preserving detached branch $branch" >&2
+    return 0
+  fi
+  [ "$branch" = "$default" ] && return 0
+  git -C "$WT" branch -D -- "$branch" >/dev/null 2>&1 || true
 }
 
 require_orca_worktree_path_match() {
@@ -893,9 +1058,9 @@ validate_task_temp_for_removal() {
   local target=$1 legacy prefix suffix
   [ -n "$target" ] || return 0
   legacy="/tmp/fm-$ID"
-  prefix="$legacy."
+  prefix="/tmp/fm-$ID."
   case "$target" in
-    "$legacy") suffix= ;;
+    "$legacy") suffix=legacy ;;
     "$prefix"*) suffix=${target#"$prefix"} ;;
     *)
       echo "REFUSED: unsafe task temporary directory $target does not match task $ID" >&2
@@ -903,14 +1068,10 @@ validate_task_temp_for_removal() {
       ;;
   esac
   case "$suffix" in
-    *[![:alnum:]]*)
+    ''|*[![:alnum:]]*)
       echo "REFUSED: unsafe task temporary directory $target does not match task $ID" >&2
       return 1
       ;;
-    '') [ "$target" = "$legacy" ] || {
-      echo "REFUSED: unsafe task temporary directory $target does not match task $ID" >&2
-      return 1
-    } ;;
   esac
   [ ! -e "$target" ] && [ ! -L "$target" ] && return 0
   if [ ! -d "$target" ] || [ -L "$target" ]; then
@@ -926,45 +1087,43 @@ remove_codex_crewmate_home() {
 }
 
 close_recorded_endpoint() {
-  local tab_id require_absence=0 endpoint_label=endpoint
+  local tab_id absence_status require_confirmed_absence=0
   tab_id=$(meta_value "$META" zellij_tab_id)
   if [ "$ENDPOINT_CLEANUP_PENDING" = 1 ] || [ -n "$CODEX_CREWMATE_HOME" ]; then
-    require_absence=1
-    [ "$ENDPOINT_CLEANUP_PENDING" != 1 ] || endpoint_label='failed-spawn endpoint'
+    require_confirmed_absence=1
   fi
-  if [ "$BACKEND" = orca ] && [ -n "${T_ORCA:-}" ]; then
-    require_absence=1
-  fi
-  if [ "$require_absence" -ne 1 ]; then
-    fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null || true
-    return 0
-  fi
-  close_endpoint_with_confirmed_absence "$BACKEND" "$T" "$tab_id" "fm-$ID" "$endpoint_label"
-}
-
-close_endpoint_with_confirmed_absence() {
-  local backend=$1 target=$2 tab_id=$3 expected_label=$4 endpoint_label=$5 absence_status close_failed=0
-  if fm_backend_target_absent "$backend" "$target" "$expected_label"; then
-    return 0
-  fi
-  if ! FM_BACKEND_KILL_STRICT=1 fm_backend_kill "$backend" "$target" "$tab_id" "$expected_label" 2>/dev/null; then
-    close_failed=1
-  fi
-  if fm_backend_target_absent "$backend" "$target" "$expected_label"; then
-    absence_status=0
-  else
-    absence_status=$?
-  fi
-  if [ "$absence_status" -ne 0 ]; then
-    if [ "$absence_status" -eq 1 ]; then
-      echo "error: $endpoint_label $target remains live after cleanup; preserving recovery metadata" >&2
+  if [ "$require_confirmed_absence" = 1 ]; then
+    if fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
+      return 0
     else
-      echo "error: $endpoint_label $target could not be confirmed absent after cleanup; preserving recovery metadata" >&2
+      absence_status=$?
     fi
-    return 1
-  fi
-  if [ "$close_failed" -ne 0 ]; then
-    echo "warning: $endpoint_label $target was already absent after close reported an error" >&2
+    if [ "$absence_status" -ne 1 ]; then
+      echo "error: endpoint $T could not be confirmed absent before cleanup; preserving recovery metadata" >&2
+      return 1
+    fi
+    if ! FM_BACKEND_KILL_STRICT=1 fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null; then
+      if fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
+        return 0
+      fi
+      echo "error: endpoint $T could not be confirmed closed; preserving recovery metadata" >&2
+      return 1
+    fi
+    if fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
+      absence_status=0
+    else
+      absence_status=$?
+    fi
+    if [ "$absence_status" -ne 0 ]; then
+      if [ "$absence_status" -eq 1 ]; then
+        echo "error: endpoint $T remains live after cleanup; preserving recovery metadata" >&2
+      else
+        echo "error: endpoint $T could not be confirmed absent after cleanup; preserving recovery metadata" >&2
+      fi
+      return 1
+    fi
+  else
+    fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null || true
   fi
 }
 
@@ -1038,9 +1197,6 @@ validate_firstmate_home_children_removal() {
       validate_firstmate_home_children_removal "$child_home" || return 1
     elif [ "$child_backend" = orca ]; then
       child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
-      if ! orca_terminal_confirmed_absent "$child_meta"; then
-        require_orca_terminal "$child_meta" >/dev/null || return 1
-      fi
       if [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
         child_proj=$(meta_value "$child_meta" project)
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
@@ -1072,16 +1228,11 @@ cleanup_firstmate_home_children() {
     fi
     if [ "$child_backend" = orca ] && [ "$child_kind" != secondmate ]; then
       child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
-      if ! orca_terminal_confirmed_absent "$child_meta"; then
-        child_t=$(require_orca_terminal "$child_meta") || return 1
-      fi
       if [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       fi
     fi
-    if [ "$child_backend" = orca ] && [ -n "$child_t" ]; then
-      close_endpoint_with_confirmed_absence "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" "child endpoint" || return 1
-    elif [ -n "$child_t" ]; then
+    if [ -n "$child_t" ]; then
       if [ "$child_backend" = zellij ]; then
         # Zellij titles are scoped by the owning home tag, so forced secondmate
         # cleanup must verify child tabs as that child home, not the parent.
@@ -1121,6 +1272,7 @@ cleanup_firstmate_home_children() {
       fi
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id"
+    remove_busy_progress_tracking "$sub_state" "$child_t"
     remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
     rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.grok-turnend-token"
   done
@@ -1145,15 +1297,6 @@ if [ "$KIND" = secondmate ]; then
 fi
 
 validate_task_temp_for_removal "$TASK_TMP" || exit 1
-
-if [ "$KIND" != secondmate ] && [ -n "$WT" ] && [ -n "$PROJ" ]; then
-  WT_CANONICAL=$(canonical_existing_dir "$WT" || true)
-  PROJ_CANONICAL=$(canonical_existing_dir "$PROJ" || true)
-  if [ -n "$WT_CANONICAL" ] && [ "$WT_CANONICAL" = "$PROJ_CANONICAL" ]; then
-    echo "REFUSED: task worktree $WT resolves to its primary project checkout; preserving task state." >&2
-    exit 1
-  fi
-fi
 
 if [ "$KIND" = secondmate ] && [ "$FORCE" != "--force" ]; then
   SUB_STATE="$HOME_PATH/state"
@@ -1210,37 +1353,22 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
-# Best-effort: drop a local non-default task branch so the shared repo does not
-# accumulate task refs while retaining the resolved default branch.
+# Best-effort: drop the local task branch so the shared repo does not accumulate refs.
+begin_treehouse_lease_return_transaction || exit 1
+prepare_treehouse_lease_handoff_return || exit 1
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ -n "$ORCA_WORKTREE_ID" ] && [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
     ORCA_PATH_MATCH_VERIFIED=1
   fi
-  [ -z "$T_ORCA" ] || close_recorded_endpoint || exit 1
   if [ -n "$ORCA_WORKTREE_ID" ] && [ -d "$WT" ]; then
-    branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-    if [ "$branch" != "HEAD" ]; then
-      if git -C "$WT" checkout --detach -q 2>/dev/null; then
-        default=$(default_branch || true)
-        if [ -n "$default" ] && [ "$branch" != "$default" ]; then
-          git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
-        fi
-      fi
-    fi
+    detach_and_drop_task_branch || exit 1
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
   fi
+  [ -z "$T_ORCA" ] || close_recorded_endpoint || exit 1
   [ -z "$ORCA_WORKTREE_ID" ] || fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
-elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
-  branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-  if [ "$branch" != "HEAD" ]; then
-    if git -C "$WT" checkout --detach -q 2>/dev/null; then
-      default=$(default_branch || true)
-      if [ -n "$default" ] && [ "$branch" != "$default" ]; then
-        git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
-      fi
-    fi
-  fi
+elif [ -d "$WT" ] && [ "$KIND" != secondmate ] && [ "$TREEHOUSE_LEASE_RETURN_NEEDED" = 1 ]; then
+  detach_and_drop_task_branch || exit 1
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
   # Kills remaining processes in the worktree (including the agent), resets, returns
@@ -1251,11 +1379,16 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety
   fi
-  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
-    echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
-    exit 1
-  }
+  if [ "$TREEHOUSE_LEASE_RETURN_NEEDED" = 1 ]; then
+    teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
+      restore_treehouse_lease_handoff
+      echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
+      exit 1
+    }
+  fi
 fi
+
+finish_treehouse_lease_handoff_return || exit 1
 
 if [ "$BACKEND" != orca ]; then
   close_recorded_endpoint || exit 1
@@ -1268,11 +1401,18 @@ if [ "$KIND" = secondmate ]; then
 fi
 remove_grok_turnend_auth "$STATE" "$ID"
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
-# Remove the per-task temp root, including its gotmp/, recorded by spawn.
+  remove_busy_progress_tracking "$STATE" "$T"
+  # Remove the per-task temp root, including its gotmp/, recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -z "$TASK_TMP" ] || rm -rf -- "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
-rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
+rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
+rm -f "$STATE/$ID.meta"
+if [ -n "$TREEHOUSE_LEASE_HANDOFF" ]; then
+  rm -f "$TREEHOUSE_LEASE_HANDOFF" || \
+    echo "warning: returned treehouse lease handoff retained at $TREEHOUSE_LEASE_HANDOFF" >&2
+fi
+release_treehouse_lease_transaction
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi

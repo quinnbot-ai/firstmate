@@ -136,6 +136,7 @@ The positive ancestry walk itself is exercised by fake `ps`/`lsappinfo` unit tes
 
 cmux is a session provider only, exactly like herdr and zellij (unlike Orca, which also owns the task worktree).
 Treehouse remains the worktree provider.
+Its ship and scout allocations use the shared task-lease contract in [`docs/architecture.md`](architecture.md#worktrees-not-branches-in-your-checkout).
 The feasibility report searched cmux's source for a shipped git-worktree-owning feature and found only a prototype (`Sources/ExtensionWorktreePrototype.swift`) that is not wired into any CLI verb - `workspace.create --cwd <path>` just opens a terminal at an existing directory with no opinion about how that directory came to exist.
 
 ## Task container shape: one workspace per task, one surface

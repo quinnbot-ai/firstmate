@@ -357,6 +357,12 @@ classify_signal() {  # <reason-after-colon> <state>
 # timestamp marker; persistence is escalated by housekeeping's recheck, not here.
 classify_stale() {  # <window> <state>
   local win=$1 state=$2 task last seen
+  case "$win" in
+    *' (busy but zero progress for '*)
+      printf 'escalate|%s' "$win"
+      return
+      ;;
+  esac
   task=$(window_to_task "$win" "$state")
   last=$(last_status_line "$state/$task.status")
   if [ -n "$last" ] && status_is_paused "$last"; then

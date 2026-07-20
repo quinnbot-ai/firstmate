@@ -155,7 +155,7 @@ SH
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
-  get) printf '%s\n' "${FM_FAKE_TREEHOUSE_LEASE_PATH:?}" ;;
+  get) printf '%s\n' "${FM_FAKE_PANE_PATH:?}" ;;
 esac
 SH
   chmod +x "$fakebin/treehouse"
@@ -171,7 +171,7 @@ run_spawn() {
       "FM_ROOT_OVERRIDE=" "FM_HOME=$home" \
       "FM_STATE_OVERRIDE=$home/state" "FM_DATA_OVERRIDE=$home/data" \
       "FM_PROJECTS_OVERRIDE=$home/projects" "FM_CONFIG_OVERRIDE=$home/config" \
-      "FM_SPAWN_NO_GUARD=1" "FM_FAKE_PANE_PATH=$pane" "FM_FAKE_TREEHOUSE_LEASE_PATH=$pane" "TMUX=fake,1,0" \
+      "FM_SPAWN_NO_GUARD=1" "FM_FAKE_PANE_PATH=$pane" "TMUX=fake,1,0" \
       "PATH=$fakebin:$PATH" "$@" \
       "$SPAWN" "$id" "$proj" claude ) 2>&1
 }
@@ -229,12 +229,7 @@ case "${1:-}" in
     done
     printf 'send-keys target=%s literal=%s arg=%s\n' "$target" "$literal" "${1:-}" >> "$FM_TMUX_LOG"
     exit 0 ;;
-  display-message)
-    for a in "$@"; do case "$a" in
-      *cursor_y*) printf '0\n'; exit 0 ;;
-      *pane_current_command*) printf 'codex\n'; exit 0 ;;
-    esac; done
-    printf '%%1\n'; exit 0 ;;
+  display-message) printf '%%1\n'; exit 0 ;;
   capture-pane) printf '\xe2\x94\x82 \xe2\x94\x82\n'; exit 0 ;;
 esac
 exit 0

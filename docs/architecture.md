@@ -9,8 +9,11 @@ firstmate's always-loaded operating contract and routing index for conditional p
 ## Event-driven supervision
 
 A zero-token bash watcher (`bin/fm-watch.sh`) sleeps on the fleet, classifies detected wakes in bash, and wakes the first mate only when something is actionable.
-Actionable wakes include captain-relevant status signals, no-verb signals whose crew is not provably working, authenticated check output such as PR merge polling or an X-mode mention, changed operations inboxes, stale panes whose crew is not provably working whether their status log looks terminal or non-terminal, provably-working stale panes that persist past `FM_STALE_ESCALATE_SECS`, declared external waits that remain paused past `FM_PAUSE_RESURFACE_SECS`, and heartbeat backstop hits.
+Actionable wakes include captain-relevant status signals, no-verb signals whose crew is not provably working, authenticated check output such as PR merge polling or an X-mode mention, changed operations inboxes, stale panes whose crew is not provably working whether their status log looks terminal or non-terminal, provably-working stale panes that persist past `FM_STALE_ESCALATE_SECS`, busy panes whose startup, context/token, or subagent-wait signal remains unchanged past the configured busy-progress window, declared external waits that remain paused past `FM_PAUSE_RESURFACE_SECS`, and heartbeat backstop hits.
 Repeated provably-working stale escalations on the same unchanged pane add an escalation count to the wake reason and, at `FM_WEDGE_DEMAND_INSPECT_COUNT`, a `demand-deep-inspection` marker.
+Busy-progress tracking applies only to non-paused, non-secondmate panes that still look busy, and its shared `bin/fm-classify-lib.sh` readers inspect only the final footer controls for context/token snapshots and known spinner signatures.
+A Codex `Starting MCP servers` footer at context 0% surfaces after `FM_STARTUP_ZERO_CONTEXT_SECS` regardless of status-file freshness, while unchanged context/token snapshots and the configured no-completed-subagent signature surface only after `FM_BUSY_NO_PROGRESS_SECS` with no fresh status write inside `FM_BUSY_STATUS_GRACE_SECS`.
+A changed snapshot or fresh status write restarts the no-progress window, and every busy-progress escalation includes an escalation count plus `demand-deep-inspection` so a changing spinner or hot loop cannot be treated as healthy indefinitely.
 Those actionable wakes are written to a durable local queue (`state/.wake-queue`) before detector state advances, so a missed process exit can be recovered by draining the queue.
 No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when `bin/fm-crew-state.sh` reports positive evidence that the crew is still working: an actively running no-mistakes step for that crew's branch or a backend busy signature.
 A crew whose latest status declares `paused:` for a known external wait is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge.
@@ -79,8 +82,7 @@ On an unmarked return, `bin/fm-afk-return.sh` owns ordered shutdown, durable cat
 The runtime backend is the session-provider layer below firstmate's scripts.
 It owns task endpoint creation, bounded capture, text/key sends, current-path reads for spawn-time worktree discovery when the backend does not create the worktree itself, live-window fallback lookup, agent-process liveness probes where verified, and endpoint teardown.
 `bin/fm-backend.sh` centralizes backend selection, `state/<id>.meta` helpers, selector resolution, and operation dispatch; `bin/backends/tmux.sh` is the verified reference adapter ([`docs/tmux-backend.md`](tmux-backend.md)), and `bin/backends/herdr.sh` (P2), `bin/backends/zellij.sh` (P3), `bin/backends/orca.sh` (P4), and `bin/backends/cmux.sh` (P5) are experimental task-spawn adapters.
-Routine endpoint teardown is best-effort, except a managed Codex home or Orca worktree requires firstmate to confirm its recorded endpoint is absent before discarding metadata or task-private resources.
-Cleanup following a failed allocation has the same strict absence requirement.
+Routine endpoint teardown is best-effort, but cleanup following a failed allocation is strict: firstmate must confirm the recorded endpoint is absent before discarding recovery metadata or task-private credentials.
 When that proof is unavailable, `fm-teardown.sh` preserves the task's metadata and resources for a later recovery instead of assuming cleanup succeeded.
 New spawns select a backend from `--backend`, then `FM_BACKEND`, then local `config/backend`, then runtime auto-detection from `$TMUX`, `HERDR_ENV=1`, or cmux runtime signals, then default `tmux`.
 Runtime auto-detection is innermost-first: `$TMUX` wins over `HERDR_ENV=1`, which wins over cmux's primary `CMUX_WORKSPACE_ID` marker and documented fallback signals; auto-detected herdr or cmux prints a one-time opt-out notice, auto-detected tmux stays silent, and zellij and orca are never auto-detected (only explicit selection).
@@ -103,8 +105,12 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
-For treehouse-backed spawns, the pane may remain in the physical primary-checkout path only while the lease command is taking effect, then it must enter the exact physical leased-worktree root.
-Any other reported pane path is an immediate isolation failure rather than a transient destination, so firstmate never launches into an unverified checkout.
+Every treehouse-backed ship or scout allocation is leased under its task id and records `treehouse_lease=1` in live task metadata, so the pool cannot recycle it until `fm-teardown.sh` returns the worktree.
+Lease acquisition and return use a private durable handoff record, and any unsafe abort or cleanup result preserves that record for a later recovery instead of freeing an unproven worktree.
+If a same-project live task meta predates that marker, allocation fails closed until teardown instead of risking an unleased detached or uncommitted worktree.
+Spawn-time current-path reads can transiently report a foreground child process, so the canonical leased worktree root is accepted immediately while every other changed candidate must persist for two polls before the isolation check can reject it.
+Before launching a ship or scout worker, firstmate pins its worktree-local Git author identity without changing global or shared project Git configuration.
+`bin/fm-git-identity.sh`'s header owns the exact identities and the protected Epstein-project predicates.
 Codex ship and scout workers additionally run with a firstmate-managed, task-private `CODEX_HOME` under `data/codex-crewmate/`.
 That home copies only the captain's Codex authentication and model catalog, disables plugins, carries no MCP configuration, and excludes the project-local Codex configuration.
 It is recorded as `codex_crewmate_home=` in task metadata and removed only after endpoint cleanup succeeds; the full configuration contract is in [configuration.md](configuration.md#harness-support).
@@ -181,12 +187,12 @@ The `data/secondmates.md` line contract is owned by the [`secondmate-provisionin
 
 `data/projects.md` records each project's delivery mode and optional `+yolo` autonomy flag.
 `no-mistakes` projects run the full validation pipeline, `direct-PR` projects open PRs without that pipeline, and `local-only` projects stay local until firstmate performs an approved fast-forward merge.
-When a selected delivery path calls for a diff, `bin/fm-review-diff.sh` refreshes the authoritative base and, when task meta records `pr=`, compares against the reachable recorded `pr_head=` or a freshly fetched `refs/pull/<n>/head` before falling back to the local branch with a warning.
+When a selected delivery path calls for a diff, `bin/fm-review-diff.sh` refreshes the authoritative base and, when task meta records `pr=`, always fetches and compares against `refs/pull/<n>/head` by default (recorded `pr_head=` is only an offline fallback) before falling back to the local branch with a warning.
 For target project repos shipped through their own no-mistakes pipeline, commits under `.no-mistakes/evidence/` are the pipeline's PR-viewable validation evidence and are expected to stay in the crew branch until the evidence-hosting design changes.
 The firstmate repo itself is the exception: its `.no-mistakes/` directory is local state, stays gitignored, and is rejected by CI if tracked.
 PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and any available `pr_head=` through `bin/fm-pr-check.sh` before calling `gh-axi pr merge`.
 The helper requires a full `https://github.com/<owner>/<repo>/pull/<n>` URL, invokes `gh-axi pr merge <n> --repo <owner>/<repo>`, defaults to `--squash`, preserves explicit merge-method flags, and rejects malformed URLs or repo override flags before recording merge state.
-Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
+Teardown is fail-closed for ship worktrees: dirty worktrees refuse, committed work must be landed before the worktree is returned, and a returned treehouse worktree releases its task lease.
 [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, and stale-lock recovery procedure.
 
 ## Optional X mode

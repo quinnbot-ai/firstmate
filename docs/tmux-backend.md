@@ -25,6 +25,7 @@ This mainly matters as an opt-out of herdr or cmux runtime auto-detection (see [
 
 Nothing to provision up front.
 The first crewmate spawn creates whatever tmux session and window it needs.
+Its treehouse-backed ship and scout allocations use the shared task-lease contract in [`docs/architecture.md`](architecture.md#worktrees-not-branches-in-your-checkout).
 
 ## Run inside tmux for the best experience
 

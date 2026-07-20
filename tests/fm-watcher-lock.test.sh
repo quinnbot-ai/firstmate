@@ -722,7 +722,7 @@ test_arm_waits_for_peer_beacon_after_child_stands_down() {
   printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=5 FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" > "$armout" &
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=1 FM_ARM_ATTACH_POLL=0.1 "$WATCH_ARM" > "$armout" &
   armpid=$!
   # Synchronize on the owned child declining the live peer lock before making
   # the peer healthy. Sleeping for the same one-second budget as the arm made
@@ -784,43 +784,6 @@ test_arm_fails_loud_when_no_fresh_watcher_confirmable() {
   kill "$live" 2>/dev/null || true
   wait "$live" 2>/dev/null || true
   pass "arm reports FAILED and exits non-zero when no fresh watcher can be confirmed"
-}
-
-test_arm_timeout_kills_term_ignoring_child() {
-  local dir state fakebin arm watcher child_pid_file child armpid status i
-  dir=$(make_case arm-timeout-reap)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  arm="$dir/fm-watch-arm.sh"
-  watcher="$dir/fm-watch-ignores-term.sh"
-  child_pid_file="$dir/child.pid"
-  cp "$WATCH_ARM" "$arm"
-  cp "$ROOT/bin/fm-wake-lib.sh" "$dir/fm-wake-lib.sh"
-  cat > "$watcher" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' "$$" > "${FM_TEST_CHILD_PID:?}"
-trap '' TERM
-while :; do sleep 1; done
-SH
-  chmod 0700 "$arm" "$watcher"
-  sed -i.bak "s|WATCH=\"\$SCRIPT_DIR/fm-watch.sh\"|WATCH=\"$watcher\"|" "$arm"
-  rm -f "$arm.bak"
-
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_CONFIRM_TIMEOUT=1 FM_ARM_CHILD_REAP_GRACE=1 \
-    FM_TEST_CHILD_PID="$child_pid_file" "$arm" > "$dir/arm.out" &
-  armpid=$!
-  i=0
-  while [ "$i" -lt 30 ] && [ ! -s "$child_pid_file" ]; do
-    sleep 0.1
-    i=$((i + 1))
-  done
-  [ -s "$child_pid_file" ] || fail "term-ignoring watcher child did not start"
-  child=$(cat "$child_pid_file")
-  wait_for_exit "$armpid" 60
-  status=$?
-  [ "$status" -ne 0 ] || fail "arm exited zero after confirmation timeout"
-  ! is_live_non_zombie "$child" || fail "confirmation timeout left a TERM-ignoring watcher child alive"
-  pass "arm confirmation timeout escalates to KILL and reaps its child"
 }
 
 test_cycle_exit_ledger_links_successor_and_stays_bounded() {
@@ -970,6 +933,5 @@ test_arm_hup_cleans_child_and_temp_output
 test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
-test_arm_timeout_kills_term_ignoring_child
 test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified

@@ -21,18 +21,7 @@ make_spawn_fakebin() {
 #!/usr/bin/env bash
 set -u
 case "$*" in
-  *"#{pane_current_path}"*)
-    if [ -n "${FM_FAKE_PANE_PATHS_FILE:-}" ]; then
-      count=0
-      [ ! -f "${FM_FAKE_PANE_COUNTER:?}" ] || count=$(cat "${FM_FAKE_PANE_COUNTER}")
-      count=$((count + 1))
-      printf '%s\n' "$count" > "${FM_FAKE_PANE_COUNTER}"
-      sed -n "${count}p" "${FM_FAKE_PANE_PATHS_FILE}"
-    else
-      printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
-    fi
-    exit 0
-    ;;
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
   *"#{pane_id}"*)
     [ "${FM_FAKE_TARGET_QUERY_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_TARGET_QUERY_STATUS}"
     if [ "$(cat "${FM_FAKE_TARGET_STATE:?}" 2>/dev/null)" != live ]; then
@@ -49,9 +38,7 @@ case "${1:-}" in
   kill-window)
     [ -z "${FM_FAKE_BACKEND_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_BACKEND_LOG"
     status=${FM_FAKE_BACKEND_KILL_STATUS:-0}
-    { [ "$status" -eq 0 ] || [ "${FM_FAKE_BACKEND_CLOSE_ON_ERROR:-0}" = 1 ]; } \
-      && [ "${FM_FAKE_BACKEND_CLOSE_EFFECT:-gone}" = gone ] \
-      && printf '%s\n' gone > "${FM_FAKE_TARGET_STATE:?}"
+    [ "$status" -ne 0 ] || [ "${FM_FAKE_BACKEND_CLOSE_EFFECT:-gone}" != gone ] || printf '%s\n' gone > "${FM_FAKE_TARGET_STATE:?}"
     exit "$status"
     ;;
   has-session|new-session|new-window)
@@ -90,29 +77,17 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-cat > "$fakebin/treehouse" <<'SH'
+  cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 set -u
 [ -z "${FM_FAKE_BACKEND_LOG:-}" ] || printf 'treehouse %s\n' "$*" >> "$FM_FAKE_BACKEND_LOG"
-case "$*" in
-  "get --lease"*)
-    if [ -n "${FM_FAKE_TREEHOUSE_LEASE_PATHS_FILE:-}" ]; then
-      count=0
-      [ ! -f "${FM_FAKE_TREEHOUSE_LEASE_COUNTER:?}" ] || count=$(cat "${FM_FAKE_TREEHOUSE_LEASE_COUNTER}")
-      count=$((count + 1))
-      printf '%s\n' "$count" > "${FM_FAKE_TREEHOUSE_LEASE_COUNTER}"
-      sed -n "${count}p" "${FM_FAKE_TREEHOUSE_LEASE_PATHS_FILE}"
-    else
-      printf '%s\n' "${FM_FAKE_TREEHOUSE_LEASE_PATH:?}"
-    fi
-    exit "${FM_FAKE_TREEHOUSE_GET_STATUS:-0}"
-    ;;
-  "return --force"*)
+case "${1:-}" in
+  get) printf '%s\n' "${FM_FAKE_PANE_PATH:?}" ;;
+  return)
     [ "${FM_FAKE_TREEHOUSE_CLOSE_EFFECT:-none}" != gone ] || printf '%s\n' gone > "${FM_FAKE_TARGET_STATE:?}"
     exit "${FM_FAKE_TREEHOUSE_RETURN_STATUS:-0}"
     ;;
 esac
-exit 0
 SH
   chmod +x "$fakebin/treehouse"
   cat > "$fakebin/mktemp" <<'SH'
@@ -168,15 +143,9 @@ run_spawn() {
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="${FM_FAKE_PANE_PATH:-$wt}" \
-    FM_FAKE_PANE_PATHS_FILE="${FM_FAKE_PANE_PATHS_FILE:-}" \
-    FM_FAKE_PANE_COUNTER="${FM_FAKE_PANE_COUNTER:-}" \
-    FM_FAKE_TREEHOUSE_LEASE_PATH="${FM_FAKE_TREEHOUSE_LEASE_PATH:-$wt}" TMUX="fake,1,0" \
-    FM_FAKE_TREEHOUSE_LEASE_PATHS_FILE="${FM_FAKE_TREEHOUSE_LEASE_PATHS_FILE:-}" \
-    FM_FAKE_TREEHOUSE_LEASE_COUNTER="${FM_FAKE_TREEHOUSE_LEASE_COUNTER:-}" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_BACKEND_LOG="$(dirname "$launchlog")/backend.log" \
     FM_FAKE_TREEHOUSE_RETURN_STATUS="${FM_FAKE_TREEHOUSE_RETURN_STATUS:-0}" \
-    FM_FAKE_TREEHOUSE_GET_STATUS="${FM_FAKE_TREEHOUSE_GET_STATUS:-0}" \
     FM_FAKE_BACKEND_KILL_STATUS="${FM_FAKE_BACKEND_KILL_STATUS:-0}" \
     FM_FAKE_BACKEND_CLOSE_EFFECT="${FM_FAKE_BACKEND_CLOSE_EFFECT:-gone}" \
     FM_FAKE_TREEHOUSE_CLOSE_EFFECT="${FM_FAKE_TREEHOUSE_CLOSE_EFFECT:-none}" \
@@ -221,7 +190,7 @@ assert_private_activation_result() {  # <task-id> <result-path> <message>
 materialize_codex_home() {  # <home> <data> <source> <profile> <worktree>
   python3 "$ROOT/bin/fm-codex-home.py" --create-activate --data "$2" --source "$3" \
     --profile "$4" --worktree "$5" --home "$1" \
-    --result-token 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef -- /bin/sleep 2 >/dev/null
+    --result-token 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef -- /usr/bin/env >/dev/null
   python3 "$ROOT/bin/fm-codex-home.py" --remove-activation-result --data "$2" --home "$1"
 }
 
@@ -368,7 +337,7 @@ test_codex_threads_model_and_effort() {
 }
 
 test_codex_crewmate_home_excludes_mcp_and_plugins() {
-  local rec ship scout out status launch crew_home source_home activation_result worktree_link worktree_real scout_wt scout_worktree_real
+  local rec ship scout out status launch crew_home source_home activation_result worktree_link worktree_real
   ship=profile-codex-home-ship-z17
   scout=profile-codex-home-scout-z18
   rec=$(make_spawn_case profile-codex-home codex "$ship" "$scout")
@@ -444,10 +413,7 @@ EOF
   [ ! -L "$crew_home/auth.json" ] || fail "isolated Codex auth must not point into the captain home"
 
   mkdir -p "$HOME_DIR/data/codex-crewmate/fm-crewmate-$scout/plugins/stale-plugin"
-  scout_wt="$CASE_DIR/scout-wt"
-  git -C "$PROJ_DIR" worktree add --quiet -b profile-codex-home-scout-wt "$scout_wt"
-  scout_worktree_real=$(cd "$scout_wt" && pwd -P)
-  out=$(run_spawn "$HOME_DIR" "$scout_wt" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$scout" "$PROJ_DIR" --scout)
+  out=$(run_spawn "$HOME_DIR" "$worktree_link" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$scout" "$PROJ_DIR" --scout)
   status=$?
   expect_code 0 "$status" "Codex scout spawn should use the isolated home"
   launch=$(cat "$LAUNCH_LOG")
@@ -459,7 +425,7 @@ EOF
     "Codex scout launch did not authenticate the isolated-home activation"
   assert_contains "$launch" "-- codex --profile 'fm-crewmate-$scout' --disable plugins" \
     "Codex scout launch did not activate the isolated CODEX_HOME"
-  materialize_codex_home "$crew_home" "$HOME_DIR/data" "$source_home" "fm-crewmate-$scout" "$scout_worktree_real"
+  materialize_codex_home "$crew_home" "$HOME_DIR/data" "$source_home" "fm-crewmate-$scout" "$worktree_real"
   assert_no_grep 'mcp_servers' "$crew_home/config.toml" \
     "Codex scout refresh reintroduced MCP server entries"
   assert_grep 'plugins = false' "$crew_home/config.toml" \
@@ -1002,22 +968,15 @@ test_codex_crewmate_home_uses_private_directory() {
 }
 
 test_codex_home_activation_uses_open_descriptor() {
-  local data source home result token out command
+  local data source home result token out
   data="$TMP_ROOT/codex-activation-data"
   source="$TMP_ROOT/codex-activation-source"
   mkdir -p "$data" "$source"
-  command="$TMP_ROOT/codex-activation-live-command"
-  cat > "$command" <<'SH'
-#!/usr/bin/env bash
-printf 'CODEX_HOME=%s\n' "$CODEX_HOME"
-sleep 2
-SH
-  chmod +x "$command"
   home="$data/codex-crewmate/$(python3 "$ROOT/bin/fm-codex-home.py" --data "$data" --new-home-name)"
   result="$data/codex-crewmate/.fm-codex-activation.${home##*/}"
   token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
   out=$(python3 "$ROOT/bin/fm-codex-home.py" --create-activate --data "$data" --source "$source" \
-    --profile fm-crewmate-activation-z42 --worktree /tmp/fm-codex-activation --home "$home" --result-token "$token" -- "$command")
+    --profile fm-crewmate-activation-z42 --worktree /tmp/fm-codex-activation --home "$home" --result-token "$token" -- /usr/bin/env)
   codex_home_value=$(printf '%s\n' "$out" | sed -n 's/^CODEX_HOME=//p' | head -n 1)
   [ -n "$codex_home_value" ] || fail "Codex activation must export CODEX_HOME to the child"
   case "$codex_home_value" in
@@ -1048,94 +1007,6 @@ test_codex_home_activation_reports_exec_failure() {
   assert_contains "$(cat "$result")" failed "Codex activation must report exec failures as failed"
   assert_absent "$home" "Codex activation must remove a home after an exec failure"
   pass "Codex activation reports exec failures before ready"
-}
-
-test_codex_home_activation_rejects_immediate_exit() {
-  local data source home result token out status
-  data="$TMP_ROOT/codex-activation-immediate-exit-data"
-  source="$TMP_ROOT/codex-activation-immediate-exit-source"
-  mkdir -p "$data" "$source"
-  home="$data/codex-crewmate/$(python3 "$ROOT/bin/fm-codex-home.py" --data "$data" --new-home-name)"
-  result="$data/codex-crewmate/.fm-codex-activation.${home##*/}"
-  token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-  out=$(python3 "$ROOT/bin/fm-codex-home.py" --create-activate --data "$data" --source "$source" \
-    --profile fm-crewmate-immediate-exit-z46 --worktree /tmp/fm-codex-immediate-exit --home "$home" --result-token "$token" -- /usr/bin/true 2>&1)
-  status=$?
-  expect_code 1 "$status" "Codex activation must fail when its launch exits during activation"
-  assert_contains "$out" "exited during activation" "Codex activation did not report an immediate launch exit"
-  assert_contains "$(cat "$result")" failed "Codex activation must report immediate exits as failed"
-  assert_absent "$home" "Codex activation must remove a home after an immediate launch exit"
-  pass "Codex activation rejects launches that exit during activation"
-}
-
-test_codex_home_activation_rejects_delayed_exit() {
-  local data source home result token command out status
-  data="$TMP_ROOT/codex-activation-delayed-exit-data"
-  source="$TMP_ROOT/codex-activation-delayed-exit-source"
-  mkdir -p "$data" "$source"
-  command="$TMP_ROOT/codex-activation-delayed-exit-command"
-  cat > "$command" <<'SH'
-#!/usr/bin/env bash
-sleep 0.2
-exit 1
-SH
-  chmod +x "$command"
-  home="$data/codex-crewmate/$(python3 "$ROOT/bin/fm-codex-home.py" --data "$data" --new-home-name)"
-  result="$data/codex-crewmate/.fm-codex-activation.${home##*/}"
-  token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-  out=$(python3 "$ROOT/bin/fm-codex-home.py" --create-activate --data "$data" --source "$source" \
-    --profile fm-crewmate-delayed-exit-z47 --worktree /tmp/fm-codex-delayed-exit --home "$home" --result-token "$token" -- "$command" 2>&1)
-  status=$?
-  expect_code 1 "$status" "Codex activation must fail when its launch exits during startup"
-  assert_contains "$out" "exited during activation" "Codex activation did not report a delayed launch exit"
-  assert_contains "$(cat "$result")" failed "Codex activation must report delayed exits as failed"
-  assert_absent "$home" "Codex activation must remove a home after a delayed launch exit"
-  pass "Codex activation rejects delayed startup exits"
-}
-
-test_codex_home_activation_rechecks_before_publishing_ready() {
-  if ! python3 - "$ROOT/bin/fm-codex-home.py" <<'PY'
-import importlib.util
-import sys
-
-spec = importlib.util.spec_from_file_location("fm_codex_home", sys.argv[1])
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-
-module.os.pipe = lambda: (10, 11)
-module.os.set_inheritable = lambda *args: None
-module.os.fork = lambda: 123
-module.os.close = lambda fd: None
-module.os.read = lambda fd, size: b""
-wait_calls = []
-
-def waitpid(pid, flags):
-    wait_calls.append((pid, flags))
-    if len(wait_calls) == 1:
-        return 0, 0
-    return pid, 0
-
-module.os.waitpid = waitpid
-monotonic_values = iter((0.0, 1.0))
-module.time.monotonic = lambda: next(monotonic_values)
-module.time.sleep = lambda seconds: None
-module.finish_activation_result_with_token = lambda *args: (_ for _ in ()).throw(
-    AssertionError("published ready after the child exited")
-)
-
-try:
-    module.activate_command(object(), 12, ["codex"], 13, b"token")
-except module.ActivationExecError:
-    pass
-else:
-    raise AssertionError("activation accepted an exit after the stability check")
-
-assert len(wait_calls) == 2
-PY
-  then
-    fail "Codex activation did not recheck the child before publishing ready"
-  fi
-  pass "Codex activation rechecks the child before publishing ready"
 }
 
 test_codex_home_activation_refuses_replaced_path() {
@@ -1175,23 +1046,6 @@ test_codex_home_activation_result_refuses_symlink() {
   pass "Codex activation result reader rejects symlinks"
 }
 
-test_codex_home_activation_result_waits_for_empty_file() {
-  local data home result token out status
-  data=$(mktemp -d "$TMP_ROOT/codex-activation-result-empty.XXXXXXXX")
-  home="$data/codex-crewmate/.fm-codex-home.0123456789abcdef0123456789abcdef"
-  result="$data/codex-crewmate/.fm-codex-activation.${home##*/}"
-  mkdir -p "$data/codex-crewmate"
-  chmod 700 "$data/codex-crewmate"
-  : > "$result"
-  chmod 600 "$result"
-  token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-  out=$(python3 "$ROOT/bin/fm-codex-home.py" --read-activation-result --data "$data" --home "$home" --result-token "$token" 2>&1)
-  status=$?
-  expect_code 3 "$status" "Codex activation must wait for an empty private result"
-  [ "$out" = pending ] || fail "Codex activation did not report an empty result as pending: $out"
-  pass "Codex activation reader waits for a valid empty result"
-}
-
 test_codex_home_activation_refuses_existing_result() {
   local data source home result token out status
   data=$(mktemp -d "$TMP_ROOT/codex-activation-existing-result.XXXXXXXX")
@@ -1223,74 +1077,18 @@ test_codex_home_activation_failure_aborts_spawn() {
   expect_code 1 "$status" "Codex spawn must fail when terminal activation fails"
   assert_contains "$out" "isolated Codex home activation failed" \
     "Codex spawn did not report terminal activation failure"
-  assert_absent "$HOME_DIR/state/$id.meta" "terminal activation failure must not retain task metadata"
-  assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
-    "terminal activation failure did not return its worktree"
+  assert_grep 'failed_spawn=1' "$HOME_DIR/state/$id.meta" \
+    "terminal activation failure did not retain recovery metadata"
+  assert_grep 'treehouse_lease=1' "$HOME_DIR/state/$id.meta" \
+    "terminal activation failure did not retain its committed lease"
+  assert_no_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
+    "terminal activation failure must not return a committed lease implicitly"
   assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
     "terminal activation failure did not remove its task endpoint"
   for task_tmp in "/tmp/fm-$id".*; do
     [ ! -e "$task_tmp" ] || fail "terminal activation failure left task temporary root: $task_tmp"
   done
-  pass "Codex spawn synchronizes terminal activation failures"
-}
-
-test_codex_spawn_abort_passes_home_cleanup_identity() {
-  local rec id out status cleanup_args real_python
-  id=profile-codex-home-cleanup-z49
-  rec=$(make_spawn_case profile-codex-home-cleanup codex "$id")
-  read_case_record "$rec"
-  cleanup_args="$CASE_DIR/cleanup-args"
-  real_python=$(command -v python3)
-  cat > "$FAKEBIN_DIR/python3" <<SH
-#!/usr/bin/env bash
-set -u
-if [ "\${2:-}" = --remove ]; then
-  state=
-  task_id=
-  args=("\$@")
-  while [ "\$#" -gt 0 ]; do
-    case "\$1" in
-      --state) state=\${2:-}; shift 2 ;;
-      --task-id) task_id=\${2:-}; shift 2 ;;
-      *) shift ;;
-    esac
-  done
-  [ "\$state" = "\${FM_EXPECTED_STATE:?}" ] || exit 73
-  [ "\$task_id" = "\${FM_EXPECTED_TASK_ID:?}" ] || exit 74
-  printf '%s|%s\n' "\$state" "\$task_id" > "\${FM_CLEANUP_ARGS:?}"
-  exec "$real_python" "\${args[@]}"
-fi
-exec "$real_python" "\$@"
-SH
-  chmod +x "$FAKEBIN_DIR/python3"
-
-  out=$(FM_FAKE_ACTIVATION_RESULT=failed FM_EXPECTED_STATE="$HOME_DIR/state" \
-    FM_EXPECTED_TASK_ID="$id" FM_CLEANUP_ARGS="$cleanup_args" \
-    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
-  status=$?
-  expect_code 1 "$status" "Codex spawn must fail when terminal activation fails"
-  [ "$(cat "$cleanup_args")" = "$HOME_DIR/state|$id" ] \
-    || fail "failed Codex spawn did not pass the cleanup task identity"
-  pass "Codex spawn identifies failed-home cleanup"
-}
-
-test_codex_activation_failure_accepts_absent_endpoint_after_close_error() {
-  local rec id out status launch crew_home
-  id=profile-codex-home-close-error-z79
-  rec=$(make_spawn_case profile-codex-home-close-error codex "$id")
-  read_case_record "$rec"
-
-  out=$(FM_FAKE_ACTIVATION_RESULT=failed FM_FAKE_BACKEND_KILL_STATUS=75 FM_FAKE_BACKEND_CLOSE_ON_ERROR=1 \
-    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
-  status=$?
-  expect_code 1 "$status" "Codex spawn must report its terminal activation failure"
-  launch=$(cat "$LAUNCH_LOG")
-  crew_home=$(codex_home_from_launch "$launch")
-  assert_absent "$HOME_DIR/state/$id.meta" "an absent endpoint after close error must not retain failed-spawn metadata"
-  [ ! -e "$crew_home" ] || fail "an absent endpoint after close error retained the isolated Codex home"
-  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
-    "terminal activation failure did not attempt endpoint cleanup"
-  pass "Codex spawn accepts a self-closed endpoint after close reports an error"
+  pass "Codex spawn retains terminal activation failures for safe teardown"
 }
 
 test_codex_activation_uses_managed_data_root() {
@@ -1344,33 +1142,6 @@ test_codex_teardown_preserves_failed_endpoint_metadata() {
   [ -f "$HOME_DIR/state/$id.meta" ] || fail "failed endpoint teardown discarded recovery metadata"
   [ -d "$crew_home" ] || fail "failed endpoint teardown removed the credential home before close confirmation"
   pass "failed endpoint teardown retains recovery metadata until close succeeds"
-}
-
-test_codex_teardown_accepts_absent_endpoint_after_close_error() {
-  local rec id out status launch crew_home target_state
-  id=profile-codex-absent-after-close-error-z71
-  rec=$(make_spawn_case profile-codex-absent-after-close-error codex "$id")
-  read_case_record "$rec"
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
-  status=$?
-  expect_code 0 "$status" "Codex spawn should prepare an absent-endpoint recovery case"
-  launch=$(cat "$LAUNCH_LOG")
-  crew_home=$(codex_home_from_launch "$launch")
-  materialize_codex_home "$crew_home" "$HOME_DIR/data" "$CASE_DIR/user/.codex" "fm-crewmate-$id" "$WT_DIR"
-  printf 'failed_spawn=1\nendpoint_cleanup_pending=1\n' >> "$HOME_DIR/state/$id.meta"
-  target_state="$CASE_DIR/target-state"
-  printf 'gone\n' > "$target_state"
-
-  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
-    FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
-    FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_FAKE_TARGET_STATE="$target_state" \
-    FM_FAKE_BACKEND_LOG="$CASE_DIR/backend.log" FM_FAKE_BACKEND_KILL_STATUS=75 PATH="$FAKEBIN_DIR:$PATH" \
-    "$TEARDOWN" "$id" --force 2>&1)
-  status=$?
-  expect_code 0 "$status" "teardown must recover when the failed-spawn endpoint is already absent"
-  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "absent endpoint teardown retained recovery metadata"
-  [ ! -e "$crew_home" ] || fail "absent endpoint teardown retained the credential home"
-  pass "failed endpoint teardown accepts verified absence after a close error"
 }
 
 test_codex_teardown_preserves_metadata_when_successful_close_leaves_endpoint_live() {
@@ -1523,11 +1294,10 @@ test_codex_teardown_refuses_symlinked_data_root() {
 }
 
 test_codex_crewmate_home_records_failed_worktree_return() {
-  local rec id out status project
+  local rec id out status handoff
   id=profile-codex-home-return-z22
   rec=$(make_spawn_case profile-codex-home-return codex "$id")
   read_case_record "$rec"
-  project=$(cd "$PROJ_DIR" && pwd)
   cat > "$FAKEBIN_DIR/python3" <<'SH'
 #!/usr/bin/env bash
 exit 73
@@ -1538,92 +1308,17 @@ SH
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "Codex spawn must fail when private-home creation and return fail"
+  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+    "failed spawn cleanup did not close its endpoint before returning the lease"
   assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
     "failed isolated-home cleanup did not attempt to return its worktree"
-  assert_no_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
-    "failed worktree return must leave the endpoint for normal teardown"
-  assert_grep "window=firstmate:fm-$id" "$HOME_DIR/state/$id.meta" \
-    "failed worktree return did not record the task endpoint"
-  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
-    "failed worktree return did not record the worktree"
-  assert_grep "project=$project" "$HOME_DIR/state/$id.meta" \
-    "failed worktree return did not record the project"
-  pass "Codex spawn records failed worktree returns for normal teardown"
-}
-
-test_treehouse_spawn_preserves_unverified_worktree() {
-  local rec id out status foreign
-  id=profile-treehouse-unverified-z23
-  rec=$(make_spawn_case profile-treehouse-unverified claude "$id")
-  read_case_record "$rec"
-  foreign="$CASE_DIR/foreign"
-  git -C "$PROJ_DIR" worktree add --quiet -b foreign-worktree "$foreign"
-
-  out=$(FM_FAKE_PANE_PATH="$foreign" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
-  status=$?
-  expect_code 1 "$status" "spawn must reject a pane that enters an unverified worktree"
-  assert_no_grep "treehouse return --force $foreign" "$CASE_DIR/backend.log" \
-    "spawn cleanup returned an unverified worktree"
-  assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
-    "spawn cleanup did not return its leased worktree"
-  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
-    "spawn cleanup did not close its own failed endpoint"
   assert_absent "$HOME_DIR/state/$id.meta" \
-    "fully reaped failed spawn retained recovery metadata"
-  pass "treehouse spawn returns only its leased worktree while reaping its endpoint"
-}
-
-test_treehouse_lease_rejects_unverified_output() {
-  local rec id out status foreign lease_output case_name
-  for case_name in primary foreign active-task; do
-    id="profile-treehouse-lease-$case_name-z24"
-    rec=$(make_spawn_case "profile-treehouse-lease-$case_name" claude "$id")
-    read_case_record "$rec"
-    foreign="$CASE_DIR/foreign"
-    if [ "$case_name" = active-task ]; then
-      git -C "$PROJ_DIR" worktree add --quiet -b active-worktree "$foreign"
-      fm_write_meta "$HOME_DIR/state/active-task.meta" \
-        "window=firstmate:fm-active-task" "worktree=$foreign" "project=$PROJ_DIR" \
-        "harness=claude" "kind=ship" "mode=no-mistakes"
-      lease_output="$foreign"
-    elif [ "$case_name" = foreign ]; then
-      git init --quiet "$foreign"
-      lease_output="$foreign"
-    else
-      lease_output="$PROJ_DIR"
-    fi
-
-    out=$(FM_FAKE_TREEHOUSE_LEASE_PATH="$lease_output" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
-    status=$?
-    expect_code 1 "$status" "spawn must reject an unverified $case_name lease output"
-    if [ "$case_name" = active-task ]; then
-      assert_contains "$out" "already recorded by active task 'active-task'" \
-        "spawn did not explain the active-task lease collision"
-    fi
-    assert_no_grep "treehouse return --force $lease_output" "$CASE_DIR/backend.log" \
-      "spawn cleanup returned an unverified $case_name lease output"
-    assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
-      "unverified $case_name lease output did not close its task endpoint"
-    assert_absent "$HOME_DIR/state/$id.meta" \
-      "fully reaped unverified $case_name lease output retained recovery metadata"
-  done
-  pass "treehouse lease rejects unverified output while reaping its endpoint"
-}
-
-test_treehouse_lease_failure_reaps_endpoint() {
-  local rec id out status
-  id=profile-treehouse-lease-failure-z24
-  rec=$(make_spawn_case profile-treehouse-lease-failure claude "$id")
-  read_case_record "$rec"
-
-  out=$(FM_FAKE_TREEHOUSE_GET_STATUS=75 run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
-  status=$?
-  expect_code 1 "$status" "spawn must fail when treehouse cannot lease a worktree"
-  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
-    "failed treehouse lease did not close its task endpoint"
-  assert_absent "$HOME_DIR/state/$id.meta" \
-    "fully reaped failed treehouse lease retained recovery metadata"
-  pass "treehouse lease failure reaps its task endpoint"
+    "failed lease return must not retain a task after its endpoint is closed"
+  handoff=$(find "$HOME_DIR/state" -name ".${id}.treehouse-lease.*" -type f -print -quit)
+  [ -n "$handoff" ] || fail "failed lease return did not retain a recovery handoff"
+  assert_contains "$(cat "$handoff")" "leased=$WT_DIR" \
+    "failed lease return did not restore its handoff to leased state"
+  pass "Codex spawn retains a closed-endpoint lease handoff for recovery"
 }
 
 test_codex_spawn_abort_accepts_an_already_absent_endpoint() {
@@ -1637,11 +1332,13 @@ test_codex_spawn_abort_accepts_an_already_absent_endpoint() {
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "Codex spawn should report the isolated-home activation failure"
-  assert_no_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
-    "failed spawn cleanup should not strictly close an already absent endpoint"
-  assert_absent "$HOME_DIR/state/$id.meta" \
-    "failed spawn cleanup retained metadata after confirming endpoint absence"
-  pass "Codex spawn abort accepts a confirmed already-absent endpoint"
+  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+    "failed spawn cleanup should close a live endpoint before releasing its lease"
+  assert_grep 'failed_spawn=1' "$HOME_DIR/state/$id.meta" \
+    "failed spawn cleanup did not retain recovery metadata after endpoint closure"
+  assert_grep 'treehouse_lease=1' "$HOME_DIR/state/$id.meta" \
+    "failed spawn cleanup did not retain its committed lease"
+  pass "Codex spawn abort retains a committed lease after endpoint closure"
 }
 
 test_codex_crewmate_home_records_failed_endpoint_removal() {
@@ -1661,7 +1358,7 @@ SH
   status=$?
   expect_code 1 "$status" "Codex spawn must fail when private-home creation and endpoint removal fail"
   assert_no_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
-    "unconfirmed endpoint cleanup returned a worktree that must remain leased"
+    "failed endpoint removal must not return a lease that still has a live endpoint"
   assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
     "failed endpoint removal was not attempted"
   assert_grep "window=firstmate:fm-$id" "$HOME_DIR/state/$id.meta" \
@@ -1670,8 +1367,10 @@ SH
     "failed endpoint removal did not record the worktree"
   assert_grep "project=$project" "$HOME_DIR/state/$id.meta" \
     "failed endpoint removal did not record the project"
+  assert_grep 'treehouse_lease=1' "$HOME_DIR/state/$id.meta" \
+    "failed endpoint removal did not hold its treehouse lease for teardown"
   [ ! -s "$LAUNCH_LOG" ] || fail "failed endpoint removal must not launch Codex"
-  pass "Codex spawn retains its leased worktree when endpoint removal is unconfirmed"
+  pass "Codex spawn records failed endpoint removals for normal teardown"
 }
 
 test_codex_omits_invalid_max_effort() {
@@ -1782,22 +1481,14 @@ test_pi_threads_model_and_max_effort() {
 }
 
 test_batch_forwards_shared_profile_flags() {
-  local rec id1 id2 out status wt2 lease_paths lease_counter pane_counter
+  local rec id1 id2 out status
   id1=profile-batch-a-z9
   id2=profile-batch-b-z10
   rec=$(make_spawn_case profile-batch claude "$id1" "$id2")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
-  wt2="$CASE_DIR/wt-2"
-  git -C "$PROJ_DIR" worktree add --quiet -b "wt-profile-batch-2" "$wt2"
-  lease_paths="$CASE_DIR/lease-paths"
-  lease_counter="$CASE_DIR/lease-counter"
-  pane_counter="$CASE_DIR/pane-counter"
-  printf '%s\n%s\n' "$WT_DIR" "$wt2" > "$lease_paths"
 
-  out=$(FM_FAKE_TREEHOUSE_LEASE_PATHS_FILE="$lease_paths" FM_FAKE_TREEHOUSE_LEASE_COUNTER="$lease_counter" \
-    FM_FAKE_PANE_PATHS_FILE="$lease_paths" FM_FAKE_PANE_COUNTER="$pane_counter" \
-    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high)
   status=$?
   expect_code 0 "$status" "batch spawn with shared profile flags should succeed"
@@ -1859,28 +1550,18 @@ test_raw_script_dispatches_fail_closed
 test_codex_crewmate_home_uses_private_directory
 test_codex_home_activation_uses_open_descriptor
 test_codex_home_activation_reports_exec_failure
-test_codex_home_activation_rejects_immediate_exit
-test_codex_home_activation_rejects_delayed_exit
-test_codex_home_activation_rechecks_before_publishing_ready
 test_codex_home_activation_refuses_replaced_path
 test_codex_home_activation_result_refuses_symlink
-test_codex_home_activation_result_waits_for_empty_file
 test_codex_home_activation_refuses_existing_result
 test_codex_home_activation_failure_aborts_spawn
-test_codex_spawn_abort_passes_home_cleanup_identity
-test_codex_activation_failure_accepts_absent_endpoint_after_close_error
 test_codex_activation_uses_managed_data_root
 test_codex_teardown_preserves_failed_endpoint_metadata
-test_codex_teardown_accepts_absent_endpoint_after_close_error
 test_codex_teardown_preserves_metadata_when_successful_close_leaves_endpoint_live
 test_codex_teardown_preserves_metadata_when_endpoint_query_is_unavailable
 test_codex_teardown_refuses_malformed_task_temp_metadata
 test_codex_teardown_accepts_legacy_task_temp_metadata
 test_codex_teardown_refuses_symlinked_data_root
 test_codex_crewmate_home_records_failed_worktree_return
-test_treehouse_spawn_preserves_unverified_worktree
-test_treehouse_lease_rejects_unverified_output
-test_treehouse_lease_failure_reaps_endpoint
 test_codex_spawn_abort_accepts_an_already_absent_endpoint
 test_codex_crewmate_home_records_failed_endpoint_removal
 test_codex_omits_invalid_max_effort

@@ -53,6 +53,7 @@ trap 'rm -f "$OUT" "$ERR"' EXIT
 
 run_with_perl_timeout() {
   perl -e '
+    use POSIX qw(WNOHANG);
     my $seconds = shift;
     my $pid = fork;
     die "fork failed\n" unless defined $pid;
@@ -63,8 +64,14 @@ run_with_perl_timeout() {
     }
     local $SIG{ALRM} = sub {
       kill "TERM", -$pid;
-      select undef, undef, undef, 0.2;
+      my $deadline = time + 1;
+      while (time < $deadline) {
+        my $done = waitpid($pid, WNOHANG);
+        exit 124 if $done == $pid || $done == -1;
+        select undef, undef, undef, 0.05;
+      }
       kill "KILL", -$pid;
+      waitpid $pid, 0;
       exit 124;
     };
     alarm $seconds;
@@ -74,16 +81,8 @@ run_with_perl_timeout() {
 }
 
 set +e
-if command -v timeout >/dev/null 2>&1; then
-  timeout "$SECONDS_ARG" "$SCRIPT_DIR/fm-watch.sh" >"$OUT" 2>"$ERR"
-  RC=$?
-elif command -v gtimeout >/dev/null 2>&1; then
-  gtimeout "$SECONDS_ARG" "$SCRIPT_DIR/fm-watch.sh" >"$OUT" 2>"$ERR"
-  RC=$?
-else
-  run_with_perl_timeout >"$OUT" 2>"$ERR"
-  RC=$?
-fi
+run_with_perl_timeout >"$OUT" 2>"$ERR"
+RC=$?
 set -e
 
 if grep -E '^(signal:|stale:|check:|heartbeat($|:))' "$OUT" >/dev/null 2>&1; then

@@ -46,6 +46,7 @@ A zellij spawn refuses loudly if `zellij` or `jq` is missing, or if the installe
 
 Zellij is a session provider only (D3, `data/fm-backend-design-d7/herdr-addendum.md`, restated for zellij in the same task).
 Treehouse remains the worktree provider, exactly as it is for tmux and herdr.
+Its ship and scout allocations use the shared task-lease contract in [`docs/architecture.md`](architecture.md#worktrees-not-branches-in-your-checkout).
 
 ## Task container shape: one session, one tab per task
 
