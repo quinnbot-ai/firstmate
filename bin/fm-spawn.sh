@@ -235,6 +235,7 @@ TASK_META_TMP=
 ORCA_WORKTREE_CLEANUP_COMPLETE=0
 ORCA_ABORT_CLEANUP_FAILED=0
 ORCA_ABORT_ENDPOINT_ABSENT=1
+ORCA_TERMINAL_CONFIRMED_ABSENT=0
 FAILED_ENDPOINT_CLEANUP=0
 TASK_TMP=
 CODEX_CREWMATE_HOME=
@@ -358,6 +359,7 @@ write_failed_treehouse_spawn_meta() {
     if [ "$BACKEND" = orca ]; then
       echo "orca_worktree_id=${ORCA_WORKTREE_ID:-}"
       [ "${ORCA_WORKTREE_CLEANUP_COMPLETE:-0}" != 1 ] || echo "orca_worktree_cleanup_complete=1"
+      [ "${ORCA_TERMINAL_CONFIRMED_ABSENT:-0}" != 1 ] || echo "orca_terminal_absent=1"
       [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
     fi
   } > "$STATE/$ID.meta" 2>/dev/null || true
@@ -379,13 +381,17 @@ orca_spawn_abort_cleanup() {
   local cleanup_failed=0 terminal_absent=1
   [ "$ORCA_ABORT_CLEANUP" = 1 ] || return 0
   ORCA_ABORT_CLEANUP=0
+  if [ -z "${ORCA_TERMINAL:-}" ]; then
+    ORCA_TERMINAL_CONFIRMED_ABSENT=1
+  fi
   if [ -n "${ORCA_TERMINAL:-}" ]; then
     terminal_absent=0
     if fm_backend_target_absent orca "$ORCA_TERMINAL"; then
       ORCA_TERMINAL=
       T=
       terminal_absent=1
-    elif FM_BACKEND_KILL_STRICT=1 fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null; then
+    else
+      FM_BACKEND_KILL_STRICT=1 fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
       if fm_backend_target_absent orca "$ORCA_TERMINAL"; then
         ORCA_TERMINAL=
         T=
@@ -393,14 +399,8 @@ orca_spawn_abort_cleanup() {
       else
         cleanup_failed=1
         FAILED_ENDPOINT_CLEANUP=1
+        echo "error: Orca terminal cleanup is unconfirmed; retaining failed-spawn resources for recovery" >&2
       fi
-    elif fm_backend_target_absent orca "$ORCA_TERMINAL"; then
-      ORCA_TERMINAL=
-      T=
-      terminal_absent=1
-    else
-      cleanup_failed=1
-      FAILED_ENDPOINT_CLEANUP=1
     fi
   fi
   if [ "$terminal_absent" = 1 ] && [ -n "${ORCA_WORKTREE_ID:-}" ]; then
@@ -415,6 +415,7 @@ orca_spawn_abort_cleanup() {
     cleanup_failed=1
   fi
   ORCA_ABORT_ENDPOINT_ABSENT=$terminal_absent
+  ORCA_TERMINAL_CONFIRMED_ABSENT=$terminal_absent
   ORCA_ABORT_CLEANUP_FAILED=$cleanup_failed
   return 0
 }
@@ -436,7 +437,7 @@ spawn_abort_cleanup() {
       write_failed_treehouse_spawn_meta
     fi
   fi
-  if [ "$status" -ne 0 ] && [ "$TREEHOUSE_LEASE_COMMITTED" = 1 ] && [ "$SPAWN_META_WRITTEN" = 1 ]; then
+  if [ "$BACKEND" != orca ] && [ "$status" -ne 0 ] && [ "$TREEHOUSE_LEASE_COMMITTED" = 1 ] && [ "$SPAWN_META_WRITTEN" = 1 ]; then
     clean_codex_home=1
     if ! treehouse_abort_endpoint_cleanup; then
       preserve_codex_home=1

@@ -44,7 +44,22 @@ if [ "${1:-}" = status ] && [ "${2:-}" = --json ] && [ "${FM_HERDR_SCRIPT_STATUS
   printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n'
   exit 0
 fi
+if [ "${FM_FAKE_HERDR_NO_ANSI:-0}" = 1 ]; then
+  for arg in "$@"; do
+    [ "$arg" != --format ] || exit 1
+  done
+fi
 n=$next
+if [ "$1" = pane ] && [ "${2:-}" = get ] && [ ! -f "$RESP/$n.out" ] && [ ! -f "$RESP/$n.exit" ]; then
+  printf '%s\n' "$n" > "$RESP/.preflight-live"
+  printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "${3:-}"
+  exit 0
+fi
+if [ "$1" = agent ] && [ "${2:-}" = get ] && [ -f "$RESP/.preflight-live" ]; then
+  rm -f "$RESP/.preflight-live"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n'
+  exit 0
+fi
 echo "$n" > "$COUNT_FILE"
 if [ -f "$RESP/$n.exit" ]; then
   exit "$(cat "$RESP/$n.exit")"
@@ -1523,6 +1538,128 @@ test_send_text_submit_preexisting_working_does_not_false_confirm_swallowed_enter
   pass "fm_backend_herdr_send_text_submit: preexisting working is not accepted as submit proof when the composer still holds the message"
 }
 
+test_send_text_submit_preexisting_working_shell_after_enter_is_unknown() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-preexisting-working-shell"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  printf '$\n' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = unknown ] || fail "a fallback shell after a preexisting-working Enter must be unknown, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "an unverified fallback shell must stop retries, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: a fallback shell after a preexisting-working Enter is never accepted as delivery"
+}
+
+# Regression for the 2026-07-08 false-negative sends.
+test_send_text_submit_confirms_codex_busy_redraw_transcript() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-codex-busy-redraw"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # The target was already working before Enter, so native state alone cannot
+  # prove this submission and the post-submit composer path must decide.
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  printf '\x1b[0m\xe2\x80\xba ship the fix\x1b[0m\n\n\xe2\x80\xa2 Working...\n  esc to interrupt\n' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "ship the fix" 3 0.01 0.01' "$ROOT" )
+  [ "$out" = empty ] || fail "a submitted Codex transcript above its busy footer must confirm empty, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "a busy redraw transcript must not provoke retry Enters, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: a Codex busy redraw transcript is not misread as a pending composer"
+}
+
+test_send_text_submit_confirms_grok_busy_redraw_transcript() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-grok-busy-redraw"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  printf '\x1b[0m\xe2\x9d\xaf ship the fix\x1b[0m\n\n  Ctrl+c:cancel\n' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "ship the fix" 3 0.01 0.01' "$ROOT" )
+  [ "$out" = empty ] || fail "a submitted Grok transcript above its busy footer must confirm empty, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "a Grok busy redraw transcript must not provoke retry Enters, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: a Grok busy redraw transcript is not misread as a pending composer"
+}
+
+test_send_text_submit_codex_editable_draft_with_preexisting_busy_footer_stays_pending() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-codex-editable-preexisting-busy"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  printf '\x1b[0m\x1b[1m\xe2\x80\xba ship the fix\x1b[0m\n\n\xe2\x80\xa2 Working...\n  esc to interrupt\n' > "$resp/4.out"
+  printf '\x1b[0m\x1b[1m\xe2\x80\xba ship the fix\x1b[0m\n\n\xe2\x80\xa2 Working...\n  esc to interrupt\n' > "$resp/6.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "ship the fix" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = pending ] || fail "an editable Codex draft with an old busy footer must remain pending, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 2 ] || fail "an editable Codex draft with an old busy footer must retry Enter, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: an editable Codex draft with a preexisting busy footer remains a swallowed Enter"
+}
+
+test_send_text_submit_codex_busy_redraw_without_ansi_stays_pending() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-codex-busy-no-ansi"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  printf '\xe2\x80\xba ship the fix\n\n\xe2\x80\xa2 Working...\n  esc to interrupt\n' > "$resp/4.out"
+  printf '\xe2\x80\xba ship the fix\n\n\xe2\x80\xa2 Working...\n  esc to interrupt\n' > "$resp/6.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_FAKE_HERDR_NO_ANSI=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "ship the fix" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = pending ] || fail "a busy redraw without ANSI styling must remain pending, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 2 ] || fail "a busy redraw without ANSI styling must retry Enter, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: a Codex busy redraw without ANSI styling remains pending"
+}
+
+test_send_text_submit_codex_busy_redraw_plain_ansi_stays_pending() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-codex-busy-plain-ansi"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  printf '\xe2\x80\xba ship the fix\n\n\xe2\x80\xa2 Working...\n  esc to interrupt\n' > "$resp/4.out"
+  printf '\xe2\x80\xba ship the fix\n\n\xe2\x80\xa2 Working...\n  esc to interrupt\n' > "$resp/6.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "ship the fix" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = pending ] || fail "a plain row from an otherwise successful ANSI capture must remain pending, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 2 ] || fail "a plain row from an otherwise successful ANSI capture must retry Enter, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: an ANSI read with a plain busy redraw remains a swallowed Enter"
+}
+
+# The same preexisting-working fallback must treat a styled Codex ghost hint as
+# empty after Enter.  This runs through submit verification, not just the
+# away-mode guard's direct composer-state fixture.
+test_send_text_submit_confirms_codex_ghost_after_preexisting_working() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-codex-ghost-preexisting-working"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  printf '\x1b[0m\x1b[1m\xe2\x80\xba \x1b[0m\x1b[2mSummarize recent commits\x1b[0m\n\n  gpt-5.5 xhigh\n' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "ship the fix" 3 0.01 0.01' "$ROOT" )
+  [ "$out" = empty ] || fail "a faint Codex ghost after a submitted Enter must confirm empty, got '$out'"
+  pass "fm_backend_herdr_send_text_submit: a faint Codex ghost is empty in the preexisting-working fallback"
+}
+
+# A real Codex draft has the same glyph but no later busy footer.  It remains a
+# positive swallowed-Enter signal even in the private post-submit mode.
+test_send_text_submit_codex_true_swallow_stays_pending() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-codex-true-swallow"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  printf '\xe2\x80\xba ship the fix\n\n  gpt-5.5 xhigh\n' > "$resp/4.out"
+  printf '\xe2\x80\xba ship the fix\n\n  gpt-5.5 xhigh\n' > "$resp/6.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "ship the fix" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = pending ] || fail "a real Codex composer draft without busy evidence must remain pending, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 2 ] || fail "a real Codex swallow must retry Enter through the configured budget, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: a real Codex draft still reports a swallowed Enter"
+}
+
 # Regression for the submit-confirmation side of the 2026-07-07 incident:
 # even if a Codex idle composer displays suggestion text, an idle-baseline
 # submit must confirm from native agent-state rather than composer scraping.
@@ -1598,7 +1735,9 @@ test_send_text_submit_slow_transition_within_one_enter_needs_no_extra_enter() {
 test_send_text_submit_send_failed() {
   local dir log resp fb out
   dir="$TMP_ROOT/submit-fail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '1\n' > "$resp/1.exit"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '1\n' > "$resp/3.exit"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "x" 2 0.01 0.01' "$ROOT" )
@@ -1618,6 +1757,64 @@ test_send_text_submit_unknown_on_capture_failure() {
   enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
   [ "$enter_count" -eq 1 ] || fail "send_text_submit must never retry past an unreadable target (that is a hard I/O failure, not a timing race), sent $enter_count Enter(s)"
   pass "fm_backend_herdr_send_text_submit: reports 'unknown' when the post-Enter agent-get read fails (never retries past an unreadable target)"
+}
+
+test_send_text_submit_rejects_agentless_pane_before_typing() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-agentless-before-type"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"error":{"code":"agent_not_found"}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = send-failed ] || fail "send_text_submit must reject an agent-less pane before typing, got '$out'"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''send-text' "$log")" -eq 0 ] \
+    || fail "send_text_submit typed into an agent-less bare shell"
+  pass "fm_backend_herdr_send_text_submit: rejects an agent-less pane before typing"
+}
+
+test_send_text_submit_rejects_missing_pane_before_typing() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-missing-pane-before-type"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"error":{"code":"pane_not_found"}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = send-failed ] || fail "send_text_submit must reject a missing pane before typing, got '$out'"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''send-text' "$log")" -eq 0 ] \
+    || fail "send_text_submit typed into a missing pane"
+  pass "fm_backend_herdr_send_text_submit: rejects a missing pane before typing"
+}
+
+test_send_text_submit_rejects_unknown_pane_before_typing() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-unknown-pane-before-type"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"different-pane"}}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = send-failed ] || fail "send_text_submit must reject an unverified pane before typing, got '$out'"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''send-text' "$log")" -eq 0 ] \
+    || fail "send_text_submit typed into a pane with unverified agent state"
+  pass "fm_backend_herdr_send_text_submit: rejects an unverified pane before typing"
+}
+
+test_send_text_submit_rejects_agentless_pane_after_unknown_confirmation() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-agentless-after-unknown"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
+  printf '1\n' > "$resp/6.exit"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/7.out"
+  printf '{"error":{"code":"agent_not_found"}}\n' > "$resp/8.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = send-failed ] || fail "send_text_submit must reject an agent-less pane after an unknown confirmation, got '$out'"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")" -eq 1 ] \
+    || fail "send_text_submit retried Enter after the pane became agent-less"
+  pass "fm_backend_herdr_send_text_submit: rejects an agent-less pane after unknown confirmation"
 }
 
 # --- fm-backend.sh dispatch wiring -------------------------------------------
@@ -2314,12 +2511,24 @@ test_send_text_submit_detects_swallowed_enter
 test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_text_submit_confirms_blocked_after_enter
 test_send_text_submit_preexisting_working_does_not_false_confirm_swallowed_enter
+test_send_text_submit_preexisting_working_shell_after_enter_is_unknown
+test_send_text_submit_confirms_codex_busy_redraw_transcript
+test_send_text_submit_confirms_grok_busy_redraw_transcript
+test_send_text_submit_codex_editable_draft_with_preexisting_busy_footer_stays_pending
+test_send_text_submit_codex_busy_redraw_without_ansi_stays_pending
+test_send_text_submit_codex_busy_redraw_plain_ansi_stays_pending
+test_send_text_submit_confirms_codex_ghost_after_preexisting_working
+test_send_text_submit_codex_true_swallow_stays_pending
 test_send_text_submit_confirms_despite_codex_idle_tip_composer
 test_composer_state_codex_dynamic_idle_tip_reads_empty_when_faint
 test_composer_state_guard_still_refuses_real_pending_text_after_submit_confirmation_change
 test_send_text_submit_slow_transition_within_one_enter_needs_no_extra_enter
 test_send_text_submit_send_failed
 test_send_text_submit_unknown_on_capture_failure
+test_send_text_submit_rejects_agentless_pane_before_typing
+test_send_text_submit_rejects_missing_pane_before_typing
+test_send_text_submit_rejects_unknown_pane_before_typing
+test_send_text_submit_rejects_agentless_pane_after_unknown_confirmation
 test_dispatch_routes_herdr_backend
 test_dispatch_busy_state_unknown_for_tmux
 test_dispatch_composer_state_routes_by_backend
