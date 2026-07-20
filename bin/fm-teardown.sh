@@ -918,48 +918,45 @@ remove_codex_crewmate_home() {
 }
 
 close_recorded_endpoint() {
-  local tab_id absence_status close_failed=0 require_absence=0
+  local tab_id require_absence=0 endpoint_label=endpoint
   tab_id=$(meta_value "$META" zellij_tab_id)
   if [ "$ENDPOINT_CLEANUP_PENDING" = 1 ] || [ -n "$CODEX_CREWMATE_HOME" ]; then
+    require_absence=1
+    [ "$ENDPOINT_CLEANUP_PENDING" != 1 ] || endpoint_label='failed-spawn endpoint'
+  fi
+  if [ "$BACKEND" = orca ] && [ -n "${T_ORCA:-}" ]; then
     require_absence=1
   fi
   if [ "$require_absence" -ne 1 ]; then
     fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null || true
     return 0
   fi
-  if fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
+  close_endpoint_with_confirmed_absence "$BACKEND" "$T" "$tab_id" "fm-$ID" "$endpoint_label"
+}
+
+close_endpoint_with_confirmed_absence() {
+  local backend=$1 target=$2 tab_id=$3 expected_label=$4 endpoint_label=$5 absence_status close_failed=0
+  if fm_backend_target_absent "$backend" "$target" "$expected_label"; then
     return 0
   fi
-  if ! FM_BACKEND_KILL_STRICT=1 fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null; then
+  if ! FM_BACKEND_KILL_STRICT=1 fm_backend_kill "$backend" "$target" "$tab_id" "$expected_label" 2>/dev/null; then
     close_failed=1
   fi
-  if fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
+  if fm_backend_target_absent "$backend" "$target" "$expected_label"; then
     absence_status=0
   else
     absence_status=$?
   fi
   if [ "$absence_status" -ne 0 ]; then
-    if [ "$ENDPOINT_CLEANUP_PENDING" = 1 ]; then
-      if [ "$absence_status" -eq 1 ]; then
-        echo "error: failed-spawn endpoint $T remains live after cleanup; preserving recovery metadata" >&2
-      else
-        echo "error: failed-spawn endpoint $T could not be confirmed absent after cleanup; preserving recovery metadata" >&2
-      fi
+    if [ "$absence_status" -eq 1 ]; then
+      echo "error: $endpoint_label $target remains live after cleanup; preserving recovery metadata" >&2
     else
-      if [ "$absence_status" -eq 1 ]; then
-        echo "error: endpoint $T remains live after cleanup; preserving recovery metadata" >&2
-      else
-        echo "error: endpoint $T could not be confirmed absent after cleanup; preserving recovery metadata" >&2
-      fi
+      echo "error: $endpoint_label $target could not be confirmed absent after cleanup; preserving recovery metadata" >&2
     fi
     return 1
   fi
   if [ "$close_failed" -ne 0 ]; then
-    if [ "$ENDPOINT_CLEANUP_PENDING" = 1 ]; then
-      echo "warning: failed-spawn endpoint $T was already absent after close reported an error" >&2
-    else
-      echo "warning: endpoint $T was already absent after close reported an error" >&2
-    fi
+    echo "warning: $endpoint_label $target was already absent after close reported an error" >&2
   fi
 }
 
@@ -1068,7 +1065,9 @@ cleanup_firstmate_home_children() {
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       fi
     fi
-    if [ -n "$child_t" ]; then
+    if [ "$child_backend" = orca ] && [ -n "$child_t" ]; then
+      close_endpoint_with_confirmed_absence "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" "child endpoint" || return 1
+    elif [ -n "$child_t" ]; then
       if [ "$child_backend" = zellij ]; then
         # Zellij titles are scoped by the owning home tag, so forced secondmate
         # cleanup must verify child tabs as that child home, not the parent.
@@ -1203,6 +1202,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
     ORCA_PATH_MATCH_VERIFIED=1
   fi
+  [ -z "$T_ORCA" ] || close_recorded_endpoint || exit 1
   if [ -n "$ORCA_WORKTREE_ID" ] && [ -d "$WT" ]; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     if [ "$branch" != "HEAD" ]; then
@@ -1215,7 +1215,6 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     fi
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
   fi
-  [ -z "$T_ORCA" ] || close_recorded_endpoint || exit 1
   [ -z "$ORCA_WORKTREE_ID" ] || fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)

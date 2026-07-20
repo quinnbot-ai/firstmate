@@ -1037,6 +1037,8 @@ test_scout_teardown_removes_orca_worktree_via_helper() {
     "decisions_reviewed=1" "decision_keys="
   orca_case teardown
   printf '{"ok":true,"result":{"worktree":{"id":"wt-teardown","path":"%s"}}}\n' "$wt" > "$RESP/1.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["still live"]}}}\n' > "$RESP/2.out"
+  printf '{"ok":false,"error":{"code":"terminal_not_found","message":"terminal not found"}}\n' > "$RESP/4.out"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -1051,6 +1053,46 @@ test_scout_teardown_removes_orca_worktree_via_helper() {
     "teardown did not remove the Orca worktree through orca worktree rm"
   assert_absent "$state/$id.meta" "teardown should remove task metadata"
   pass "fm-teardown.sh backend=orca: scout report gate then helper-backed worktree removal"
+}
+
+test_scout_teardown_preserves_orca_worktree_when_terminal_absence_is_unconfirmed() {
+  local proj wt data state config id out rc neutral branch
+  id="orcatermunknownz4"
+  proj="$TMP_ROOT/terminal-unknown-project"
+  wt="$TMP_ROOT/terminal-unknown-wt"
+  data="$TMP_ROOT/terminal-unknown-data"
+  state="$TMP_ROOT/terminal-unknown-state"
+  config="$TMP_ROOT/terminal-unknown-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'report\n' > "$data/$id/report.md"
+  touch "$state/.last-watcher-beat"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "terminal=term-unknown" "worktree=$wt" "project=$proj" \
+    "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "backend=orca" "orca_worktree_id=wt-terminal-unknown" \
+    "decisions_reviewed=1" "decision_keys="
+  orca_case terminal-unknown
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-terminal-unknown","path":"%s"}}}\n' "$wt" > "$RESP/1.out"
+  printf '{"ok":false,"error":{"code":"runtime_error","message":"unreadable"}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"closed":true}}\n' > "$RESP/3.out"
+  printf '{"ok":false,"error":{"code":"runtime_error","message":"unreadable"}}\n' > "$RESP/4.out"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "Orca teardown should refuse unconfirmed terminal absence"$'\n'"$out"
+  assert_contains "$out" "could not be confirmed absent" \
+    "teardown did not explain the unconfirmed terminal absence"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
+    "teardown removed the Orca worktree without confirmed terminal absence"
+  assert_present "$state/$id.meta" "unconfirmed terminal teardown should preserve task metadata"
+  branch=$(git -C "$wt" rev-parse --abbrev-ref HEAD)
+  [ "$branch" = "fm/$id" ] || fail "teardown changed the worktree branch before terminal absence was confirmed"
+  pass "fm-teardown.sh backend=orca: preserves worktree when terminal absence is unconfirmed"
 }
 
 test_scout_teardown_refuses_orca_id_path_mismatch() {
@@ -1109,6 +1151,8 @@ test_teardown_removes_orca_worktree_when_path_missing() {
     "backend=orca" "orca_worktree_id=wt-missing-path" \
     "decisions_reviewed=1" "decision_keys="
   orca_case missing-path
+  printf '{"ok":true,"result":{"terminal":{"tail":["still live"]}}}\n' > "$RESP/1.out"
+  printf '{"ok":false,"error":{"code":"terminal_not_found","message":"terminal not found"}}\n' > "$RESP/3.out"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -1233,6 +1277,8 @@ test_ship_teardown_removes_orca_worktree_when_id_path_matches() {
     "backend=orca" "orca_worktree_id=wt-ship-match"
   orca_case ship-match
   printf '{"ok":true,"result":{"worktree":{"id":"wt-ship-match","path":"%s"}}}\n' "$wt" > "$RESP/1.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["still live"]}}}\n' > "$RESP/2.out"
+  printf '{"ok":false,"error":{"code":"terminal_not_found","message":"terminal not found"}}\n' > "$RESP/4.out"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -1415,6 +1461,8 @@ test_secondmate_force_teardown_removes_orca_child_via_orca() {
     "backend=orca" "orca_worktree_id=wt-child-cleanup"
   orca_case secondmate-child-cleanup
   printf '{"ok":true,"result":{"worktree":{"id":"wt-child-cleanup","path":"%s"}}}\n' "$childwt" > "$RESP/1.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["still live"]}}}\n' > "$RESP/2.out"
+  printf '{"ok":false,"error":{"code":"terminal_not_found","message":"terminal not found"}}\n' > "$RESP/4.out"
   add_tmux_fake "$FB"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
@@ -1569,6 +1617,7 @@ test_peek_and_crew_state_fail_closed_on_orca_error_json
 test_target_exists_rejects_orca_error_json
 test_target_absent_confirms_orca_not_found
 test_scout_teardown_removes_orca_worktree_via_helper
+test_scout_teardown_preserves_orca_worktree_when_terminal_absence_is_unconfirmed
 test_scout_teardown_refuses_orca_id_path_mismatch
 test_teardown_removes_orca_worktree_when_path_missing
 test_teardown_preserves_metadata_when_orca_remove_error_json
