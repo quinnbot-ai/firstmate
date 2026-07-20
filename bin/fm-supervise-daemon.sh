@@ -138,6 +138,9 @@
 #          SIGTERM/SIGINT shut down within ~1s, flush escalations, release the
 #          lock. A crashing fm-watch.sh is logged and restarted, never killing
 #          the daemon; a tight crash-restart spin is detected and backed off.
+#          The daemon lease binds this home, script path, process identity, and
+#          a loop heartbeat, stops on ownership loss, and cleans up only its
+#          own lock metadata. docs/watcher-continuity.md owns that contract.
 set -u
 
 FM_DAEMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
