@@ -209,7 +209,6 @@ ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
 TREEHOUSE_LEASE_PATH_FILE=
-TREEHOUSE_LEASE_ACQUIRED=0
 TREEHOUSE_LEASE_COMMITTED=0
 TREEHOUSE_LEASE_LOCK=
 TREEHOUSE_LEASE_LOCK_HELD=0
@@ -1699,7 +1698,6 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     echo "error: could not durably record treehouse lease $TREEHOUSE_LEASE_PATH for $ID" >&2
     exit 1
   fi
-  TREEHOUSE_LEASE_ACQUIRED=1
   sq_treehouse_lease_path=$(shell_quote "$TREEHOUSE_LEASE_PATH")
   spawn_send_text_line "$WT_TARGET" "cd $sq_treehouse_lease_path"
 

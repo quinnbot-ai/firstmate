@@ -40,6 +40,13 @@ GLOBAL_CLEANUP() {
 }
 trap GLOBAL_CLEANUP EXIT
 
+write_pid_identity() {  # <state> <pid> <destination>
+  local state=$1 pid=$2 destination=$3 identity
+  identity=$(FM_HOME="$state" FM_STATE_OVERRIDE="$state/state" bash -c \
+    '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$pid" 2>/dev/null) || true
+  printf '%s\n' "$identity" > "$destination"
+}
+
 # ---------------------------------------------------------------------------
 # UNIT 1: fm_afk_clear_stale_artifacts removes exactly the three stale artifacts.
 # ---------------------------------------------------------------------------
@@ -75,7 +82,7 @@ unit_clear_stale() {
 # current session's buffered escalations.
 # ---------------------------------------------------------------------------
 unit_fresh_vs_refresh() {
-  local st sleep_pid lock owner identity
+  local st sleep_pid lock owner
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-refresh.XXXXXX")
   mkdir -p "$st/state"
   : > "$st/state/.subsuper-escalations"
@@ -89,9 +96,7 @@ unit_fresh_vs_refresh() {
   mkdir "$owner"
   ln -s "$owner" "$lock"
   printf '%s' "$sleep_pid" > "$owner/pid"
-  identity=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c \
-    '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$sleep_pid" 2>/dev/null) || true
-  printf '%s\n' "$identity" > "$owner/pid-identity"
+  write_pid_identity "$st" "$sleep_pid" "$owner/pid-identity"
   printf '%s\n' "$st" > "$owner/fm-home"
   printf '%s\n' "$ROOT/bin/fm-supervise-daemon.sh" > "$owner/daemon-path"
   touch "$owner/heartbeat"
@@ -706,7 +711,7 @@ unit_refresh_validates_record() {
   printf 'tmux\tonly-two-fields\n' > "$st/state/.afk-daemon-terminal"
   sleep 30 & daemon_pid=$!
   printf '%s' "$daemon_pid" > "$owner/pid"
-  ( FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$owner/pid-identity" )
+  write_pid_identity "$st" "$daemon_pid" "$owner/pid-identity"
   printf '%s\n' "$st" > "$owner/fm-home"
   printf '%s\n' "$ROOT/bin/fm-supervise-daemon.sh" > "$owner/daemon-path"
   touch "$owner/heartbeat"
@@ -734,7 +739,7 @@ unit_stale_lease_restarts_launch_paths() {
   mkdir "$owner"
   ln -s "$owner" "$lock"
   printf '%s\n' "$daemon_pid" > "$owner/pid"
-  ( FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$owner/pid-identity" )
+  write_pid_identity "$st" "$daemon_pid" "$owner/pid-identity"
   printf '%s\n' "$st" > "$owner/fm-home"
   printf '%s\n' "$ROOT/bin/fm-supervise-daemon.sh" > "$owner/daemon-path"
   touch -t 200001010000 "$owner/heartbeat"
