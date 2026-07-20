@@ -229,6 +229,8 @@ The task metadata records `claude_crewmate_home=`, and normal teardown removes t
 Claude secondmate launches are unaffected and keep their existing `CLAUDE_CONFIG_DIR` behavior.
 
 When `data/claude-crewmate/profile/` is ready, `bin/fm-dispatch-select.sh`'s `quota-balanced` selection (below) also reads the Claude vendor's quota through that profile, so vendor selection compares the account crew tasks will actually burn rather than the captain's seat account; an absent or not-ready profile reads the default environment exactly as before.
+`quota-axi` 0.1.7 has no per-profile flag (`quota-axi --help` lists only `--provider`/`--json`/`--full`/`--allow-keychain-prompt`), so this is done by setting `CLAUDE_CONFIG_DIR` on the `quota-axi` invocation itself, never by forking or patching `quota-axi`.
+Verified 2026-07-20, `quota-axi` 0.1.7: `quota-axi --provider claude --json` under the default environment returns the logged-in seat's live reading (`"source": "oauth"`, fresh windows); the identical command with `CLAUDE_CONFIG_DIR` pointed at an empty, unauthenticated directory returns `"source": "cache"` with `"state": {"status": "stale", "error": "Claude sign-in required", ...}` - it does not silently fall back to reading the seat's live credentials, but it does fall back to a stale global cache rather than failing outright, which is exactly why `fm-dispatch-select.sh` only ever sets `CLAUDE_CONFIG_DIR` for this call after `fm_claude_crew_profile_ready` has already confirmed the profile is logged in, not unconditionally.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
