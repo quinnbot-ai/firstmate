@@ -1502,7 +1502,7 @@ fi
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
 validate_spawn_worktree() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
+  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real lease_real
   wt_real=
   if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
     wt_real=
@@ -1513,7 +1513,12 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   if ! wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P); then
     wt_top_real=
   fi
-  if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
+  lease_real=
+  if [ -n "${TREEHOUSE_LEASE_PATH:-}" ]; then
+    lease_real=$(real_path_or_raw "$TREEHOUSE_LEASE_PATH")
+  fi
+  if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ] || \
+    { [ -n "$lease_real" ] && [ "$wt_real" != "$lease_real" ]; }; then
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
@@ -1644,6 +1649,13 @@ spawn_current_path() {  # <target>
     cmux) fm_backend_cmux_current_path "$1" "$W" ;;
   esac
 }
+spawn_path_is_worktree_root() {  # <path>
+  local path=$1 path_real top top_real
+  path_real=$(cd "$path" 2>/dev/null && pwd -P) || return 1
+  top=$(git -C "$path" rev-parse --show-toplevel 2>/dev/null) || return 1
+  top_real=$(cd "$top" 2>/dev/null && pwd -P) || return 1
+  [ "$path_real" = "$top_real" ]
+}
 spawn_send_literal() {  # <target> <text>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_literal "$1" "$2" ;;
@@ -1692,14 +1704,38 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
   # prefix would otherwise make the pane's OS-level cwd read differ from
   # PROJ_ABS on the very first poll, before the pane has actually moved.
+  # A live foreground-cwd read can catch a short-lived child of `treehouse
+  # get` instead of the pane shell itself. In particular, git-upload-pack for
+  # a local-path origin temporarily reports that origin's git directory. A
+  # candidate that is the canonical leased worktree root is safe immediately; every
+  # other candidate needs two consecutive polls before validation may refuse
+  # the spawn, so a child-process cwd cannot strand its pane or lease.
+  cwd_candidate=''
+  cwd_candidate_polls=0
   for _ in $(seq 1 60); do
     p=$(spawn_current_path "$WT_TARGET" || true)
     # A just-created terminal can briefly report its uninitialized root cwd.
     # Every other changed cwd is treehouse's result and must hit the isolation
     # validator, including invalid destinations, instead of timing out.
     if [ -n "$p" ] && [ "$p" != / ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
-      WT="$p"
-      break
+      p_real=$(real_path_or_raw "$p")
+      if spawn_path_is_worktree_root "$p" && [ "$p_real" = "$(real_path_or_raw "$TREEHOUSE_LEASE_PATH")" ]; then
+        WT="$p"
+        break
+      fi
+      if [ "$p_real" = "$cwd_candidate" ]; then
+        cwd_candidate_polls=$((cwd_candidate_polls + 1))
+      else
+        cwd_candidate=$p_real
+        cwd_candidate_polls=1
+      fi
+      if [ "$cwd_candidate_polls" -ge 2 ]; then
+        WT="$p"
+        break
+      fi
+    else
+      cwd_candidate=''
+      cwd_candidate_polls=0
     fi
     sleep 1
   done
