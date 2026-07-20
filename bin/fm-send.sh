@@ -10,11 +10,12 @@
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
 # Orca currently supports Enter and C-c only, and rejects Escape.
 #
-# Text submission is verified: the line is typed ONCE, then Enter is sent and
-# retried (Enter only, never retyped) until the target backend confirms a
-# submit or reports an inconclusive send. If a swallowed Enter is positively
-# confirmed, fm-send exits NON-ZERO so the caller knows the steer did not land
-# instead of silently leaving an unsubmitted instruction.
+# Text sends first require a confirmed live harness agent, so dead or unknown
+# target liveness refuses before any text is typed. The line is then typed ONCE,
+# and Enter is retried (Enter only, never retyped) until the target backend
+# explicitly confirms the submit. Any swallowed or inconclusive submit exits
+# NON-ZERO, so the caller never mistakes an unsubmitted instruction for a steer
+# that landed.
 # Submission dispatches through the target's recorded backend; the tmux adapter
 # shares its composer/submit core with the away-mode daemon via bin/fm-tmux-lib.sh.
 # Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).

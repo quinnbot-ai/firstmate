@@ -53,7 +53,8 @@ tmux select-window -t <session-name>:fm-<id> # jump to one, or use ctrl-b <n>
 
 Use the current tmux session name when firstmate was launched inside tmux; use `firstmate` only for the detached outside-tmux path.
 Typing directly into an attached window is authoritative direct intervention - the first mate treats it the same as any other captain instruction and reconciles at the next heartbeat.
-You do not need to attach at all for routine supervision: from an active firstmate session, the first mate reads crew windows itself with `bin/fm-peek.sh fm-<id>` (a bounded, read-only capture) and steers a crew with `FM_HOME=<this-firstmate-home> bin/fm-send.sh fm-<id> "<text>"` unless `FM_HOME` is already set to the active firstmate home.
+You do not need to attach at all for routine supervision: from an active firstmate session, the first mate reads crew windows itself with `bin/fm-peek.sh fm-<id>` (a bounded, read-only capture) and can steer a crew with `FM_HOME=<this-firstmate-home> bin/fm-send.sh fm-<id> "<text>"` when its live-agent probe confirms the harness.
+Text sends refuse rather than type into a dead or unknown pane, including tmux's currently unclassifiable Pi process shape.
 
 ## Verifying it works
 

@@ -57,7 +57,8 @@ No first-run provisioning beyond the socket-access setup above and having `jq` i
 
 Watching and attaching: firstmate uses one workspace per task in whatever cmux window is currently open.
 Task selectors resolve through the shared contract owned by [`docs/configuration.md`](configuration.md) ("Runtime backend"), while the actual cmux workspace title is home-scoped as `fm-<home-label>-<id>`, for example `fm-firstmate-<8hex>-cmux-e2e-t1` in the primary home or `fm-2ndmate-<secondmate-id>-<8hex>-cmux-e2e-t1` in a secondmate home.
-You do not need to bring the window forward for routine supervision: from an active firstmate session, `bin/fm-peek.sh <id>` reads a task's surface without focusing it, and `FM_HOME=<this-firstmate-home> bin/fm-send.sh <id> "<text>"` steers it unless `FM_HOME` is already set to the active firstmate home - workspace/surface/pane creation all default `focus` to `false`, so an unattended spawn never steals your view.
+You do not need to bring the window forward for routine supervision: from an active firstmate session, `bin/fm-peek.sh <id>` reads a task's surface without focusing it, and workspace/surface/pane creation all default `focus` to `false`, so an unattended spawn never steals your view.
+cmux has no verified agent-process liveness classifier, so `fm-send.sh` currently refuses text steers before typing rather than risk delivery to an unknown pane.
 
 Verify it works by spawning a trivial task with `--backend cmux` and confirming the task's meta records `backend=cmux` plus `cmux_workspace_id=` and `cmux_surface_id=`.
 The cmux sidebar should show a new `fm-firstmate-<8hex>-<id>` workspace in the primary home.
@@ -344,7 +345,8 @@ Every real-cmux test in this document and its accompanying test files creates on
 
 ## End-to-end verification (spawn -> steer -> peek -> done -> merge -> teardown)
 
-Beyond the fake-CLI unit tests (`tests/fm-backend-cmux.test.sh`) and the real-CLI smoke test (`tests/fm-backend-cmux-smoke.test.sh`), the full firstmate lifecycle was driven end to end against a real `claude` crewmate through this branch's own scripts, in a scratch `FM_HOME`, a scratch `local-only` git project, and the same captain-owned real cmux app instance (there is no isolated session to spin up for cmux, unlike herdr/zellij; only firstmate-created `fm-` task workspaces were ever touched):
+Beyond the fake-CLI unit tests (`tests/fm-backend-cmux.test.sh`) and the real-CLI smoke test (`tests/fm-backend-cmux-smoke.test.sh`), the full firstmate lifecycle was driven end to end against a real `claude` crewmate through this branch's own scripts, in a scratch `FM_HOME`, a scratch `local-only` git project, and the same captain-owned real cmux app instance (there is no isolated session to spin up for cmux, unlike herdr/zellij; only firstmate-created `fm-` task workspaces were ever touched).
+This record predates the strict text-send liveness preflight, so current `fm-send.sh` intentionally refuses the text steers in steps 5 and 6 before they reach the otherwise verified adapter submit path:
 
 1. `FM_HOME=<scratch> bin/fm-spawn.sh cmux-e2e-t1 projects/scratch-e2e-project --backend cmux claude` - spawned successfully, printing `window=<workspace_uuid>:<surface_uuid>` in the summary and writing `backend=cmux`, `cmux_workspace_id=`, `cmux_surface_id=` to the task's meta. The worktree-discovery poll correctly resolved the real treehouse worktree path using the active `pwd`-marker-probe workaround (finding #2), exactly as designed.
 2. `bin/fm-peek.sh fm-cmux-e2e-t1` - showed the live claude trust dialog ("Quick safety check: Is this a project you created or one you trust?").

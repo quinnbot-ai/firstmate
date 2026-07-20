@@ -36,11 +36,12 @@
 # quarantine entries with the rest of the volatile state.
 # Codex ship and scout tasks record a firstmate-managed private home under
 # data/codex-crewmate in codex_crewmate_home= metadata.
-# Teardown removes that home only after endpoint cleanup succeeds.
-# When failed-spawn cleanup cannot confirm the endpoint absent, it preserves the metadata and private home for a later safe recovery attempt.
-# Orca tasks use the same safety checks, then close the recorded terminal and
-# remove the recorded worktree through `orca worktree rm`; teardown never guesses
-# an Orca target from ambient CLI state.
+# Teardown removes that home only after endpoint cleanup confirms absence.
+# When a managed Codex home or Orca task cannot confirm its recorded endpoint
+# absent, teardown preserves metadata and task-private resources for a later safe
+# recovery attempt. Orca tasks otherwise use the same safety checks, close the
+# recorded terminal, and remove the recorded worktree through `orca worktree rm`;
+# teardown never guesses an Orca target from ambient CLI state.
 # Secondmates (kind=secondmate in meta) are retired explicitly. Normal
 # teardown refuses while their home has in-flight crewmate meta files; --force
 # is the approved discard path that prevalidates child removal targets, discards
@@ -1209,7 +1210,8 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
-# Best-effort: drop the local task branch so the shared repo does not accumulate refs.
+# Best-effort: drop a local non-default task branch so the shared repo does not
+# accumulate task refs while retaining the resolved default branch.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ -n "$ORCA_WORKTREE_ID" ] && [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1

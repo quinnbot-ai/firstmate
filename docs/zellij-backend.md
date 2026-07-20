@@ -27,7 +27,8 @@ No first-run provisioning is needed beyond having `zellij` and `jq` on `PATH`; f
 Watching and attaching: firstmate uses one shared session (default name `firstmate`, overridable with `FM_ZELLIJ_SESSION`) with one tab per task.
 The tab's caller-facing label is always `fm-<id>`, but its actual visible title is home-scoped - `fm-<home-label>-<id>`, e.g. `fm-firstmate-a1b2c3d4-fix-login-k3` - so that two firstmate homes sharing this one session (a primary plus a secondmate, two secondmates, or two independent primary installations on the same machine) never collide on the tab bar even if their task ids happen to match; see "Home-scoped tab titles" below.
 Attach to the selected `FM_ZELLIJ_SESSION` (or the default `firstmate` session) with `zellij attach <name>` to see every task, primary or secondmate, as a tab in that one tab bar.
-You do not need to attach for routine supervision: from an active firstmate session, `bin/fm-peek.sh fm-<id>` reads a task's pane without attaching, and `FM_HOME=<this-firstmate-home> bin/fm-send.sh fm-<id> "<text>"` steers it unless `FM_HOME` is already set to the active firstmate home.
+You do not need to attach for routine supervision: from an active firstmate session, `bin/fm-peek.sh fm-<id>` reads a task's pane without attaching.
+Zellij has no verified agent-process liveness classifier, so `fm-send.sh` currently refuses text steers before typing rather than risk delivery to an unknown pane.
 
 Verify it works by spawning a trivial task with `--backend zellij` and confirming the task's meta records `backend=zellij` plus `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`; attaching to the session should show the new home-scoped tab title, such as `fm-firstmate-<8hex>-<id>`.
 
@@ -196,7 +197,8 @@ Every real-zellij test in this document and its accompanying test files uses a u
 
 ## End-to-end verification (spawn -> steer -> peek -> done -> merge -> teardown)
 
-Beyond the fake-CLI unit tests (`tests/fm-backend-zellij.test.sh`) and the real-CLI smoke tests (`tests/fm-backend-zellij-smoke.test.sh`), the full firstmate lifecycle was driven end to end against a real `claude` crewmate through this branch's own scripts, in a scratch `FM_HOME`, a scratch `local-only` git project, and an isolated `FM_ZELLIJ_SESSION` (never the real `firstmate` session name):
+Beyond the fake-CLI unit tests (`tests/fm-backend-zellij.test.sh`) and the real-CLI smoke tests (`tests/fm-backend-zellij-smoke.test.sh`), the full firstmate lifecycle was driven end to end against a real `claude` crewmate through this branch's own scripts, in a scratch `FM_HOME`, a scratch `local-only` git project, and an isolated `FM_ZELLIJ_SESSION` (never the real `firstmate` session name).
+This record predates the strict text-send liveness preflight, so current `fm-send.sh` intentionally refuses the text steer in step 5 before it reaches the otherwise verified adapter submit path:
 
 1. `FM_HOME=<scratch> FM_BACKEND=zellij FM_ZELLIJ_SESSION=<isolated> bin/fm-spawn.sh zellij-e2e-t1 projects/scratch-e2e-project claude` - spawned successfully, printing `window=<session>:<pane>` in the summary and writing `backend=zellij`, `zellij_session=`, `zellij_tab_id=`, `zellij_pane_id=` to the task's meta. The worktree-discovery poll correctly resolved the real treehouse worktree path using the active `pwd`-probe workaround.
 2. `FM_HOME=<scratch> FM_ZELLIJ_SESSION=<isolated> bin/fm-peek.sh fm-zellij-e2e-t1` - showed the live claude trust dialog ("Quick safety check: Is this a project you created or one you trust?").
