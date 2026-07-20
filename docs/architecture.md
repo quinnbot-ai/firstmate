@@ -106,7 +106,11 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
 Every treehouse-backed ship or scout allocation is leased under its task id and records `treehouse_lease=1` in live task metadata, so the pool cannot recycle it until `fm-teardown.sh` returns the worktree.
+Lease acquisition and return use a private durable handoff record, and any unsafe abort or cleanup result preserves that record for a later recovery instead of freeing an unproven worktree.
 If a same-project live task meta predates that marker, allocation fails closed until teardown instead of risking an unleased detached or uncommitted worktree.
+Spawn-time current-path reads can transiently report a foreground child process, so the canonical leased worktree root is accepted immediately while every other changed candidate must persist for two polls before the isolation check can reject it.
+Before launching a ship or scout worker, firstmate pins its worktree-local Git author identity without changing global or shared project Git configuration.
+`bin/fm-git-identity.sh`'s header owns the exact identities and the protected Epstein-project predicates.
 Codex ship and scout workers additionally run with a firstmate-managed, task-private `CODEX_HOME` under `data/codex-crewmate/`.
 That home copies only the captain's Codex authentication and model catalog, disables plugins, carries no MCP configuration, and excludes the project-local Codex configuration.
 It is recorded as `codex_crewmate_home=` in task metadata and removed only after endpoint cleanup succeeds; the full configuration contract is in [configuration.md](configuration.md#harness-support).
