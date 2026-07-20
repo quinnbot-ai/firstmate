@@ -410,6 +410,9 @@ if [ "$mode" = arm ] && healthy_watcher; then
   cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
   report_attached
   cycle_begin "$HEALTHY_PID" attached
+  trap 'handle_attached_signal HUP 129' HUP
+  trap 'handle_attached_signal TERM 143' TERM
+  trap 'handle_attached_signal INT 130' INT
   attach_and_wait "$HEALTHY_PID"
   exit $?
 fi
