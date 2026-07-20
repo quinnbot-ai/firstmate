@@ -273,9 +273,9 @@ test_sweep_nudge_requires_instruction_change() {
   bump_primary "$w" readme
   base=$(primary_head_commit "$w/main")
 
-  FM_ROOT="$w/main" FM_HOME="$w/home"
-  FF_NUDGE_WINDOWS=""
-  FF_SEEN_HOMES=""
+  export FM_ROOT="$w/main" FM_HOME="$w/home"
+  export FF_NUDGE_WINDOWS=""
+  export FF_SEEN_HOMES=""
   sweep_live_secondmate_metas "$w/home/state" "$base" yes >/dev/null
 
   [ -z "$FF_NUDGE_WINDOWS" ] \

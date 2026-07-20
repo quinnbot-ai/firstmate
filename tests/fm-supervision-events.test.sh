@@ -118,7 +118,7 @@ pass "event_wait_or_sleep: a home with no push-capable window is inert (sleeps P
 
 reset_state
 fm_write_meta "$STATE_DIR/tk5.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
-EVENT_CAP_FAIL_MAX=2
+export EVENT_CAP_FAIL_MAX=2
 fm_backend_events_capable() { return 0; }
 fm_backend_wait_transition() { printf 'WT\n' >> "$TMP/wtcalls"; return 2; }
 : > "$TMP/wtcalls"
