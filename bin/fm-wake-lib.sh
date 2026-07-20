@@ -238,10 +238,14 @@ fm_arm_lease_release() {  # <state> <owner>
   rmdir "$owner" 2>/dev/null || true
 }
 
-fm_daemon_lease_publish() {  # <state> <daemon-path> <home> <lock>
-  local state=$1 daemon_path=$2 home=$3 lock=$4 owner
-  owner=$(fm_lock_link_owner "$lock" 2>/dev/null || true)
+fm_daemon_lease_publish() {  # <state> <daemon-path> <home> <lock> <owner>
+  local state=$1 daemon_path=$2 home=$3 lock=$4 owner=$5 pid stored current
   [ -n "$owner" ] || return 1
+  fm_lock_points_to_owner "$lock" "$owner" || return 1
+  pid=$(cat "$owner/pid" 2>/dev/null || true)
+  stored=$(cat "$owner/pid-identity" 2>/dev/null || true)
+  current=$(fm_pid_identity "$pid") || return 1
+  [ -n "$stored" ] && [ "$current" = "$stored" ] || return 1
   printf '%s\n' "$home" > "$owner/fm-home"
   printf '%s\n' "$daemon_path" > "$owner/daemon-path"
   touch "$owner/heartbeat"
@@ -262,14 +266,14 @@ fm_daemon_lease_healthy() {  # <state> <daemon-path> <home> [grace]
   [ "$(fm_path_age "$owner/heartbeat")" -lt "$grace" ]
 }
 
-fm_daemon_lease_heartbeat() {  # <lock>
-  local lock=$1 owner pid stored current
-  owner=$(fm_lock_link_owner "$lock" 2>/dev/null || true)
-  [ -n "$owner" ] || return 1
+fm_daemon_lease_heartbeat() {  # <lock> <owner> <identity>
+  local lock=$1 owner=$2 identity=$3 pid stored current
+  [ -n "$owner" ] && [ -n "$identity" ] || return 1
+  fm_lock_points_to_owner "$lock" "$owner" || return 1
   pid=$(cat "$owner/pid" 2>/dev/null || true)
   stored=$(cat "$owner/pid-identity" 2>/dev/null || true)
   current=$(fm_pid_identity "$pid") || return 1
-  [ -n "$stored" ] && [ "$current" = "$stored" ] || return 1
+  [ "$stored" = "$identity" ] && [ "$current" = "$identity" ] || return 1
   touch "$owner/heartbeat"
 }
 
