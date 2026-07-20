@@ -148,6 +148,47 @@ test_daemon_lease_heartbeat_rejects_owner_handoff() {
   pass "daemon heartbeat rejects lease owner handoff"
 }
 
+test_daemon_lease_reclaim_respects_heartbeat_fence() {
+  local dir state lock owner daemon_pid identity ready release holder reclaim
+  dir=$(make_supercase daemon-lease-heartbeat-fence)
+  state="$dir/state"
+  lock="$state/.supervise-daemon.lock"
+  owner="$lock.owner"
+  ready="$dir/heartbeat-ready"
+  release="$dir/heartbeat-release"
+  sleep 60 & daemon_pid=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$daemon_pid") \
+    || fail "could not identify daemon for heartbeat fence"
+  mkdir "$owner"
+  ln -s "$owner" "$lock"
+  printf '%s\n' "$daemon_pid" > "$owner/pid"
+  printf '%s\n' "$identity" > "$owner/pid-identity"
+  printf '%s\n' "$dir" > "$owner/fm-home"
+  printf '%s\n' "$DAEMON" > "$owner/daemon-path"
+  touch -t 200001010000 "$owner/heartbeat"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2"
+    : > "$3"
+    while [ ! -e "$4" ]; do sleep 0.01; done
+    touch "$5"
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock.heartbeat" "$ready" "$release" "$owner/heartbeat" &
+  holder=$!
+  while [ ! -e "$ready" ]; do sleep 0.01; done
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; ! fm_daemon_lease_remove_stale "$2" "$3" "$4" 300' _ "$ROOT/bin/fm-wake-lib.sh" "$state" "$DAEMON" "$dir" &
+  reclaim=$!
+  sleep 0.1
+  [ -L "$lock" ] || fail "daemon reclaimer removed a lease while its heartbeat fence was held"
+  : > "$release"
+  wait "$holder" || fail "daemon heartbeat fence holder failed"
+  wait "$reclaim" || fail "daemon reclaimer did not reject the refreshed lease"
+  [ -L "$lock" ] || fail "daemon reclaimer removed a lease refreshed under its fence"
+  kill "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  pass "daemon lease reclaim cannot race a heartbeat refresh"
+}
+
 test_daemon_state_root_uses_fm_home() {
   local dir home override out
   dir=$(make_supercase daemon-fm-home)
@@ -1742,6 +1783,7 @@ test_afk_start_reclaims_stale_daemon_lock_reused_pid
 test_afk_start_reclaims_stale_daemon_lease
 test_daemon_lease_release_cleans_owner_metadata
 test_daemon_lease_heartbeat_rejects_owner_handoff
+test_daemon_lease_reclaim_respects_heartbeat_fence
 test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
