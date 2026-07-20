@@ -436,7 +436,7 @@ spawn_abort_cleanup() {
   if [ -n "$TREEHOUSE_LEASE_PATH_FILE" ]; then
     clean_codex_home=1
     treehouse_spawn_abort_cleanup "$status" || true
-    if [ "$FAILED_ENDPOINT_CLEANUP" = 1 ] && [ "$SPAWN_META_WRITTEN" = 1 ]; then
+    if [ "$FAILED_ENDPOINT_CLEANUP" = 1 ] && [ "$TREEHOUSE_LEASE_ACQUIRED" = 1 ]; then
       preserve_codex_home=1
       write_failed_treehouse_spawn_meta
     fi
