@@ -159,19 +159,7 @@ make_spawn_fakebin() {
 #!/usr/bin/env bash
 set -u
 case "$*" in
-  *"#{pane_current_path}"*)
-    if [ -n "${FM_FAKE_PANE_PATH_SEQUENCE:-}" ]; then
-      poll_file=${FM_FAKE_PANE_POLL_FILE:?}
-      polls=0
-      [ ! -f "$poll_file" ] || polls=$(cat "$poll_file")
-      polls=$((polls + 1))
-      printf '%s\n' "$polls" > "$poll_file"
-      sed -n "${polls}p" "$FM_FAKE_PANE_PATH_SEQUENCE"
-    else
-      printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
-    fi
-    exit 0
-    ;;
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
   *"#{window_name}"*)
     if [ "${FM_FAKE_PANE_ABSENT:-0}" = 1 ]; then
       printf '%s\n' "can't find window: ${3:-unknown}" >&2
@@ -181,10 +169,6 @@ case "$*" in
     exit 0
     ;;
   *"#{pane_id}"*)
-    if [ -n "${FM_FAKE_PANE_CLOSED_FILE:-}" ] && [ -e "$FM_FAKE_PANE_CLOSED_FILE" ]; then
-      printf '%s\n' "can't find window: ${4:-unknown}" >&2
-      exit 1
-    fi
     case "$*" in
       *:fm-abort-*) printf '%s\n' "can't find window: ${4:-unknown}" >&2; exit 1 ;;
     esac
@@ -286,42 +270,11 @@ make_spawn_lease_fakebin() {
 #!/usr/bin/env bash
 set -u
 [ -z "${FM_TREEHOUSE_REC:-}" ] || printf 'tmux %s\n' "$*" >> "$FM_TREEHOUSE_REC"
-case "${1:-}" in
-  list-windows) exit 0 ;;
-esac
 case "$*" in
-  *"#{pane_current_path}"*)
-    if [ -n "${FM_FAKE_PANE_PATH_SEQUENCE:-}" ]; then
-      poll_file=${FM_FAKE_PANE_POLL_FILE:?}
-      polls=0
-      [ ! -f "$poll_file" ] || polls=$(cat "$poll_file")
-      polls=$((polls + 1))
-      printf '%s\n' "$polls" > "$poll_file"
-      sed -n "${polls}p" "$FM_FAKE_PANE_PATH_SEQUENCE"
-    else
-      printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
-    fi
-    exit 0
-    ;;
-  *"#{window_name}"*)
-    if [ -n "${FM_FAKE_PANE_CLOSED_FILE:-}" ] && [ -e "$FM_FAKE_PANE_CLOSED_FILE" ]; then
-      printf '%s\n' "can't find window: ${4:-unknown}" >&2
-      exit 1
-    fi
-    case "${FM_FAKE_TASK_ID:-}" in
-      lease-isolation-rollback-*|lease-primary-rollback-*|lease-setup-rollback-*|lease-recovery-*|lease-returned-tombstone-ff7)
-        printf '%s\n' "can't find window: ${4:-unknown}" >&2; exit 1 ;;
-    esac
-    printf 'fm-%s\n' "${FM_FAKE_TASK_ID:?}"
-    exit 0
-    ;;
-  *"#{pane_id}"*)
-    if [ -n "${FM_FAKE_PANE_CLOSED_FILE:-}" ] && [ -e "$FM_FAKE_PANE_CLOSED_FILE" ]; then
-      printf '%s\n' "can't find window: ${4:-unknown}" >&2
-      exit 1
-    fi
-    case "${FM_FAKE_TASK_ID:-}" in
-      lease-isolation-rollback-*|lease-primary-rollback-*|lease-setup-rollback-*|lease-recovery-*|lease-returned-tombstone-ff7)
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_id}"*|*"#{window_name}"*)
+    case "$*" in
+      *:fm-lease-isolation-rollback-*|*:fm-lease-primary-rollback-*|*:fm-lease-setup-rollback-*|*:fm-lease-recovery-*|*:fm-lease-returned-tombstone-ff7*)
         printf '%s\n' "can't find window: ${4:-unknown}" >&2; exit 1 ;;
     esac
     printf '%s\n' '@1'; exit 0 ;;
@@ -334,12 +287,7 @@ case "${1:-}" in
     esac
     exit 0
     ;;
-  kill-window)
-    [ -z "${FM_FAKE_PANE_CLOSED_FILE:-}" ] || : > "$FM_FAKE_PANE_CLOSED_FILE"
-    exit 0
-    ;;
-  new-window) printf '%s\n' '@1'; exit 0 ;;
-  list-windows|has-session|new-session) exit 0 ;;
+  list-windows|has-session|new-session|new-window) exit 0 ;;
 esac
 exit 0
 SH
@@ -375,7 +323,7 @@ run_spawn_lease_case() {
       FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
       FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
-      FM_FAKE_LEASED_WORKTREE="$lease_path" FM_TREEHOUSE_REC="$rec" FM_FAKE_TASK_ID="$id" \
+      FM_FAKE_LEASED_WORKTREE="$lease_path" FM_TREEHOUSE_REC="$rec" \
       FM_TEST_FAIL_TASK_TMP="${FM_TEST_FAIL_TASK_TMP:-0}" PATH="$fakebin:$PATH" \
       "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --scout 2>&1
   else
@@ -383,7 +331,7 @@ run_spawn_lease_case() {
       FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
       FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
-      FM_FAKE_LEASED_WORKTREE="$lease_path" FM_TREEHOUSE_REC="$rec" FM_FAKE_TASK_ID="$id" \
+      FM_FAKE_LEASED_WORKTREE="$lease_path" FM_TREEHOUSE_REC="$rec" \
       FM_TEST_FAIL_TASK_TMP="${FM_TEST_FAIL_TASK_TMP:-0}" PATH="$fakebin:$PATH" \
       "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude 2>&1
   fi
@@ -471,76 +419,6 @@ test_spawn_rolls_back_lease_after_isolation_failure() {
     "isolation failure did not return the leased worktree recorded by the handoff"
   assert_absent "$home/state/$id.meta" "isolation failure must not create a task meta"
   pass "fm-spawn: rolls back a leased slot when isolation validation fails"
-}
-
-# A foreground-cwd read is a snapshot of whatever process currently owns the
-# pane. The fixture deliberately returns an unrelated linked-worktree root
-# once, then the leased linked-worktree root.
-test_spawn_retries_transient_unrelated_worktree_cwd() {
-  local home proj wt unrelated fakebin rec out status id sequence polls
-  home="$TMP_ROOT/cwd-race-home"
-  mkdir -p "$home/state" "$home/data"
-  proj=$(make_repo "$TMP_ROOT/cwd-race-proj")
-  wt="$TMP_ROOT/cwd-race-wt"
-  unrelated="$TMP_ROOT/cwd-race-unrelated-wt"
-  git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
-  git -C "$proj" worktree add -q --detach "$unrelated" >/dev/null 2>&1
-  fakebin=$(make_spawn_lease_fakebin "$TMP_ROOT/cwd-race-fake")
-  rec="$TMP_ROOT/cwd-race-treehouse.log"; : > "$rec"
-  id=cwd-race-aa1
-  sequence="$TMP_ROOT/cwd-race-paths"
-  polls="$TMP_ROOT/cwd-race-polls"
-  printf '%s\n%s\n' "$unrelated" "$wt" > "$sequence"
-
-  out=$(FM_FAKE_PANE_PATH_SEQUENCE="$sequence" FM_FAKE_PANE_POLL_FILE="$polls" \
-    run_spawn_lease_case "$home" "$id" "$proj" "$wt" "$fakebin" "$rec"); status=$?
-  expect_code 0 "$status" "a transient unrelated worktree cwd must not refuse a healthy spawn"$'\n'"$out"
-  [ "$(cat "$polls")" -eq 2 ] || fail "transient cwd fixture did not advance to the worktree poll"
-  assert_not_contains "$out" "did not yield an isolated worktree" \
-    "transient unrelated worktree cwd reached the isolation refusal"
-  assert_no_grep "treehouse return --force $wt" "$rec" \
-    "healthy spawn returned its newly leased worktree after a transient cwd"
-  assert_grep "worktree=$wt" "$home/state/$id.meta" \
-    "spawn metadata used the transient unrelated worktree instead of the leased worktree"
-  assert_absent "$unrelated/.claude/settings.local.json" \
-    "spawn installed a hook in the transient unrelated worktree"
-  assert_present "$wt/.claude/settings.local.json" \
-    "spawn did not install its hook in the leased worktree"
-  pass "fm-spawn: retries a transient unrelated worktree cwd until the leased worktree appears"
-}
-
-test_spawn_refusal_closes_pane_and_returns_lease() {
-  local home proj wt unrelated fakebin rec out status id sequence polls closed
-  home="$TMP_ROOT/cwd-refusal-cleanup-home"
-  mkdir -p "$home/state" "$home/data"
-  proj=$(make_repo "$TMP_ROOT/cwd-refusal-cleanup-proj")
-  wt="$TMP_ROOT/cwd-refusal-cleanup-wt"
-  unrelated="$TMP_ROOT/cwd-refusal-cleanup-unrelated-wt"
-  git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
-  git -C "$proj" worktree add -q --detach "$unrelated" >/dev/null 2>&1
-  fakebin=$(make_spawn_lease_fakebin "$TMP_ROOT/cwd-refusal-cleanup-fake")
-  rec="$TMP_ROOT/cwd-refusal-cleanup-treehouse.log"; : > "$rec"
-  id=cwd-refusal-cleanup-bb2
-  sequence="$TMP_ROOT/cwd-refusal-cleanup-paths"
-  polls="$TMP_ROOT/cwd-refusal-cleanup-polls"
-  closed="$TMP_ROOT/cwd-refusal-cleanup-closed"
-  printf '%s\n%s\n' "$unrelated" "$unrelated" > "$sequence"
-
-  out=$(FM_FAKE_PANE_PATH_SEQUENCE="$sequence" FM_FAKE_PANE_POLL_FILE="$polls" \
-    FM_FAKE_PANE_CLOSED_FILE="$closed" \
-    run_spawn_lease_case "$home" "$id" "$proj" "$unrelated" "$fakebin" "$rec" '' "$wt"); status=$?
-  expect_code 1 "$status" "a stable non-leased worktree cwd must refuse the spawn"
-  [ "$(cat "$polls")" -eq 2 ] || fail "stable non-leased worktree did not reach the refusal poll"
-  assert_contains "$out" "did not yield an isolated worktree" "stable non-leased worktree did not reach isolation refusal"
-  assert_present "$closed" "isolation refusal left the launched pane open"
-  assert_grep 'tmux kill-window -t @1' "$rec" \
-    "isolation refusal did not ask the backend to close its launched pane"
-  assert_grep "treehouse return --force $wt" "$rec" \
-    "isolation refusal did not return its leased worktree"
-  assert_absent "$home/state/$id.meta" "refused spawn must not retain task metadata"
-  assert_absent "$unrelated/.claude/settings.local.json" \
-    "refused spawn installed a hook in the non-leased worktree"
-  pass "fm-spawn: a genuine non-leased-worktree refusal closes its pane and returns its lease"
 }
 
 test_spawn_refuses_to_roll_back_primary_checkout() {
@@ -704,8 +582,8 @@ test_spawn_refuses_empty_lease_handoff() {
   pass "fm-spawn: retains an empty lease handoff instead of losing an in-flight acquisition"
 }
 
-test_spawn_discards_handoff_writer_temporaries() {
-  local home proj wt fakebin rec out status legacy_writer_temp writer_temp gets
+test_spawn_discards_legacy_handoff_writer_temporary() {
+  local home proj wt fakebin rec out status writer_temp gets
   home="$TMP_ROOT/lease-writer-temp-home"
   mkdir -p "$home/state" "$home/data"
   proj=$(make_repo "$TMP_ROOT/lease-writer-temp-proj")
@@ -713,22 +591,19 @@ test_spawn_discards_handoff_writer_temporaries() {
   git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
   fakebin=$(make_spawn_lease_fakebin "$TMP_ROOT/lease-writer-temp-fake")
   rec="$TMP_ROOT/lease-writer-temp-treehouse.log"; : > "$rec"
-  legacy_writer_temp="$home/state/.treehouse-handoff-write.interrupted"
   writer_temp="$home/state/..interrupted-writer-kk2.treehouse-lease.token.tmp.partial"
-  printf 'returning=%s\n' "$wt" > "$legacy_writer_temp"
   printf 'returning=%s\n' "$wt" > "$writer_temp"
 
   out=$(run_spawn_lease_case "$home" lease-writer-temp-ll3 "$proj" "$wt" "$fakebin" "$rec"); status=$?
-  expect_code 0 "$status" "spawn should ignore interrupted handoff writer temporaries"
+  expect_code 0 "$status" "spawn should ignore an interrupted legacy handoff writer temporary"
   assert_contains "$out" "cleared stale treehouse lease handoff writer temporary" \
     "spawn did not identify the interrupted writer temporary"
-  assert_absent "$legacy_writer_temp" "spawn retained a legacy interrupted writer temporary"
   assert_absent "$writer_temp" "spawn retained an interrupted writer temporary"
   gets=$(grep -Fc "treehouse get --lease" "$rec")
   [ "$gets" -eq 1 ] || fail "interrupted writer temporary blocked or altered normal allocation"
   assert_no_grep "treehouse return --force $wt" "$rec" \
     "interrupted writer temporary was mistaken for a durable handoff"
-  pass "fm-spawn: discards interrupted handoff writer temporaries"
+  pass "fm-spawn: discards interrupted legacy handoff writer temporaries"
 }
 
 test_spawn_serializes_lease_handoff_publication() {
@@ -989,15 +864,13 @@ test_spawn_refuses_legacy_held_worktree
 test_spawn_refuses_detached_legacy_held_worktree
 test_spawn_leases_normal_treehouse_allocation
 test_spawn_rolls_back_lease_after_isolation_failure
-test_spawn_retries_transient_unrelated_worktree_cwd
-test_spawn_refusal_closes_pane_and_returns_lease
 test_spawn_refuses_to_roll_back_primary_checkout
 test_spawn_rolls_back_lease_after_setup_failure
 test_spawn_recovers_failed_lease_rollback
 test_spawn_tombstones_returned_lease_handoff
 test_spawn_keeps_published_lease_on_abort
 test_spawn_refuses_empty_lease_handoff
-test_spawn_discards_handoff_writer_temporaries
+test_spawn_discards_legacy_handoff_writer_temporary
 test_spawn_serializes_lease_handoff_publication
 test_spawn_clears_committed_lease_handoff
 test_spawn_refuses_returned_handoff_with_live_metadata

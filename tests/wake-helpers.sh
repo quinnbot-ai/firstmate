@@ -63,7 +63,7 @@ make_case() {
   local name=$1 dir fakebin
   dir="$TMP_ROOT/$name"
   fakebin="$dir/fakebin"
-  mkdir -p "$dir/state" "$dir/home" "$fakebin"
+  mkdir -p "$dir/state" "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -75,9 +75,6 @@ if [ "${1:-}" = "list-windows" ]; then
 fi
 if [ "${1:-}" = "display-message" ]; then
   for _arg in "$@"; do
-    case "$_arg" in
-      *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_CURRENT_COMMAND:-}"; exit 0 ;;
-    esac
     if [ "$_arg" = '#{window_name}' ]; then
       printf '%s\n' "${FM_FAKE_TMUX_WINDOW##*:}"
       exit 0
@@ -94,11 +91,6 @@ if [ "${1:-}" = "capture-pane" ]; then
     cat "$FM_FAKE_TMUX_CAPTURE"
   fi
   exit 0
-fi
-if [ "${1:-}" = "display-message" ]; then
-  case "$*" in
-    *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_CURRENT_COMMAND:-}"; exit 0 ;;
-  esac
 fi
 exit 1
 SH
@@ -224,10 +216,7 @@ COMPOSER="${FM_FAKE_COMPOSER:?FM_FAKE_COMPOSER unset}"
 case "${1:-}" in
   display-message)
     print=0
-    for a in "$@"; do case "$a" in
-      *cursor_y*) printf '0\n'; exit 0 ;;
-      *pane_current_command*) printf 'codex\n'; exit 0 ;;
-    esac; done
+    for a in "$@"; do case "$a" in *cursor_y*) printf '0\n'; exit 0 ;; esac; done
     for a in "$@"; do [ "$a" = "-p" ] && print=1; done
     [ "$print" = 1 ] && printf 'fakepane\n'
     exit 0 ;;
