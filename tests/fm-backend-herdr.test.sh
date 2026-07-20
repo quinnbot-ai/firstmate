@@ -1404,6 +1404,20 @@ test_send_text_submit_confirms_codex_busy_redraw_transcript() {
   pass "fm_backend_herdr_send_text_submit: a Codex busy redraw transcript is not misread as a pending composer"
 }
 
+test_send_text_submit_confirms_grok_busy_redraw_transcript() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-grok-busy-redraw"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  printf '\x1b[0m\xe2\x9d\xaf ship the fix\x1b[0m\n\n  Ctrl+c:cancel\n' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "ship the fix" 3 0.01 0.01' "$ROOT" )
+  [ "$out" = empty ] || fail "a submitted Grok transcript above its busy footer must confirm empty, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "a Grok busy redraw transcript must not provoke retry Enters, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: a Grok busy redraw transcript is not misread as a pending composer"
+}
+
 test_send_text_submit_codex_editable_draft_with_preexisting_busy_footer_stays_pending() {
   local dir log resp fb out enter_count
   dir="$TMP_ROOT/submit-codex-editable-preexisting-busy"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -2328,6 +2342,7 @@ test_send_text_submit_confirms_blocked_after_enter
 test_send_text_submit_preexisting_working_does_not_false_confirm_swallowed_enter
 test_send_text_submit_preexisting_working_shell_after_enter_is_unknown
 test_send_text_submit_confirms_codex_busy_redraw_transcript
+test_send_text_submit_confirms_grok_busy_redraw_transcript
 test_send_text_submit_codex_editable_draft_with_preexisting_busy_footer_stays_pending
 test_send_text_submit_codex_busy_redraw_without_ansi_stays_pending
 test_send_text_submit_codex_busy_redraw_plain_ansi_stays_pending

@@ -323,16 +323,15 @@ spawn_abort_cleanup() {
   if [ "$TREEHOUSE_ABORT_CLEANUP" = 1 ]; then
     TREEHOUSE_ABORT_CLEANUP=0
     clean_codex_home=1
-    if ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) 2>/dev/null; then
+    if ! fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
+      FM_BACKEND_KILL_STRICT=1 fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "fm-$ID" 2>/dev/null || true
       if ! fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
-        FM_BACKEND_KILL_STRICT=1 fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "fm-$ID" 2>/dev/null || true
-        if ! fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
-          FAILED_ENDPOINT_CLEANUP=1
-          write_failed_treehouse_spawn_meta
-          preserve_codex_home=1
-        fi
+        FAILED_ENDPOINT_CLEANUP=1
+        write_failed_treehouse_spawn_meta
+        preserve_codex_home=1
       fi
-    else
+    fi
+    if [ "$FAILED_ENDPOINT_CLEANUP" != 1 ] && ! ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) 2>/dev/null; then
       FAILED_ENDPOINT_CLEANUP=1
       write_failed_treehouse_spawn_meta
       preserve_codex_home=1

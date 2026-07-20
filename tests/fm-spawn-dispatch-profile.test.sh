@@ -1660,8 +1660,8 @@ SH
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "Codex spawn must fail when private-home creation and endpoint removal fail"
-  assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
-    "failed isolated-home cleanup did not return its worktree"
+  assert_no_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
+    "unconfirmed endpoint cleanup returned a worktree that must remain leased"
   assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
     "failed endpoint removal was not attempted"
   assert_grep "window=firstmate:fm-$id" "$HOME_DIR/state/$id.meta" \
@@ -1671,7 +1671,7 @@ SH
   assert_grep "project=$project" "$HOME_DIR/state/$id.meta" \
     "failed endpoint removal did not record the project"
   [ ! -s "$LAUNCH_LOG" ] || fail "failed endpoint removal must not launch Codex"
-  pass "Codex spawn records failed endpoint removals for normal teardown"
+  pass "Codex spawn retains its leased worktree when endpoint removal is unconfirmed"
 }
 
 test_codex_omits_invalid_max_effort() {
