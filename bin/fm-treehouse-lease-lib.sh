@@ -27,7 +27,7 @@ fm_treehouse_lease_handoff_write() {
   local handoff=$1 handoff_state=$2 lease_path=$3 handoff_dir handoff_base handoff_tmp
   handoff_dir=$(dirname "$handoff")
   handoff_base=$(basename "$handoff")
-  handoff_tmp=$(mktemp "$handoff_dir/.treehouse-handoff-write.XXXXXX") || return 1
+  handoff_tmp=$(mktemp "$handoff_dir/.${handoff_base}.tmp.XXXXXX") || return 1
   if ! printf '%s=%s\n' "$handoff_state" "$lease_path" > "$handoff_tmp"; then
     rm -f "$handoff_tmp"
     return 1
@@ -42,7 +42,7 @@ fm_treehouse_lease_handoff_is_writer_temp() {
   local handoff_base
   handoff_base=$(basename "$1")
   case "$handoff_base" in
-    ..*.treehouse-lease.*.tmp.*) return 0 ;;
+    .treehouse-handoff-write.*|..*.treehouse-lease.*.tmp.*) return 0 ;;
     *) return 1 ;;
   esac
 }
