@@ -271,8 +271,8 @@ fm_afk_launch_wait_ready() {  # <backend> <target>
     return
   fi
   for i in $(seq 1 100); do
-    daemon_lock_held_by_live_daemon && return 0
     fm_afk_launch_terminal_alive "$backend" "$target" || return 1
+    fm_daemon_lease_healthy "$FM_AFK_STATE" "$FM_AFK_DAEMON" "$FM_HOME" && return 0
     sleep 0.05
   done
   return 1

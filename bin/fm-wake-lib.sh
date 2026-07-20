@@ -266,6 +266,42 @@ fm_daemon_lease_healthy() {  # <state> <daemon-path> <home> [grace]
   [ "$(fm_path_age "$owner/heartbeat")" -lt "$grace" ]
 }
 
+fm_daemon_lease_remove_stale() {  # <state> <daemon-path> <home> [grace]
+  local state=$1 daemon_path=$2 home=$3 grace=${4:-${FM_DAEMON_LEASE_GRACE:-45}}
+  local lock steal owner pid identity snapshot current rc=1
+  lock="$state/.supervise-daemon.lock"
+  steal="$lock.steal"
+
+  fm_lock_try_acquire "$steal" || return 1
+  if [ -L "$lock" ]; then
+    owner=$(fm_lock_link_owner "$lock" 2>/dev/null || true)
+  elif [ -d "$lock" ]; then
+    owner=$lock
+  else
+    owner=
+  fi
+  if [ -n "$owner" ]; then
+    snapshot=$(cat "$owner/pid" "$owner/pid-identity" "$owner/fm-home" "$owner/daemon-path" 2>/dev/null || true)
+    pid=$(cat "$owner/pid" 2>/dev/null || true)
+    identity=$(cat "$owner/pid-identity" 2>/dev/null || true)
+    current=$(fm_pid_identity "$pid" 2>/dev/null || true)
+    if [ -n "$identity" ] \
+      && { [ "$current" != "$identity" ] \
+        || { [ "$(cat "$owner/fm-home" 2>/dev/null || true)" = "$home" ] \
+          && [ "$(cat "$owner/daemon-path" 2>/dev/null || true)" = "$daemon_path" ] \
+          && [ "$(fm_path_age "$owner/heartbeat")" -ge "$grace" ]; }; } \
+      && [ "$(cat "$owner/pid" "$owner/pid-identity" "$owner/fm-home" "$owner/daemon-path" 2>/dev/null || true)" = "$snapshot" ] \
+      && [ "$(fm_pid_identity "$pid" 2>/dev/null || true)" = "$current" ]; then
+      if { [ -L "$lock" ] && fm_lock_points_to_owner "$lock" "$owner"; } \
+        || { [ ! -L "$lock" ] && [ "$lock" = "$owner" ] && [ -d "$lock" ]; }; then
+        fm_lock_remove_path "$lock" && rc=0
+      fi
+    fi
+  fi
+  fm_lock_release "$steal"
+  return "$rc"
+}
+
 fm_daemon_lease_heartbeat() {  # <lock> <owner> <identity>
   local lock=$1 owner=$2 identity=$3 pid stored current
   [ -n "$owner" ] && [ -n "$identity" ] || return 1
