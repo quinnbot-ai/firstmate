@@ -170,6 +170,12 @@ case "$*" in
     else
       printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
     fi
+  *"#{window_name}"*)
+    if [ "${FM_FAKE_PANE_ABSENT:-0}" = 1 ]; then
+      printf '%s\n' "can't find window: ${3:-unknown}" >&2
+      exit 1
+    fi
+    printf '%s\n' 'firstmate'
     exit 0
     ;;
   *"#{pane_id}"*)
@@ -293,6 +299,24 @@ case "$*" in
     exit 0
     ;;
   *"#{pane_id}"*)
+    if [ -n "${FM_FAKE_PANE_CLOSED_FILE:-}" ] && [ -e "$FM_FAKE_PANE_CLOSED_FILE" ]; then
+      printf '%s\n' "can't find window: ${4:-unknown}" >&2
+      exit 1
+    fi
+  *"#{pane_current_path}"*)
+    if [ -n "${FM_FAKE_PANE_PATH_SEQUENCE:-}" ]; then
+      poll_file=${FM_FAKE_PANE_POLL_FILE:?}
+      polls=0
+      [ ! -f "$poll_file" ] || polls=$(cat "$poll_file")
+      polls=$((polls + 1))
+      printf '%s\n' "$polls" > "$poll_file"
+      sed -n "${polls}p" "$FM_FAKE_PANE_PATH_SEQUENCE"
+    else
+      printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
+    fi
+    exit 0
+    ;;
+  *"#{pane_id}"*|*"#{window_name}"*)
     if [ -n "${FM_FAKE_PANE_CLOSED_FILE:-}" ] && [ -e "$FM_FAKE_PANE_CLOSED_FILE" ]; then
       printf '%s\n' "can't find window: ${4:-unknown}" >&2
       exit 1

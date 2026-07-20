@@ -22,6 +22,15 @@ make_spawn_fakebin() {
 set -u
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{window_name}"*)
+    [ "${FM_FAKE_TARGET_QUERY_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_TARGET_QUERY_STATUS}"
+    if [ "$(cat "${FM_FAKE_TARGET_STATE:?}" 2>/dev/null)" != live ]; then
+      printf '%s\n' "can't find window: ${3:-unknown}" >&2
+      exit 1
+    fi
+    printf '%s\n' 'firstmate'
+    exit 0
+    ;;
   *"#{pane_id}"*)
     [ "${FM_FAKE_TARGET_QUERY_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_TARGET_QUERY_STATUS}"
     if [ "$(cat "${FM_FAKE_TARGET_STATE:?}" 2>/dev/null)" != live ]; then
@@ -1353,7 +1362,7 @@ exit 73
 SH
   chmod +x "$FAKEBIN_DIR/python3"
 
-  out=$(FM_FAKE_TREEHOUSE_RETURN_STATUS=0 FM_FAKE_BACKEND_KILL_STATUS=76 FM_FAKE_TARGET_QUERY_STATUS=77 \
+  out=$(FM_FAKE_TREEHOUSE_RETURN_STATUS=0 FM_FAKE_BACKEND_KILL_STATUS=76 \
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "Codex spawn must fail when private-home creation and endpoint removal fail"

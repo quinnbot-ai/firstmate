@@ -529,7 +529,7 @@ test_arm_self_eviction_is_loud_without_successor() {
 }
 
 test_arm_attaches_and_waits_for_live_fresh_watcher() {
-  local dir state fakebin out armout i wpid peer peer_identity armpid status
+  local dir state fakebin out armout i wpid peer peer_identity armpid status home
   dir=$(make_case arm-attach)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -560,6 +560,8 @@ test_arm_attaches_and_waits_for_live_fresh_watcher() {
   ! grep -qF 'watcher: FAILED' "$armout" || fail "arm reported FAILED for a healthy watcher"
   [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "arm disturbed the healthy watcher's lock"
   is_live_non_zombie "$armpid" || fail "arm exited while the seed watcher was still healthy"
+  home=$(cat "$state/.watch.lock/fm-home" 2>/dev/null || true)
+  [ -n "$home" ] || fail "seed watcher did not record its home"
   sleep 60 &
   peer=$!
   peer_identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") \
@@ -567,7 +569,7 @@ test_arm_attaches_and_waits_for_live_fresh_watcher() {
   rm -f "$state/.watch.lock"
   mkdir "$state/.watch.lock"
   printf '%s\n' "$peer" > "$state/.watch.lock/pid"
-  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$home" > "$state/.watch.lock/fm-home"
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
   printf '%s\n' "$peer_identity" > "$state/.watch.lock/pid-identity"
   touch "$state/.last-watcher-beat"
