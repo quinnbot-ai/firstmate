@@ -778,31 +778,20 @@ process.exit(process.argv[1] === "0" ? 1 : 2);
 #             structurally-gone/no-agent-registered pane (herdr).
 #   unknown - anything ambiguous, unreadable, or unverified for this backend.
 # Tmux and herdr classify their native process state directly.
-# Orca and cmux classify a visible harness composer as alive, because a bare
-# shell cannot produce that bounded composer structure.
-# Zellij reports unknown until it has an equally reliable classifier.
+# Zellij, Orca, and cmux report unknown until they have an equally reliable
+# native process classifier.
 # Callers must treat unknown exactly like an unreadable target: NEVER license
 # an action from it alone - the secondmate-liveness sweep gates a respawn on
 # `dead` only, precisely so a momentary read glitch can never duplicate a
 # live supervisor.
 fm_backend_agent_alive() {  # <backend> <target> [harness] [isolated-codex-home] [expected-label]
-  local backend=$1 target=$2 harness=${3:-} isolated_codex_home=${4:-} expected_label=${5:-} composer
+  local backend=$1 target=$2 harness=${3:-} isolated_codex_home=${4:-}
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   case "$backend" in
     tmux) fm_backend_tmux_agent_alive "$target" "$harness" "$isolated_codex_home" ;;
     herdr) fm_backend_herdr_agent_alive "$target" ;;
-    zellij) printf 'unknown'; return 0 ;;
-    orca) composer=$(fm_backend_orca_composer_state "$target") ;;
-    cmux) composer=$(fm_backend_cmux_composer_state "$target" "$expected_label") ;;
+    zellij|orca|cmux) printf 'unknown'; return 0 ;;
     *) printf 'unknown'; return 0 ;;
-  esac
-  case "$backend" in
-    orca|cmux)
-      case "$composer" in
-        empty|pending) printf 'alive' ;;
-        *) printf 'unknown' ;;
-      esac
-      ;;
   esac
 }
 
