@@ -37,6 +37,7 @@ case "${1:-}" in
     for a in "$@"; do
       case "$a" in
         *cursor_y*) printf '0\n'; exit 0 ;;
+        *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_CURRENT_COMMAND:-codex}"; exit 0 ;;
       esac
     done
     target=
@@ -84,7 +85,7 @@ case "${1:-}:${2:-}" in
   agent:get)
     count=$(( $(cat "$count_file" 2>/dev/null || echo 0) + 1 ))
     printf '%s\n' "$count" > "$count_file"
-    if [ "$count" = 2 ]; then
+    if [ "$count" = 3 ]; then
       exit 1
     fi
     printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}'
@@ -190,6 +191,36 @@ test_healthy_fm_id_send_still_works() {
   pass "fm-send strict: healthy fm-<id> sends still type once and submit"
 }
 
+test_metadata_target_requires_live_harness_agent() {
+  local dir fb home err log rc
+  dir="$TMP_ROOT/dead-agent"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home dead-agent); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  fm_write_meta "$home/state/dead-agent.meta" "window=sess:fm-dead-agent" "kind=ship" "harness=codex"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_SEND_SETTLE=0 \
+    "$SEND" dead-agent "must not reach the shell" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "fm-send must reject a metadata target whose harness has exited"
+  assert_contains "$(cat "$err")" "harness agent is dead" "dead-agent refusal should explain the liveness verdict"
+  [ ! -s "$log" ] || fail "fm-send typed into a dead agent's shell"$'\n'"$(cat "$log")"
+  pass "fm-send strict: metadata target requires a live harness agent before typing"
+}
+
+test_metadata_target_requires_confirmed_harness_agent() {
+  local dir fb home err log rc
+  dir="$TMP_ROOT/unknown-agent"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home unknown-agent); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  fm_write_meta "$home/state/unknown-agent.meta" "window=sess:fm-unknown-agent" "kind=ship" "harness=pi"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=node FM_SEND_SETTLE=0 \
+    "$SEND" unknown-agent "must not reach an indeterminate endpoint" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "fm-send must reject a metadata target with indeterminate agent liveness"
+  assert_contains "$(cat "$err")" "harness agent is unknown" "unknown-agent refusal should explain the liveness verdict"
+  [ ! -s "$log" ] || fail "fm-send typed into an indeterminate endpoint"$'\n'"$(cat "$log")"
+  pass "fm-send strict: metadata target requires confirmed harness liveness before typing"
+}
+
 test_herdr_unknown_submit_confirmation_fails() {
   local dir fb home err rc
   dir="$TMP_ROOT/herdr-unknown-submit"; mkdir -p "$dir"
@@ -213,4 +244,6 @@ test_unresolvable_target_does_not_tmux_fallback
 test_prefixless_herdr_pane_id_fails
 test_unmatched_single_colon_target_must_exist
 test_healthy_fm_id_send_still_works
+test_metadata_target_requires_live_harness_agent
+test_metadata_target_requires_confirmed_harness_agent
 test_herdr_unknown_submit_confirmation_fails

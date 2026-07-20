@@ -441,7 +441,7 @@ test_worktree_and_terminal_helpers_parse_json() {
   pass "Orca lifecycle helpers: register repo, create worktree, create terminal, parse stable ids"
 }
 
-test_worktree_create_removes_worktree_when_path_missing() {
+test_worktree_create_preserves_recoverable_allocation_when_path_missing() {
   local out status
   orca_case lifecycle-missing-path
   printf '1\n' > "$RESP/1.exit"
@@ -453,11 +453,13 @@ test_worktree_create_removes_worktree_when_path_missing() {
   [ "$status" -ne 0 ] || fail "worktree helper should fail when Orca omits the worktree path"
   assert_contains "$out" "orca worktree create did not return a path for fm-task" \
     "worktree helper did not explain the missing path"
-  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-no-path'$'\x1f''--json' \
-    "worktree helper did not close the implicit terminal when path parsing failed"
-  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-no-path'$'\x1f''--force'$'\x1f''--json' \
-    "worktree helper did not remove the pathless Orca worktree"
-  pass "fm_backend_orca_worktree_create: removes created worktree when path is missing"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
+    "worktree helper must leave terminal cleanup to the recoverable spawn path"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
+    "worktree helper must leave worktree cleanup to the recoverable spawn path"
+  assert_contains "$out" $'wt-no-path\t\tterm-no-path' \
+    "pathless allocation should retain its worktree and terminal handles for cleanup"
+  pass "fm_backend_orca_worktree_create: preserves pathless allocation for cleanup"
 }
 
 test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails() {
@@ -493,6 +495,40 @@ test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails() {
   assert_grep "orca_worktree_id=wt-pathless-cleanup" "$state/$id.meta" "preserved pathless metadata missing Orca worktree id"
   assert_no_grep "terminal=" "$state/$id.meta" "preserved pathless metadata should not invent a terminal handle"
   pass "fm-spawn.sh --backend orca: preserves metadata when pathless cleanup fails"
+}
+
+test_spawn_preserves_orca_metadata_when_pathless_terminal_close_is_unconfirmed() {
+  local proj data state config id out status
+  id="orcapathlesstermz7"
+  proj="$TMP_ROOT/pathless-terminal-project"
+  data="$TMP_ROOT/pathless-terminal-data"
+  state="$TMP_ROOT/pathless-terminal-state"
+  config="$TMP_ROOT/pathless-terminal-config"
+  fm_git_init_commit "$proj"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'brief\n' > "$data/$id/brief.md"
+  touch "$state/.last-watcher-beat"
+  orca_case pathless-terminal-unconfirmed
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-pathless-terminal"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-pathless-terminal"},"terminal":{"handle":"term-pathless-terminal"}}}\n' > "$RESP/3.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["still live"]}}}\n' > "$RESP/4.out"
+  printf '1\n' > "$RESP/5.exit"
+  printf '{"ok":true,"result":{"terminal":{"tail":["still live"]}}}\n' > "$RESP/6.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend orca 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "Orca spawn should fail when a pathless allocation lacks its worktree path"
+  assert_present "$state/$id.meta" "unconfirmed pathless terminal cleanup should preserve metadata"
+  assert_grep "orca_worktree_id=wt-pathless-terminal" "$state/$id.meta" "preserved pathless metadata missing worktree id"
+  assert_grep "terminal=term-pathless-terminal" "$state/$id.meta" "preserved pathless metadata missing terminal handle"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-pathless-terminal'$'\x1f''--json' \
+    "spawn cleanup should attempt a strict terminal close"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-pathless-terminal' \
+    "spawn cleanup must not remove the worktree while terminal absence is unconfirmed"
+  pass "fm-spawn.sh --backend orca: preserves pathless resources after unconfirmed terminal close"
 }
 
 test_spawn_writes_orca_metadata_and_launches_harness() {
@@ -1701,8 +1737,9 @@ test_worktree_path_resolves_id
 test_dispatcher_sources_orca_and_routes_primitives
 test_json_get_ignores_undocumented_terminal_id_shapes
 test_worktree_and_terminal_helpers_parse_json
-test_worktree_create_removes_worktree_when_path_missing
+test_worktree_create_preserves_recoverable_allocation_when_path_missing
 test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails
+test_spawn_preserves_orca_metadata_when_pathless_terminal_close_is_unconfirmed
 test_spawn_writes_orca_metadata_and_launches_harness
 test_spawn_refuses_orca_secondmate_before_home_mutation
 test_spawn_refuses_orca_when_runtime_not_ready
