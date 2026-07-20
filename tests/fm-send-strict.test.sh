@@ -235,8 +235,8 @@ test_metadata_target_requires_confirmed_harness_agent() {
   pass "fm-send strict: metadata target requires confirmed harness liveness before typing"
 }
 
-test_isolated_codex_worker_uses_wrapper_liveness() {
-  local dir fb home err log rc got
+test_isolated_codex_python_wrapper_requires_confirmed_agent() {
+  local dir fb home err log rc
   dir="$TMP_ROOT/isolated-codex"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); home=$(setup_home isolated-codex); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
   fm_write_meta "$home/state/isolated-codex.meta" \
@@ -245,11 +245,10 @@ test_isolated_codex_worker_uses_wrapper_liveness() {
   PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
     FM_FAKE_TMUX_CURRENT_COMMAND=python3 FM_SEND_SETTLE=0 \
     "$SEND" isolated-codex "hello from the coordinator" >/dev/null 2>"$err"; rc=$?
-  expect_code 0 "$rc" "isolated Codex workers should accept sends while their wrapper owns the foreground Python process"
-  got=$(cat "$log")
-  assert_contains "$got" "target=sess:fm-isolated-codex literal=1 arg=hello from the coordinator" "isolated Codex send should type to the wrapper-owned pane"
-  assert_contains "$got" "target=sess:fm-isolated-codex literal=0 arg=Enter" "isolated Codex send should submit to the wrapper-owned pane"
-  pass "fm-send strict: isolated Codex wrapper is recognized as a live agent"
+  [ "$rc" -ne 0 ] || fail "fm-send must reject an isolated Codex target when only a generic Python process is observable"
+  assert_contains "$(cat "$err")" "harness agent is unknown" "isolated Codex Python refusal should explain the liveness verdict"
+  [ ! -s "$log" ] || fail "fm-send typed into an unverified isolated Codex Python process"$'\n'"$(cat "$log")"
+  pass "fm-send strict: isolated Codex Python wrappers require confirmed agent liveness"
 }
 
 test_herdr_unknown_submit_confirmation_fails() {
@@ -278,5 +277,5 @@ test_explicit_target_requires_live_harness_agent
 test_healthy_fm_id_send_still_works
 test_metadata_target_requires_live_harness_agent
 test_metadata_target_requires_confirmed_harness_agent
-test_isolated_codex_worker_uses_wrapper_liveness
+test_isolated_codex_python_wrapper_requires_confirmed_agent
 test_herdr_unknown_submit_confirmation_fails

@@ -199,7 +199,7 @@ fi
 # The target's BACKEND comes from selector meta, from matching an explicit target
 # back to recorded meta, or from strict explicit-target shape validation.
 if [ "${1:-}" != "--key" ]; then
-  agent_liveness=$(fm_backend_agent_alive "$TARGET_BACKEND" "$T" "$TARGET_HARNESS" "$(fm_meta_get "$TARGET_META" codex_crewmate_home)" "$EXPECTED_LABEL" 2>/dev/null || printf unknown)
+  agent_liveness=$(fm_backend_agent_alive "$TARGET_BACKEND" "$T" 2>/dev/null || printf unknown)
   if [ "$agent_liveness" != alive ]; then
     echo "error: refusing to send to $T ($TARGET_BACKEND harness agent is $agent_liveness; tried $RESOLUTION_TRIED)" >&2
     exit 1

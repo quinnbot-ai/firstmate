@@ -784,11 +784,11 @@ process.exit(process.argv[1] === "0" ? 1 : 2);
 # an action from it alone - the secondmate-liveness sweep gates a respawn on
 # `dead` only, precisely so a momentary read glitch can never duplicate a
 # live supervisor.
-fm_backend_agent_alive() {  # <backend> <target> [harness] [isolated-codex-home] [expected-label]
-  local backend=$1 target=$2 harness=${3:-} isolated_codex_home=${4:-}
+fm_backend_agent_alive() {  # <backend> <target>
+  local backend=$1 target=$2
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   case "$backend" in
-    tmux) fm_backend_tmux_agent_alive "$target" "$harness" "$isolated_codex_home" ;;
+    tmux) fm_backend_tmux_agent_alive "$target" ;;
     herdr) fm_backend_herdr_agent_alive "$target" ;;
     zellij|orca|cmux) printf 'unknown'; return 0 ;;
     *) printf 'unknown'; return 0 ;;
