@@ -160,6 +160,14 @@ make_spawn_fakebin() {
 set -u
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{window_name}"*)
+    if [ "${FM_FAKE_PANE_ABSENT:-0}" = 1 ]; then
+      printf '%s\n' "can't find window: ${3:-unknown}" >&2
+      exit 1
+    fi
+    printf '%s\n' 'firstmate'
+    exit 0
+    ;;
   *"#{pane_id}"*)
     case "$*" in
       *:fm-abort-*) printf '%s\n' "can't find window: ${4:-unknown}" >&2; exit 1 ;;
@@ -264,7 +272,7 @@ set -u
 [ -z "${FM_TREEHOUSE_REC:-}" ] || printf 'tmux %s\n' "$*" >> "$FM_TREEHOUSE_REC"
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
-  *"#{pane_id}"*)
+  *"#{pane_id}"*|*"#{window_name}"*)
     case "$*" in
       *:fm-lease-isolation-rollback-*|*:fm-lease-primary-rollback-*|*:fm-lease-setup-rollback-*|*:fm-lease-recovery-*|*:fm-lease-returned-tombstone-ff7*)
         printf '%s\n' "can't find window: ${4:-unknown}" >&2; exit 1 ;;
