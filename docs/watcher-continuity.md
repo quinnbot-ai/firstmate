@@ -24,8 +24,7 @@ Codex retains its bounded foreground checkpoint protocol.
 Grok retains its tracked background-task notification protocol.
 No adapter starts a replacement with shell `&`.
 
-The existing turn-end guard implementation and adapters are unchanged.
-They remain the final backstop rather than the normal continuity mechanism.
+The turn-end guard remains the final backstop rather than the normal continuity mechanism.
 
 ## Arm-layer cycle contract
 
@@ -42,10 +41,30 @@ The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYC
 The default 300-second grace is unchanged.
 Only the watcher process touches `state/.last-watcher-beat`; no helper process can make a wedged watcher appear healthy.
 
+## Relay leases
+
+While a harness-visible `fm-watch-arm.sh` relay waits for a watcher, it holds a home-scoped lease in `state/.watch-arm.lease` and binds that lease to the exact watcher in `state/.watch-arm.bound`.
+The binding records the home, watcher path, watcher PID, watcher identity, relay PID identity, and a relay heartbeat, so a sibling home, stale lock, or recycled PID cannot satisfy it.
+`docs/configuration.md` owns the relay lease timing settings.
+The watcher checks a lease only after an arm has bound itself to that exact watcher, so direct manual or test watchers remain supported.
+If a bound watcher next reaches its poll boundary without a fresh identity-matched relay, it first durably appends `check: watcher arm relay lost` under the `watcher-arm-relay` wake key and then exits through that actionable wake.
+An ordinary arm close releases only its own identity-matched lease, while a re-arm may remove only a stale, fully revalidated lease before it claims the successor binding.
+The turn-end implications of this lease are owned by [turnend-guard.md](turnend-guard.md#relay-health-predicate).
+
+## Away-mode daemon lease
+
+Away mode uses the same liveness standard for `state/.supervise-daemon.lock` rather than trusting a PID file alone.
+The daemon publishes its home, script path, PID identity, and heartbeat, refreshes that heartbeat during its loop, and stops if ownership changes.
+At a turn boundary, daemon lease freshness uses the same `FM_GUARD_GRACE` setting as watcher health.
+The turn-end guard requires this daemon lease and a healthy watcher while `state/.afk` is present; it does not require a separate arm relay because the daemon owns that watcher lifecycle.
+
 ## Regression coverage
 
 `tests/fm-pi-watch-extension.test.sh` simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, blocks prompt delivery to prove the successor launches first, verifies single-flight behavior, changes the session lock before close to prove ownership is rechecked, and hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
-`tests/fm-watcher-lock.test.sh` covers verified-successor attach, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
+`tests/fm-watcher-lock.test.sh` covers verified-successor attach, relay transfer, identity-based PID-reuse rejection, safe stale-lease reclamation, immediate normal re-arm without a false lost-relay wake, typed self-eviction failure, bounded lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
+`tests/fm-watch-triage.test.sh` proves the watcher writes the durable `watcher-arm-relay` wake before it stops, including when a relay disappears between its initial and next lease-health polls.
+`tests/fm-turnend-guard.test.sh` proves that a live watcher with a dead relay still blocks a normal-mode turn end.
+`tests/fm-daemon.test.sh` proves daemon lease cleanup removes only its owned lock metadata.
 `tests/fm-continuity-pretool-check.test.sh` proves the Claude gate rejects only non-recovery fleet execution in the precise unhealthy state and preserves the existing Stop registration.
 
 ## Sanitized live evidence, 2026-07-17
