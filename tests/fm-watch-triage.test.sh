@@ -80,7 +80,8 @@ seen_sig() {
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
 record_arm_lease() {  # <state> <watcher-pid> <arm-pid>
-  local state=$1 watcher_pid=$2 arm_pid=$3 lease="$state/.watch-arm.lease" watcher_id arm_id home
+  local state=$1 watcher_pid=$2 arm_pid=$3 lease watcher_id arm_id home
+  lease="$state/.watch-arm.lease"
   watcher_id=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$watcher_pid") || return 1
   arm_id=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$arm_pid") || return 1
   home=$(cat "$state/.watch.lock/fm-home" 2>/dev/null || true)

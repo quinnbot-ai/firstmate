@@ -139,6 +139,7 @@ fm_arm_lease_healthy() {  # <state> <watch-path> <watcher-pid> <home> [grace]
   current_watcher=$(fm_pid_identity "$watcher_pid") || return 1
   [ "$current_arm" = "$arm_identity" ] && [ "$current_watcher" = "$watcher_identity" ] || return 1
   [ "$(fm_path_age "$owner/heartbeat")" -lt "$grace" ] || return 1
+  # shellcheck disable=SC2034 # Read by callers after fm_arm_lease_healthy returns.
   FM_ARM_LEASE_HEALTHY_PID=$arm_pid
 }
 
@@ -202,6 +203,7 @@ fm_arm_lease_claim() {  # <state> <watch-path> <watcher-pid> <home>
     fm_arm_lease_release "$state" "$owner"
     return 1
   }
+  # shellcheck disable=SC2034 # Read by callers after fm_arm_lease_claim returns.
   FM_ARM_LEASE_OWNER=$owner
 }
 
