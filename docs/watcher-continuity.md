@@ -58,6 +58,7 @@ The turn-end implications of this lease are owned by [turnend-guard.md](turnend-
 Away mode uses the same liveness standard for `state/.supervise-daemon.lock` rather than trusting a PID file alone.
 The daemon publishes its home, script path, PID identity, and heartbeat, refreshes that heartbeat during its loop, and stops if ownership changes.
 The daemon uses the same heartbeat fence as an arm lease when stale reclamation overlaps a refresh.
+AFK start and stale-lease reclamation use `FM_DAEMON_LEASE_GRACE`, which defaults to 45 seconds.
 At a turn boundary, daemon lease freshness uses the same `FM_GUARD_GRACE` setting as watcher health.
 The turn-end guard requires this daemon lease and a healthy watcher while `state/.afk` is present; it does not require a separate arm relay because the daemon owns that watcher lifecycle.
 

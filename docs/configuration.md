@@ -424,6 +424,7 @@ FM_ARM_CONFIRM_TIMEOUT=10   # seconds fm-watch-arm waits to confirm a fresh watc
 FM_ARM_ATTACH_POLL=0.5  # seconds between checks while fm-watch-arm is attached to an existing healthy watcher cycle
 FM_ARM_LEASE_GRACE=45   # seconds an identity-checked watch-arm relay heartbeat may be stale before a bound watcher fails closed
 FM_ARM_LEASE_TICK=5     # seconds between watch-arm relay lease heartbeats while the relay waits
+FM_DAEMON_LEASE_GRACE=45   # seconds an identity-checked away-mode daemon heartbeat may be stale before AFK start/recovery reclaims its lease
 FM_OPENCODE_ARM_READY_TIMEOUT_MS=12000   # milliseconds the OpenCode primary watcher plugin waits for an arm attempt to report started, healthy, wake, or failure
 FM_PI_ARM_READY_TIMEOUT_MS=12000   # milliseconds the Pi watcher extension waits for a successor arm to report started or attached
 FM_WATCH_ARM_RETIRE_TIMEOUT_MS=1000   # milliseconds Pi/OpenCode wait for an unready successor arm to exit before abandoning retries
