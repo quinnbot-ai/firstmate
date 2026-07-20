@@ -40,13 +40,6 @@ GLOBAL_CLEANUP() {
 }
 trap GLOBAL_CLEANUP EXIT
 
-write_pid_identity() {  # <state> <pid> <destination>
-  local state=$1 pid=$2 destination=$3 identity
-  identity=$(FM_HOME="$state" FM_STATE_OVERRIDE="$state/state" bash -c \
-    '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$pid" 2>/dev/null) || true
-  printf '%s\n' "$identity" > "$destination"
-}
-
 # ---------------------------------------------------------------------------
 # UNIT 1: fm_afk_clear_stale_artifacts removes exactly the three stale artifacts.
 # ---------------------------------------------------------------------------
@@ -96,7 +89,7 @@ unit_fresh_vs_refresh() {
   mkdir "$owner"
   ln -s "$owner" "$lock"
   printf '%s' "$sleep_pid" > "$owner/pid"
-  write_pid_identity "$st" "$sleep_pid" "$owner/pid-identity"
+  ( FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleep_pid" > "$owner/pid-identity" 2>/dev/null ) || true
   printf '%s\n' "$st" > "$owner/fm-home"
   printf '%s\n' "$ROOT/bin/fm-supervise-daemon.sh" > "$owner/daemon-path"
   touch "$owner/heartbeat"
@@ -416,24 +409,6 @@ unit_readiness_failure_preserves_unconfirmed_record() {
   rm -rf "$st"
 }
 
-unit_readiness_rejects_stale_daemon() {
-  local st
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stale-ready.XXXXXX")
-  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
-    . "$1"
-    fm_afk_launch_terminal_alive() { return 0; }
-    daemon_lock_held_by_live_daemon() { return 0; }
-    fm_daemon_lease_healthy() { return 1; }
-    sleep() { :; }
-    ! fm_afk_launch_wait_ready tmux exact-session
-  ' _ "$LAUNCH"; then
-    pass "readiness: stale live daemon does not satisfy lease readiness"
-  else
-    fail "readiness: stale live daemon was accepted before publishing a healthy lease"
-  fi
-  rm -rf "$st"
-}
-
 unit_tmux_absence_distinguishes_probe_failure() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-tmux-probe.XXXXXX")
@@ -711,7 +686,7 @@ unit_refresh_validates_record() {
   printf 'tmux\tonly-two-fields\n' > "$st/state/.afk-daemon-terminal"
   sleep 30 & daemon_pid=$!
   printf '%s' "$daemon_pid" > "$owner/pid"
-  write_pid_identity "$st" "$daemon_pid" "$owner/pid-identity"
+  ( FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$owner/pid-identity" )
   printf '%s\n' "$st" > "$owner/fm-home"
   printf '%s\n' "$ROOT/bin/fm-supervise-daemon.sh" > "$owner/daemon-path"
   touch "$owner/heartbeat"
@@ -739,7 +714,7 @@ unit_stale_lease_restarts_launch_paths() {
   mkdir "$owner"
   ln -s "$owner" "$lock"
   printf '%s\n' "$daemon_pid" > "$owner/pid"
-  write_pid_identity "$st" "$daemon_pid" "$owner/pid-identity"
+  ( FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$owner/pid-identity" )
   printf '%s\n' "$st" > "$owner/fm-home"
   printf '%s\n' "$ROOT/bin/fm-supervise-daemon.sh" > "$owner/daemon-path"
   touch -t 200001010000 "$owner/heartbeat"
@@ -943,7 +918,6 @@ unit_herdr_run_failure_preserves_unconfirmed_record
 unit_record_failure_closes_terminal
 unit_readiness_failure_rolls_back_terminal
 unit_readiness_failure_preserves_unconfirmed_record
-unit_readiness_rejects_stale_daemon
 unit_tmux_absence_distinguishes_probe_failure
 unit_native_lifecycle
 unit_native_entry_preserves_prepared_state

@@ -23,13 +23,6 @@ fi
 
 TMP_ROOT=$(fm_test_tmproot fm-daemon-tests)
 
-write_pid_identity() {  # <home> <state> <pid> <destination>
-  local home=$1 state=$2 pid=$3 destination=$4 identity
-  identity=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash -c \
-    '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$pid" 2>/dev/null) || true
-  printf '%s\n' "$identity" > "$destination"
-}
-
 test_afk_start_refuses_when_flag_cannot_be_written() {
   local dir state out status
   dir=$(make_supercase afk-start-flag-unwritable)
@@ -92,7 +85,7 @@ test_afk_start_reclaims_stale_daemon_lease() {
   mkdir "$owner"
   ln -s "$owner" "$lock"
   printf '%s\n' "$daemon_pid" > "$owner/pid"
-  write_pid_identity "$dir" "$state" "$daemon_pid" "$owner/pid-identity"
+  ( FM_HOME="$dir" FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$owner/pid-identity" )
   printf '%s\n' "$dir" > "$owner/fm-home"
   printf '%s\n' "$DAEMON" > "$owner/daemon-path"
   touch -t 200001010000 "$owner/heartbeat"
@@ -1463,7 +1456,7 @@ test_wedge_alarm_shutdown_stops_active_notifier_group() {
     pid=$!
     while [ ! -s "$child_file" ]; do sleep 0.05; done
     child=$(cat "$child_file")
-    export WEDGE_ALARM_NOTIFIER_PID=$pid
+    WEDGE_ALARM_NOTIFIER_PID=$pid
     wedge_alarm_stop_active_notifier
     if kill -0 "$child" 2>/dev/null; then
       fail "shutdown left a notifier descendant running (pid $child)"
@@ -1479,7 +1472,7 @@ test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend() {
   local dir state log
   dir=$(make_wedge_case wedge-integration); state="$dir/state"; log="$dir/alert.log"
   escalate_add "$state" "needs-decision: pick A"
-  export WEDGE_ALARM_LAST_EPOCH=0
+  WEDGE_ALARM_LAST_EPOCH=0
   FM_WEDGE_ALARM_LOG="$log" FM_STATE_OVERRIDE="$state" \
     FM_WEDGE_ALARM_CHANNEL=osascript FM_SUPERVISOR_BACKEND=herdr \
     inject_wedge_alarm "$state" 30600
@@ -1495,7 +1488,7 @@ test_inject_wedge_alarm_throttles_when_marker_cannot_be_written() {
   state="$dir/state"; log="$dir/alert.log"; daemon_log="$dir/daemon.log"
   escalate_add "$state" "needs-decision: pick A"
   chmod u-w "$state"
-  export WEDGE_ALARM_LAST_EPOCH=0
+  WEDGE_ALARM_LAST_EPOCH=0
   LOG="$daemon_log" FM_WEDGE_ALARM_LOG="$log" FM_MAX_DEFER_SECS=600 \
     FM_WEDGE_ALARM_CHANNEL=osascript FM_SUPERVISOR_BACKEND=herdr \
     inject_wedge_alarm "$state" 30600
