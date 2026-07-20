@@ -89,6 +89,11 @@ arm_healthy=0
 if [ "$watcher_healthy" -eq 1 ]; then
   fm_arm_lease_healthy "$STATE" "$WATCH" "$FM_WATCHER_HEALTHY_PID" "$FM_HOME" "$GRACE" && arm_healthy=1
 fi
+checkpoint_healthy=0
+if [ "${FM_TURNEND_HARNESS:-}" = codex ] \
+  && [ "$(fm_path_age "$STATE/.last-watcher-checkpoint")" -lt "$GRACE" ]; then
+  checkpoint_healthy=1
+fi
 
 afk=0
 [ -e "$STATE/.afk" ] && afk=1
@@ -99,7 +104,8 @@ fi
 if [ "$afk" -eq 1 ] && [ "$watcher_healthy" -eq 1 ] && [ "$daemon_healthy" -eq 1 ]; then
   exit 0
 fi
-if [ "$afk" -eq 0 ] && [ "$watcher_healthy" -eq 1 ] && [ "$arm_healthy" -eq 1 ]; then
+if [ "$afk" -eq 0 ] \
+  && { { [ "$watcher_healthy" -eq 1 ] && [ "$arm_healthy" -eq 1 ]; } || [ "$checkpoint_healthy" -eq 1 ]; }; then
   exit 0
 fi
 x_mode=0

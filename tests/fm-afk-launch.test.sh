@@ -273,6 +273,42 @@ unit_lock_release_preserves_reclaimed_lock() {
   rm -rf "$st"
 }
 
+unit_lock_reclaim_gate_blocks_publication() {
+  local st ready release holder contender
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-lock-gate.XXXXXX")
+  ready="$st/gate-ready"
+  release="$st/gate-release"
+  mkdir -p "$st/state"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$FM_AFK_LAUNCH_LOCK.reclaim"
+    : > "$2"
+    while [ ! -e "$3" ]; do sleep 0.01; done
+    fm_lock_release "$FM_AFK_LAUNCH_LOCK.reclaim"
+  ' _ "$LAUNCH" "$ready" "$release" &
+  holder=$!
+  while [ ! -e "$ready" ]; do sleep 0.01; done
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    fm_afk_launch_lock_acquire
+    fm_afk_launch_lock_release
+  ' _ "$LAUNCH" &
+  contender=$!
+  sleep 0.1
+  if [ -e "$st/state/.afk-launch.lock" ] || [ -L "$st/state/.afk-launch.lock" ]; then
+    fail "launcher lock: contender published while stale reclaim was fenced"
+  fi
+  : > "$release"
+  wait "$holder" || fail "launcher lock: reclaim gate holder failed"
+  wait "$contender" || fail "launcher lock: contender did not acquire after reclaim gate release"
+  if [ ! -e "$st/state/.afk-launch.lock" ] && [ ! -L "$st/state/.afk-launch.lock" ]; then
+    pass "launcher lock: reclaim gate serializes stale removal and publication"
+  else
+    fail "launcher lock: contender did not release its lifecycle lock"
+  fi
+  rm -rf "$st"
+}
+
 unit_signal_exits_with_lock_cleanup() {
   local st marker child
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-signal.XXXXXX")
@@ -961,6 +997,7 @@ unit_failed_start_rolls_back_state
 unit_concurrent_start_serialized
 unit_lock_unpublished_owner
 unit_lock_release_preserves_reclaimed_lock
+unit_lock_reclaim_gate_blocks_publication
 unit_signal_exits_with_lock_cleanup
 unit_herdr_partial_create_recovery
 unit_herdr_error_with_exact_ids_closes_exact

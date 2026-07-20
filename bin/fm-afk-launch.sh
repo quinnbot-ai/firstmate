@@ -82,20 +82,38 @@ fm_afk_launch_lock_owned() {
 }
 
 fm_afk_launch_lock_acquire() {
-  local i incomplete=0 identity owner
+  local i identity owner gate
+  gate="$FM_AFK_LAUNCH_LOCK.reclaim"
   mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
   for i in $(seq 1 200); do
+    if ! fm_lock_try_acquire "$gate"; then
+      sleep 0.05
+      continue
+    fi
+    if fm_afk_launch_lock_owned; then
+      fm_lock_release "$gate"
+      sleep 0.05
+      continue
+    fi
+    if [ -e "$FM_AFK_LAUNCH_LOCK" ] || [ -L "$FM_AFK_LAUNCH_LOCK" ]; then
+      rm -rf "$FM_AFK_LAUNCH_LOCK" 2>/dev/null || {
+        fm_lock_release "$gate"
+        return 1
+      }
+    fi
     owner="$FM_AFK_LAUNCH_LOCK.owner.$$.$FM_AFK_LAUNCH_LOCK_NONCE"
     if mkdir "$owner" 2>/dev/null; then
       FM_AFK_LAUNCH_LOCK_OWNER=$owner
       if ! printf '%s' "$$" > "$owner/pid"; then
         rm -rf "$owner"
         FM_AFK_LAUNCH_LOCK_OWNER=
+        fm_lock_release "$gate"
         return 1
       fi
       identity=$(fm_pid_identity "$$" 2>/dev/null) || {
         rm -rf "$owner"
         FM_AFK_LAUNCH_LOCK_OWNER=
+        fm_lock_release "$gate"
         return 1
       }
       if [ -z "$identity" ] \
@@ -103,28 +121,17 @@ fm_afk_launch_lock_acquire() {
         || ! printf '%s' "$FM_AFK_LAUNCH_LOCK_NONCE" > "$owner/nonce"; then
         rm -rf "$owner"
         FM_AFK_LAUNCH_LOCK_OWNER=
+        fm_lock_release "$gate"
         return 1
       fi
       if ln -s "$owner" "$FM_AFK_LAUNCH_LOCK" 2>/dev/null; then
+        fm_lock_release "$gate"
         return 0
       fi
       rm -rf "$owner"
       FM_AFK_LAUNCH_LOCK_OWNER=
     fi
-    if [ ! -s "$FM_AFK_LAUNCH_LOCK/pid" ] || [ ! -s "$FM_AFK_LAUNCH_LOCK/pid-identity" ]; then
-      incomplete=$((incomplete + 1))
-      if [ "$incomplete" -lt 20 ]; then
-        sleep 0.05
-        continue
-      fi
-    else
-      incomplete=0
-    fi
-    if ! fm_afk_launch_lock_owned; then
-      rm -rf "$FM_AFK_LAUNCH_LOCK" 2>/dev/null || return 1
-      incomplete=0
-      continue
-    fi
+    fm_lock_release "$gate"
     sleep 0.05
   done
   fm_afk_launch_log "timed out waiting for launcher lock"
@@ -134,15 +141,23 @@ fm_afk_launch_lock_acquire() {
 fm_afk_launch_lock_release() {
   local owner
   owner=$FM_AFK_LAUNCH_LOCK_OWNER
-  [ -n "$owner" ] || return 0
+  if [ -z "$owner" ]; then
+    fm_lock_release "$FM_AFK_LAUNCH_LOCK.reclaim"
+    return 0
+  fi
   if [ ! -L "$FM_AFK_LAUNCH_LOCK" ] || [ "$(readlink "$FM_AFK_LAUNCH_LOCK" 2>/dev/null || true)" != "$owner" ]; then
     rm -rf "$owner"
     FM_AFK_LAUNCH_LOCK_OWNER=
+    fm_lock_release "$FM_AFK_LAUNCH_LOCK.reclaim"
     return 0
   fi
-  rm -f "$FM_AFK_LAUNCH_LOCK" || return 1
+  rm -f "$FM_AFK_LAUNCH_LOCK" || {
+    fm_lock_release "$FM_AFK_LAUNCH_LOCK.reclaim"
+    return 1
+  }
   rm -rf "$owner"
   FM_AFK_LAUNCH_LOCK_OWNER=
+  fm_lock_release "$FM_AFK_LAUNCH_LOCK.reclaim"
 }
 
 fm_afk_launch_usage() {

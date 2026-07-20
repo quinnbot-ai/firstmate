@@ -167,9 +167,9 @@ make_secondmate_linked_home_dir() {
 }
 
 run_hook() {
-  local dir=$1 stop_active=$2 home
+  local dir=$1 stop_active=$2 harness=${3:-claude} home
   home=$(cd "$dir" && pwd)
-  printf '{"stop_hook_active":%s}' "$stop_active" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
+  printf '{"stop_hook_active":%s}' "$stop_active" | CLAUDECODE=1 FM_HOME="$home" FM_TURNEND_HARNESS="$harness" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
 }
 
 nonexistent_pid() {
@@ -286,6 +286,28 @@ test_hook_blocks_when_live_watcher_has_dead_arm_lease() {
   expect_code 2 "$status" "hook must block when a healthy watcher has a dead arm relay lease"
   assert_contains "$out" 'watch-arm relay lease' "arm relay failure must explain why turn end was blocked"
   pass "fm-turnend-guard: blocks on a dead arm with a still-live watcher"
+}
+
+test_hook_allows_recent_codex_checkpoint() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-codex-checkpoint")
+  : > "$dir/state/task1.meta"
+  touch "$dir/state/.last-watcher-checkpoint"
+  out=$(run_hook "$dir" false codex); status=$?
+  expect_code 0 "$status" "guard must accept a recent Codex checkpoint"
+  [ -z "$out" ] || fail "Codex checkpoint guard produced output: $out"
+  pass "fm-turnend-guard: accepts a recent Codex foreground checkpoint"
+}
+
+test_hook_rejects_recent_checkpoint_for_non_codex() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-noncodex-checkpoint")
+  : > "$dir/state/task1.meta"
+  touch "$dir/state/.last-watcher-checkpoint"
+  out=$(run_hook "$dir" false claude); status=$?
+  expect_code 2 "$status" "guard must not treat a checkpoint as a Claude relay"
+  assert_contains "$out" "TURN WOULD END BLIND" "non-Codex checkpoint bypassed the guard"
+  pass "fm-turnend-guard: checkpoint marker is Codex-specific"
 }
 
 test_hook_blocks_with_live_lock_and_stale_beacon() {
@@ -661,6 +683,7 @@ test_codex_hook_invokes_shared_guard() {
   assert_contains "$command" 'pwd -P' "codex hook must anchor from the hook process working directory"
   assert_contains "$command" '.codex/hooks.json' "codex hook must verify the hook-loaded firstmate root"
   assert_contains "$command" 'fm-turnend-guard.sh' "codex hook must invoke the shared guard"
+  assert_contains "$command" 'FM_TURNEND_HARNESS=codex' "codex hook must identify the checkpoint supervision mode"
   assert_not_contains "$command" '.cwd' "codex hook must not use payload cwd to select the guard executable"
   pass ".codex/hooks.json: Stop hook invokes the shared primary guard"
 }
@@ -939,6 +962,8 @@ test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_when_dead_lock_has_fresh_beacon
 test_hook_silent_with_live_lock_and_fresh_beacon
 test_hook_blocks_when_live_watcher_has_dead_arm_lease
+test_hook_allows_recent_codex_checkpoint
+test_hook_rejects_recent_checkpoint_for_non_codex
 test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_when_unhealthy_in_primary
 test_hook_blocks_from_fm_home_state
