@@ -34,6 +34,11 @@ case "${1:-}" in
     printf 'send-keys target=%s literal=%s arg=%s\n' "$target" "$literal" "${1:-}" >> "$FM_TMUX_LOG"
     exit 0 ;;
   display-message)
+    for a in "$@"; do
+      case "$a" in
+        *cursor_y*) printf '0\n'; exit 0 ;;
+      esac
+    done
     target=
     while [ $# -gt 0 ]; do
       case "$1" in
@@ -62,6 +67,31 @@ exit 0
 SH
   chmod +x "$fb/sleep"
   printf '%s\n' "$fb"
+}
+
+make_herdr_unknown_submit_stub() {  # <fakebin>
+  cat > "$1/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+count_file=${FM_HERDR_AGENT_GET_COUNT:?}
+case "${1:-}:${2:-}" in
+  status:--json)
+    printf '%s\n' '{"server":{"running":true}}'
+    ;;
+  pane:get)
+    printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "${3:-}"
+    ;;
+  agent:get)
+    count=$(( $(cat "$count_file" 2>/dev/null || echo 0) + 1 ))
+    printf '%s\n' "$count" > "$count_file"
+    if [ "$count" = 2 ]; then
+      exit 1
+    fi
+    printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}'
+    ;;
+esac
+SH
+  chmod +x "$1/herdr"
 }
 
 setup_home() {  # <name> -> echoes home dir
@@ -160,9 +190,27 @@ test_healthy_fm_id_send_still_works() {
   pass "fm-send strict: healthy fm-<id> sends still type once and submit"
 }
 
+test_herdr_unknown_submit_confirmation_fails() {
+  local dir fb home err rc
+  dir="$TMP_ROOT/herdr-unknown-submit"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); make_herdr_unknown_submit_stub "$fb"
+  home=$(setup_home herdr-unknown-submit); err="$dir/send.err"
+  : > "$dir/agent-get-count"
+  fm_write_meta "$home/state/herdr-submit.meta" \
+    "window=default:w1:p2" "backend=herdr" "herdr_session=default" "herdr_pane_id=w1:p2" "kind=ship"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_HERDR_AGENT_GET_COUNT="$dir/agent-get-count" \
+    FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 FM_SEND_RETRIES=1 \
+    "$SEND" herdr-submit "hello captain" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "fm-send must fail when Herdr cannot confirm the post-Enter submission"
+  assert_contains "$(cat "$err")" "could not be confirmed" "unknown Herdr submit confirmation should report a fail-closed diagnostic"
+  pass "fm-send strict: unknown Herdr submit confirmation fails closed"
+}
+
 test_exact_lane_id_send_still_works
 test_unset_fm_home_fails
 test_unresolvable_target_does_not_tmux_fallback
 test_prefixless_herdr_pane_id_fails
 test_unmatched_single_colon_target_must_exist
 test_healthy_fm_id_send_still_works
+test_herdr_unknown_submit_confirmation_fails
