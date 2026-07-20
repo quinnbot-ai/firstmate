@@ -84,11 +84,41 @@ test_daemon_lease_release_cleans_owner_metadata() {
   fm_lock_try_acquire "$lock" || fail "could not acquire daemon lease fixture"
   owner=$(fm_lock_link_owner "$lock") || fail "could not resolve daemon lease owner"
   fm_pid_identity "${BASHPID:-$$}" > "$owner/pid-identity" || fail "could not identify daemon lease fixture"
-  fm_daemon_lease_publish "$state" "$DAEMON" "$dir" "$lock" || fail "could not publish daemon lease fixture"
+  fm_daemon_lease_publish "$state" "$DAEMON" "$dir" "$lock" "$owner" || fail "could not publish daemon lease fixture"
   fm_lock_release "$lock"
   [ ! -e "$lock" ] && [ ! -L "$lock" ] || fail "daemon lease link remained after release"
   [ ! -d "$owner" ] || fail "daemon lease owner remained after release"
   pass "daemon lease release removes its owner metadata and directory"
+}
+
+test_daemon_lease_heartbeat_rejects_owner_handoff() {
+  local dir state lock owner identity successor successor_identity
+  dir=$(make_supercase daemon-lease-owner-handoff)
+  state="$dir/state"
+  lock="$state/.supervise-daemon.lock"
+  . "$ROOT/bin/fm-wake-lib.sh"
+  fm_lock_try_acquire "$lock" || fail "could not acquire initial daemon lease fixture"
+  owner=${FM_LOCK_OWNER_DIR:-}
+  fm_pid_identity "${BASHPID:-$$}" > "$owner/pid-identity" || fail "could not identify initial daemon lease fixture"
+  identity=$(cat "$owner/pid-identity")
+  fm_daemon_lease_publish "$state" "$DAEMON" "$dir" "$lock" "$owner" || fail "could not publish initial daemon lease fixture"
+
+  fm_lock_release "$lock"
+  fm_lock_try_acquire "$lock" || fail "could not acquire successor daemon lease fixture"
+  successor=${FM_LOCK_OWNER_DIR:-}
+  fm_pid_identity "${BASHPID:-$$}" > "$successor/pid-identity" || fail "could not identify successor daemon lease fixture"
+  successor_identity=$(cat "$successor/pid-identity")
+  fm_daemon_lease_publish "$state" "$DAEMON" "$dir" "$lock" "$successor" || fail "could not publish successor daemon lease fixture"
+  touch -t 200001010000 "$successor/heartbeat"
+
+  if fm_daemon_lease_heartbeat "$lock" "$owner" "$identity"; then
+    fail "displaced daemon refreshed the successor lease heartbeat"
+  fi
+  [ "$(fm_path_age "$successor/heartbeat")" -gt 1000 ] || fail "displaced daemon changed the successor heartbeat"
+  fm_daemon_lease_heartbeat "$lock" "$successor" "$successor_identity" || fail "successor daemon could not refresh its own lease heartbeat"
+  [ "$(fm_path_age "$successor/heartbeat")" -lt 5 ] || fail "successor daemon did not refresh its own heartbeat"
+  fm_lock_release "$lock"
+  pass "daemon heartbeat rejects lease owner handoff"
 }
 
 test_daemon_state_root_uses_fm_home() {
@@ -1683,6 +1713,7 @@ test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
 test_daemon_lease_release_cleans_owner_metadata
+test_daemon_lease_heartbeat_rejects_owner_handoff
 test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
