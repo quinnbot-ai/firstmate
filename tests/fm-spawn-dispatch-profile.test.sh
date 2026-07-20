@@ -28,7 +28,11 @@ case "$*" in
       printf '%s\n' "can't find window: ${3:-unknown}" >&2
       exit 1
     fi
-    printf '%s\n' 'firstmate'
+    if [ -n "${FM_FAKE_WINDOW_NAME_FILE:-}" ] && [ -f "$FM_FAKE_WINDOW_NAME_FILE" ]; then
+      cat "$FM_FAKE_WINDOW_NAME_FILE"
+    else
+      printf '%s\n' 'firstmate'
+    fi
     exit 0
     ;;
   *"#{pane_id}"*)
@@ -50,7 +54,22 @@ case "${1:-}" in
     [ "$status" -ne 0 ] || [ "${FM_FAKE_BACKEND_CLOSE_EFFECT:-gone}" != gone ] || printf '%s\n' gone > "${FM_FAKE_TARGET_STATE:?}"
     exit "$status"
     ;;
-  has-session|new-session|new-window)
+  new-window)
+    [ -z "${FM_FAKE_BACKEND_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_BACKEND_LOG"
+    if [ -n "${FM_FAKE_WINDOW_NAME_FILE:-}" ]; then
+      previous=
+      for argument in "$@"; do
+        if [ "$previous" = -n ]; then
+          printf '%s\n' "$argument" > "$FM_FAKE_WINDOW_NAME_FILE"
+          break
+        fi
+        previous=$argument
+      done
+    fi
+    printf '%s\n' '@1'
+    exit 0
+    ;;
+  has-session|new-session)
     [ -z "${FM_FAKE_BACKEND_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_BACKEND_LOG"
     exit 0
     ;;
@@ -144,9 +163,10 @@ make_seeded_secondmate_home() {
 }
 
 run_spawn() {
-  local home=$1 wt=$2 fakebin=$3 launchlog=$4 target_state
+  local home=$1 wt=$2 fakebin=$3 launchlog=$4 target_state target_name
   shift 4
   target_state="$(dirname "$launchlog")/target-state"
+  target_name="$(dirname "$launchlog")/target-window-name"
   : > "$launchlog"
   printf '%s\n' live > "$target_state"
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
@@ -157,6 +177,7 @@ run_spawn() {
     FM_FAKE_TREEHOUSE_RETURN_STATUS="${FM_FAKE_TREEHOUSE_RETURN_STATUS:-0}" \
     FM_FAKE_BACKEND_KILL_STATUS="${FM_FAKE_BACKEND_KILL_STATUS:-0}" \
     FM_FAKE_BACKEND_CLOSE_EFFECT="${FM_FAKE_BACKEND_CLOSE_EFFECT:-gone}" \
+    FM_FAKE_WINDOW_NAME_FILE="$target_name" \
     FM_FAKE_TREEHOUSE_CLOSE_EFFECT="${FM_FAKE_TREEHOUSE_CLOSE_EFFECT:-none}" \
     FM_FAKE_TARGET_QUERY_STATUS="${FM_FAKE_TARGET_QUERY_STATUS:-0}" \
     FM_FAKE_TARGET_STATE="$target_state" \
@@ -662,8 +683,8 @@ test_codex_crewmate_home_refuses_symlink_escape() {
   assert_absent "$HOME_DIR/state/$id.meta" "symlink rejection must not create task metadata"
   assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
     "symlink rejection did not return its worktree"
-  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
-    "symlink rejection did not remove its task endpoint"
+  assert_grep 'kill-window -t @1' "$CASE_DIR/backend.log" \
+    "symlink rejection did not remove its task endpoint by stable window id"
   [ ! -s "$LAUNCH_LOG" ] || fail "symlink rejection must not launch Codex"
   pass "Codex spawn refuses isolated-home symlink escapes"
 }
