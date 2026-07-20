@@ -704,6 +704,32 @@ test_arm_hup_cleans_child_and_temp_output() {
   pass "arm cleans child watcher and temp output on HUP"
 }
 
+test_arm_cancellation_queues_lost_relay_wake() {
+  local dir state fakebin armout i armpid lock_pid status
+  dir=$(make_case arm-cancel-lost-relay)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'watcher: started pid=' "$armout" || fail "arm did not start before cancellation check"
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  kill -TERM "$armpid" 2>/dev/null || fail "could not cancel arm"
+  wait_for_exit "$armpid" 80
+  status=$?
+  [ "$status" -eq 143 ] || fail "cancelled arm did not exit with TERM status (got $status)"
+  grep "$(printf '\tcheck\twatcher-arm-relay\tcheck: watcher arm relay lost')" "$state/.wake-queue" >/dev/null \
+    || fail "arm cancellation did not synchronously queue the lost-relay wake"
+  ! is_live_non_zombie "$lock_pid" || fail "arm cancellation left its child watcher running"
+  pass "arm cancellation queues the durable lost-relay wake before stopping its watcher"
+}
+
 test_arm_propagates_immediate_wake_before_confirmation() {
   local dir state fakebin armout drain_out rearm_out check_file rc rearm_pid watcher_pid i
   dir=$(make_case arm-immediate-wake)
@@ -1017,10 +1043,63 @@ test_arm_lease_reclaims_replaced_watcher() {
   pass "arm lease reclaim treats a stopped bound watcher as stale despite a live prior arm"
 }
 
+test_arm_lease_publishes_complete_owner() {
+  local dir state watcher_pid watcher_identity ready release claim_pid i field
+  dir=$(make_case arm-lease-atomic-publication)
+  state="$dir/state"
+  ready="$dir/publish-ready"
+  release="$dir/publish-release"
+  sleep 60 & watcher_pid=$!
+  watcher_identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$watcher_pid") \
+    || fail "could not identify watcher for atomic arm-lease publication"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$watcher_pid" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$watcher_identity" > "$state/.watch.lock/pid-identity"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ARM_LEASE_PUBLISH_READY="$ready" FM_ARM_LEASE_PUBLISH_RELEASE="$release" \
+    bash -c '
+      . "$1"
+      printf() {
+        command printf "$@"
+        case "$*" in
+          *"/pid-identity"*)
+            : > "$FM_ARM_LEASE_PUBLISH_READY"
+            while [ ! -e "$FM_ARM_LEASE_PUBLISH_RELEASE" ]; do command sleep 0.01; done
+            ;;
+        esac
+      }
+      fm_arm_lease_claim "$2" "$3" "$4" "$5"
+    ' _ "$LIB" "$state" "$WATCH" "$watcher_pid" "$dir" &
+  claim_pid=$!
+  i=0
+  while [ "$i" -lt 80 ] && [ ! -e "$ready" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ ! -e "$ready" ]; then
+    : > "$release"
+    wait "$claim_pid" 2>/dev/null || true
+    kill "$watcher_pid" 2>/dev/null || true
+    wait "$watcher_pid" 2>/dev/null || true
+    fail "arm lease publication did not reach the pre-link pause"
+  fi
+  [ ! -e "$state/.watch-arm.lease" ] || fail "incomplete arm lease became observable"
+  : > "$release"
+  wait "$claim_pid" || fail "arm lease claim failed after publication release"
+  for field in pid pid-identity fm-home watcher-path watcher-pid watcher-identity heartbeat; do
+    [ -e "$state/.watch-arm.lease/$field" ] || fail "published arm lease is missing $field"
+  done
+  kill "$watcher_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+  pass "arm lease publishes complete metadata before its owner link"
+}
+
 test_singleton_start
 test_pid_identity_is_locale_invariant
 test_arm_lease_rejects_reused_pid_identity
 test_arm_lease_reclaims_replaced_watcher
+test_arm_lease_publishes_complete_owner
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings
@@ -1040,6 +1119,7 @@ test_arm_attaches_and_waits_for_live_fresh_watcher
 test_attached_arm_signal_is_recorded_in_cycle_ledger
 test_arm_starts_and_self_heals
 test_arm_hup_cleans_child_and_temp_output
+test_arm_cancellation_queues_lost_relay_wake
 test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable

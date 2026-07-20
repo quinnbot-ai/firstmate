@@ -95,16 +95,26 @@ pr_number_from_target() {
   printf '%s' "$n"
 }
 
-remote_repository() {  # <remote>
-  local remote=$1 url repository host path
-  url=$(git -C "$WT" remote get-url "$remote" 2>/dev/null) || return 1
+normalize_repository() {  # <URL>
+  local url=$1 repository authority path
   case "$url" in
-    *://*) repository=${url#*://} ;;
-    *@*:* )
-      host=${url#*@}
-      host=${host%%:*}
+    file://*) repository=${url#file://} ;;
+    *://*)
+      repository=${url#*://}
+      authority=${repository%%/*}
+      path=${repository#*/}
+      [ "$path" != "$repository" ] || return 1
+      authority=${authority##*@}
+      authority=${authority%%:*}
+      [ -n "$authority" ] || return 1
+      repository=$authority/$path
+      ;;
+    *@*:*)
+      authority=${url#*@}
+      authority=${authority%%:*}
       path=${url#*:}
-      repository=$host/$path
+      [ -n "$authority" ] && [ -n "$path" ] || return 1
+      repository=$authority/$path
       ;;
     *) repository=$url ;;
   esac
@@ -114,19 +124,21 @@ remote_repository() {  # <remote>
   printf '%s' "$repository"
 }
 
+remote_repository() {  # <remote>
+  local remote=$1 url
+  url=$(git -C "$WT" config --get "remote.$remote.url" 2>/dev/null) \
+    || url=$(git -C "$WT" remote get-url "$remote" 2>/dev/null) \
+    || return 1
+  normalize_repository "$url"
+}
+
 pr_repository() {  # <PR URL>
   local target=$1 repository
   case "$target" in
     *"/pull/"*) repository=${target%/pull/*} ;;
     *) return 1 ;;
   esac
-  case "$repository" in
-    *://*) repository=${repository#*://} ;;
-  esac
-  repository=${repository%/}
-  repository=${repository%.git}
-  [ -n "$repository" ] || return 1
-  printf '%s' "$repository"
+  normalize_repository "$repository"
 }
 
 remote_for_pr() {  # <PR URL>
