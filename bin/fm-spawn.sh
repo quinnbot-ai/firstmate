@@ -1730,7 +1730,10 @@ spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 spawn_send_key "$T" Enter
 if [ -n "$CODEX_ACTIVATION_TOKEN" ]; then
-  wait_for_codex_home_activation "$CODEX_CREWMATE_HOME" "$CODEX_ACTIVATION_TOKEN" || exit 1
+  if ! wait_for_codex_home_activation "$CODEX_CREWMATE_HOME" "$CODEX_ACTIVATION_TOKEN"; then
+    TREEHOUSE_ABORT_RETURN_FIRST=1
+    exit 1
+  fi
   CODEX_ACTIVATION_TOKEN=
 fi
 TREEHOUSE_ABORT_CLEANUP=0
