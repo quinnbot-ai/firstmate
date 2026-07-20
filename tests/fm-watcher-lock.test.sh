@@ -1004,6 +1004,27 @@ test_arm_lease_rejects_reused_pid_identity() {
   pass "arm lease rejects a recycled PID whose process identity changed"
 }
 
+test_arm_lease_bind_rejects_changed_watcher_identity() {
+  local dir state watcher_pid
+  dir=$(make_case arm-lease-bind-pid-reuse)
+  state="$dir/state"
+  watcher_pid=$$
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$watcher_pid" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' 'replacement-identity' > "$state/.watch.lock/pid-identity"
+  if FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_pid_identity() { printf "%s\\n" replacement-identity; }
+    fm_arm_lease_bind_watcher "$2" "$3" "$4" "$5" original-identity
+  ' _ "$LIB" "$state" "$WATCH" "$watcher_pid" "$dir"; then
+    fail "arm lease bound a watcher whose identity changed during acquisition"
+  fi
+  [ ! -e "$state/.watch-arm.bound" ] || fail "arm lease published a stale watcher identity"
+  pass "arm lease bind rejects watcher identity changes during acquisition"
+}
+
 test_arm_lease_reclaims_replaced_watcher() {
   local dir state old_watcher new_watcher old_arm old_watcher_identity new_watcher_identity old_arm_identity
   dir=$(make_case arm-lease-replaced-watcher)
@@ -1131,6 +1152,7 @@ SH
 test_singleton_start
 test_pid_identity_is_locale_invariant
 test_arm_lease_rejects_reused_pid_identity
+test_arm_lease_bind_rejects_changed_watcher_identity
 test_arm_lease_reclaims_replaced_watcher
 test_arm_lease_publishes_complete_owner
 test_arm_lease_tick_rejects_invalid_values

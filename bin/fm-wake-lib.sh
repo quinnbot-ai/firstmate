@@ -94,9 +94,11 @@ fm_arm_lease_owner() {  # <state>
 }
 
 fm_arm_lease_bind_watcher() {  # <state> <watch-path> <watcher-pid> <home> <watcher-identity>
-  local state=$1 watch_path=$2 watcher_pid=$3 home=$4 watcher_identity=$5 bound tmp
+  local state=$1 watch_path=$2 watcher_pid=$3 home=$4 watcher_identity=$5 bound current_identity tmp
   bound="$state/.watch-arm.bound"
   fm_watcher_lock_matches_pid "$state" "$watch_path" "$watcher_pid" "$home" || return 1
+  current_identity=$(fm_pid_identity "$watcher_pid") || return 1
+  [ "$current_identity" = "$watcher_identity" ] || return 1
   tmp=$(umask 077; mktemp "$state/.watch-arm.bound.XXXXXX" 2>/dev/null) || return 1
   if ! printf '%s\n%s\n%s\n%s\n' "$home" "$watch_path" "$watcher_pid" "$watcher_identity" > "$tmp" \
     || ! mv -f "$tmp" "$bound"; then
