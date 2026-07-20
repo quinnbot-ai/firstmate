@@ -1390,6 +1390,7 @@ fm_super_main() {
   # --- shutdown: flush buffered escalations, reap child, release lock -------
   local WATCHER_PID="" CUR_TMP=""
   cleanup() {
+    local exit_code=${1:-0}
     trap - TERM INT
     wedge_alarm_stop_active_notifier
     escalate_flush "$STATE" 2>/dev/null || true
@@ -1401,9 +1402,11 @@ fm_super_main() {
       rm -f "$CUR_TMP" 2>/dev/null || true
     fi
     fm_lock_release "$LOCK" 2>/dev/null || true
-    rm -f "$PIDFILE" 2>/dev/null || true
+    if [ "$(cat "$PIDFILE" 2>/dev/null || true)" = "$DAEMON_PID" ]; then
+      rm -f "$PIDFILE" 2>/dev/null || true
+    fi
     log "daemon shutting down"
-    exit 0
+    exit "$exit_code"
   }
   trap cleanup TERM INT
 
@@ -1437,7 +1440,7 @@ fm_super_main() {
   while true; do
     fm_daemon_lease_heartbeat "$LOCK" "$DAEMON_OWNER" "$DAEMON_IDENTITY" || {
       log "ERROR: supervise-daemon lease ownership lost; stopping"
-      exit 1
+      cleanup 1
     }
     # --- pane-gone guard (preserved) ---------------------------------------
     # With the #29 watcher's enqueue-before-suppress, a wake is no longer

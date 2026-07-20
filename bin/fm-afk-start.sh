@@ -132,7 +132,10 @@ fm_afk_start_main() {
   fi
 
   if fm_pid_alive "$pid" && [ -n "$pid" ]; then
-    fm_lock_remove_path "$FM_AFK_LOCK" 2>/dev/null || true
+    fm_daemon_lease_remove_stale "$FM_AFK_STATE" "$FM_AFK_DAEMON" "$FM_HOME" || {
+      echo "afk: stale daemon lease changed during recovery" >&2
+      return 1
+    }
   fi
 
   # Fresh start: clear the previous away session's stale delivery artifacts
