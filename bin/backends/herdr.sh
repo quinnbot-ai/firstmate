@@ -808,14 +808,26 @@ fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
   printf '%s' "$out" | jq -r '[.result.agent.agent // "", .result.agent.agent_status // ""] | @tsv' 2>/dev/null
 }
 
-fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
-  local target=$1 session pane cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped
+fm_backend_herdr_bare_prompt_has_ansi() {
+  printf '%s' "$1" | grep -q $'\033\\['
+}
+
+fm_backend_herdr_bare_prompt_is_editable() {
+  printf '%s' "$1" | grep -qE $'\033\\[[0-9;]*1(;[0-9;]*)?m[❯›]'
+}
+
+fm_backend_herdr_composer_state() {  # <target> [guard|post-submit] -> empty|pending|unknown
+  local target=$1 mode=${2:-guard} session pane cap line trimmed found=0 shape="" raw_match="" bordered=0 stripped
+  local after_match="" verdict
   local identity agent agent_status row=0 generic_line=0
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   session=$FM_BACKEND_HERDR_SESSION
   pane=$FM_BACKEND_HERDR_PANE
-  cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES" 2>/dev/null \
-    || fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES") || { printf 'unknown'; return 0; }
+  if cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES" 2>/dev/null); then
+    :
+  else
+    cap=$(fm_backend_herdr_capture "$target" "$FM_BACKEND_HERDR_COMPOSER_LINES") || { printf 'unknown'; return 0; }
+  fi
   # Structural scan: locate the bottom-most composer row and remember its RAW
   # (styled) bytes. Shape detection runs on the plain row (fm_backend_herdr_strip_ansi
   # keeps ghost text so the border/prompt glyph is still visible); the raw row is
@@ -832,6 +844,7 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
         raw_match=$line
         generic_line=$row
         found=1
+        after_match=""
         ;;
       *)
         if printf '%s' "$trimmed" | grep -qE "$FM_BACKEND_HERDR_BARE_PROMPT_RE"; then
@@ -839,6 +852,9 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|unknown
           raw_match=$line
           generic_line=$row
           found=1
+          after_match=""
+        elif [ "$found" -eq 1 ]; then
+          after_match="${after_match}${trimmed}"$'\n'
         fi
         ;;
     esac
@@ -878,7 +894,10 @@ EOF
     # not provide the complete Pi composer structure required for injection.
     found=0
   fi
-  [ "$found" -eq 1 ] || { printf 'unknown'; return 0; }
+  if [ "$found" -ne 1 ]; then
+    printf 'unknown'
+    return 0
+  fi
   # Content: extract the real typed text from the raw row with the shared,
   # fleet-wide ghost stripper (bin/fm-composer-lib.sh), which drops dim/faint AND
   # dark-truecolor ghost/placeholder runs. This replaces the former herdr-only
@@ -907,7 +926,15 @@ EOF
   # shape only ever starts with an AGENT glyph (FM_BACKEND_HERDR_BARE_PROMPT_RE
   # is '^[❯›]'), so a bare shell prompt never reaches here - it stays 'unknown'
   # via the no-composer-row path above, exactly as before.
-  fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE"
+  verdict=$(fm_composer_classify_content "$bordered" "$stripped" "$FM_BACKEND_HERDR_IDLE_RE")
+  if [ "$mode" = post-submit ] && [ "$shape" = bare ] && [ "$verdict" = pending ] \
+    && fm_backend_herdr_bare_prompt_has_ansi "$raw_match" \
+    && ! fm_backend_herdr_bare_prompt_is_editable "$raw_match" \
+    && printf '%s' "$after_match" | grep -qiE "${FM_BUSY_REGEX:-esc (to )?interrupt|Working\\.\\.\\.|Ctrl\\+c:cancel}"; then
+    printf 'empty'
+    return 0
+  fi
+  printf '%s' "$verdict"
 }
 
 # fm_backend_herdr_send_text_submit: type <text> into <target> once (raw,
@@ -972,8 +999,13 @@ EOF
 # backend; how each backend confirms it is an internal decision - herdr's is
 # no longer literally "the composer read empty").
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep pane_state
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
+  pane_state=$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
+  case "$pane_state" in
+    live) ;;
+    *) printf 'send-failed'; return 0 ;;
+  esac
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
   baseline=$(fm_backend_herdr_classify_submit_agent_status \
@@ -986,12 +1018,19 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
         "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS")
     else
       sleep "$sleep_s"
-      verdict=$(fm_backend_herdr_composer_state "$target")
+      verdict=$(fm_backend_herdr_composer_state "$target" post-submit)
     fi
     case "$verdict" in
       busy) printf 'empty'; return 0 ;;
       empty) printf 'empty'; return 0 ;;
-      unknown) printf 'unknown'; return 0 ;;
+      unknown)
+        pane_state=$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
+        case "$pane_state" in
+          dead|no-agent) printf 'send-failed' ;;
+          *) printf 'unknown' ;;
+        esac
+        return 0
+        ;;
     esac
     i=$((i + 1))
     [ "$i" -lt "$retries" ] || { printf 'pending'; return 0; }

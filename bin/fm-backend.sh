@@ -777,12 +777,9 @@ process.exit(process.argv[1] === "0" ? 1 : 2);
 #   dead    - CONFIDENTLY not an agent: a bare shell (tmux) or a
 #             structurally-gone/no-agent-registered pane (herdr).
 #   unknown - anything ambiguous, unreadable, or unverified for this backend.
-# Scoped to today's --secondmate-spawn-capable backends with an empirically
-# verified classifier: tmux (docs/tmux-backend.md "Agent liveness probe") and
-# herdr (docs/herdr-backend.md "Agent liveness probe reuses the husk
-# classifier"). zellij, orca, and cmux report unknown until independently
-# verified - future work, not a functional gap for the two backends
-# --secondmate spawns actually support today plus tmux's reference path.
+# Tmux and herdr classify their native process state directly.
+# Zellij, Orca, and cmux report unknown until they have an equally reliable
+# native process classifier.
 # Callers must treat unknown exactly like an unreadable target: NEVER license
 # an action from it alone - the secondmate-liveness sweep gates a respawn on
 # `dead` only, precisely so a momentary read glitch can never duplicate a
@@ -793,7 +790,8 @@ fm_backend_agent_alive() {  # <backend> <target>
   case "$backend" in
     tmux) fm_backend_tmux_agent_alive "$target" ;;
     herdr) fm_backend_herdr_agent_alive "$target" ;;
-    *) printf 'unknown' ;;
+    zellij|orca|cmux) printf 'unknown'; return 0 ;;
+    *) printf 'unknown'; return 0 ;;
   esac
 }
 

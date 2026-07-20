@@ -10,11 +10,12 @@
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
 # Orca currently supports Enter and C-c only, and rejects Escape.
 #
-# Text submission is verified: the line is typed ONCE, then Enter is sent and
-# retried (Enter only, never retyped) until the target backend confirms a
-# submit or reports an inconclusive send. If a swallowed Enter is positively
-# confirmed, fm-send exits NON-ZERO so the caller knows the steer did not land
-# instead of silently leaving an unsubmitted instruction.
+# Text sends first require a confirmed live harness agent, so dead or unknown
+# target liveness refuses before any text is typed. The line is then typed ONCE,
+# and Enter is retried (Enter only, never retyped) until the target backend
+# explicitly confirms the submit. Any swallowed or inconclusive submit exits
+# NON-ZERO, so the caller never mistakes an unsubmitted instruction for a steer
+# that landed.
 # Submission dispatches through the target's recorded backend; the tmux adapter
 # shares its composer/submit core with the away-mode daemon via bin/fm-tmux-lib.sh.
 # Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).
@@ -197,11 +198,13 @@ fi
 # unknown and treated as non-codex (the safe default that keeps the fast path).
 # The target's BACKEND comes from selector meta, from matching an explicit target
 # back to recorded meta, or from strict explicit-target shape validation.
-# Do not add a separate passive liveness preflight here. Active send paths own
-# backend readiness: herdr, for example, must route through its session-aware
-# target_ready path before sending, while zellij verifies pane labels in its
-# send implementation. A failed backend send is still surfaced below as a hard
-# error with the attempted resolution attached.
+if [ "${1:-}" != "--key" ]; then
+  agent_liveness=$(fm_backend_agent_alive "$TARGET_BACKEND" "$T" 2>/dev/null || printf unknown)
+  if [ "$agent_liveness" != alive ]; then
+    echo "error: refusing to send to $T ($TARGET_BACKEND harness agent is $agent_liveness; tried $RESOLUTION_TRIED)" >&2
+    exit 1
+  fi
+fi
 
 if [ "${1:-}" = "--key" ]; then
   if ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$2" "$EXPECTED_LABEL"; then
@@ -230,13 +233,14 @@ else
   esac
   retries=${FM_SEND_RETRIES:-3}
   sleep_s=${FM_SEND_SLEEP:-0.4}
-  # Type once, submit, verify. Lenient: only a positively-confirmed swallow
-  # (text still in the composer) is an error; an unreadable pane is assumed sent.
+  # Type once, submit, and require explicit confirmation.
   if ! verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL"); then
     echo "error: text not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1
   fi
   case "$verdict" in
+    empty)
+      ;;
     pending)
       echo "error: text not submitted to $T (Enter swallowed; text left in composer; tried $RESOLUTION_TRIED)" >&2
       exit 1
@@ -245,8 +249,12 @@ else
       echo "error: text not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
       exit 1
       ;;
+    *)
+      echo "error: text submission to $T could not be confirmed ($TARGET_BACKEND returned '$verdict'; tried $RESOLUTION_TRIED)" >&2
+      exit 1
+      ;;
   esac
-  # Submit landed (verdict was not pending/send-failed). Confirmation only proves
+  # Submit landed. Confirmation only proves
   # the text was accepted; the harness still needs a beat to spin up the
   # turn before its busy footer shows. Pause so an immediate peek catches the
   # crewmate actually working instead of the stale idle pane. FM_SEND_SETTLE=0

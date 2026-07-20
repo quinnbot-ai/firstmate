@@ -16,6 +16,10 @@ import secrets
 import signal
 import stat
 import sys
+import time
+
+
+ACTIVATION_STABILITY_SECONDS = 1.0
 
 
 def die(message):
@@ -325,6 +329,9 @@ def read_activation_result(args):
             die("isolated Codex home activation result is unsafe")
     finally:
         os.close(fd)
+    if not content:
+        print("pending")
+        return 3
     for state in (b"ready", b"failed"):
         if content == state + b" " + token + b"\n":
             print(state.decode())
@@ -390,6 +397,18 @@ def activate_command(args, home_fd, command, result_fd, token):
         _, status = os.waitpid(pid, 0)
         finish_activation_result_with_token(result_fd, b"failed", token)
         raise ActivationExecError("could not execute isolated Codex launch")
+    deadline = time.monotonic() + ACTIVATION_STABILITY_SECONDS
+    while True:
+        exited_pid, status = os.waitpid(pid, os.WNOHANG)
+        if exited_pid:
+            raise ActivationExecError("isolated Codex launch exited during activation")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(remaining, 0.05))
+    exited_pid, status = os.waitpid(pid, os.WNOHANG)
+    if exited_pid:
+        raise ActivationExecError("isolated Codex launch exited during activation")
     try:
         finish_activation_result_with_token(result_fd, b"ready", token)
     except BaseException:

@@ -107,6 +107,10 @@ test_tmux_agent_alive_classifies() {
   [ "$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source tmux; fm_backend_tmux_agent_alive sess:win' "$ROOT")" = unknown ] \
     || fail "an ambiguous bare-interpreter (node) foreground process should classify as unknown, never dead"
 
+  fb=$(make_probe_tmux "$TMP_ROOT/tmux-python" python3)
+  [ "$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source tmux; fm_backend_tmux_agent_alive sess:win' "$ROOT")" = unknown ] \
+    || fail "an ambiguous bare-interpreter (python3) foreground process should classify as unknown, never alive"
+
   fb=$(make_probe_tmux "$TMP_ROOT/tmux-vim" vim)
   [ "$(PATH="$fb:$BASE_PATH" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source tmux; fm_backend_tmux_agent_alive sess:win' "$ROOT")" = unknown ] \
     || fail "an unrecognized foreground process should classify as unknown"

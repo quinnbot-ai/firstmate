@@ -23,7 +23,8 @@ Spawn fails closed if the runtime is not ready.
 The first spawn against a given project also auto-registers that project's repo in Orca (`orca repo add --path`) if it is not already registered - no manual registration step is needed.
 
 Watching and attaching: Orca owns both the worktree and the terminal for its tasks, so there is nothing to attach to outside the Orca app itself - open the app and find the terminal for the task (recorded as `terminal=<handle>` in the task's meta, with `window=fm-<id>` as the shared firstmate alias).
-You do not need to open the app for routine supervision: from an active firstmate session, `bin/fm-peek.sh <id>` reads a task's terminal without opening Orca, and `FM_HOME=<this-firstmate-home> bin/fm-send.sh <id> "<text>"` steers it unless `FM_HOME` is already set to the active firstmate home (the stable `fm-<id>` alias also works; Enter and Ctrl-C are supported; Escape is not).
+You do not need to open the app for routine supervision: from an active firstmate session, `bin/fm-peek.sh <id>` reads a task's terminal without opening Orca.
+Orca has no verified agent-process liveness classifier, so `fm-send.sh` currently refuses text steers before typing rather than risk delivery to an unknown terminal; the stable `fm-<id>` alias still supports Enter and Ctrl-C, while Escape is unsupported.
 
 Verify it works by spawning a trivial task with `--backend orca` and confirming the task's meta records `backend=orca`, `terminal=`, `orca_worktree_id=`, and `worktree=`; the Orca app should show a new terminal for the task.
 
@@ -76,7 +77,8 @@ Spawn:
 Operation routing:
 
 - `fm-peek.sh` captures with `orca terminal read`.
-- `fm-send.sh` types text with `orca terminal send --text ...`, submits with Enter, and verifies the composer row cleared before returning; when Orca reports a limited page, the verifier follows `oldestCursor` and preserves the current tail so older text cannot hide still-pending composer input.
+- The Orca adapter can type text with `orca terminal send --text ...`, submit with Enter, and verify the composer row cleared; `fm-send.sh` currently refuses text before that path because Orca cannot yet confirm a live harness agent.
+  When Orca reports a limited page, the verifier follows `oldestCursor` and preserves the current tail so older text cannot hide still-pending composer input.
   A slash-command popup that closes by filling an argument-hint placeholder still reads as pending, so the retry loop sends the required second Enter rather than treating the first Enter as a submission.
   The bordered row is classified through the shared composer classifier; a bare shell prompt has no genuine composer row and reads `unknown`, not confirmed empty.
 - `fm-send.sh --key Enter` and `--key C-c` are supported.
@@ -88,8 +90,11 @@ Teardown:
 - Scout teardown still requires `data/<id>/report.md` and the shared unresolved-decision completion gate unless `--force` is explicitly used.
 - Ship teardown still refuses dirty or unlanded work before any terminal/worktree cleanup.
 - Ship teardown resolves `orca_worktree_id` back through Orca and verifies it matches the inspected `worktree=` path before removing anything; mismatches or uninspectable paths preserve metadata and fail closed.
-- After the existing firstmate safety checks pass, teardown closes the recorded Orca terminal and releases the recorded worktree through `orca worktree rm --worktree id:<orca_worktree_id> --force`.
+- After the existing firstmate safety checks pass, teardown closes the recorded Orca terminal, confirms it is absent, and only then releases the recorded worktree through `orca worktree rm --worktree id:<orca_worktree_id> --force`.
+- If terminal absence cannot be confirmed, teardown preserves its metadata and Orca worktree for safe recovery instead of deleting either resource.
 - Teardown does not raw-delete Orca worktrees.
+- A failed Orca spawn removes its provisional task metadata after it confirms terminal absence and worktree cleanup.
+  If it cannot confirm terminal absence, it preserves the metadata, private Codex home, and task temporary directory for safe recovery instead of treating the spawn as clean.
 
 ## Limitations
 
@@ -110,8 +115,8 @@ Fake-Orca tests cover:
 - rejection of undocumented terminal-handle result shapes;
 - runtime readiness gating through `orca status --json`;
 - `fm-spawn.sh --backend orca` metadata creation and harness launch;
-- `fm-peek.sh`, `fm-send.sh`, and `fm-crew-state.sh` routing through recorded Orca metadata;
-- slash-command popup placeholder handling that requires a second Enter before `fm-send.sh` reports submission;
+- `fm-peek.sh` and `fm-crew-state.sh` routing through recorded Orca metadata, plus `fm-send.sh` failing closed before typing without a native liveness signal;
+- adapter-level slash-command popup placeholder handling that requires a second Enter before its submit primitive reports submission;
 - scout teardown releasing an Orca worktree through `orca worktree rm`;
 - ship teardown failing closed when the recorded Orca worktree id is missing, cannot resolve to a path, or resolves to a different path than `worktree=`.
 
