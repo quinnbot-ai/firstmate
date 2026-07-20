@@ -147,6 +147,7 @@ CODEX_CREWMATE_HOME=$(grep '^codex_crewmate_home=' "$META" | cut -d= -f2- || tru
 ENDPOINT_CLEANUP_PENDING=$(grep '^endpoint_cleanup_pending=' "$META" | tail -1 | cut -d= -f2- || true)
 ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
 ORCA_WORKTREE_CLEANUP_COMPLETE=$(fm_meta_get "$META" orca_worktree_cleanup_complete)
+ORCA_TERMINAL_CONFIRMED_ABSENT=$(fm_meta_get "$META" orca_terminal_absent)
 ORCA_PATH_MATCH_VERIFIED=0
 TREEHOUSE_LEASE_HANDOFF=
 TREEHOUSE_LEASE_RETURN_NEEDED=1
@@ -311,12 +312,18 @@ require_orca_terminal() {
   printf '%s\n' "$terminal"
 }
 
+orca_terminal_confirmed_absent() {
+  [ "$(meta_value "$1" orca_terminal_absent)" = 1 ]
+}
+
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_WORKTREE_CLEANUP_COMPLETE" != 1 ]; then
     ORCA_WORKTREE_ID=$(require_orca_worktree_id "$META") || exit 1
   fi
-  T_ORCA=$(meta_value "$META" terminal)
-  [ -z "$T_ORCA" ] || T=$T_ORCA
+  if [ "$ORCA_TERMINAL_CONFIRMED_ABSENT" != 1 ]; then
+    T_ORCA=$(require_orca_terminal "$META") || exit 1
+    T=$T_ORCA
+  fi
 fi
 
 remove_grok_turnend_auth() {
@@ -1092,6 +1099,9 @@ close_recorded_endpoint() {
   if [ "$ENDPOINT_CLEANUP_PENDING" = 1 ] || [ -n "$CODEX_CREWMATE_HOME" ]; then
     require_confirmed_absence=1
   fi
+  if [ "$BACKEND" = orca ] && [ -n "${T_ORCA:-}" ]; then
+    require_confirmed_absence=1
+  fi
   if [ "$require_confirmed_absence" = 1 ]; then
     if fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
       return 0
@@ -1124,6 +1134,32 @@ close_recorded_endpoint() {
     fi
   else
     fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null || true
+  fi
+}
+
+close_endpoint_with_confirmed_absence() {
+  local backend=$1 target=$2 tab_id=$3 expected_label=$4 endpoint_label=$5 absence_status close_failed=0
+  if fm_backend_target_absent "$backend" "$target" "$expected_label"; then
+    return 0
+  fi
+  if ! FM_BACKEND_KILL_STRICT=1 fm_backend_kill "$backend" "$target" "$tab_id" "$expected_label" 2>/dev/null; then
+    close_failed=1
+  fi
+  if fm_backend_target_absent "$backend" "$target" "$expected_label"; then
+    absence_status=0
+  else
+    absence_status=$?
+  fi
+  if [ "$absence_status" -ne 0 ]; then
+    if [ "$absence_status" -eq 1 ]; then
+      echo "error: $endpoint_label $target remains live after cleanup; preserving recovery metadata" >&2
+    else
+      echo "error: $endpoint_label $target could not be confirmed absent after cleanup; preserving recovery metadata" >&2
+    fi
+    return 1
+  fi
+  if [ "$close_failed" -ne 0 ]; then
+    echo "warning: $endpoint_label $target was already absent after close reported an error" >&2
   fi
 }
 
@@ -1197,6 +1233,9 @@ validate_firstmate_home_children_removal() {
       validate_firstmate_home_children_removal "$child_home" || return 1
     elif [ "$child_backend" = orca ]; then
       child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
+      if ! orca_terminal_confirmed_absent "$child_meta"; then
+        require_orca_terminal "$child_meta" >/dev/null || return 1
+      fi
       if [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
         child_proj=$(meta_value "$child_meta" project)
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
@@ -1228,11 +1267,16 @@ cleanup_firstmate_home_children() {
     fi
     if [ "$child_backend" = orca ] && [ "$child_kind" != secondmate ]; then
       child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
+      if ! orca_terminal_confirmed_absent "$child_meta"; then
+        child_t=$(require_orca_terminal "$child_meta") || return 1
+      fi
       if [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       fi
     fi
-    if [ -n "$child_t" ]; then
+    if [ "$child_backend" = orca ] && [ -n "$child_t" ]; then
+      close_endpoint_with_confirmed_absence "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" "child endpoint" || return 1
+    elif [ -n "$child_t" ]; then
       if [ "$child_backend" = zellij ]; then
         # Zellij titles are scoped by the owning home tag, so forced secondmate
         # cleanup must verify child tabs as that child home, not the parent.
@@ -1298,6 +1342,15 @@ fi
 
 validate_task_temp_for_removal "$TASK_TMP" || exit 1
 
+if [ "$KIND" != secondmate ] && [ -n "$WT" ] && [ -n "$PROJ" ]; then
+  WT_CANONICAL=$(canonical_existing_dir "$WT" || true)
+  PROJ_CANONICAL=$(canonical_existing_dir "$PROJ" || true)
+  if [ -n "$WT_CANONICAL" ] && [ "$WT_CANONICAL" = "$PROJ_CANONICAL" ]; then
+    echo "REFUSED: task worktree $WT resolves to its primary project checkout; preserving task state." >&2
+    exit 1
+  fi
+fi
+
 if [ "$KIND" = secondmate ] && [ "$FORCE" != "--force" ]; then
   SUB_STATE="$HOME_PATH/state"
   if [ -d "$SUB_STATE" ]; then
@@ -1361,11 +1414,11 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
     ORCA_PATH_MATCH_VERIFIED=1
   fi
+  [ -z "$T_ORCA" ] || close_recorded_endpoint || exit 1
   if [ -n "$ORCA_WORKTREE_ID" ] && [ -d "$WT" ]; then
     detach_and_drop_task_branch || exit 1
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
   fi
-  [ -z "$T_ORCA" ] || close_recorded_endpoint || exit 1
   [ -z "$ORCA_WORKTREE_ID" ] || fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ] && [ "$TREEHOUSE_LEASE_RETURN_NEEDED" = 1 ]; then
   detach_and_drop_task_branch || exit 1
