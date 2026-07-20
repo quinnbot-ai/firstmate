@@ -203,7 +203,10 @@ COMPOSER="${FM_FAKE_COMPOSER:?FM_FAKE_COMPOSER unset}"
 case "${1:-}" in
   display-message)
     print=0
-    for a in "$@"; do case "$a" in *cursor_y*) printf '0\n'; exit 0 ;; esac; done
+    for a in "$@"; do case "$a" in
+      *cursor_y*) printf '0\n'; exit 0 ;;
+      *pane_current_command*) printf 'codex\n'; exit 0 ;;
+    esac; done
     for a in "$@"; do [ "$a" = "-p" ] && print=1; done
     [ "$print" = 1 ] && printf 'fakepane\n'
     exit 0 ;;

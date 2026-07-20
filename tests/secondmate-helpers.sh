@@ -35,6 +35,10 @@ case "${1:-}" in
     exit 0
     ;;
   display-message)
+    for a in "$@"; do case "$a" in
+      *cursor_y*) printf '0\n'; exit 0 ;;
+      *pane_current_command*) printf 'codex\n'; exit 0 ;;
+    esac; done
     printf 'firstmate\n'
     exit 0
     ;;
