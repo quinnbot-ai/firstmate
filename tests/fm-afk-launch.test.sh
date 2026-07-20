@@ -89,7 +89,9 @@ unit_fresh_vs_refresh() {
   mkdir "$owner"
   ln -s "$owner" "$lock"
   printf '%s' "$sleep_pid" > "$owner/pid"
-  ( FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleep_pid" > "$owner/pid-identity" 2>/dev/null ) || true
+  ( FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" \
+    bash -c '. "$1"; fm_pid_identity "$2" > "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$sleep_pid" "$owner/pid-identity" 2>/dev/null ) || true
   printf '%s\n' "$st" > "$owner/fm-home"
   printf '%s\n' "$ROOT/bin/fm-supervise-daemon.sh" > "$owner/daemon-path"
   touch "$owner/heartbeat"
@@ -771,7 +773,9 @@ unit_refresh_validates_record() {
   printf 'tmux\tonly-two-fields\n' > "$st/state/.afk-daemon-terminal"
   sleep 30 & daemon_pid=$!
   printf '%s' "$daemon_pid" > "$owner/pid"
-  ( FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$owner/pid-identity" )
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" \
+    bash -c '. "$1"; fm_pid_identity "$2" > "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$daemon_pid" "$owner/pid-identity"
   printf '%s\n' "$st" > "$owner/fm-home"
   printf '%s\n' "$ROOT/bin/fm-supervise-daemon.sh" > "$owner/daemon-path"
   touch "$owner/heartbeat"
@@ -799,7 +803,9 @@ unit_stale_lease_restarts_launch_paths() {
   mkdir "$owner"
   ln -s "$owner" "$lock"
   printf '%s\n' "$daemon_pid" > "$owner/pid"
-  ( FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$owner/pid-identity" )
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" \
+    bash -c '. "$1"; fm_pid_identity "$2" > "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$daemon_pid" "$owner/pid-identity"
   printf '%s\n' "$st" > "$owner/fm-home"
   printf '%s\n' "$ROOT/bin/fm-supervise-daemon.sh" > "$owner/daemon-path"
   touch -t 200001010000 "$owner/heartbeat"

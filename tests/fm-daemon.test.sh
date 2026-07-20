@@ -85,7 +85,9 @@ test_afk_start_reclaims_stale_daemon_lease() {
   mkdir "$owner"
   ln -s "$owner" "$lock"
   printf '%s\n' "$daemon_pid" > "$owner/pid"
-  ( FM_HOME="$dir" FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$owner/pid-identity" )
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$1"; fm_pid_identity "$2" > "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$daemon_pid" "$owner/pid-identity"
   printf '%s\n' "$dir" > "$owner/fm-home"
   printf '%s\n' "$DAEMON" > "$owner/daemon-path"
   touch -t 200001010000 "$owner/heartbeat"
