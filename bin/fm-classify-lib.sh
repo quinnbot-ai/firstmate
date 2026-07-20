@@ -390,10 +390,13 @@ crew_pause_handoff_allows_recovery() {  # <id> [state-dir]
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
-crew_absorb_class() {  # <id>
-  local id=$1 line state src state_dir last
-  [ -n "$id" ] || { printf 'none'; return; }
-  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+# Same classification as crew_absorb_class, but takes an already-fetched
+# fm-crew-state.sh <line> instead of invoking FM_CREW_STATE_BIN itself. Callers
+# that need the raw line for a further decision (pause_state_class, to tell a
+# parked-gate override from a plain authoritative paused read) read it once and
+# call this directly instead of paying for a second bounded state read.
+crew_absorb_class_from_line() {  # <id> <line>
+  local id=$1 line=$2 state src state_dir last
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
   state=${line#state: }; state=${state%% *}
   if [ "$state" = paused ]; then printf 'paused'; return; fi
@@ -419,6 +422,13 @@ crew_absorb_class() {  # <id>
     fi
   fi
   printf 'none'
+}
+
+crew_absorb_class() {  # <id>
+  local id=$1 line
+  [ -n "$id" ] || { printf 'none'; return; }
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  crew_absorb_class_from_line "$id" "$line"
 }
 
 # 0 if crew <id> shows POSITIVE evidence it is still working (crew_absorb_class

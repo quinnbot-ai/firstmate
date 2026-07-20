@@ -473,7 +473,7 @@ clear_pause_tracking() {  # <window>
 # Only a confidently dead ordinary crew may recover paused classification after
 # fm-crew-state has fallen back to stopped or unknown.
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck_file class agent_alive
+  local win=$1 task=$2 key last recheck_file class agent_alive crew_line
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
@@ -487,7 +487,11 @@ pause_state_class() {  # <window> <task>
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
     if [ "$(window_kind "$win")" != secondmate ]; then
       agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-      if [ "$agent_alive" != dead ]; then
+      # Only a CONFIRMED-alive agent forces a fresh look; unknown (unreadable,
+      # or a harness tmux's classifier cannot attribute) must never license a
+      # downgrade on its own (fm_backend_agent_alive's documented contract) and
+      # instead keeps trusting the already-established pause classification.
+      if [ "$agent_alive" = alive ]; then
         rm -f "$recheck_file"
         printf 'none'
         return
@@ -496,21 +500,46 @@ pause_state_class() {  # <window> <task>
     printf 'paused'
     return
   fi
-  class=$(crew_absorb_class "$task")
+  crew_line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || true
+  class=$(crew_absorb_class_from_line "$task" "$crew_line")
   if [ "$class" = working ]; then
     rm -f "$recheck_file"
     printf 'working'
     return
   fi
+  case "$crew_line" in
+    "state: parked"*)
+      if [ "$class" = paused ]; then
+        # The latest declared paused: status explicitly overrides this parked
+        # no-mistakes gate (crew_absorb_class_from_line's parked branch) - that
+        # is the operator's current instruction, not a stale log leftover, so
+        # trust it directly instead of demanding proof about the agent at all.
+        date +%s > "$recheck_file"
+        rm -f "$(crew_pause_handoff_file "$task" "$STATE")"
+        printf 'paused'
+        return
+      fi
+      ;;
+  esac
+  agent_alive=unknown
   if [ "$(window_kind "$win")" != secondmate ]; then
     agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-    if [ "$agent_alive" != dead ]; then
-      rm -f "$recheck_file"
-      printf 'none'
-      return
-    fi
   fi
-  [ "$class" = none ] && [ "${agent_alive:-unknown}" = dead ] && class=paused
+  if [ "$class" = paused ] && [ "$agent_alive" = alive ]; then
+    # A confirmed-live agent sitting at whatever the status log calls a pause
+    # (a plain authoritative "state: paused" read, or a handoff-recovered
+    # pause) deserves a fresh surfaced look rather than blind trust in the
+    # log - a live external-decision gate must not hide behind the pause
+    # cadence. Unknown liveness never forces this downgrade on its own, so an
+    # unreadable pane still keeps trusting an already-established pause.
+    rm -f "$recheck_file"
+    printf 'none'
+    return
+  fi
+  # A class=none (stopped/unknown-without-handoff) verdict recovers to paused
+  # only once the agent is CONFIRMED dead - unknown liveness must never
+  # license that recovery on its own either.
+  [ "$class" = none ] && [ "$agent_alive" = dead ] && class=paused
   case "$class" in
     paused) date +%s > "$recheck_file"
             rm -f "$(crew_pause_handoff_file "$task" "$STATE")"
