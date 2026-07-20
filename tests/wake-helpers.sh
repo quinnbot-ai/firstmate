@@ -73,6 +73,19 @@ if [ "${1:-}" = "list-windows" ]; then
   fi
   exit 0
 fi
+if [ "${1:-}" = "display-message" ]; then
+  for _arg in "$@"; do
+    if [ "$_arg" = '#{window_name}' ]; then
+      printf '%s\n' "${FM_FAKE_TMUX_WINDOW##*:}"
+      exit 0
+    fi
+    if [ "$_arg" = '#{pane_id}' ]; then
+      printf '%s\n' '%fake-pane'
+      exit 0
+    fi
+  done
+  exit 1
+fi
 if [ "${1:-}" = "capture-pane" ]; then
   if [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ]; then
     cat "$FM_FAKE_TMUX_CAPTURE"
