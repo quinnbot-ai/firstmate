@@ -866,7 +866,7 @@ test_orca_spawn_uses_strict_terminal_cleanup() {
   pass "fm-spawn.sh --backend orca: confirms strict terminal cleanup"
 }
 
-test_orca_partial_cleanup_metadata_reaches_codex_home() {
+test_orca_partial_cleanup_without_terminal_preserves_codex_home() {
   local data state config home id out status neutral
   id="orcacodexcleanupleakz1"
   data="$TMP_ROOT/codex-cleanup-fail-data"
@@ -885,10 +885,11 @@ test_orca_partial_cleanup_metadata_reaches_codex_home() {
   out=$( FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1 )
   status=$?
-  expect_code 0 "$status" "Orca partial cleanup metadata should reach Codex-home removal"$'\n'"$out"
-  [ ! -e "$home" ] || fail "Orca partial cleanup teardown left the Codex home behind"
-  assert_absent "$state/$id.meta" "Orca partial cleanup teardown should remove metadata"
-  pass "fm-teardown.sh backend=orca: partial cleanup metadata reaches Codex-home removal"
+  expect_code 1 "$status" "Orca partial cleanup without a terminal should preserve recovery resources"$'\n'"$out"
+  assert_contains "$out" "missing terminal" "Orca partial cleanup did not explain the missing terminal"
+  [ -d "$home" ] || fail "Orca partial cleanup without a terminal removed the Codex home"
+  assert_present "$state/$id.meta" "Orca partial cleanup without a terminal removed metadata"
+  pass "fm-teardown.sh backend=orca: preserves partial cleanup resources without a terminal"
 }
 
 test_spawn_releases_orca_resources_when_metadata_write_fails() {
@@ -1181,12 +1182,13 @@ test_teardown_preserves_metadata_when_orca_remove_error_json() {
   printf 'report\n' > "$data/$id/report.md"
   touch "$state/.last-watcher-beat"
   fm_write_meta "$state/$id.meta" \
-    "window=fm-$id" "worktree=$wt" "project=$proj" \
+    "window=fm-$id" "terminal=term-remove-error" "worktree=$wt" "project=$proj" \
     "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
     "backend=orca" "orca_worktree_id=wt-remove-error" \
     "decisions_reviewed=1" "decision_keys="
   orca_case remove-error-teardown
-  printf '{"ok":false,"error":{"code":"worktree_not_removed","message":"worktree not removed"}}\n' > "$RESP/1.out"
+  printf '{"ok":false,"error":{"code":"terminal_not_found","message":"terminal not found"}}\n' > "$RESP/1.out"
+  printf '{"ok":false,"error":{"code":"worktree_not_removed","message":"worktree not removed"}}\n' > "$RESP/2.out"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -1404,8 +1406,8 @@ test_teardown_refuses_orca_missing_worktree_id() {
   pass "fm-teardown.sh backend=orca: refuses missing worktree ids before cleanup"
 }
 
-test_teardown_removes_orca_worktree_without_terminal_handle() {
-  local proj wt data state config id out rc neutral
+test_teardown_without_orca_terminal_preserves_recovery_resources() {
+  local proj wt data state config home id out rc neutral
   id="orcanotermz0"
   proj="$TMP_ROOT/no-terminal-project"
   wt="$TMP_ROOT/no-terminal-wt"
@@ -1413,13 +1415,16 @@ test_teardown_removes_orca_worktree_without_terminal_handle() {
   state="$TMP_ROOT/no-terminal-state"
   config="$TMP_ROOT/no-terminal-config"
   fm_git_worktree "$proj" "$wt" "fm/$id"
-  mkdir -p "$data/$id" "$state" "$config"
+  home="$data/codex-crewmate/.fm-codex-home.$id"
+  mkdir -p "$data/$id" "$state" "$config" "$home"
+  : > "$home/fm-crewmate-$id.config.toml"
   printf 'report\n' > "$data/$id/report.md"
   touch "$state/.last-watcher-beat"
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" "worktree=$wt" "project=$proj" \
     "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
     "backend=orca" "orca_worktree_id=wt-no-terminal" \
+    "codex_crewmate_home=$home" \
     "decisions_reviewed=1" "decision_keys="
   orca_case no-terminal
   printf '{"ok":true,"result":{"worktree":{"id":"wt-no-terminal","path":"%s"}}}\n' "$wt" > "$RESP/1.out"
@@ -1430,13 +1435,14 @@ test_teardown_removes_orca_worktree_without_terminal_handle() {
     "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
   rc=$?
   set -e
-  expect_code 0 "$rc" "Orca teardown should remove a worktree even when no terminal was ever recorded"$'\n'"$out"
-  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-no-terminal'$'\x1f''--force'$'\x1f''--json' \
-    "teardown did not remove the partial Orca worktree"
-  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
-    "teardown should not close a terminal when no terminal handle is recorded"
-  assert_absent "$state/$id.meta" "successful partial cleanup should remove task metadata"
-  pass "fm-teardown.sh backend=orca: removes partial worktree-only metadata"
+  expect_code 1 "$rc" "Orca teardown should refuse when no terminal was ever recorded"$'\n'"$out"
+  assert_contains "$out" "missing terminal" "teardown did not explain the missing Orca terminal"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
+    "teardown should not remove an Orca worktree without a terminal handle"
+  [ -d "$wt" ] || fail "teardown without a terminal removed the Orca worktree"
+  [ -d "$home" ] || fail "teardown without a terminal removed the Codex home"
+  assert_present "$state/$id.meta" "teardown without a terminal removed task metadata"
+  pass "fm-teardown.sh backend=orca: preserves recovery resources without a terminal"
 }
 
 test_secondmate_force_teardown_removes_orca_child_via_orca() {
@@ -1523,7 +1529,7 @@ test_secondmate_force_teardown_refuses_orca_child_id_path_mismatch() {
   pass "fm-teardown.sh --force: refuses Orca child id/path mismatches"
 }
 
-test_secondmate_force_teardown_removes_partial_orca_child() {
+test_secondmate_force_teardown_without_orca_terminal_preserves_child() {
   local home subhome childproj childwt child_id neutral out rc
   home="$TMP_ROOT/orca-partial-child-parent"
   subhome="$TMP_ROOT/orca-partial-child-secondmate"
@@ -1552,13 +1558,14 @@ test_secondmate_force_teardown_removes_partial_orca_child() {
     FM_ROOT_OVERRIDE="$neutral" FM_HOME="$home" "$ROOT/bin/fm-teardown.sh" domain --force 2>&1 )
   rc=$?
   set -e
-  expect_code 0 "$rc" "forced secondmate teardown should remove partial Orca child state"$'\n'"$out"
-  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-partial-child'$'\x1f''--force'$'\x1f''--json' \
-    "partial child cleanup did not remove the Orca worktree through orca worktree rm"
-  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
-    "partial child cleanup should not close a terminal when no terminal handle is recorded"
-  assert_absent "$home/state/domain.meta" "parent metadata should be removed after forced partial cleanup"
-  pass "fm-teardown.sh --force: removes partial Orca secondmate children"
+  expect_code 1 "$rc" "forced secondmate teardown should preserve an Orca child without a terminal"$'\n'"$out"
+  assert_contains "$out" "missing terminal" "child cleanup did not explain the missing Orca terminal"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
+    "partial child cleanup removed an Orca worktree without a terminal handle"
+  [ -d "$childwt" ] || fail "partial child cleanup removed the Orca worktree"
+  assert_present "$home/state/domain.meta" "failed forced child cleanup removed parent metadata"
+  assert_present "$subhome/state/$child_id.meta" "failed forced child cleanup removed child metadata"
+  pass "fm-teardown.sh --force: preserves Orca secondmate children without terminals"
 }
 
 test_dispatcher_sources_orca_and_routes_primitives() {
@@ -1610,7 +1617,7 @@ test_spawn_preserves_codex_home_when_orca_terminal_cleanup_is_unconfirmed
 test_spawn_removes_orca_worktree_when_terminal_create_fails
 test_spawn_preserves_orca_metadata_when_abort_cleanup_fails
 test_orca_spawn_uses_strict_terminal_cleanup
-test_orca_partial_cleanup_metadata_reaches_codex_home
+test_orca_partial_cleanup_without_terminal_preserves_codex_home
 test_spawn_releases_orca_resources_when_metadata_write_fails
 test_peek_send_and_crew_state_route_through_orca_meta
 test_peek_and_crew_state_fail_closed_on_orca_error_json
@@ -1627,7 +1634,7 @@ test_ship_teardown_removes_orca_worktree_when_id_path_matches
 test_ship_teardown_refuses_orca_unresolvable_worktree_id
 test_ship_teardown_refuses_orca_id_path_mismatch
 test_teardown_refuses_orca_missing_worktree_id
-test_teardown_removes_orca_worktree_without_terminal_handle
+test_teardown_without_orca_terminal_preserves_recovery_resources
 test_secondmate_force_teardown_removes_orca_child_via_orca
 test_secondmate_force_teardown_refuses_orca_child_id_path_mismatch
-test_secondmate_force_teardown_removes_partial_orca_child
+test_secondmate_force_teardown_without_orca_terminal_preserves_child
