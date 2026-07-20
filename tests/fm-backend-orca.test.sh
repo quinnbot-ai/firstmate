@@ -690,13 +690,14 @@ test_spawn_accepts_orca_terminal_absent_after_close_failure() {
 }
 
 test_spawn_preserves_orca_metadata_when_terminal_close_is_unconfirmed() {
-  local proj data state config id out status branch
+  local proj data state config id out status branch primary_branch
   id="orcacloseunconfirmedz5"
   proj="$TMP_ROOT/close-unconfirmed-project"
   data="$TMP_ROOT/close-unconfirmed-data"
   state="$TMP_ROOT/close-unconfirmed-state"
   config="$TMP_ROOT/close-unconfirmed-config"
   fm_git_init_commit "$proj"
+  primary_branch=$(git -C "$proj" rev-parse --abbrev-ref HEAD)
   mkdir -p "$data/$id" "$state" "$config"
   printf 'brief\n' > "$data/$id/brief.md"
   touch "$state/.last-watcher-beat"
@@ -733,7 +734,7 @@ test_spawn_preserves_orca_metadata_when_terminal_close_is_unconfirmed() {
   assert_contains "$out" "resolves to its primary project checkout" \
     "teardown did not explain its primary-checkout refusal"
   branch=$(git -C "$proj" rev-parse --abbrev-ref HEAD)
-  [ "$branch" = main ] || fail "teardown changed the primary checkout branch to '$branch'"
+  [ "$branch" = "$primary_branch" ] || fail "teardown changed the primary checkout branch from '$primary_branch' to '$branch'"
   assert_present "$state/$id.meta" "primary-checkout refusal must preserve failed-spawn metadata"
   pass "fm-spawn.sh --backend orca: preserves metadata when strict close is unconfirmed"
 }
