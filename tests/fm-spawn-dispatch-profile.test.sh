@@ -992,6 +992,66 @@ test_codex_home_activation_uses_open_descriptor() {
   pass "Codex activation passes a real-path home resolved from the retained descriptor"
 }
 
+test_codex_home_removal_preserves_a_replacement_after_validation() {
+  local data state home status
+  data="$TMP_ROOT/codex-remove-replaced-data"
+  state="$TMP_ROOT/codex-remove-replaced-state"
+  home="$data/codex-crewmate/.fm-codex-home.0123456789abcdef0123456789abcdef"
+  mkdir -p "$home" "$state"
+  : > "$home/fm-crewmate-owner.config.toml"
+
+  python3 - "$ROOT/bin/fm-codex-home.py" "$data" "$state" "$home" <<'PY'
+import contextlib
+import importlib.util
+import io
+import os
+import sys
+from types import SimpleNamespace
+
+helper, data, state, home = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("fm_codex_home", helper)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+original_open = module.open_directory
+original_close = module.os.close
+target = {"fd": None, "replaced": False}
+
+def open_directory(name, directory_fd=None):
+    fd = original_open(name, directory_fd)
+    if name == os.path.basename(home) and target["fd"] is None:
+        target["fd"] = fd
+    return fd
+
+def close(fd):
+    original_close(fd)
+    if fd == target["fd"] and not target["replaced"]:
+        target["replaced"] = True
+        os.rename(home, home + ".validated")
+        os.mkdir(home, 0o700)
+        with open(os.path.join(home, "replacement"), "w", encoding="utf-8") as file:
+            file.write("preserve")
+
+module.open_directory = open_directory
+module.os.close = close
+with contextlib.redirect_stderr(io.StringIO()):
+    try:
+        module.remove_home(
+            SimpleNamespace(data=data, state=state, task_id="owner", home=home, create_activate=False)
+        )
+    except SystemExit as error:
+        if error.code != 1:
+            raise
+    else:
+        raise AssertionError("removal accepted a replacement home")
+if not os.path.isfile(os.path.join(home, "replacement")):
+    raise AssertionError("removal deleted the replacement home")
+PY
+  status=$?
+  expect_code 0 "$status" "Codex removal must preserve a home replaced after ownership validation"
+  [ -f "$home/replacement" ] || fail "Codex removal deleted a replacement home"
+  pass "Codex removal preserves a replacement after ownership validation"
+}
+
 test_codex_home_activation_reports_exec_failure() {
   local data source home result token out status
   data="$TMP_ROOT/codex-activation-exec-failure-data"
@@ -1829,6 +1889,7 @@ test_raw_custom_dynamic_execution_fails_closed
 test_raw_script_dispatches_fail_closed
 test_codex_crewmate_home_uses_private_directory
 test_codex_home_activation_uses_open_descriptor
+test_codex_home_removal_preserves_a_replacement_after_validation
 test_codex_home_activation_reports_exec_failure
 test_codex_home_activation_refuses_replaced_path
 test_codex_home_activation_result_refuses_symlink

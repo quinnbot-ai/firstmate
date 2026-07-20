@@ -139,13 +139,16 @@ def copy_tree(source_dir_fd, target_dir_fd, top_level):
             die(f"Claude profile source entry is not a file or directory: {entry}")
 
 
-def remove_tree(directory_fd, name):
+def remove_tree(directory_fd, name, expected_identity=None):
     try:
         child_fd = open_directory(name, directory_fd)
     except FileNotFoundError:
         return
     try:
         opened_stat = os.fstat(child_fd)
+        opened_identity = (opened_stat.st_dev, opened_stat.st_ino)
+        if expected_identity is not None and opened_identity != expected_identity:
+            raise OSError("validated managed Claude home changed before removal")
         for child in os.listdir(child_fd):
             child_stat = os.stat(child, dir_fd=child_fd, follow_symlinks=False)
             if stat.S_ISDIR(child_stat.st_mode):
@@ -155,10 +158,7 @@ def remove_tree(directory_fd, name):
     finally:
         os.close(child_fd)
     current_stat = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-    if (current_stat.st_dev, current_stat.st_ino) != (
-        opened_stat.st_dev,
-        opened_stat.st_ino,
-    ):
+    if (current_stat.st_dev, current_stat.st_ino) != opened_identity:
         raise OSError("managed Claude home changed during removal")
     os.rmdir(name, dir_fd=directory_fd)
 
@@ -361,11 +361,15 @@ def remove_home(args):
                     die(f"isolated Claude home does not belong to task {task_id}")
             finally:
                 os.close(marker_fd)
+            home_stat = os.fstat(home_fd)
+            expected_identity = (home_stat.st_dev, home_stat.st_ino)
         finally:
             os.close(home_fd)
-        remove_tree(base_fd, name)
+        remove_tree(base_fd, name, expected_identity)
     except FileNotFoundError:
         pass
+    except OSError as error:
+        die(f"could not remove isolated Claude home: {error.strerror or str(error)}")
     finally:
         os.close(base_fd)
 

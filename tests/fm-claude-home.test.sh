@@ -119,6 +119,66 @@ test_remove_is_a_no_op_when_already_absent() {
   pass "remove is a no-op when the home is already absent"
 }
 
+test_remove_preserves_a_replacement_after_validation() {
+  local case_dir data source state home status
+  case_dir="$TMP_ROOT/remove-replaced"
+  data="$case_dir/data"
+  source="$case_dir/profile"
+  state="$case_dir/state"
+  mkdir -p "$data" "$state"
+  make_profile "$source"
+  home=$(python3 "$HELPER" --data "$data" --source "$source" --task-id owner --create)
+
+  python3 - "$HELPER" "$data" "$state" "$home" <<'PY'
+import contextlib
+import importlib.util
+import io
+import os
+import sys
+from types import SimpleNamespace
+
+helper, data, state, home = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("fm_claude_home", helper)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+original_open = module.open_directory
+original_close = module.os.close
+target = {"fd": None, "replaced": False}
+
+def open_directory(name, directory_fd=None):
+    fd = original_open(name, directory_fd)
+    if name == os.path.basename(home) and target["fd"] is None:
+        target["fd"] = fd
+    return fd
+
+def close(fd):
+    original_close(fd)
+    if fd == target["fd"] and not target["replaced"]:
+        target["replaced"] = True
+        os.rename(home, home + ".validated")
+        os.mkdir(home, 0o700)
+        with open(os.path.join(home, "replacement"), "w", encoding="utf-8") as file:
+            file.write("preserve")
+
+module.open_directory = open_directory
+module.os.close = close
+with contextlib.redirect_stderr(io.StringIO()):
+    try:
+        module.remove_home(SimpleNamespace(data=data, state=state, task_id="owner", home=home))
+    except SystemExit as error:
+        if error.code != 1:
+            raise
+    else:
+        raise AssertionError("removal accepted a replacement home")
+if not os.path.isfile(os.path.join(home, "replacement")):
+    raise AssertionError("removal deleted the replacement home")
+PY
+  status=$?
+  expect_code 0 "$status" "remove must preserve a home replaced after ownership validation"
+  [ -f "$home/replacement" ] || fail "remove deleted a replacement home"
+  pass "remove preserves a replacement after ownership validation"
+}
+
 test_create_generates_fresh_names_across_calls() {
   local case_dir data source home1 home2
   case_dir="$TMP_ROOT/create-fresh-names"
@@ -138,6 +198,7 @@ test_create_refuses_symlink_in_profile
 test_remove_refuses_when_owned_by_another_task
 test_remove_preserves_home_referenced_by_another_task
 test_remove_is_a_no_op_when_already_absent
+test_remove_preserves_a_replacement_after_validation
 test_create_generates_fresh_names_across_calls
 
 echo "# all fm-claude-home tests passed"
