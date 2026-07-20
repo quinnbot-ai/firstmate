@@ -140,8 +140,7 @@ fm_pane_is_busy() {  # <target>
 # pick their own success policy:
 #   - the daemon clears its buffer only on "empty" (strict: an unknown pane must
 #     not be mistaken for a delivered escalation).
-#   - fm-send fails only on "pending" (lenient: a positively-confirmed swallow),
-#     so an unreadable pane never turns a normal steer into a false error.
+#   - fm-send accepts only "empty" and fails closed for every other verdict.
 fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep>
   local target=$1 retries=$2 sleep_s=$3 i=0 state
   while :; do

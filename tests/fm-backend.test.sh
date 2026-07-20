@@ -610,7 +610,10 @@ set -u
 case "${1:-}" in
   send-keys) exit 0 ;;
   display-message)
-    for a in "$@"; do case "$a" in *cursor_y*) printf '0\n'; exit 0 ;; esac; done
+    for a in "$@"; do case "$a" in
+      *cursor_y*) printf '0\n'; exit 0 ;;
+      *pane_current_command*) printf 'codex\n'; exit 0 ;;
+    esac; done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '\xe2\x94\x82 \xe2\x94\x82\n'; exit 0 ;;
   list-windows) exit 0 ;;
@@ -631,9 +634,11 @@ run_send_case() {  # <bin-root> <fakebin> <log> <home> -- <send args...>
 }
 
 strip_send_preflight() {  # <log>
-  local preflight
-  preflight=$'tmux\x1fdisplay-message\x1f-p\x1f-t\x1fsess:win\x1f#{pane_id}'
-  awk -v preflight="$preflight" '$0 != preflight { print }' "$1"
+  local endpoint_preflight agent_preflight
+  endpoint_preflight=$'tmux\x1fdisplay-message\x1f-p\x1f-t\x1fsess:win\x1f#{pane_id}'
+  agent_preflight=$'tmux\x1fdisplay-message\x1f-p\x1f-t\x1fsess:win\x1f#{pane_current_command}'
+  awk -v endpoint_preflight="$endpoint_preflight" -v agent_preflight="$agent_preflight" \
+    '$0 != endpoint_preflight && $0 != agent_preflight { print }' "$1"
 }
 
 test_send_conformance_old_vs_new() {
