@@ -86,6 +86,10 @@ ARM_LEASE_OWNER=
 ARM_LEASE_TICKER=
 case "$CYCLE_LOG_MAX_BYTES" in ''|*[!0-9]*|0) CYCLE_LOG_MAX_BYTES=262144 ;; esac
 case "$CYCLE_LOG_KEEP_LINES" in ''|*[!0-9]*|0) CYCLE_LOG_KEEP_LINES=1000 ;; esac
+if ! [[ "$ARM_LEASE_TICK" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]] \
+  || ! awk -v tick="$ARM_LEASE_TICK" 'BEGIN { exit !(tick + 0 > 0) }'; then
+  ARM_LEASE_TICK=5
+fi
 
 # The lifecycle ledger is diagnostic evidence, not a supervision dependency.
 # Writes are bounded and best-effort so an observability failure cannot stall an

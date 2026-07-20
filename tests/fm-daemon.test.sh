@@ -75,6 +75,33 @@ test_afk_start_reclaims_stale_daemon_lock_reused_pid() {
   pass "fm-afk-start.sh reclaims stale daemon locks whose live pid identity no longer matches"
 }
 
+test_afk_start_reclaims_stale_daemon_lease() {
+  local dir state out status lock owner daemon_pid
+  dir=$(make_supercase afk-start-stale-daemon-lease)
+  state="$dir/state"
+  lock="$state/.supervise-daemon.lock"
+  owner="$lock.owner"
+  sleep 60 & daemon_pid=$!
+  mkdir "$owner"
+  ln -s "$owner" "$lock"
+  printf '%s\n' "$daemon_pid" > "$owner/pid"
+  ( FM_HOME="$dir" FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$owner/pid-identity" )
+  printf '%s\n' "$dir" > "$owner/fm-home"
+  printf '%s\n' "$DAEMON" > "$owner/daemon-path"
+  touch -t 200001010000 "$owner/heartbeat"
+
+  out=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "fm-afk-start.sh should replace a stale daemon lease"
+  assert_contains "$out" "starting supervise daemon" "fm-afk-start.sh treated a stale daemon lease as healthy"
+  assert_not_contains "$out" "daemon already running" "fm-afk-start.sh refreshed a stale daemon lease"
+  [ ! -e "$lock" ] && [ ! -L "$lock" ] || fail "fm-afk-start.sh retained the stale daemon lease lock"
+  kill "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  pass "fm-afk-start.sh replaces an identity-matched daemon lease with a stale heartbeat"
+}
+
 test_daemon_lease_release_cleans_owner_metadata() {
   local dir state lock owner
   dir=$(make_supercase daemon-lease-cleanup)
@@ -1712,6 +1739,7 @@ test_inject_msg_defers_on_dead_shell_unknown() {
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
+test_afk_start_reclaims_stale_daemon_lease
 test_daemon_lease_release_cleans_owner_metadata
 test_daemon_lease_heartbeat_rejects_owner_handoff
 test_daemon_state_root_uses_fm_home

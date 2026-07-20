@@ -126,7 +126,7 @@ fm_afk_start_main() {
 
   local pid
   pid=$(daemon_lock_pid 2>/dev/null || true)
-  if daemon_lock_held_by_live_daemon; then
+  if fm_daemon_lease_healthy "$FM_AFK_STATE" "$FM_AFK_DAEMON" "$FM_HOME"; then
     echo "afk: daemon already running pid=$pid"
     return 0
   fi

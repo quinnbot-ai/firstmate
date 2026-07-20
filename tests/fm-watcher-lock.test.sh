@@ -1095,11 +1095,45 @@ test_arm_lease_publishes_complete_owner() {
   pass "arm lease publishes complete metadata before its owner link"
 }
 
+test_arm_lease_tick_rejects_invalid_values() {
+  local dir state fakebin armout armpid watcher_pid i
+  dir=$(make_case arm-lease-tick-validation)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mark_pr_check_migration_complete "$state"
+  cat > "$fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = invalid ]; then
+  : > "${FM_INVALID_ARM_TICK_USED:?}"
+  exit 1
+fi
+exec /bin/sleep "$@"
+SH
+  chmod +x "$fakebin/sleep"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_LEASE_TICK=invalid FM_INVALID_ARM_TICK_USED="$dir/invalid-tick" "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  grep -qF "watcher: started pid=$watcher_pid" "$armout" || fail "arm with an invalid lease tick did not start"
+  sleep 0.2
+  [ ! -e "$dir/invalid-tick" ] || fail "arm ticker passed an invalid interval to sleep"
+  kill "$armpid" "$watcher_pid" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  pass "arm lease ticker replaces invalid intervals before starting"
+}
+
 test_singleton_start
 test_pid_identity_is_locale_invariant
 test_arm_lease_rejects_reused_pid_identity
 test_arm_lease_reclaims_replaced_watcher
 test_arm_lease_publishes_complete_owner
+test_arm_lease_tick_rejects_invalid_values
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings
