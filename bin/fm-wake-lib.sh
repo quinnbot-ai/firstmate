@@ -184,27 +184,36 @@ fm_arm_lease_claim() {  # <state> <watch-path> <watcher-pid> <home>
   arm_pid=${BASHPID:-$$}
   arm_identity=$(fm_pid_identity "$arm_pid") || return 1
   watcher_identity=$(fm_pid_identity "$watcher_pid") || return 1
-  if ! fm_lock_try_acquire "$lease"; then
+  FM_ARM_LEASE_PUBLISH_IDENTITY=$arm_identity
+  FM_ARM_LEASE_PUBLISH_HOME=$home
+  FM_ARM_LEASE_PUBLISH_WATCH_PATH=$watch_path
+  FM_ARM_LEASE_PUBLISH_WATCHER_PID=$watcher_pid
+  FM_ARM_LEASE_PUBLISH_WATCHER_IDENTITY=$watcher_identity
+  if ! fm_lock_try_acquire "$lease" fm_arm_lease_publish_owner; then
     if fm_arm_lease_healthy "$state" "$watch_path" "$watcher_pid" "$home"; then
       return 2
     fi
     fm_arm_lease_remove_stale "$state" "$watch_path" "$watcher_pid" "$home" || return 1
-    fm_lock_try_acquire "$lease" || return 1
+    fm_lock_try_acquire "$lease" fm_arm_lease_publish_owner || return 1
   fi
   owner=${FM_LOCK_OWNER_DIR:-}
   [ -n "$owner" ] || return 1
-  printf '%s\n' "$arm_identity" > "$owner/pid-identity" || { fm_lock_release "$lease"; return 1; }
-  printf '%s\n' "$home" > "$owner/fm-home"
-  printf '%s\n' "$watch_path" > "$owner/watcher-path"
-  printf '%s\n' "$watcher_pid" > "$owner/watcher-pid"
-  printf '%s\n' "$watcher_identity" > "$owner/watcher-identity"
-  touch "$owner/heartbeat"
   fm_arm_lease_bind_watcher "$state" "$watch_path" "$watcher_pid" "$home" "$watcher_identity" || {
     fm_arm_lease_release "$state" "$owner"
     return 1
   }
   # shellcheck disable=SC2034 # Read by callers after fm_arm_lease_claim returns.
   FM_ARM_LEASE_OWNER=$owner
+}
+
+fm_arm_lease_publish_owner() {  # <owner>
+  local owner=$1
+  printf '%s\n' "$FM_ARM_LEASE_PUBLISH_IDENTITY" > "$owner/pid-identity" \
+    && printf '%s\n' "$FM_ARM_LEASE_PUBLISH_HOME" > "$owner/fm-home" \
+    && printf '%s\n' "$FM_ARM_LEASE_PUBLISH_WATCH_PATH" > "$owner/watcher-path" \
+    && printf '%s\n' "$FM_ARM_LEASE_PUBLISH_WATCHER_PID" > "$owner/watcher-pid" \
+    && printf '%s\n' "$FM_ARM_LEASE_PUBLISH_WATCHER_IDENTITY" > "$owner/watcher-identity" \
+    && touch "$owner/heartbeat"
 }
 
 fm_arm_lease_heartbeat() {  # <state> <owner>
@@ -368,7 +377,7 @@ fm_lock_claim() {
 }
 
 fm_lock_try_create() {
-  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
+  local lockdir=$1 allowed_steal_owner=${2:-} owner_prepare=${3:-} ownerdir
   FM_LOCK_OWNER_DIR=
   ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
@@ -376,6 +385,10 @@ fm_lock_try_create() {
     return 1
   fi
   if ! fm_lock_prepare_owner "$ownerdir"; then
+    fm_lock_discard_owner "$ownerdir"
+    return 1
+  fi
+  if [ -n "$owner_prepare" ] && ! "$owner_prepare" "$ownerdir"; then
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
@@ -438,11 +451,11 @@ fm_lock_recheck_stale_owner() {
 }
 
 fm_lock_try_acquire() {
-  local lockdir=$1 pid steal cur rc steal_owner primary_owner
+  local lockdir=$1 owner_prepare=${2:-} pid steal cur rc steal_owner primary_owner
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
 
-  if fm_lock_try_create "$lockdir"; then
+  if fm_lock_try_create "$lockdir" '' "$owner_prepare"; then
     return 0
   fi
 
@@ -498,7 +511,7 @@ fm_lock_try_acquire() {
 
   fm_lock_remove_path "$lockdir" || true
   rc=1
-  if fm_lock_try_create "$lockdir" "$steal_owner"; then
+  if fm_lock_try_create "$lockdir" "$steal_owner" "$owner_prepare"; then
     rc=0
   fi
   if [ "$rc" -ne 0 ]; then

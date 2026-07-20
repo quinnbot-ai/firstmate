@@ -180,19 +180,20 @@ test_pr_meta_fetches_from_matching_remote_not_origin() {
   stale_sha=$(git -C "$case_dir/wt" rev-parse fm/task-x1)
   git init -q --bare "$case_dir/upstream.git"
   git -C "$case_dir/upstream.git" symbolic-ref HEAD refs/heads/main
-  git -C "$case_dir/wt" remote add upstream "$case_dir/upstream.git"
+  git -C "$case_dir/wt" config "url.file://$case_dir/upstream.git.insteadOf" 'ssh://git@example.invalid/owner/repo.git'
+  git -C "$case_dir/wt" remote add upstream 'ssh://git@example.invalid/owner/repo.git'
   git -C "$case_dir/wt" push -q upstream "main:refs/heads/main"
   git -C "$case_dir/wt" push -q upstream "pr-head-tmp:refs/pull/9/head"
   git -C "$case_dir/wt" push -q origin "fm/task-x1:refs/pull/9/head"
   write_task_meta "$case_dir" \
-    "pr=file://$case_dir/upstream.git/pull/9" \
+    'pr=https://reviewer@example.invalid/owner/repo/pull/9' \
     "pr_head=$stale_sha"
 
   out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
 
   assert_contains "$out" '+pr-fixed' "matching-remote: diff must use the PR repository remote"
   assert_not_contains "$out" 'stale-local' "matching-remote: origin's same-number PR must not replace the PR head"
-  pass "fm-review-diff fetches PR heads only from the repository named by pr="
+  pass "fm-review-diff matches SSH URI remotes and PR URLs with userinfo"
 }
 
 test_pr_meta_uses_matching_remote_for_base() {
