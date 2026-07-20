@@ -39,6 +39,14 @@
 # loud. A live cycle already present means re-arm attaches - do not start a second
 # watcher.
 #
+# While it waits, this relay publishes its identity-checked lease at
+# state/.watch-arm.lease and binds it to that exact watcher in
+# state/.watch-arm.bound.
+# It refreshes the lease heartbeat until the cycle ends and releases only the
+# owner it still identifies as itself.
+# The watcher uses that binding to fail closed after a lost relay; see
+# docs/watcher-continuity.md for the shared cross-process contract.
+#
 # Every observed watcher cycle appends one tab-separated lifecycle record to
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
 # arm/watcher identities, timestamps, exit/signal classification, beacon age,
