@@ -33,6 +33,15 @@ def require_directory(fd, label):
         die(f"{label} must be a directory")
 
 
+def require_not_symlink(name, label, directory_fd=None):
+    try:
+        mode = os.stat(name, dir_fd=directory_fd, follow_symlinks=False).st_mode
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(mode):
+        die(f"{label} must not be a symlink")
+
+
 def directory_path(fd, fallback):
     try:
         import fcntl
@@ -458,10 +467,12 @@ def create_home(args, command=None):
     worktree = toml_basic_string(args.worktree)
     try:
         data = os.path.abspath(args.data)
+        require_not_symlink(data, "firstmate data")
         data_fd = open_directory(data)
         require_directory(data_fd, "firstmate data")
         data = directory_path(data_fd, data)
         try:
+            require_not_symlink("codex-crewmate", "isolated Codex home", data_fd)
             try:
                 os.mkdir("codex-crewmate", 0o700, dir_fd=data_fd)
             except FileExistsError:
