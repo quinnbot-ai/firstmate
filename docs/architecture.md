@@ -17,6 +17,7 @@ A changed snapshot or fresh status write restarts the no-progress window, and ev
 Those actionable wakes are written to a durable local queue (`state/.wake-queue`) before detector state advances, so a missed process exit can be recovered by draining the queue.
 No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when `bin/fm-crew-state.sh` reports positive evidence that the crew is still working: an actively running no-mistakes step for that crew's branch or a backend busy signature.
 A crew whose latest status declares `paused:` for a known external wait is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge.
+When a watcher exits after coalescing an actionable signal batch whose final status is `paused:`, it persists that declaration so its successor can rebuild pause tracking even if current-state reconciliation is temporarily unavailable.
 For watcher absorb classification, that latest declaration also overrides a `parked` no-mistakes gate until a later status replaces it, while an actively running step or busy pane still takes precedence.
 For an ordinary crew that has stopped, the normal-mode watcher first surfaces one stale wake, then applies that same cadence to an unchanged `paused:` or durable `captain-held` endpoint only when the backend confidently reports its agent dead.
 Live or inconclusive liveness remains fail-open at that initial surface, and the secondmate idle-endpoint exemption is unchanged.
