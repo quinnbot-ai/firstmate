@@ -51,11 +51,12 @@ FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|
 # drift between the two consumers. FM_CLASSIFY_PAUSED_VERB overrides it.
 FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 
-# Bounded re-surface cadence for a declared pause. Far longer than the wedge
-# threshold (FM_STALE_ESCALATE_SECS, default 240s) so a deliberate wait is not
-# nagged like a wedge, yet finite so a forgotten pause cannot rot invisibly - it
-# re-surfaces once for a recheck every window. One hour by default; both consumers
-# read FM_PAUSE_RESURFACE_SECS with this default so the cadence has one owner.
+# Bounded re-surface cadence for a declared pause or a dead-agent captain hold.
+# Far longer than the wedge threshold (FM_STALE_ESCALATE_SECS, default 240s), it
+# avoids nagging a deliberate wait while ensuring a forgotten hold cannot rot
+# invisibly - it re-surfaces once for a recheck every window. One hour by default;
+# both consumers read FM_PAUSE_RESURFACE_SECS with this default so the cadence has
+# one owner.
 # shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
 FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 
@@ -158,6 +159,19 @@ status_is_paused() {  # <status-line>
   [ -n "$line" ] || return 1
   verb=$(status_line_verb "$line")
   [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]
+}
+
+# 0 if a status line declares either an external-wait pause or a verified
+# captain-held transfer.
+# Both declarations can intentionally leave an exited crew's endpoint idle, so
+# the watcher applies its bounded pause cadence when agent death confirms that
+# no live decision gate is being silenced.
+status_is_paused_or_captain_held() {  # <status-line>
+  local line=$1 verb
+  status_is_paused "$line" && return 0
+  [ -n "$line" ] || return 1
+  verb=$(status_line_verb "$line")
+  [ "$verb" = "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" ]
 }
 
 # --- durable keyed decisions ------------------------------------------------
@@ -376,10 +390,13 @@ crew_pause_handoff_allows_recovery() {  # <id> [state-dir]
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
-crew_absorb_class() {  # <id>
-  local id=$1 line state src state_dir last
-  [ -n "$id" ] || { printf 'none'; return; }
-  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+# Same classification as crew_absorb_class, but takes an already-fetched
+# fm-crew-state.sh <line> instead of invoking FM_CREW_STATE_BIN itself. Callers
+# that need the raw line for a further decision (pause_state_class, to tell a
+# parked-gate override from a plain authoritative paused read) read it once and
+# call this directly instead of paying for a second bounded state read.
+crew_absorb_class_from_line() {  # <id> <line>
+  local id=$1 line=$2 state src state_dir last
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
   state=${line#state: }; state=${state%% *}
   if [ "$state" = paused ]; then printf 'paused'; return; fi
@@ -405,6 +422,13 @@ crew_absorb_class() {  # <id>
     fi
   fi
   printf 'none'
+}
+
+crew_absorb_class() {  # <id>
+  local id=$1 line
+  [ -n "$id" ] || { printf 'none'; return; }
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  crew_absorb_class_from_line "$id" "$line"
 }
 
 # 0 if crew <id> shows POSITIVE evidence it is still working (crew_absorb_class
