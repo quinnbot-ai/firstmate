@@ -431,9 +431,12 @@ def activate_command(args, home_fd, command, result_fd, token):
 def validate_data_root(data):
     if not data:
         die("isolated Codex home requires --data")
-    data_fd = open_directory(os.path.abspath(data))
+    data = os.path.abspath(data)
+    require_not_symlink(data, "firstmate data")
+    data_fd = open_directory(data)
     try:
         require_directory(data_fd, "firstmate data")
+        require_not_symlink("codex-crewmate", "isolated Codex home", data_fd)
         try:
             base_fd = open_directory("codex-crewmate", data_fd)
         except FileNotFoundError:
