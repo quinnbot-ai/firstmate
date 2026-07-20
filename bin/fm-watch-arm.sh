@@ -425,6 +425,9 @@ cleanup_child() {
 handle_arm_signal() {
   local signal=$1 rc=$2
   trap - HUP TERM INT
+  if [ -n "${ARM_LEASE_OWNER:-}" ]; then
+    fm_wake_append check watcher-arm-relay 'check: watcher arm relay lost' || true
+  fi
   arm_lease_stop
   if [ -n "$child" ] && fm_pid_alive "$child"; then
     kill -TERM "$child" 2>/dev/null || true
