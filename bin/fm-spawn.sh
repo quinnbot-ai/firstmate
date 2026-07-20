@@ -209,6 +209,7 @@ ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
 TREEHOUSE_LEASE_PATH_FILE=
+TREEHOUSE_LEASE_ACQUIRED=0
 TREEHOUSE_LEASE_COMMITTED=0
 TREEHOUSE_LEASE_LOCK=
 TREEHOUSE_LEASE_LOCK_HELD=0
@@ -408,7 +409,7 @@ spawn_abort_cleanup() {
   if [ -n "$TREEHOUSE_LEASE_PATH_FILE" ]; then
     clean_codex_home=1
     treehouse_spawn_abort_cleanup "$status" || true
-    if [ "$FAILED_ENDPOINT_CLEANUP" = 1 ] && [ "$SPAWN_META_WRITTEN" = 1 ]; then
+    if [ "$FAILED_ENDPOINT_CLEANUP" = 1 ] && [ "$TREEHOUSE_LEASE_ACQUIRED" = 1 ]; then
       preserve_codex_home=1
       write_failed_treehouse_spawn_meta
     fi
@@ -1697,6 +1698,7 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     echo "error: could not durably record treehouse lease $TREEHOUSE_LEASE_PATH for $ID" >&2
     exit 1
   fi
+  TREEHOUSE_LEASE_ACQUIRED=1
   sq_treehouse_lease_path=$(shell_quote "$TREEHOUSE_LEASE_PATH")
   spawn_send_text_line "$WT_TARGET" "cd $sq_treehouse_lease_path"
 
