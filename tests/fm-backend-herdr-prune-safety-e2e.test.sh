@@ -80,7 +80,10 @@ MARKER="$SCRATCH/heartbeat.log"
 fm_backend_herdr_cli "$SESSION" pane run "$LIVE_PANE_ID" \
   "sh -c 'while true; do date +%s >> $MARKER; sleep 1; done'" >/dev/null 2>&1 \
   || fail "could not start the live heartbeat process in the startup workspace's pane"
-sleep 2
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  [ -s "$MARKER" ] && break
+  sleep 1
+done
 [ -s "$MARKER" ] || fail "the live heartbeat process did not start writing its marker file"
 BEFORE_COUNT=$(wc -l < "$MARKER" | tr -d '[:space:]')
 pass "repro setup: a live long-running process is running in the startup workspace's single tab (label '1'), heartbeating to a marker file"
@@ -109,8 +112,12 @@ fi
 if ! herdr pane get "$LIVE_PANE_ID" --session "$SESSION" >/dev/null 2>&1; then
   fail "REGRESSION (2026-07-02 self-kill): the live startup-workspace pane was CLOSED by create_task"
 fi
-sleep 2
-AFTER_COUNT=$(wc -l < "$MARKER" | tr -d '[:space:]')
+AFTER_COUNT=$BEFORE_COUNT
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  AFTER_COUNT=$(wc -l < "$MARKER" | tr -d '[:space:]')
+  [ "$AFTER_COUNT" -gt "$BEFORE_COUNT" ] && break
+  sleep 1
+done
 [ "$AFTER_COUNT" -gt "$BEFORE_COUNT" ] \
   || fail "REGRESSION: the live heartbeat process stopped writing after create_task ran - it was killed even though its pane object survived"
 pass "fixed: the live pane (and its live process) survived create_task untouched - the exact 2026-07-02 self-kill incident does not reproduce"
