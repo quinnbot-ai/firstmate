@@ -1627,6 +1627,44 @@ test_secondmate_force_teardown_without_orca_terminal_preserves_child() {
   pass "fm-teardown.sh --force: preserves Orca secondmate children without terminals"
 }
 
+test_secondmate_force_teardown_releases_orca_child_with_confirmed_terminal_absence() {
+  local home subhome childproj childwt child_id neutral out rc
+  home="$TMP_ROOT/orca-absent-child-parent"
+  subhome="$TMP_ROOT/orca-absent-child-secondmate"
+  childproj="$subhome/projects/alpha"
+  childwt="$TMP_ROOT/orca-absent-child-worktree"
+  child_id="orcachildabsentz7"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$subhome/projects"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  fm_git_worktree "$childproj" "$childwt" "fm/$child_id"
+  fm_write_meta "$home/state/domain.meta" \
+    "window=firstmate:fm-domain" "worktree=$subhome" "project=$subhome" \
+    "harness=echo" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "home=$subhome" "projects=alpha"
+  printf '%s\n' "- domain - Orca confirmed-absence child cleanup (home: $subhome; scope: orca cleanup; projects: alpha; added 2026-07-03)" \
+    > "$home/data/secondmates.md"
+  fm_write_meta "$subhome/state/$child_id.meta" \
+    "window=fm-$child_id" "worktree=$childwt" "project=$childproj" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off" \
+    "backend=orca" "orca_worktree_id=wt-child-absent" "orca_terminal_absent=1"
+  orca_case secondmate-absent-child-cleanup
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-child-absent","path":"%s"}}}\n' "$childwt" > "$RESP/1.out"
+  add_tmux_fake "$FB"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_HOME="$home" "$ROOT/bin/fm-teardown.sh" domain --force 2>&1 )
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "forced secondmate teardown should release an Orca child with confirmed terminal absence"$'\n'"$out"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
+    "confirmed terminal absence should not try to close a missing Orca terminal"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-child-absent'$'\x1f''--force'$'\x1f''--json' \
+    "confirmed terminal absence should still release the Orca worktree"
+  assert_absent "$home/state/domain.meta" "parent metadata should be removed after confirmed-absence cleanup"
+  pass "fm-teardown.sh --force: releases Orca children with confirmed terminal absence"
+}
+
 test_dispatcher_sources_orca_and_routes_primitives() {
   local out
   orca_case dispatch
@@ -1698,3 +1736,4 @@ test_teardown_without_orca_terminal_preserves_recovery_resources
 test_secondmate_force_teardown_removes_orca_child_via_orca
 test_secondmate_force_teardown_refuses_orca_child_id_path_mismatch
 test_secondmate_force_teardown_without_orca_terminal_preserves_child
+test_secondmate_force_teardown_releases_orca_child_with_confirmed_terminal_absence

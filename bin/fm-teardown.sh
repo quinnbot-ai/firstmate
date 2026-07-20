@@ -182,6 +182,10 @@ require_orca_terminal() {
   printf '%s\n' "$terminal"
 }
 
+orca_terminal_confirmed_absent() {
+  [ "$(meta_value "$1" orca_terminal_absent)" = 1 ]
+}
+
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_WORKTREE_CLEANUP_COMPLETE" != 1 ]; then
     ORCA_WORKTREE_ID=$(require_orca_worktree_id "$META") || exit 1
@@ -1033,7 +1037,9 @@ validate_firstmate_home_children_removal() {
       validate_firstmate_home_children_removal "$child_home" || return 1
     elif [ "$child_backend" = orca ]; then
       child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
-      require_orca_terminal "$child_meta" >/dev/null || return 1
+      if ! orca_terminal_confirmed_absent "$child_meta"; then
+        require_orca_terminal "$child_meta" >/dev/null || return 1
+      fi
       if [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
         child_proj=$(meta_value "$child_meta" project)
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
@@ -1065,7 +1071,9 @@ cleanup_firstmate_home_children() {
     fi
     if [ "$child_backend" = orca ] && [ "$child_kind" != secondmate ]; then
       child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
-      child_t=$(require_orca_terminal "$child_meta") || return 1
+      if ! orca_terminal_confirmed_absent "$child_meta"; then
+        child_t=$(require_orca_terminal "$child_meta") || return 1
+      fi
       if [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       fi
