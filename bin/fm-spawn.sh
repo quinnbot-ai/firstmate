@@ -200,6 +200,7 @@ ORCA_TERMINAL=
 ORCA_WORKTREE_CLEANUP_COMPLETE=0
 ORCA_ABORT_CLEANUP_FAILED=0
 ORCA_ABORT_TERMINAL_ABSENT=1
+ORCA_TERMINAL_CONFIRMED_ABSENT=0
 FAILED_ENDPOINT_CLEANUP=0
 TREEHOUSE_ABORT_CLEANUP=0
 TREEHOUSE_ENDPOINT_CLEANUP=0
@@ -265,6 +266,7 @@ write_failed_treehouse_spawn_meta() {
       echo "orca_worktree_id=${ORCA_WORKTREE_ID:-}"
       [ "${ORCA_WORKTREE_CLEANUP_COMPLETE:-0}" != 1 ] || echo "orca_worktree_cleanup_complete=1"
       [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
+      [ "${ORCA_TERMINAL_CONFIRMED_ABSENT:-0}" != 1 ] || echo "orca_terminal_absent=1"
     fi
   } > "$STATE/$ID.meta" 2>/dev/null || true
 }
@@ -289,12 +291,14 @@ orca_spawn_abort_cleanup() {
     terminal_absent=0
     if fm_backend_target_absent orca "$ORCA_TERMINAL"; then
       terminal_absent=1
+      ORCA_TERMINAL_CONFIRMED_ABSENT=1
       ORCA_TERMINAL=
       T=
     else
       FM_BACKEND_KILL_STRICT=1 fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
       if fm_backend_target_absent orca "$ORCA_TERMINAL"; then
         terminal_absent=1
+        ORCA_TERMINAL_CONFIRMED_ABSENT=1
         ORCA_TERMINAL=
         T=
       else

@@ -133,6 +133,7 @@ CODEX_CREWMATE_HOME=$(grep '^codex_crewmate_home=' "$META" | cut -d= -f2- || tru
 ENDPOINT_CLEANUP_PENDING=$(grep '^endpoint_cleanup_pending=' "$META" | tail -1 | cut -d= -f2- || true)
 ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
 ORCA_WORKTREE_CLEANUP_COMPLETE=$(fm_meta_get "$META" orca_worktree_cleanup_complete)
+ORCA_TERMINAL_CONFIRMED_ABSENT=$(fm_meta_get "$META" orca_terminal_absent)
 ORCA_PATH_MATCH_VERIFIED=0
 
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
@@ -185,8 +186,10 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_WORKTREE_CLEANUP_COMPLETE" != 1 ]; then
     ORCA_WORKTREE_ID=$(require_orca_worktree_id "$META") || exit 1
   fi
-  T_ORCA=$(require_orca_terminal "$META") || exit 1
-  T=$T_ORCA
+  if [ "$ORCA_TERMINAL_CONFIRMED_ABSENT" != 1 ]; then
+    T_ORCA=$(require_orca_terminal "$META") || exit 1
+    T=$T_ORCA
+  fi
 fi
 
 remove_grok_turnend_auth() {

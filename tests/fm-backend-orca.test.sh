@@ -791,6 +791,65 @@ SH
   pass "fm-spawn.sh --backend orca: preserves the Codex home when terminal cleanup is unconfirmed"
 }
 
+test_spawn_records_confirmed_orca_terminal_absence_when_worktree_cleanup_fails() {
+  local proj wt data state config source home id out status real_python task_tmp
+  id="orcaabsentworktreez5"
+  proj="$TMP_ROOT/absent-worktree-project"
+  wt="$TMP_ROOT/absent-worktree-wt"
+  data="$TMP_ROOT/absent-worktree-data"
+  state="$TMP_ROOT/absent-worktree-state"
+  config="$TMP_ROOT/absent-worktree-config"
+  source="$TMP_ROOT/absent-worktree-source"
+  home="$data/codex-crewmate/.fm-codex-home.fixture"
+  real_python=$(command -v python3)
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config" "$source"
+  printf 'brief\n' > "$data/$id/brief.md"
+  touch "$state/.last-watcher-beat"
+  orca_case absent-terminal-worktree-fail
+  cat > "$FB/python3" <<'SH'
+#!/usr/bin/env bash
+set -u
+case " $* " in
+  *' --new-home-name '*) printf '%s\n' '.fm-codex-home.fixture' ;;
+  *' --read-activation-result '*) printf '%s\n' failed ;;
+  *) exec "$FM_TEST_REAL_PYTHON" "$@" ;;
+esac
+SH
+  chmod +x "$FB/python3"
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-absent-worktree"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-absent-worktree","path":"%s"},"terminal":{"handle":"term-absent-worktree"}}}\n' "$wt" > "$RESP/3.out"
+  printf '{"ok":true,"result":{"sent":true}}\n' > "$RESP/4.out"
+  printf '{"ok":true,"result":{"sent":true}}\n' > "$RESP/5.out"
+  printf '{"ok":true,"result":{"sent":true}}\n' > "$RESP/6.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["still live"]}}}\n' > "$RESP/7.out"
+  printf '{"ok":true,"result":{"closed":true}}\n' > "$RESP/8.out"
+  printf '{"ok":false,"error":{"code":"terminal_not_found","message":"terminal not found"}}\n' > "$RESP/9.out"
+  printf '{"ok":false,"error":{"code":"worktree_not_removed","message":"worktree not removed"}}\n' > "$RESP/10.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_TEST_REAL_PYTHON="$real_python" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 CODEX_HOME="$source" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex --backend orca 2>&1 )
+  status=$?
+  expect_code 1 "$status" "Orca Codex spawn should fail when activation fails"$'\n'"$out"
+  assert_present "$state/$id.meta" "failed Orca worktree cleanup should preserve metadata"
+  assert_grep "orca_terminal_absent=1" "$state/$id.meta" "failed Orca worktree cleanup did not retain confirmed terminal absence"
+  assert_no_grep "terminal=" "$state/$id.meta" "failed Orca worktree cleanup retained a terminal known absent"
+  assert_grep "orca_worktree_id=wt-absent-worktree" "$state/$id.meta" "failed Orca worktree cleanup lost the retained worktree id"
+  task_tmp=$(grep '^tasktmp=' "$state/$id.meta" | cut -d= -f2-)
+  [ ! -e "$task_tmp" ] || fail "confirmed terminal absence should release the task temporary directory"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-absent-worktree","path":"%s"}}}\n' "$wt" > "$RESP/11.out"
+  printf '{"ok":true,"result":{"removed":true}}\n' > "$RESP/12.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_TEST_REAL_PYTHON="$real_python" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$TMP_ROOT/unused-home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1 )
+  status=$?
+  expect_code 0 "$status" "teardown should release an Orca worktree once terminal absence is recorded"$'\n'"$out"
+  assert_absent "$state/$id.meta" "teardown should remove retained Orca metadata after worktree cleanup succeeds"
+  pass "fm-spawn.sh --backend orca: records terminal absence for retained worktree recovery"
+}
+
 test_spawn_removes_orca_worktree_when_terminal_create_fails() {
   local proj wt data state config id out status
   id="orcatermfailz8"
@@ -1614,6 +1673,7 @@ test_spawn_accepts_already_absent_orca_terminal
 test_spawn_accepts_orca_terminal_absent_after_close_failure
 test_spawn_preserves_orca_metadata_when_terminal_close_is_unconfirmed
 test_spawn_preserves_codex_home_when_orca_terminal_cleanup_is_unconfirmed
+test_spawn_records_confirmed_orca_terminal_absence_when_worktree_cleanup_fails
 test_spawn_removes_orca_worktree_when_terminal_create_fails
 test_spawn_preserves_orca_metadata_when_abort_cleanup_fails
 test_orca_spawn_uses_strict_terminal_cleanup
