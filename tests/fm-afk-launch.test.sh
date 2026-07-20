@@ -409,6 +409,24 @@ unit_readiness_failure_preserves_unconfirmed_record() {
   rm -rf "$st"
 }
 
+unit_readiness_rejects_stale_daemon() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stale-ready.XXXXXX")
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    fm_afk_launch_terminal_alive() { return 0; }
+    daemon_lock_held_by_live_daemon() { return 0; }
+    fm_daemon_lease_healthy() { return 1; }
+    sleep() { :; }
+    ! fm_afk_launch_wait_ready tmux exact-session
+  ' _ "$LAUNCH"; then
+    pass "readiness: stale live daemon does not satisfy lease readiness"
+  else
+    fail "readiness: stale live daemon was accepted before publishing a healthy lease"
+  fi
+  rm -rf "$st"
+}
+
 unit_tmux_absence_distinguishes_probe_failure() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-tmux-probe.XXXXXX")
@@ -918,6 +936,7 @@ unit_herdr_run_failure_preserves_unconfirmed_record
 unit_record_failure_closes_terminal
 unit_readiness_failure_rolls_back_terminal
 unit_readiness_failure_preserves_unconfirmed_record
+unit_readiness_rejects_stale_daemon
 unit_tmux_absence_distinguishes_probe_failure
 unit_native_lifecycle
 unit_native_entry_preserves_prepared_state
