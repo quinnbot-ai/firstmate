@@ -35,6 +35,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-treehouse-lease-lib.sh` | Maintain private durable Treehouse lease handoff records for spawn and teardown    |
 | `fm-git-identity.sh`     | Pin and audit project worktree Git author identities                                |
 | `fm-codex-home.py`       | Create, activate, validate, and remove task-private no-MCP Codex crew homes |
+| `fm-claude-home.py`      | Create and safely remove task-private Claude crew homes from a ready profile |
+| `fm-claude-crew-lib.sh`  | Resolve the Claude crew profile path and fail-closed readiness check |
 | `fm-dispatch-select.sh`  | Resolve a matched crew-dispatch rule to one concrete profile, owning `quota-balanced` selection |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
 | `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab and cmux workspace titles |
