@@ -75,6 +75,10 @@ if [ "${1:-}" = "list-windows" ]; then
 fi
 if [ "${1:-}" = "display-message" ]; then
   for _arg in "$@"; do
+    if [ "$_arg" = '#{pane_current_command}' ]; then
+      printf '%s\n' "${FM_FAKE_TMUX_CURRENT_COMMAND:-}"
+      exit 0
+    fi
     if [ "$_arg" = '#{window_name}' ]; then
       printf '%s\n' "${FM_FAKE_TMUX_WINDOW##*:}"
       exit 0

@@ -985,7 +985,8 @@ test_codex_home_activation_uses_open_descriptor() {
   result="$data/codex-crewmate/.fm-codex-activation.${home##*/}"
   token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
   out=$(python3 "$ROOT/bin/fm-codex-home.py" --create-activate --data "$data" --source "$source" \
-    --profile fm-crewmate-activation-z42 --worktree /tmp/fm-codex-activation --home "$home" --result-token "$token" -- /usr/bin/env)
+    --profile fm-crewmate-activation-z42 --worktree /tmp/fm-codex-activation --home "$home" --result-token "$token" -- \
+    /bin/sh -c 'printf "CODEX_HOME=%s\\n" "$CODEX_HOME"; sleep 2')
   codex_home_value=$(printf '%s\n' "$out" | sed -n 's/^CODEX_HOME=//p' | head -n 1)
   [ -n "$codex_home_value" ] || fail "Codex activation must export CODEX_HOME to the child"
   case "$codex_home_value" in
