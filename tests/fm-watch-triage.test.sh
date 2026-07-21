@@ -801,6 +801,46 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   pass "exited declared-pause and captain-held panes use bounded pause cadence while a live decision gate still surfaces once"
 }
 
+# A normal-mode watcher intentionally surfaces a newly declared pause once through
+# its status signal, then records .seen-*. On a later watcher restart the
+# short-lived .paused-* marker may be absent, but that already-surfaced pause is
+# still durable in the task's final status line. The stale path must recover that
+# declared pause from the status log rather than emit one fresh plain stale wake
+# before it rebuilds pause tracking.
+test_settled_pause_survives_watcher_restart_without_pause_marker() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid
+  dir=$(make_case settled-pause-restart); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-settled-pause"
+  printf 'idle, awaiting upstream\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/settled-pause.meta"
+  statusf="$state/settled-pause.status"
+  printf 'paused: awaiting the upstream release\n' > "$statusf"
+  # The initial status signal was already surfaced by the previous watcher cycle.
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-settled-pause_status"
+  key=$(printf '%s' "$window" | tr ':/. ' '____')
+  pane_hash=$(hash_text 'idle, awaiting upstream')
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # Simulate a fresh watcher after volatile pause tracking was lost.
+  rm -f "$state/.paused-$key" "$state/.paused-rechecked-$key" "$state/.stale-$key"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream release'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "settled paused pane surfaced a plain stale wake after watcher restart: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "settled paused pane printed a wake after watcher restart: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "settled paused pane enqueued a stale wake after watcher restart"; }
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "settled paused pane did not rebuild pause tracking"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a settled declared pause survives watcher restart without a .paused marker"
+}
+
 # A pause can land in the same grace-window batch as a different actionable
 # signal.
 # That first watcher must surface the batch and exit before its stale loop runs,

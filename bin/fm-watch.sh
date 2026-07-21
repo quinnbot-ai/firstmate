@@ -500,6 +500,20 @@ pause_state_class() {  # <window> <task>
     printf 'working'
     return
   fi
+  if [ "$class" = paused ]; then
+    if [ "$(window_kind "$win")" != secondmate ]; then
+      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
+      if [ "$agent_alive" = alive ]; then
+        rm -f "$recheck_file"
+        printf 'none'
+        return
+      fi
+    fi
+    date +%s > "$recheck_file"
+    rm -f "$(crew_pause_handoff_file "$task" "$STATE")"
+    printf 'paused'
+    return
+  fi
   case "$crew_line" in
     "state: stopped"*)
       # fm-crew-state's stopped verdict is the authoritative result of a
