@@ -1025,7 +1025,7 @@ test_arm_lease_bind_rejects_changed_watcher_identity() {
   pass "arm lease bind rejects watcher identity changes during acquisition"
 }
 
-test_arm_lease_binds_before_publication() {
+test_arm_lease_binds_after_publication() {
   local dir state watcher_pid watcher_identity
   dir=$(make_case arm-lease-bind-before-publication)
   state="$dir/state"
@@ -1047,10 +1047,10 @@ test_arm_lease_binds_before_publication() {
   else
     fail "arm lease claim unexpectedly published under a forced acquisition failure"
   fi
-  [ -f "$state/.watch-arm.bound" ] || fail "watcher was not bound before a failed lease publication"
+  [ ! -e "$state/.watch-arm.bound" ] || fail "failed lease publication bound the watcher"
   kill "$watcher_pid" 2>/dev/null || true
   wait "$watcher_pid" 2>/dev/null || true
-  pass "arm lease binds the watcher before lease publication"
+  pass "arm lease does not bind the watcher before lease publication"
 }
 
 test_arm_lease_reclaim_respects_heartbeat_fence() {
@@ -1188,6 +1188,7 @@ test_arm_lease_publishes_complete_owner() {
   for field in pid pid-identity fm-home watcher-path watcher-pid watcher-identity heartbeat; do
     [ -e "$state/.watch-arm.lease/$field" ] || fail "published arm lease is missing $field"
   done
+  [ -f "$state/.watch-arm.bound" ] || fail "published arm lease did not bind its watcher"
   kill "$watcher_pid" 2>/dev/null || true
   wait "$watcher_pid" 2>/dev/null || true
   pass "arm lease publishes complete metadata before its owner link"
@@ -1230,7 +1231,7 @@ test_singleton_start
 test_pid_identity_is_locale_invariant
 test_arm_lease_rejects_reused_pid_identity
 test_arm_lease_bind_rejects_changed_watcher_identity
-test_arm_lease_binds_before_publication
+test_arm_lease_binds_after_publication
 test_arm_lease_reclaim_respects_heartbeat_fence
 test_arm_lease_reclaims_replaced_watcher
 test_arm_lease_publishes_complete_owner

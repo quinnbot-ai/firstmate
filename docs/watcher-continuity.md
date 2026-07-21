@@ -47,7 +47,7 @@ While a harness-visible `fm-watch-arm.sh` relay waits for a watcher, it holds a 
 The binding records the home, watcher path, watcher PID, watcher identity, relay PID identity, and a relay heartbeat, so a sibling home, stale lock, or recycled PID cannot satisfy it.
 `docs/configuration.md` owns the relay lease timing settings.
 The watcher checks a lease only after an arm has bound itself to that exact watcher, so direct manual or test watchers remain supported.
-The binding is written before the relay lease can become healthy, so cancellation during publication still makes the watcher fail closed at its next poll boundary.
+The complete relay lease is published before the binding, so a watcher never treats an in-flight arm claim as a lost relay.
 If a bound watcher next reaches its poll boundary without a fresh identity-matched relay, it first durably appends `check: watcher arm relay lost` under the `watcher-arm-relay` wake key and then exits through that actionable wake.
 An ordinary arm close releases only its own identity-matched lease, while a re-arm may remove only a stale, fully revalidated lease before it claims the successor binding.
 Heartbeat refresh and stale reclamation share a short owner-scoped fence, so reclamation rechecks freshness after any in-progress renewal rather than unlinking a live lease.

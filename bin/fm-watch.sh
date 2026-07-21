@@ -962,9 +962,8 @@ while :; do
   if fm_arm_lease_watcher_bound "$STATE" "$WATCH_PATH" "$WATCHER_PID" "$FM_HOME"; then
     ARM_LEASE_SEEN=1
   fi
-  if fm_arm_lease_healthy "$STATE" "$WATCH_PATH" "$WATCHER_PID" "$FM_HOME"; then
-    ARM_LEASE_SEEN=1
-  elif [ "$ARM_LEASE_SEEN" -eq 1 ]; then
+  if ! fm_arm_lease_healthy "$STATE" "$WATCH_PATH" "$WATCHER_PID" "$FM_HOME" \
+    && [ "$ARM_LEASE_SEEN" -eq 1 ]; then
     reason='check: watcher arm relay lost'
     fm_wake_append check watcher-arm-relay "$reason" || exit 1
     wake "$reason"

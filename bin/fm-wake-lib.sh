@@ -201,7 +201,6 @@ fm_arm_lease_claim() {  # <state> <watch-path> <watcher-pid> <home>
   FM_ARM_LEASE_PUBLISH_WATCH_PATH=$watch_path
   FM_ARM_LEASE_PUBLISH_WATCHER_PID=$watcher_pid
   FM_ARM_LEASE_PUBLISH_WATCHER_IDENTITY=$watcher_identity
-  fm_arm_lease_bind_watcher "$state" "$watch_path" "$watcher_pid" "$home" "$watcher_identity" || return 1
   if ! fm_lock_try_acquire "$lease" fm_arm_lease_publish_owner; then
     # This arm may be following a confirmed watcher successor.  Its previous
     # lease is still deliberately healthy as a process, but it is bound to the
@@ -221,6 +220,10 @@ fm_arm_lease_claim() {  # <state> <watch-path> <watcher-pid> <home>
   fi
   owner=${FM_LOCK_OWNER_DIR:-}
   [ -n "$owner" ] || return 1
+  if ! fm_arm_lease_bind_watcher "$state" "$watch_path" "$watcher_pid" "$home" "$watcher_identity"; then
+    fm_arm_lease_release "$state" "$owner" || true
+    return 1
+  fi
   # shellcheck disable=SC2034 # Read by callers after fm_arm_lease_claim returns.
   FM_ARM_LEASE_OWNER=$owner
 }
