@@ -499,6 +499,28 @@ pause_state_class() {  # <window> <task>
     printf 'working'
     return
   fi
+  case "$crew_line" in
+    "state: stopped"*)
+      # fm-crew-state's stopped verdict is the authoritative result of a
+      # confirmed-dead agent behind an otherwise still-live endpoint.  Keep a
+      # declared external wait on the bounded pause cadence; the liveness read
+      # below still turns a live successor into an immediate surfaced look.
+      [ "$class" = none ] && class=paused
+      ;;
+    "state: parked"*)
+      if [ "$class" = paused ]; then
+        # The latest declared paused: status explicitly overrides this parked
+        # no-mistakes gate (crew_absorb_class_from_line's parked branch) - that
+        # is the operator's current instruction, not a stale log leftover, so
+        # trust it directly instead of demanding proof about the agent at all.
+        date +%s > "$recheck_file"
+        rm -f "$(crew_pause_handoff_file "$task" "$STATE")"
+        printf 'paused'
+        return
+      fi
+      ;;
+  esac
+  agent_alive=unknown
   if [ "$(window_kind "$win")" != secondmate ]; then
     agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
     if [ "$agent_alive" != dead ]; then

@@ -63,7 +63,7 @@ make_case() {
   local name=$1 dir fakebin
   dir="$TMP_ROOT/$name"
   fakebin="$dir/fakebin"
-  mkdir -p "$dir/state" "$fakebin"
+  mkdir -p "$dir/state" "$dir/home" "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -75,6 +75,9 @@ if [ "${1:-}" = "list-windows" ]; then
 fi
 if [ "${1:-}" = "display-message" ]; then
   for _arg in "$@"; do
+    case "$_arg" in
+      *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_CURRENT_COMMAND:-}"; exit 0 ;;
+    esac
     if [ "$_arg" = '#{window_name}' ]; then
       printf '%s\n' "${FM_FAKE_TMUX_WINDOW##*:}"
       exit 0

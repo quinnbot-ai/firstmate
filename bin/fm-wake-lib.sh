@@ -178,7 +178,7 @@ fm_arm_lease_remove_stale() {  # <state> <watch-path> <watcher-pid> <home> [grac
 }
 
 fm_arm_lease_claim() {  # <state> <watch-path> <watcher-pid> <home>
-  local state=$1 watch_path=$2 watcher_pid=$3 home=$4 lease owner arm_pid arm_identity watcher_identity
+  local state=$1 watch_path=$2 watcher_pid=$3 home=$4 lease owner arm_pid arm_identity watcher_identity owner_identity
   lease="$state/.watch-arm.lease"
   FM_ARM_LEASE_OWNER=
   # Do not use fm_current_pid through command substitution here: that would
@@ -192,11 +192,21 @@ fm_arm_lease_claim() {  # <state> <watch-path> <watcher-pid> <home>
   FM_ARM_LEASE_PUBLISH_WATCHER_PID=$watcher_pid
   FM_ARM_LEASE_PUBLISH_WATCHER_IDENTITY=$watcher_identity
   if ! fm_lock_try_acquire "$lease" fm_arm_lease_publish_owner; then
-    if fm_arm_lease_healthy "$state" "$watch_path" "$watcher_pid" "$home"; then
+    # This arm may be following a confirmed watcher successor.  Its previous
+    # lease is still deliberately healthy as a process, but it is bound to the
+    # predecessor and therefore cannot satisfy the new watcher identity.  Only
+    # this exact owner may release it before publishing the replacement.
+    owner=$(fm_arm_lease_owner "$state" 2>/dev/null || true)
+    owner_identity=$(cat "$owner/pid-identity" 2>/dev/null || true)
+    if [ -n "$owner" ] && [ "$owner_identity" = "$arm_identity" ]; then
+      fm_arm_lease_release "$state" "$owner" || return 1
+      fm_lock_try_acquire "$lease" fm_arm_lease_publish_owner || return 1
+    elif fm_arm_lease_healthy "$state" "$watch_path" "$watcher_pid" "$home"; then
       return 2
+    else
+      fm_arm_lease_remove_stale "$state" "$watch_path" "$watcher_pid" "$home" || return 1
+      fm_lock_try_acquire "$lease" fm_arm_lease_publish_owner || return 1
     fi
-    fm_arm_lease_remove_stale "$state" "$watch_path" "$watcher_pid" "$home" || return 1
-    fm_lock_try_acquire "$lease" fm_arm_lease_publish_owner || return 1
   fi
   owner=${FM_LOCK_OWNER_DIR:-}
   [ -n "$owner" ] || return 1
