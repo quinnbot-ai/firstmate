@@ -27,6 +27,17 @@
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
+#   Herdr additionally supports a default-off presentation-only layout when the
+#   local config/herdr-presentation-spaces flag exists. A clean fresh task first
+#   writes state/<id>.herdr-presentation atomically, then creates a disposable
+#   workspace containing only the ordinary task pane. The journal and visible
+#   random token are never endpoint or ownership authority. Existing, ambiguous,
+#   or recovered state is never adopted, reused, closed, or deleted through that
+#   presentation path; a flat launch is allowed only after duplicate-agent risk
+#   is independently absent. Treehouse allocation and task metadata are unchanged.
+#   Every single-task invocation holds one task-id-scoped lock across backend
+#   creation through metadata publication, so concurrent same-id spawns serialize
+#   even when they select different backends.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -110,6 +121,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SUB_HOME_MARKER=".fm-secondmate-home"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
@@ -208,6 +221,12 @@ fi
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+HERDR_PROJECTION_ABORT_CLEANUP=0
+HERDR_PROJECTION_ABORT_SESSION=
+HERDR_PROJECTION_ABORT_TASK_PANE=
+HERDR_PROJECTION_ABORT_SEEDED_PANE=
+SPAWN_TASK_LOCK=
+SPAWN_TASK_LOCK_HELD=0
 TREEHOUSE_LEASE_PATH_FILE=
 TREEHOUSE_LEASE_ACQUIRED=0
 TREEHOUSE_LEASE_COMMITTED=0
@@ -407,6 +426,13 @@ orca_spawn_abort_cleanup() {
 
 spawn_abort_cleanup() {
   local status=$? preserve_codex_home=0 clean_codex_home=0 orca_cleanup_failed=0
+  if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ]; then
+    HERDR_PROJECTION_ABORT_CLEANUP=0
+    fm_backend_herdr_projection_cleanup_exact \
+      "$HERDR_PROJECTION_ABORT_SESSION" \
+      "$HERDR_PROJECTION_ABORT_TASK_PANE" \
+      "$HERDR_PROJECTION_ABORT_SEEDED_PANE" || true
+  fi
   if [ -n "$TREEHOUSE_LEASE_PATH_FILE" ]; then
     clean_codex_home=1
     treehouse_spawn_abort_cleanup "$status" || true
@@ -443,6 +469,10 @@ spawn_abort_cleanup() {
     && [ "$FAILED_ENDPOINT_CLEANUP" != 1 ] && [ "$preserve_codex_home" -eq 0 ] \
     && [ "$orca_cleanup_failed" -eq 0 ] && [ -z "$CODEX_CREWMATE_HOME" ]; then
     rm -f "$STATE/$ID.meta"
+  fi
+  if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
+    SPAWN_TASK_LOCK_HELD=0
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
   fi
   [ -z "$TASK_META_TMP" ] || rm -f "$TASK_META_TMP" || true
   treehouse_lease_transaction_release
@@ -488,6 +518,12 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
+if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
+  echo "error: another spawn is already creating task $ID" >&2
+  exit 1
+fi
+SPAWN_TASK_LOCK_HELD=1
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
@@ -1530,6 +1566,48 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   WT_REAL=$wt_real
 }
 
+# A stale presentation journal never grants launch authority.
+# When authoritative metadata already exists, require its endpoint to be
+# positively dead before the journal's read-only token inspection may allow a
+# flat fallback.
+herdr_projection_existing_meta_allows_flat() {  # <meta>
+  local meta=$1 old_backend old_target old_session old_pane old_state
+  old_backend=$(fm_backend_of_meta "$meta")
+  old_target=$(fm_backend_target_of_meta "$meta")
+  [ -n "$old_target" ] || {
+    echo "error: existing metadata for $ID has no endpoint; refusing duplicate launch while its herdr presentation journal is quarantined" >&2
+    return 1
+  }
+  if [ "$old_backend" = herdr ]; then
+    fm_backend_herdr_parse_target "$old_target" || {
+      echo "error: existing herdr endpoint for $ID is malformed; refusing duplicate launch" >&2
+      return 1
+    }
+    old_session=$FM_BACKEND_HERDR_SESSION
+    old_pane=$FM_BACKEND_HERDR_PANE
+    fm_backend_herdr_server_ensure "$old_session" || {
+      echo "error: existing herdr endpoint for $ID could not be inspected; refusing duplicate launch" >&2
+      return 1
+    }
+    old_state=$(fm_backend_herdr_pane_agent_state "$old_session" "$old_pane")
+    case "$old_state" in
+      dead|no-agent) return 0 ;;
+      live|unknown)
+        echo "error: existing herdr endpoint for $ID is $old_state; refusing duplicate launch" >&2
+        return 1
+        ;;
+    esac
+  fi
+  old_state=$(fm_backend_agent_alive "$old_backend" "$old_target")
+  case "$old_state" in
+    dead) return 0 ;;
+    alive|unknown)
+      echo "error: existing $old_backend endpoint for $ID is $old_state; refusing duplicate launch" >&2
+      return 1
+      ;;
+  esac
+}
+
 W="fm-$ID"
 case "$BACKEND" in
   tmux)
@@ -1561,21 +1639,59 @@ case "$BACKEND" in
     if [ "$KIND" = secondmate ]; then
       HERDR_LABEL_HOME=$PROJ_ABS
     fi
-    HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$PROJ_ABS") || exit 1
-    # fm_backend_herdr_container_ensure echoes "<session>:<workspace_id>\t<seeded_default_tab_id>"
-    # (the second field empty when this call ADOPTED a pre-existing workspace
-    # rather than creating a fresh one). Split on the guaranteed single tab
-    # character; the seeded tab id is threaded through to create_task
-    # untouched, which is the only function permitted to prune it (never
-    # re-derived from labels - see docs/herdr-backend.md "Default-tab prune").
-    CONTAINER=${HERDR_CONTAINER_RAW%%$'\t'*}
-    HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
-    HERDR_SES=${CONTAINER%%:*}
-    HERDR_WORKSPACE_ID=${CONTAINER#*:}
-    HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
-    read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
+    HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
+    HERDR_PROJECTED=0
+    if [ -f "$CONFIG/herdr-presentation-spaces" ]; then
+      if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
+        if [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
+          herdr_projection_existing_meta_allows_flat "$STATE/$ID.meta" || exit 1
+        fi
+        HERDR_RECOVERY_SESSION=$(fm_backend_herdr_session)
+        fm_backend_herdr_projection_recovery_allows_flat \
+          "$HERDR_RECOVERY_SESSION" "$HERDR_PRESENTATION_JOURNAL" "$ID" || exit 1
+      elif [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+        HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
+        HERDR_PROJECTION_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" \
+          fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
+        if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
+          "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
+          if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
+            HERDR_PROJECTION_ABORT_CLEANUP=1
+            HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
+            HERDR_PROJECTION_ABORT_TASK_PANE=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
+            HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
+          fi
+          exit 1
+        fi
+        HERDR_PROJECTED=1
+        HERDR_SES=$FM_BACKEND_HERDR_PROJECTION_SESSION
+        HERDR_WORKSPACE_ID=$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID
+        HERDR_SEEDED_DEFAULT_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID
+        HERDR_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
+        HERDR_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
+        HERDR_PROJECTION_ABORT_CLEANUP=1
+        HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
+        HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
+        HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
+      fi
+    fi
+    if [ "$HERDR_PROJECTED" -ne 1 ]; then
+      HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$PROJ_ABS") || exit 1
+      # fm_backend_herdr_container_ensure echoes "<session>:<workspace_id>\t<seeded_default_tab_id>"
+      # (the second field empty when this call ADOPTED a pre-existing workspace
+      # rather than creating a fresh one). Split on the guaranteed single tab
+      # character; the seeded tab id is threaded through to create_task
+      # untouched, which is the only function permitted to prune it (never
+      # re-derived from labels - see docs/herdr-backend.md "Default-tab prune").
+      CONTAINER=${HERDR_CONTAINER_RAW%%$'\t'*}
+      HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
+      HERDR_SES=${CONTAINER%%:*}
+      HERDR_WORKSPACE_ID=${CONTAINER#*:}
+      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
+    fi
     if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
       echo "error: herdr did not return a tab/pane id for $W" >&2
       exit 1
@@ -2005,6 +2121,7 @@ spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
+[ "${HERDR_PROJECTED:-0}" -ne 1 ] || HERDR_PROJECTION_ABORT_CLEANUP=0
 spawn_send_key "$T" Enter
 if [ -n "$CODEX_ACTIVATION_TOKEN" ]; then
   wait_for_codex_home_activation "$CODEX_CREWMATE_HOME" "$CODEX_ACTIVATION_TOKEN" || exit 1

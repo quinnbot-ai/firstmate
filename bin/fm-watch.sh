@@ -159,12 +159,6 @@ BUSY_STATUS_GRACE_SECS=${FM_BUSY_STATUS_GRACE_SECS:-900}
 case "$STARTUP_ZERO_CONTEXT_SECS" in ''|*[!0-9]*|0) STARTUP_ZERO_CONTEXT_SECS=600 ;; esac
 case "$BUSY_NO_PROGRESS_SECS" in ''|*[!0-9]*|0) BUSY_NO_PROGRESS_SECS=1800 ;; esac
 case "$BUSY_STATUS_GRACE_SECS" in ''|*[!0-9]*|0) BUSY_STATUS_GRACE_SECS=900 ;; esac
-# A crew that declared a pause is idling on a known external wait, so its stale
-# pane is absorbed rather than wedge-escalated.
-# A captain-held or paused crew whose agent has confidently exited uses the same
-# bounded cadence, while a live or ambiguously read agent still surfaces once.
-# These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
-# longer than the wedge threshold, but finite so a forgotten hold cannot rot invisibly.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
 TRIAGE_LOG="$STATE/.watch-triage.log"
 TRIAGE_LOG_MAX_BYTES=${FM_WATCH_TRIAGE_LOG_MAX_BYTES:-262144}
@@ -490,11 +484,7 @@ pause_state_class() {  # <window> <task>
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
     if [ "$(window_kind "$win")" != secondmate ]; then
       agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-      # Only a CONFIRMED-alive agent forces a fresh look; unknown (unreadable,
-      # or a harness tmux's classifier cannot attribute) must never license a
-      # downgrade on its own (fm_backend_agent_alive's documented contract) and
-      # instead keeps trusting the already-established pause classification.
-      if [ "$agent_alive" = alive ]; then
+      if [ "$agent_alive" != dead ]; then
         rm -f "$recheck_file"
         printf 'none'
         return
@@ -508,6 +498,20 @@ pause_state_class() {  # <window> <task>
   if [ "$class" = working ]; then
     rm -f "$recheck_file"
     printf 'working'
+    return
+  fi
+  if [ "$class" = paused ]; then
+    if [ "$(window_kind "$win")" != secondmate ]; then
+      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
+      if [ "$agent_alive" = alive ]; then
+        rm -f "$recheck_file"
+        printf 'none'
+        return
+      fi
+    fi
+    date +%s > "$recheck_file"
+    rm -f "$(crew_pause_handoff_file "$task" "$STATE")"
+    printf 'paused'
     return
   fi
   case "$crew_line" in
@@ -534,22 +538,13 @@ pause_state_class() {  # <window> <task>
   agent_alive=unknown
   if [ "$(window_kind "$win")" != secondmate ]; then
     agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
+    if [ "$agent_alive" != dead ]; then
+      rm -f "$recheck_file"
+      printf 'none'
+      return
+    fi
   fi
-  if [ "$class" = paused ] && [ "$agent_alive" = alive ]; then
-    # A confirmed-live agent sitting at whatever the status log calls a pause
-    # (a plain authoritative "state: paused" read, or a handoff-recovered
-    # pause) deserves a fresh surfaced look rather than blind trust in the
-    # log - a live external-decision gate must not hide behind the pause
-    # cadence. Unknown liveness never forces this downgrade on its own, so an
-    # unreadable pane still keeps trusting an already-established pause.
-    rm -f "$recheck_file"
-    printf 'none'
-    return
-  fi
-  # A class=none (stopped/unknown-without-handoff) verdict recovers to paused
-  # only once the agent is CONFIRMED dead - unknown liveness must never
-  # license that recovery on its own either.
-  [ "$class" = none ] && [ "$agent_alive" = dead ] && class=paused
+  [ "$class" = none ] && [ "${agent_alive:-unknown}" = dead ] && class=paused
   case "$class" in
     paused) date +%s > "$recheck_file"
             rm -f "$(crew_pause_handoff_file "$task" "$STATE")"
@@ -761,7 +756,7 @@ heartbeat_scan_finds_actionable() {
 
 # Operations inboxes are external failure signals, not crew-status events.
 # Poll their compact fingerprint every cycle while a regular task is in flight,
-# then at the existing heartbeat cadence otherwise. A changed fingerprint is
+# then at the existing heartbeat cadence otherwise.  A changed fingerprint is
 # only marked seen after its durable wake record is appended, preventing both a
 # missed event on interruption and a hot loop on an unchanged inbox.
 ops_inbox_tasks_in_flight() {
@@ -781,7 +776,7 @@ ops_inbox_changed() {
   previous=$(cat "$STATE/.hash-ops-inbox" 2>/dev/null || true)
   if [ -z "$previous" ]; then
     # A watcher first armed against an empty inbox establishes its baseline
-    # silently. Existing events or a broken configured command still surface,
+    # silently.  Existing events or a broken configured command still surface,
     # while normal task tests and an empty new home do not manufacture a wake.
     FM_OPS_INBOX_FINGERPRINT=$fingerprint
     if ! fm_ops_inbox_has_events "$FM_HOME" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"; then
@@ -982,9 +977,8 @@ while :; do
   if fm_arm_lease_watcher_bound "$STATE" "$WATCH_PATH" "$WATCHER_PID" "$FM_HOME"; then
     ARM_LEASE_SEEN=1
   fi
-  if fm_arm_lease_healthy "$STATE" "$WATCH_PATH" "$WATCHER_PID" "$FM_HOME"; then
-    ARM_LEASE_SEEN=1
-  elif [ "$ARM_LEASE_SEEN" -eq 1 ]; then
+  if ! fm_arm_lease_healthy "$STATE" "$WATCH_PATH" "$WATCHER_PID" "$FM_HOME" \
+    && [ "$ARM_LEASE_SEEN" -eq 1 ]; then
     reason='check: watcher arm relay lost'
     fm_wake_append check watcher-arm-relay "$reason" || exit 1
     wake "$reason"
@@ -1140,7 +1134,7 @@ EOF
     sf="$STATE/.stale-$key"
     ssf="$STATE/.stale-since-$key"
     ewf="$STATE/.wedge-escalations-$key"
-    pf="$STATE/.paused-$key"   # flag: this key's stale is using the bounded pause cadence
+    pf="$STATE/.paused-$key"   # flag: this key's current stale is a declared pause
     WINDOW_BUSY_CACHE=
     # Busy panes bypass stale-hash handling, so inspect their semantic progress
     # before the hash branch. A declared paused wait retains its long cadence and

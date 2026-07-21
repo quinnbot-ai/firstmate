@@ -289,7 +289,7 @@ test_poll_question_stashes_and_marks() {
   pass "fm-x-poll stashes the question and prints the compact marker"
 }
 
-test_poll_mentions_recover_pending_durable_offers() {
+test_poll_mentions_wake_once_per_durable_offer() {
   local home fakebin out rc body marker
   home="$TMP_ROOT/poll-offer-dedupe"; mkdir -p "$home"
   fakebin=$(make_fake_curl "$home")
@@ -305,8 +305,7 @@ test_poll_mentions_recover_pending_durable_offers() {
     FMX_RELAY_URL="https://relay.test" FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" \
     "$ROOT/bin/fm-x-poll.sh"); rc=$?
   expect_code 0 "$rc" "repeated pending mention poll exit"
-  [ "$out" = "x-mention req-repeat" ] \
-    || fail "a pending offered mention must re-emit its wake for crash recovery (got: $out)"
+  [ -z "$out" ] || fail "an already offered pending mention must stay silent (got: $out)"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
     FAKE_DISMISS_CODE=200 "$ROOT/bin/fm-x-dismiss.sh" req-repeat); rc=$?
   expect_code 0 "$rc" "successful dismiss before relay re-offer exit"
@@ -344,7 +343,7 @@ test_poll_mentions_recover_pending_durable_offers() {
   expect_code 0 "$rc" "mention re-offer after marker expiry exit"
   [ "$out" = "x-mention req-new" ] \
     || fail "a re-offer after the bounded marker expiry must wake once (got: $out)"
-  pass "fm-x-poll recovers pending durable offers without recreating drained inboxes"
+  pass "fm-x-poll wakes once per durable request offer across inbox cleanup"
 }
 
 test_poll_offer_claim_failure_reports_once() {
@@ -2774,7 +2773,7 @@ test_poll_empty_env_relay_overrides_env_file
 test_poll_auth_error_reports_once
 test_poll_error_private_publication_rejects_unsafe_paths
 test_poll_question_stashes_and_marks
-test_poll_mentions_recover_pending_durable_offers
+test_poll_mentions_wake_once_per_durable_offer
 test_poll_offer_claim_failure_reports_once
 test_poll_preserves_conversation_context
 test_poll_inbox_commit_failure_reports_error

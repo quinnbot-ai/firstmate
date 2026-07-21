@@ -47,24 +47,28 @@ While a harness-visible `fm-watch-arm.sh` relay waits for a watcher, it holds a 
 The binding records the home, watcher path, watcher PID, watcher identity, relay PID identity, and a relay heartbeat, so a sibling home, stale lock, or recycled PID cannot satisfy it.
 `docs/configuration.md` owns the relay lease timing settings.
 The watcher checks a lease only after an arm has bound itself to that exact watcher, so direct manual or test watchers remain supported.
+The complete relay lease is published before the binding, so a watcher never treats an in-flight arm claim as a lost relay.
 If a bound watcher next reaches its poll boundary without a fresh identity-matched relay, it first durably appends `check: watcher arm relay lost` under the `watcher-arm-relay` wake key and then exits through that actionable wake.
 An ordinary arm close releases only its own identity-matched lease, while a re-arm may remove only a stale, fully revalidated lease before it claims the successor binding.
+Heartbeat refresh and stale reclamation share a short owner-scoped fence, so reclamation rechecks freshness after any in-progress renewal rather than unlinking a live lease.
 The turn-end implications of this lease are owned by [turnend-guard.md](turnend-guard.md#relay-health-predicate).
 
 ## Away-mode daemon lease
 
 Away mode uses the same liveness standard for `state/.supervise-daemon.lock` rather than trusting a PID file alone.
 The daemon publishes its home, script path, PID identity, and heartbeat, refreshes that heartbeat during its loop, and stops if ownership changes.
+The daemon uses the same heartbeat fence as an arm lease when stale reclamation overlaps a refresh.
+AFK start and stale-lease reclamation use `FM_DAEMON_LEASE_GRACE`, which defaults to 45 seconds.
 At a turn boundary, daemon lease freshness uses the same `FM_GUARD_GRACE` setting as watcher health.
 The turn-end guard requires this daemon lease and a healthy watcher while `state/.afk` is present; it does not require a separate arm relay because the daemon owns that watcher lifecycle.
 
 ## Regression coverage
 
 `tests/fm-pi-watch-extension.test.sh` simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, blocks prompt delivery to prove the successor launches first, verifies single-flight behavior, changes the session lock before close to prove ownership is rechecked, and hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
-`tests/fm-watcher-lock.test.sh` covers verified-successor attach, relay transfer, identity-based PID-reuse rejection, safe stale-lease reclamation, immediate normal re-arm without a false lost-relay wake, typed self-eviction failure, bounded lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
+`tests/fm-watcher-lock.test.sh` covers verified-successor attach, relay transfer, identity-based PID-reuse rejection, safe stale-lease reclamation, publication binding, heartbeat fencing, immediate normal re-arm without a false lost-relay wake, typed self-eviction failure, bounded lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
 `tests/fm-watch-triage.test.sh` proves the watcher writes the durable `watcher-arm-relay` wake before it stops, including when a relay disappears between its initial and next lease-health polls.
 `tests/fm-turnend-guard.test.sh` proves that a live watcher with a dead relay still blocks a normal-mode turn end.
-`tests/fm-daemon.test.sh` proves daemon lease cleanup removes only its owned lock metadata.
+`tests/fm-daemon.test.sh` proves daemon lease cleanup removes only its owned lock metadata and cannot race a heartbeat refresh.
 `tests/fm-continuity-pretool-check.test.sh` proves the Claude gate rejects only non-recovery fleet execution in the precise unhealthy state and preserves the existing Stop registration.
 
 ## Sanitized live evidence, 2026-07-17

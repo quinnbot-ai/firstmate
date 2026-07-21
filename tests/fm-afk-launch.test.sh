@@ -40,13 +40,6 @@ GLOBAL_CLEANUP() {
 }
 trap GLOBAL_CLEANUP EXIT
 
-write_pid_identity() {  # <state> <pid> <destination>
-  local state=$1 pid=$2 destination=$3 identity
-  identity=$(FM_HOME="$state" FM_STATE_OVERRIDE="$state/state" bash -c \
-    '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$pid" 2>/dev/null) || true
-  printf '%s\n' "$identity" > "$destination"
-}
-
 # ---------------------------------------------------------------------------
 # UNIT 1: fm_afk_clear_stale_artifacts removes exactly the three stale artifacts.
 # ---------------------------------------------------------------------------
@@ -96,7 +89,9 @@ unit_fresh_vs_refresh() {
   mkdir "$owner"
   ln -s "$owner" "$lock"
   printf '%s' "$sleep_pid" > "$owner/pid"
-  write_pid_identity "$st" "$sleep_pid" "$owner/pid-identity"
+  ( FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" \
+    bash -c '. "$1"; fm_pid_identity "$2" > "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$sleep_pid" "$owner/pid-identity" 2>/dev/null ) || true
   printf '%s\n' "$st" > "$owner/fm-home"
   printf '%s\n' "$ROOT/bin/fm-supervise-daemon.sh" > "$owner/daemon-path"
   touch "$owner/heartbeat"
@@ -220,19 +215,18 @@ unit_concurrent_start_serialized() {
   rm -rf "$st"
 }
 
-unit_lock_initialization_grace() {
-  local st marker initializer
+unit_lock_unpublished_owner() {
+  local st marker initializer preparing
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-lock-init.XXXXXX")
   marker="$st/initialized"
-  mkdir -p "$st/state/.afk-launch.lock"
+  preparing="$st/state/.afk-launch.lock.owner.initializing"
+  mkdir -p "$preparing"
   (
     sleep 0.15
-    if [ -d "$st/state/.afk-launch.lock" ]; then
-      printf '%s' "$$" > "$st/state/.afk-launch.lock/pid"
-      ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$$" > "$st/state/.afk-launch.lock/pid-identity" 2>/dev/null ) || true
+    if [ -d "$preparing" ]; then
       : > "$marker"
       sleep 0.15
-      rm -rf "$st/state/.afk-launch.lock"
+      rm -rf "$preparing"
     fi
   ) &
   initializer=$!
@@ -240,12 +234,80 @@ unit_lock_initialization_grace() {
     . "$1"
     fm_afk_launch_lock_acquire
     fm_afk_launch_lock_release
-  ' _ "$LAUNCH" && [ -e "$marker" ]; then
-    pass "launcher lock: incomplete publication receives initialization grace"
+  ' _ "$LAUNCH"; then
+    wait "$initializer" 2>/dev/null || true
   else
-    fail "launcher lock: contender removed a lock during initialization"
+    wait "$initializer" 2>/dev/null || true
+    fail "launcher lock: contender touched an unpublished owner"
+    rm -rf "$st"
+    return
   fi
-  wait "$initializer" 2>/dev/null || true
+  if [ -e "$marker" ]; then
+    pass "launcher lock: incomplete owner is never published as a lock"
+  else
+    fail "launcher lock: contender touched an unpublished owner"
+  fi
+  rm -rf "$st"
+}
+
+unit_lock_release_preserves_reclaimed_lock() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-lock-reclaim.XXXXXX")
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    mkdir -p "$FM_AFK_LAUNCH_STATE"
+    FM_AFK_LAUNCH_LOCK_OWNER="$FM_AFK_LAUNCH_LOCK.owner.old"
+    mkdir "$FM_AFK_LAUNCH_LOCK_OWNER"
+    printf old > "$FM_AFK_LAUNCH_LOCK_OWNER/nonce"
+    new_owner="$FM_AFK_LAUNCH_LOCK.owner.new"
+    mkdir "$new_owner"
+    printf new > "$new_owner/nonce"
+    ln -s "$new_owner" "$FM_AFK_LAUNCH_LOCK"
+    fm_afk_launch_lock_release
+    [ -L "$FM_AFK_LAUNCH_LOCK" ] \
+      && [ "$(readlink "$FM_AFK_LAUNCH_LOCK")" = "$new_owner" ] \
+      && [ -d "$new_owner" ]
+  ' _ "$LAUNCH"; then
+    pass "launcher lock: canceled owner cannot remove a reclaimed lock"
+  else
+    fail "launcher lock: canceled owner removed a reclaimed lock"
+  fi
+  rm -rf "$st"
+}
+
+unit_lock_reclaim_gate_blocks_publication() {
+  local st ready release holder contender
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-lock-gate.XXXXXX")
+  ready="$st/gate-ready"
+  release="$st/gate-release"
+  mkdir -p "$st/state"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$FM_AFK_LAUNCH_LOCK.reclaim"
+    : > "$2"
+    while [ ! -e "$3" ]; do sleep 0.01; done
+    fm_lock_release "$FM_AFK_LAUNCH_LOCK.reclaim"
+  ' _ "$LAUNCH" "$ready" "$release" &
+  holder=$!
+  while [ ! -e "$ready" ]; do sleep 0.01; done
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    fm_afk_launch_lock_acquire
+    fm_afk_launch_lock_release
+  ' _ "$LAUNCH" &
+  contender=$!
+  sleep 0.1
+  if [ -e "$st/state/.afk-launch.lock" ] || [ -L "$st/state/.afk-launch.lock" ]; then
+    fail "launcher lock: contender published while stale reclaim was fenced"
+  fi
+  : > "$release"
+  wait "$holder" || fail "launcher lock: reclaim gate holder failed"
+  wait "$contender" || fail "launcher lock: contender did not acquire after reclaim gate release"
+  if [ ! -e "$st/state/.afk-launch.lock" ] && [ ! -L "$st/state/.afk-launch.lock" ]; then
+    pass "launcher lock: reclaim gate serializes stale removal and publication"
+  else
+    fail "launcher lock: contender did not release its lifecycle lock"
+  fi
   rm -rf "$st"
 }
 
@@ -711,7 +773,9 @@ unit_refresh_validates_record() {
   printf 'tmux\tonly-two-fields\n' > "$st/state/.afk-daemon-terminal"
   sleep 30 & daemon_pid=$!
   printf '%s' "$daemon_pid" > "$owner/pid"
-  write_pid_identity "$st" "$daemon_pid" "$owner/pid-identity"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" \
+    bash -c '. "$1"; fm_pid_identity "$2" > "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$daemon_pid" "$owner/pid-identity"
   printf '%s\n' "$st" > "$owner/fm-home"
   printf '%s\n' "$ROOT/bin/fm-supervise-daemon.sh" > "$owner/daemon-path"
   touch "$owner/heartbeat"
@@ -739,7 +803,9 @@ unit_stale_lease_restarts_launch_paths() {
   mkdir "$owner"
   ln -s "$owner" "$lock"
   printf '%s\n' "$daemon_pid" > "$owner/pid"
-  write_pid_identity "$st" "$daemon_pid" "$owner/pid-identity"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" \
+    bash -c '. "$1"; fm_pid_identity "$2" > "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$daemon_pid" "$owner/pid-identity"
   printf '%s\n' "$st" > "$owner/fm-home"
   printf '%s\n' "$ROOT/bin/fm-supervise-daemon.sh" > "$owner/daemon-path"
   touch -t 200001010000 "$owner/heartbeat"
@@ -935,7 +1001,9 @@ unit_stop_ordering
 unit_stop_rejects_reused_pid
 unit_failed_start_rolls_back_state
 unit_concurrent_start_serialized
-unit_lock_initialization_grace
+unit_lock_unpublished_owner
+unit_lock_release_preserves_reclaimed_lock
+unit_lock_reclaim_gate_blocks_publication
 unit_signal_exits_with_lock_cleanup
 unit_herdr_partial_create_recovery
 unit_herdr_error_with_exact_ids_closes_exact

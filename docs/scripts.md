@@ -32,6 +32,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-supervision-instructions.sh` | Render the session-start primary-harness supervision block or the one-line repair instruction |
 | `fm-home-seed.sh`        | Transactionally provision a secondmate home and maintain `data/secondmates.md`       |
 | `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates on the resolved harness and runtime backend |
+| `fm-treehouse-lease-lib.sh` | Private durable Treehouse lease handoff shared by spawn and teardown                 |
+| `fm-git-identity.sh`     | Pin task-worktree Git identities and audit registered project clone identities       |
 | `fm-codex-home.py`       | Create, activate, validate, and remove task-private no-MCP Codex crew homes |
 | `fm-dispatch-select.sh`  | Resolve a matched crew-dispatch rule to one concrete profile, owning `quota-balanced` selection |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
@@ -63,7 +65,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-lock-lib.sh`         | Shared "is this git lock provably abandoned?" proof used by teardown and fleet-sync   |
 | `fm-config-inherit-lib.sh` | Shared primary-to-secondmate inherited local-material propagation                  |
 | `fm-tasks-axi-lib.sh`    | Shared backlog-backend selector and `tasks-axi` compatibility probe                  |
-| `fm-wake-drain.sh`       | Atomically drain queued watcher wakes, emit bounded best-effort status-event annotations, then assert watcher liveness |
+| `fm-wake-drain.sh`       | Atomically drain queued watcher wakes, then assert watcher liveness                  |
 | `fm-wake-lib.sh`         | Shared durable wake queue, portable locks, and watcher, relay, and daemon identity/health helpers |
 | `fm-classify-lib.sh`     | Shared captain-relevant and declared-external-wait wake classification vocabulary    |
 | `fm-send.sh`             | Send one verified literal line or supported key through the target's recorded backend |

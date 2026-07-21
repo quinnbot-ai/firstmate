@@ -1000,16 +1000,16 @@ test_orca_partial_cleanup_without_terminal_preserves_codex_home() {
 }
 
 test_spawn_releases_orca_resources_when_metadata_write_fails() {
-  local proj wt data state_file config id out status
+  local proj wt data state config id out status
   id="orcametafailz9"
   proj="$TMP_ROOT/meta-fail-project"
   wt="$TMP_ROOT/meta-fail-wt"
   data="$TMP_ROOT/meta-fail-data"
-  state_file="$TMP_ROOT/meta-fail-state-file"
+  state="$TMP_ROOT/meta-fail-state"
   config="$TMP_ROOT/meta-fail-config"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   mkdir -p "$data/$id" "$config"
-  mkdir -p "$state_file"
+  mkdir -p "$state"
   printf 'brief\n' > "$data/$id/brief.md"
   orca_case meta-fail
   printf '1\n' > "$RESP/1.exit"
@@ -1019,7 +1019,7 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
   cat > "$FB/mktemp" <<SH
 #!/usr/bin/env bash
 case "\${1:-}" in
-  "$state_file"/."$id".meta.*)
+  "$state"/."$id".meta.*)
     echo 'mktemp: File exists' >&2
     exit 1
     ;;
@@ -1031,7 +1031,7 @@ SH
   printf '{"ok":true,"result":{"closed":true}}\n' > "$RESP/6.out"
   printf '{"ok":false,"error":{"code":"terminal_not_found","message":"terminal not found"}}\n' > "$RESP/7.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state_file" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend orca 2>&1 )
   status=$?
@@ -1041,7 +1041,7 @@ SH
     "Orca spawn should close the recorded terminal when a later abort occurs"
   assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-meta-fail'$'\x1f''--force'$'\x1f''--json' \
     "Orca spawn should remove the recorded worktree when a later abort occurs"
-  assert_absent "$state_file/$id.meta" "metadata-write abort should not leave metadata after successful cleanup"
+  [ ! -f "$state/$id.meta" ] || fail "metadata-write abort should not publish a regular metadata file"
   pass "fm-spawn.sh --backend orca: releases terminal and worktree on later aborts"
 }
 

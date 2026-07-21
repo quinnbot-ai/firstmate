@@ -23,13 +23,6 @@ fi
 
 TMP_ROOT=$(fm_test_tmproot fm-daemon-tests)
 
-write_pid_identity() {  # <home> <state> <pid> <destination>
-  local home=$1 state=$2 pid=$3 destination=$4 identity
-  identity=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash -c \
-    '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$pid" 2>/dev/null) || true
-  printf '%s\n' "$identity" > "$destination"
-}
-
 test_afk_start_refuses_when_flag_cannot_be_written() {
   local dir state out status
   dir=$(make_supercase afk-start-flag-unwritable)
@@ -92,7 +85,9 @@ test_afk_start_reclaims_stale_daemon_lease() {
   mkdir "$owner"
   ln -s "$owner" "$lock"
   printf '%s\n' "$daemon_pid" > "$owner/pid"
-  write_pid_identity "$dir" "$state" "$daemon_pid" "$owner/pid-identity"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$1"; fm_pid_identity "$2" > "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$daemon_pid" "$owner/pid-identity"
   printf '%s\n' "$dir" > "$owner/fm-home"
   printf '%s\n' "$DAEMON" > "$owner/daemon-path"
   touch -t 200001010000 "$owner/heartbeat"
@@ -153,6 +148,47 @@ test_daemon_lease_heartbeat_rejects_owner_handoff() {
   [ "$(fm_path_age "$successor/heartbeat")" -lt 5 ] || fail "successor daemon did not refresh its own heartbeat"
   fm_lock_release "$lock"
   pass "daemon heartbeat rejects lease owner handoff"
+}
+
+test_daemon_lease_reclaim_respects_heartbeat_fence() {
+  local dir state lock owner daemon_pid identity ready release holder reclaim
+  dir=$(make_supercase daemon-lease-heartbeat-fence)
+  state="$dir/state"
+  lock="$state/.supervise-daemon.lock"
+  owner="$lock.owner"
+  ready="$dir/heartbeat-ready"
+  release="$dir/heartbeat-release"
+  sleep 60 & daemon_pid=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$daemon_pid") \
+    || fail "could not identify daemon for heartbeat fence"
+  mkdir "$owner"
+  ln -s "$owner" "$lock"
+  printf '%s\n' "$daemon_pid" > "$owner/pid"
+  printf '%s\n' "$identity" > "$owner/pid-identity"
+  printf '%s\n' "$dir" > "$owner/fm-home"
+  printf '%s\n' "$DAEMON" > "$owner/daemon-path"
+  touch -t 200001010000 "$owner/heartbeat"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2"
+    : > "$3"
+    while [ ! -e "$4" ]; do sleep 0.01; done
+    touch "$5"
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock.heartbeat" "$ready" "$release" "$owner/heartbeat" &
+  holder=$!
+  while [ ! -e "$ready" ]; do sleep 0.01; done
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; ! fm_daemon_lease_remove_stale "$2" "$3" "$4" 300' _ "$ROOT/bin/fm-wake-lib.sh" "$state" "$DAEMON" "$dir" &
+  reclaim=$!
+  sleep 0.1
+  [ -L "$lock" ] || fail "daemon reclaimer removed a lease while its heartbeat fence was held"
+  : > "$release"
+  wait "$holder" || fail "daemon heartbeat fence holder failed"
+  wait "$reclaim" || fail "daemon reclaimer did not reject the refreshed lease"
+  [ -L "$lock" ] || fail "daemon reclaimer removed a lease refreshed under its fence"
+  kill "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  pass "daemon lease reclaim cannot race a heartbeat refresh"
 }
 
 test_daemon_state_root_uses_fm_home() {
@@ -1463,7 +1499,7 @@ test_wedge_alarm_shutdown_stops_active_notifier_group() {
     pid=$!
     while [ ! -s "$child_file" ]; do sleep 0.05; done
     child=$(cat "$child_file")
-    export WEDGE_ALARM_NOTIFIER_PID=$pid
+    WEDGE_ALARM_NOTIFIER_PID=$pid
     wedge_alarm_stop_active_notifier
     if kill -0 "$child" 2>/dev/null; then
       fail "shutdown left a notifier descendant running (pid $child)"
@@ -1479,7 +1515,7 @@ test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend() {
   local dir state log
   dir=$(make_wedge_case wedge-integration); state="$dir/state"; log="$dir/alert.log"
   escalate_add "$state" "needs-decision: pick A"
-  export WEDGE_ALARM_LAST_EPOCH=0
+  WEDGE_ALARM_LAST_EPOCH=0
   FM_WEDGE_ALARM_LOG="$log" FM_STATE_OVERRIDE="$state" \
     FM_WEDGE_ALARM_CHANNEL=osascript FM_SUPERVISOR_BACKEND=herdr \
     inject_wedge_alarm "$state" 30600
@@ -1495,7 +1531,7 @@ test_inject_wedge_alarm_throttles_when_marker_cannot_be_written() {
   state="$dir/state"; log="$dir/alert.log"; daemon_log="$dir/daemon.log"
   escalate_add "$state" "needs-decision: pick A"
   chmod u-w "$state"
-  export WEDGE_ALARM_LAST_EPOCH=0
+  WEDGE_ALARM_LAST_EPOCH=0
   LOG="$daemon_log" FM_WEDGE_ALARM_LOG="$log" FM_MAX_DEFER_SECS=600 \
     FM_WEDGE_ALARM_CHANNEL=osascript FM_SUPERVISOR_BACKEND=herdr \
     inject_wedge_alarm "$state" 30600
@@ -1749,6 +1785,7 @@ test_afk_start_reclaims_stale_daemon_lock_reused_pid
 test_afk_start_reclaims_stale_daemon_lease
 test_daemon_lease_release_cleans_owner_metadata
 test_daemon_lease_heartbeat_rejects_owner_handoff
+test_daemon_lease_reclaim_respects_heartbeat_fence
 test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates

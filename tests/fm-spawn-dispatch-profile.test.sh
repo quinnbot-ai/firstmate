@@ -28,12 +28,7 @@ case "$*" in
       printf '%s\n' "can't find window: ${3:-unknown}" >&2
       exit 1
     fi
-    window_name_file=${FM_FAKE_WINDOW_NAME_FILE:-"$(dirname "${FM_FAKE_TARGET_STATE:?}")/target-window-name"}
-    if [ -f "$window_name_file" ]; then
-      cat "$window_name_file"
-    else
-      printf '%s\n' 'firstmate'
-    fi
+    printf '%s\n' 'firstmate'
     exit 0
     ;;
   *"#{pane_id}"*)
@@ -55,22 +50,7 @@ case "${1:-}" in
     [ "$status" -ne 0 ] || [ "${FM_FAKE_BACKEND_CLOSE_EFFECT:-gone}" != gone ] || printf '%s\n' gone > "${FM_FAKE_TARGET_STATE:?}"
     exit "$status"
     ;;
-  new-window)
-    [ -z "${FM_FAKE_BACKEND_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_BACKEND_LOG"
-    if [ -n "${FM_FAKE_WINDOW_NAME_FILE:-}" ]; then
-      previous=
-      for argument in "$@"; do
-        if [ "$previous" = -n ]; then
-          printf '%s\n' "$argument" > "$FM_FAKE_WINDOW_NAME_FILE"
-          break
-        fi
-        previous=$argument
-      done
-    fi
-    printf '%s\n' '@1'
-    exit 0
-    ;;
-  has-session|new-session)
+  has-session|new-session|new-window)
     [ -z "${FM_FAKE_BACKEND_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_BACKEND_LOG"
     exit 0
     ;;
@@ -164,10 +144,9 @@ make_seeded_secondmate_home() {
 }
 
 run_spawn() {
-  local home=$1 wt=$2 fakebin=$3 launchlog=$4 target_state target_name
+  local home=$1 wt=$2 fakebin=$3 launchlog=$4 target_state
   shift 4
   target_state="$(dirname "$launchlog")/target-state"
-  target_name="$(dirname "$launchlog")/target-window-name"
   : > "$launchlog"
   printf '%s\n' live > "$target_state"
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
@@ -178,7 +157,6 @@ run_spawn() {
     FM_FAKE_TREEHOUSE_RETURN_STATUS="${FM_FAKE_TREEHOUSE_RETURN_STATUS:-0}" \
     FM_FAKE_BACKEND_KILL_STATUS="${FM_FAKE_BACKEND_KILL_STATUS:-0}" \
     FM_FAKE_BACKEND_CLOSE_EFFECT="${FM_FAKE_BACKEND_CLOSE_EFFECT:-gone}" \
-    FM_FAKE_WINDOW_NAME_FILE="$target_name" \
     FM_FAKE_TREEHOUSE_CLOSE_EFFECT="${FM_FAKE_TREEHOUSE_CLOSE_EFFECT:-none}" \
     FM_FAKE_TARGET_QUERY_STATUS="${FM_FAKE_TARGET_QUERY_STATUS:-0}" \
     FM_FAKE_TARGET_STATE="$target_state" \
@@ -221,7 +199,7 @@ assert_private_activation_result() {  # <task-id> <result-path> <message>
 materialize_codex_home() {  # <home> <data> <source> <profile> <worktree>
   python3 "$ROOT/bin/fm-codex-home.py" --create-activate --data "$2" --source "$3" \
     --profile "$4" --worktree "$5" --home "$1" \
-    --result-token 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef -- /bin/sh -c 'sleep 2' >/dev/null
+    --result-token 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef -- /bin/sleep 2 >/dev/null
   python3 "$ROOT/bin/fm-codex-home.py" --remove-activation-result --data "$2" --home "$1"
 }
 
@@ -684,8 +662,8 @@ test_codex_crewmate_home_refuses_symlink_escape() {
   assert_absent "$HOME_DIR/state/$id.meta" "symlink rejection must not create task metadata"
   assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
     "symlink rejection did not return its worktree"
-  assert_grep 'kill-window -t @1' "$CASE_DIR/backend.log" \
-    "symlink rejection did not remove its task endpoint by stable window id"
+  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+    "symlink rejection did not remove its task endpoint"
   [ ! -s "$LAUNCH_LOG" ] || fail "symlink rejection must not launch Codex"
   pass "Codex spawn refuses isolated-home symlink escapes"
 }
@@ -708,7 +686,7 @@ test_codex_crewmate_home_refuses_symlinked_data_root() {
   assert_absent "$real_data/codex-crewmate" "data-root symlink rejection must not create a Codex home"
   assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
     "data-root symlink rejection did not return its worktree"
-  assert_grep 'kill-window -t @1' "$CASE_DIR/backend.log" \
+  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
     "data-root symlink rejection did not remove its task endpoint"
   [ ! -s "$LAUNCH_LOG" ] || fail "data-root symlink rejection must not launch Codex"
   pass "Codex spawn refuses a symlinked data root"
@@ -750,7 +728,7 @@ SH
   assert_absent "$HOME_DIR/state/$id.meta" "private-home preparation failure must not create task metadata"
   assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
     "private-home preparation failure did not return its worktree"
-  assert_grep 'kill-window -t @1' "$CASE_DIR/backend.log" \
+  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
     "private-home preparation failure did not remove its task endpoint"
   [ ! -s "$LAUNCH_LOG" ] || fail "private-home preparation failure must not launch Codex"
   pass "Codex spawn cleans up a failed private-home allocation"
@@ -1006,8 +984,11 @@ test_codex_home_activation_uses_open_descriptor() {
   home="$data/codex-crewmate/$(python3 "$ROOT/bin/fm-codex-home.py" --data "$data" --new-home-name)"
   result="$data/codex-crewmate/.fm-codex-activation.${home##*/}"
   token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  # The child shell must expand CODEX_HOME after activation, not in this test process.
+  # shellcheck disable=SC2016
   out=$(python3 "$ROOT/bin/fm-codex-home.py" --create-activate --data "$data" --source "$source" \
-    --profile fm-crewmate-activation-z42 --worktree /tmp/fm-codex-activation --home "$home" --result-token "$token" -- /bin/sh -c "printf 'CODEX_HOME=%s\\n' \"\$CODEX_HOME\"; sleep 2")
+    --profile fm-crewmate-activation-z42 --worktree /tmp/fm-codex-activation --home "$home" --result-token "$token" -- \
+    /bin/sh -c 'printf "CODEX_HOME=%s\\n" "$CODEX_HOME"; sleep 2')
   codex_home_value=$(printf '%s\n' "$out" | sed -n 's/^CODEX_HOME=//p' | head -n 1)
   [ -n "$codex_home_value" ] || fail "Codex activation must export CODEX_HOME to the child"
   case "$codex_home_value" in
@@ -1114,7 +1095,7 @@ test_codex_home_activation_failure_aborts_spawn() {
     "terminal activation failure did not retain its committed lease"
   assert_no_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
     "terminal activation failure must not return a committed lease implicitly"
-  assert_grep 'kill-window -t @1' "$CASE_DIR/backend.log" \
+  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
     "terminal activation failure did not remove its task endpoint"
   for task_tmp in "/tmp/fm-$id".*; do
     [ ! -e "$task_tmp" ] || fail "terminal activation failure left task temporary root: $task_tmp"
@@ -1339,7 +1320,7 @@ SH
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "Codex spawn must fail when private-home creation and return fail"
-  assert_grep 'kill-window -t @1' "$CASE_DIR/backend.log" \
+  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
     "failed spawn cleanup did not close its endpoint before returning the lease"
   assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
     "failed isolated-home cleanup did not attempt to return its worktree"
@@ -1363,7 +1344,7 @@ test_codex_spawn_abort_accepts_an_already_absent_endpoint() {
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "Codex spawn should report the isolated-home activation failure"
-  assert_grep 'kill-window -t @1' "$CASE_DIR/backend.log" \
+  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
     "failed spawn cleanup should close a live endpoint before releasing its lease"
   assert_grep 'failed_spawn=1' "$HOME_DIR/state/$id.meta" \
     "failed spawn cleanup did not retain recovery metadata after endpoint closure"
@@ -1390,7 +1371,7 @@ SH
   expect_code 1 "$status" "Codex spawn must fail when private-home creation and endpoint removal fail"
   assert_no_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
     "failed endpoint removal must not return a lease that still has a live endpoint"
-  assert_grep 'kill-window -t @1' "$CASE_DIR/backend.log" \
+  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
     "failed endpoint removal was not attempted"
   assert_grep "window=firstmate:fm-$id" "$HOME_DIR/state/$id.meta" \
     "failed endpoint removal did not record the task endpoint"

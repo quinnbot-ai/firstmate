@@ -1025,6 +1025,83 @@ test_arm_lease_bind_rejects_changed_watcher_identity() {
   pass "arm lease bind rejects watcher identity changes during acquisition"
 }
 
+test_arm_lease_binds_after_publication() {
+  local dir state watcher_pid watcher_identity
+  dir=$(make_case arm-lease-bind-before-publication)
+  state="$dir/state"
+  sleep 60 & watcher_pid=$!
+  watcher_identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$watcher_pid") \
+    || fail "could not identify watcher for pre-publication binding"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$watcher_pid" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$watcher_identity" > "$state/.watch.lock/pid-identity"
+  if FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire() { return 1; }
+    fm_arm_lease_remove_stale() { return 1; }
+    ! fm_arm_lease_claim "$2" "$3" "$4" "$5"
+  ' _ "$LIB" "$state" "$WATCH" "$watcher_pid" "$dir"; then
+    :
+  else
+    fail "arm lease claim unexpectedly published under a forced acquisition failure"
+  fi
+  [ ! -e "$state/.watch-arm.bound" ] || fail "failed lease publication bound the watcher"
+  kill "$watcher_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+  pass "arm lease does not bind the watcher before lease publication"
+}
+
+test_arm_lease_reclaim_respects_heartbeat_fence() {
+  local dir state watcher_pid arm_pid watcher_identity arm_identity ready release holder reclaim
+  dir=$(make_case arm-lease-heartbeat-fence)
+  state="$dir/state"
+  ready="$dir/heartbeat-ready"
+  release="$dir/heartbeat-release"
+  sleep 60 & watcher_pid=$!
+  sleep 60 & arm_pid=$!
+  watcher_identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$watcher_pid") \
+    || fail "could not identify watcher for heartbeat fence"
+  arm_identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$arm_pid") \
+    || fail "could not identify arm for heartbeat fence"
+  mkdir "$state/.watch.lock" "$state/.watch-arm.lease.owner"
+  ln -s "$state/.watch-arm.lease.owner" "$state/.watch-arm.lease"
+  printf '%s\n' "$watcher_pid" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$watcher_identity" > "$state/.watch.lock/pid-identity"
+  printf '%s\n' "$arm_pid" > "$state/.watch-arm.lease.owner/pid"
+  printf '%s\n' "$arm_identity" > "$state/.watch-arm.lease.owner/pid-identity"
+  printf '%s\n' "$dir" > "$state/.watch-arm.lease.owner/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch-arm.lease.owner/watcher-path"
+  printf '%s\n' "$watcher_pid" > "$state/.watch-arm.lease.owner/watcher-pid"
+  printf '%s\n' "$watcher_identity" > "$state/.watch-arm.lease.owner/watcher-identity"
+  touch -t 200001010000 "$state/.watch-arm.lease.owner/heartbeat"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2"
+    : > "$3"
+    while [ ! -e "$4" ]; do sleep 0.01; done
+    touch "$5"
+    fm_lock_release "$2"
+  ' _ "$LIB" "$state/.watch-arm.lease.heartbeat" "$ready" "$release" "$state/.watch-arm.lease.owner/heartbeat" &
+  holder=$!
+  while [ ! -e "$ready" ]; do sleep 0.01; done
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; ! fm_arm_lease_remove_stale "$2" "$3" "$4" "$5" 300' _ "$LIB" "$state" "$WATCH" "$watcher_pid" "$dir" &
+  reclaim=$!
+  sleep 0.1
+  [ -L "$state/.watch-arm.lease" ] || fail "reclaimer removed a lease while heartbeat renewal held its fence"
+  : > "$release"
+  wait "$holder" || fail "heartbeat fence holder failed"
+  wait "$reclaim" || fail "reclaimer did not reject the refreshed lease"
+  [ -L "$state/.watch-arm.lease" ] || fail "reclaimer removed a lease refreshed under its fence"
+  kill "$watcher_pid" "$arm_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+  wait "$arm_pid" 2>/dev/null || true
+  pass "arm lease reclaim cannot race a heartbeat refresh"
+}
+
 test_arm_lease_reclaims_replaced_watcher() {
   local dir state old_watcher new_watcher old_arm old_watcher_identity new_watcher_identity old_arm_identity
   dir=$(make_case arm-lease-replaced-watcher)
@@ -1111,6 +1188,7 @@ test_arm_lease_publishes_complete_owner() {
   for field in pid pid-identity fm-home watcher-path watcher-pid watcher-identity heartbeat; do
     [ -e "$state/.watch-arm.lease/$field" ] || fail "published arm lease is missing $field"
   done
+  [ -f "$state/.watch-arm.bound" ] || fail "published arm lease did not bind its watcher"
   kill "$watcher_pid" 2>/dev/null || true
   wait "$watcher_pid" 2>/dev/null || true
   pass "arm lease publishes complete metadata before its owner link"
@@ -1153,6 +1231,8 @@ test_singleton_start
 test_pid_identity_is_locale_invariant
 test_arm_lease_rejects_reused_pid_identity
 test_arm_lease_bind_rejects_changed_watcher_identity
+test_arm_lease_binds_after_publication
+test_arm_lease_reclaim_respects_heartbeat_fence
 test_arm_lease_reclaims_replaced_watcher
 test_arm_lease_publishes_complete_owner
 test_arm_lease_tick_rejects_invalid_values

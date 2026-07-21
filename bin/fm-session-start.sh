@@ -38,7 +38,8 @@
 #                       always safe, always runs.
 #   5. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
-#                       state/.afk, and a cheap per-task endpoint-liveness read:
+#                       state/.afk, bounded operations-inbox signals, and a
+#                       cheap per-task endpoint-liveness read:
 #                       read-only, always runs.
 #   6. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
@@ -224,7 +225,7 @@ print_status_tail() {
 }
 
 print_ops_inbox() {
-  local dir record path output rc shown event_count overflow count
+  local dir record path output rc shown event_count overflow
   local records
   subsection "OPS INBOX"
   dir=$(fm_ops_inbox_home_dir "$FM_HOME")
