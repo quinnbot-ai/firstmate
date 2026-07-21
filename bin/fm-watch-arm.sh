@@ -323,8 +323,8 @@ attach_and_wait() {
         cycle_log_append unknown unknown lock-replaced "attached:$HEALTHY_PID"
         attached_pid=$HEALTHY_PID
         arm_lease_follow "$attached_pid" || return 1
-        report_attached
         cycle_begin "$attached_pid" attached
+        report_attached
       fi
       sleep "$ATTACH_POLL"
       continue
@@ -333,8 +333,8 @@ attach_and_wait() {
       cycle_log_append unknown unknown attached-cycle-ended "attached:$HEALTHY_PID"
       attached_pid=$HEALTHY_PID
       arm_lease_follow "$attached_pid" || return 1
-      report_attached
       cycle_begin "$attached_pid" attached
+      report_attached
       continue
     fi
     cycle_log_append unknown unknown attached-cycle-ended none
@@ -412,8 +412,8 @@ fi
 if [ "$mode" = arm ] && healthy_watcher; then
   arm_lease_start "$HEALTHY_PID" || exit 1
   cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
-  report_attached
   cycle_begin "$HEALTHY_PID" attached
+  report_attached
   trap 'handle_attached_signal HUP 129' HUP
   trap 'handle_attached_signal TERM 143' TERM
   trap 'handle_attached_signal INT 130' INT
