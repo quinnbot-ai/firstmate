@@ -20,27 +20,29 @@ make_spawn_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
-case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
-  *"#{window_name}"*)
-    [ "${FM_FAKE_TARGET_QUERY_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_TARGET_QUERY_STATUS}"
-    if [ "$(cat "${FM_FAKE_TARGET_STATE:?}" 2>/dev/null)" != live ]; then
-      printf '%s\n' "can't find window: ${3:-unknown}" >&2
-      exit 1
-    fi
-    printf '%s\n' 'firstmate'
-    exit 0
-    ;;
-  *"#{pane_id}"*)
-    [ "${FM_FAKE_TARGET_QUERY_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_TARGET_QUERY_STATUS}"
-    if [ "$(cat "${FM_FAKE_TARGET_STATE:?}" 2>/dev/null)" != live ]; then
-      printf '%s\n' "can't find window: ${3:-unknown}" >&2
-      exit 1
-    fi
-    printf '%s\n' '@1'
-    exit 0
-    ;;
-esac
+if [ "${1:-}" = display-message ]; then
+  case "$*" in
+    *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+    *"#{window_name}"*)
+      [ "${FM_FAKE_TARGET_QUERY_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_TARGET_QUERY_STATUS}"
+      if [ "$(cat "${FM_FAKE_TARGET_STATE:?}" 2>/dev/null)" != live ]; then
+        printf '%s\n' "can't find window: ${3:-unknown}" >&2
+        exit 1
+      fi
+      printf '%s\n' "${FM_FAKE_WINDOW_NAME:-firstmate}"
+      exit 0
+      ;;
+    *"#{pane_id}"*)
+      [ "${FM_FAKE_TARGET_QUERY_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_TARGET_QUERY_STATUS}"
+      if [ "$(cat "${FM_FAKE_TARGET_STATE:?}" 2>/dev/null)" != live ]; then
+        printf '%s\n' "can't find window: ${3:-unknown}" >&2
+        exit 1
+      fi
+      printf '%s\n' '@1'
+      exit 0
+      ;;
+  esac
+fi
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
@@ -50,7 +52,12 @@ case "${1:-}" in
     [ "$status" -ne 0 ] || [ "${FM_FAKE_BACKEND_CLOSE_EFFECT:-gone}" != gone ] || printf '%s\n' gone > "${FM_FAKE_TARGET_STATE:?}"
     exit "$status"
     ;;
-  has-session|new-session|new-window)
+  new-window)
+    [ -z "${FM_FAKE_BACKEND_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_BACKEND_LOG"
+    [ "${FM_FAKE_STABLE_WINDOW_ID:-0}" != 1 ] || printf '%s\n' '@1'
+    exit 0
+    ;;
+  has-session|new-session)
     [ -z "${FM_FAKE_BACKEND_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_BACKEND_LOG"
     exit 0
     ;;
@@ -159,6 +166,8 @@ run_spawn() {
     FM_FAKE_BACKEND_CLOSE_EFFECT="${FM_FAKE_BACKEND_CLOSE_EFFECT:-gone}" \
     FM_FAKE_TREEHOUSE_CLOSE_EFFECT="${FM_FAKE_TREEHOUSE_CLOSE_EFFECT:-none}" \
     FM_FAKE_TARGET_QUERY_STATUS="${FM_FAKE_TARGET_QUERY_STATUS:-0}" \
+    FM_FAKE_STABLE_WINDOW_ID="${FM_FAKE_STABLE_WINDOW_ID:-0}" \
+    FM_FAKE_WINDOW_NAME="${FM_FAKE_WINDOW_NAME:-firstmate}" \
     FM_FAKE_TARGET_STATE="$target_state" \
     FM_FAKE_ACTIVATION_RESULT="${FM_FAKE_ACTIVATION_RESULT:-ready}" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
@@ -651,7 +660,8 @@ test_codex_crewmate_home_refuses_symlink_escape() {
   printf '%s\n' 'captain-config' > "$source_home/config.toml"
   ln -s "$source_home" "$crew_root"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(FM_FAKE_STABLE_WINDOW_ID=1 FM_FAKE_WINDOW_NAME="fm-$id" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "Codex spawn must reject a symlinked isolated home"
   assert_contains "$out" "could not prepare isolated Codex crewmate home" \
@@ -662,7 +672,7 @@ test_codex_crewmate_home_refuses_symlink_escape() {
   assert_absent "$HOME_DIR/state/$id.meta" "symlink rejection must not create task metadata"
   assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
     "symlink rejection did not return its worktree"
-  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+  assert_grep 'kill-window -t @1' "$CASE_DIR/backend.log" \
     "symlink rejection did not remove its task endpoint"
   [ ! -s "$LAUNCH_LOG" ] || fail "symlink rejection must not launch Codex"
   pass "Codex spawn refuses isolated-home symlink escapes"
