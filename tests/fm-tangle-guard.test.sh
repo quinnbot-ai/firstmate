@@ -286,6 +286,9 @@ make_spawn_lease_fakebin() {
 #!/usr/bin/env bash
 set -u
 [ -z "${FM_TREEHOUSE_REC:-}" ] || printf 'tmux %s\n' "$*" >> "$FM_TREEHOUSE_REC"
+case "${1:-}" in
+  list-windows) exit 0 ;;
+esac
 case "$*" in
   *"#{pane_current_path}"*)
     if [ -n "${FM_FAKE_PANE_PATH_SEQUENCE:-}" ]; then
@@ -300,13 +303,25 @@ case "$*" in
     fi
     exit 0
     ;;
-  *"#{pane_id}"*|*"#{window_name}"*)
+  *"#{window_name}"*)
     if [ -n "${FM_FAKE_PANE_CLOSED_FILE:-}" ] && [ -e "$FM_FAKE_PANE_CLOSED_FILE" ]; then
       printf '%s\n' "can't find window: ${4:-unknown}" >&2
       exit 1
     fi
-    case "$*" in
-      *:fm-lease-isolation-rollback-*|*:fm-lease-primary-rollback-*|*:fm-lease-setup-rollback-*|*:fm-lease-recovery-*|*:fm-lease-returned-tombstone-ff7*)
+    case "${FM_FAKE_TASK_ID:-}" in
+      lease-isolation-rollback-*|lease-primary-rollback-*|lease-setup-rollback-*|lease-recovery-*|lease-returned-tombstone-ff7)
+        printf '%s\n' "can't find window: ${4:-unknown}" >&2; exit 1 ;;
+    esac
+    printf 'fm-%s\n' "${FM_FAKE_TASK_ID:?}"
+    exit 0
+    ;;
+  *"#{pane_id}"*)
+    if [ -n "${FM_FAKE_PANE_CLOSED_FILE:-}" ] && [ -e "$FM_FAKE_PANE_CLOSED_FILE" ]; then
+      printf '%s\n' "can't find window: ${4:-unknown}" >&2
+      exit 1
+    fi
+    case "${FM_FAKE_TASK_ID:-}" in
+      lease-isolation-rollback-*|lease-primary-rollback-*|lease-setup-rollback-*|lease-recovery-*|lease-returned-tombstone-ff7)
         printf '%s\n' "can't find window: ${4:-unknown}" >&2; exit 1 ;;
     esac
     printf '%s\n' '@1'; exit 0 ;;
@@ -323,7 +338,8 @@ case "${1:-}" in
     [ -z "${FM_FAKE_PANE_CLOSED_FILE:-}" ] || : > "$FM_FAKE_PANE_CLOSED_FILE"
     exit 0
     ;;
-  list-windows|has-session|new-session|new-window) exit 0 ;;
+  new-window) printf '%s\n' '@1'; exit 0 ;;
+  list-windows|has-session|new-session) exit 0 ;;
 esac
 exit 0
 SH
@@ -359,7 +375,7 @@ run_spawn_lease_case() {
       FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
       FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
-      FM_FAKE_LEASED_WORKTREE="$lease_path" FM_TREEHOUSE_REC="$rec" \
+      FM_FAKE_LEASED_WORKTREE="$lease_path" FM_TREEHOUSE_REC="$rec" FM_FAKE_TASK_ID="$id" \
       FM_TEST_FAIL_TASK_TMP="${FM_TEST_FAIL_TASK_TMP:-0}" PATH="$fakebin:$PATH" \
       "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --scout 2>&1
   else
@@ -367,7 +383,7 @@ run_spawn_lease_case() {
       FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
       FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
       FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
-      FM_FAKE_LEASED_WORKTREE="$lease_path" FM_TREEHOUSE_REC="$rec" \
+      FM_FAKE_LEASED_WORKTREE="$lease_path" FM_TREEHOUSE_REC="$rec" FM_FAKE_TASK_ID="$id" \
       FM_TEST_FAIL_TASK_TMP="${FM_TEST_FAIL_TASK_TMP:-0}" PATH="$fakebin:$PATH" \
       "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude 2>&1
   fi
@@ -517,7 +533,7 @@ test_spawn_refusal_closes_pane_and_returns_lease() {
   [ "$(cat "$polls")" -eq 2 ] || fail "stable non-leased worktree did not reach the refusal poll"
   assert_contains "$out" "did not yield an isolated worktree" "stable non-leased worktree did not reach isolation refusal"
   assert_present "$closed" "isolation refusal left the launched pane open"
-  assert_grep "tmux kill-window -t firstmate:fm-$id" "$rec" \
+  assert_grep 'tmux kill-window -t @1' "$rec" \
     "isolation refusal did not ask the backend to close its launched pane"
   assert_grep "treehouse return --force $wt" "$rec" \
     "isolation refusal did not return its leased worktree"

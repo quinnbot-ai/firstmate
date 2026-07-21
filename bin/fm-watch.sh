@@ -511,6 +511,13 @@ pause_state_class() {  # <window> <task>
     return
   fi
   case "$crew_line" in
+    "state: stopped"*)
+      # fm-crew-state's stopped verdict is the authoritative result of a
+      # confirmed-dead agent behind an otherwise still-live endpoint.  Keep a
+      # declared external wait on the bounded pause cadence; the liveness read
+      # below still turns a live successor into an immediate surfaced look.
+      [ "$class" = none ] && class=paused
+      ;;
     "state: parked"*)
       if [ "$class" = paused ]; then
         # The latest declared paused: status explicitly overrides this parked
