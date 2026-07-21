@@ -211,6 +211,30 @@ The captain's Codex home is never modified, and Codex secondmate launches intent
 The task metadata records `codex_crewmate_home=`, and normal teardown removes that managed home after endpoint cleanup succeeds.
 If a spawn or teardown cannot confirm endpoint cleanup, firstmate preserves the metadata and managed home for a later safe recovery attempt.
 
+### Claude crewmate second-account isolation (data/claude-crewmate/)
+
+`data/claude-crewmate/profile/` is an optional, local, gitignored directory that lets Claude ship and scout crewmates authenticate as a second Anthropic account instead of sharing the captain's own seat account (`~/.claude`, or `$CLAUDE_CONFIG_DIR` when set).
+It is captain-private, populated exactly once, and never written to by any firstmate script - only by the captain's own login, run directly against that directory:
+
+```
+mkdir -p data/claude-crewmate/profile
+CLAUDE_CONFIG_DIR="$(pwd)/data/claude-crewmate/profile" claude auth login
+```
+
+Run that from the firstmate home whose crewmates should use the second account (the primary home or a secondmate home); a secondmate's own `data/claude-crewmate/profile/` is independent of the primary's.
+The feature stays completely dormant until that login succeeds - an absent `data/claude-crewmate/profile/`, or one that exists but is not logged in, leaves every Claude launch and its task metadata byte-identical to today's default-account behavior.
+`bin/fm-claude-crew-lib.sh`'s `fm_claude_crew_profile_ready` is the single readiness check, shared by `fm-spawn.sh` and `fm-dispatch-select.sh`: it runs `claude auth status --json` with `CLAUDE_CONFIG_DIR` pointed at the profile and treats anything other than a confirmed `loggedIn: true` as "not ready," never as an error that could block dispatch or spawn.
+
+For Claude ship and scout launches, once the profile is ready, `fm-spawn.sh` creates one private task home under `data/claude-crewmate/` (`bin/fm-claude-home.py`) and runs the process with that directory as `CLAUDE_CONFIG_DIR`.
+The helper copies the profile directory's contents - credentials and any cached account state - into the fresh task-private home, excluding `settings.json`, `settings.local.json`, `.mcp.json`, `CLAUDE.md`, `commands/`, `agents/`, `hooks/`, `plugins/`, and `skills/` so a crew launch can never inherit global MCP servers, plugins, or other customization surface even if the persistent profile is someday touched by more than a bare login.
+It never reads from or writes to the captain's own `~/.claude` or default `CLAUDE_CONFIG_DIR` - the whole point is account separation, and seat credentials are never copied into the crew profile.
+The task metadata records `claude_crewmate_home=`, and normal teardown removes that managed home after endpoint cleanup succeeds, mirroring the Codex managed-home safety contract above (a spawn or teardown that cannot confirm endpoint cleanup preserves the metadata and managed home for later safe recovery).
+Claude secondmate launches are unaffected and keep their existing `CLAUDE_CONFIG_DIR` behavior.
+
+When `data/claude-crewmate/profile/` is ready, `bin/fm-dispatch-select.sh`'s `quota-balanced` selection (below) also reads the Claude vendor's quota through that profile, so vendor selection compares the account crew tasks will actually burn rather than the captain's seat account; an absent or not-ready profile reads the default environment exactly as before.
+`quota-axi` 0.1.7 has no per-profile flag (`quota-axi --help` lists only `--provider`/`--json`/`--full`/`--allow-keychain-prompt`), so this is done by setting `CLAUDE_CONFIG_DIR` on the `quota-axi` invocation itself, never by forking or patching `quota-axi`.
+Verified 2026-07-20, `quota-axi` 0.1.7: `quota-axi --provider claude --json` under the default environment returns the logged-in seat's live reading (`"source": "oauth"`, fresh windows); the identical command with `CLAUDE_CONFIG_DIR` pointed at an empty, unauthenticated directory returns `"source": "cache"` with `"state": {"status": "stale", "error": "Claude sign-in required", ...}` - it does not silently fall back to reading the seat's live credentials, but it does fall back to a stale global cache rather than failing outright, which is exactly why `fm-dispatch-select.sh` only ever sets `CLAUDE_CONFIG_DIR` for this call after `fm_claude_crew_profile_ready` has already confirmed the profile is logged in, not unconditionally.
+
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
@@ -245,6 +269,7 @@ Absent `select` means use the first array element, or the only object in the sin
 An omitted model or effort means the selected harness uses its own default for that axis.
 If a selected profile carries an effort value the chosen harness does not accept, `fm-spawn.sh` records the requested `effort=` in task meta for traceability but omits the launch flag, and bootstrap reports the invalid harness/effort pair as a `CREW_DISPATCH` diagnostic when it is visible in the file.
 `quota-balanced` selection is deterministic and implemented by `bin/fm-dispatch-select.sh`, whose header owns the general-window rules, the 20 point stale-clear freshness margin, vendor-availability handling, and the degrade-to-first-element fallbacks; quota trouble never blocks dispatch.
+When this home's `data/claude-crewmate/profile/` is ready (above), the Claude candidate's quota is read through that profile instead of the default environment.
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`.
 When the file exists, bootstrap validates it with `jq`.
 Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json` plus one `BOOTSTRAP_INFO:` fact per rule and default profile.

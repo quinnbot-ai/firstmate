@@ -46,8 +46,11 @@
 # quarantine entries with the rest of the volatile state.
 # Codex ship and scout tasks record a firstmate-managed private home under
 # data/codex-crewmate in codex_crewmate_home= metadata.
-# Teardown removes that home only after endpoint cleanup succeeds.
-# When failed-spawn cleanup cannot confirm the endpoint absent, it preserves the metadata and private home for a later safe recovery attempt.
+# Claude ship and scout tasks record one the same way under data/claude-crewmate
+# in claude_crewmate_home= metadata, only when the captain has populated a
+# second-account crew profile (docs/configuration.md).
+# Teardown removes those homes only after endpoint cleanup succeeds.
+# When failed-spawn cleanup cannot confirm the endpoint absent, it preserves the metadata and private home(s) for a later safe recovery attempt.
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
@@ -149,6 +152,7 @@ PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 # absent for tasks spawned before that change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
 CODEX_CREWMATE_HOME=$(grep '^codex_crewmate_home=' "$META" | cut -d= -f2- || true)
+CLAUDE_CREWMATE_HOME=$(grep '^claude_crewmate_home=' "$META" | cut -d= -f2- || true)
 ENDPOINT_CLEANUP_PENDING=$(grep '^endpoint_cleanup_pending=' "$META" | tail -1 | cut -d= -f2- || true)
 ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
 ORCA_WORKTREE_CLEANUP_COMPLETE=$(fm_meta_get "$META" orca_worktree_cleanup_complete)
@@ -1105,10 +1109,16 @@ remove_codex_crewmate_home() {
   python3 "$FM_ROOT/bin/fm-codex-home.py" --remove --data "$DATA" --state "$STATE" --task-id "$ID" --home "$home"
 }
 
+remove_claude_crewmate_home() {
+  local home=$1
+  [ -n "$home" ] || return 0
+  python3 "$FM_ROOT/bin/fm-claude-home.py" --remove --data "$DATA" --state "$STATE" --task-id "$ID" --home "$home"
+}
+
 close_recorded_endpoint() {
   local tab_id absence_status require_confirmed_absence=0
   tab_id=$(meta_value "$META" zellij_tab_id)
-  if [ "$ENDPOINT_CLEANUP_PENDING" = 1 ] || [ -n "$CODEX_CREWMATE_HOME" ]; then
+  if [ "$ENDPOINT_CLEANUP_PENDING" = 1 ] || [ -n "$CODEX_CREWMATE_HOME" ] || [ -n "$CLAUDE_CREWMATE_HOME" ]; then
     require_confirmed_absence=1
   fi
   if [ "$BACKEND" = orca ] && [ -n "${T_ORCA:-}" ]; then
@@ -1489,6 +1499,7 @@ elif [ "$BACKEND" = herdr ] \
   echo "warning: herdr presentation journal for $ID remains quarantined; no workspace cleanup was attempted" >&2
 fi
 remove_codex_crewmate_home "$CODEX_CREWMATE_HOME" || exit 1
+remove_claude_crewmate_home "$CLAUDE_CREWMATE_HOME" || exit 1
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"

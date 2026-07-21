@@ -201,7 +201,23 @@ chmod +x "$LOOP_SCRIPT"
 
 fm_backend_herdr_send_text_line "$SUPERVISOR_TARGET" "bash '$LOOP_SCRIPT' '$LOG_FILE'" \
   || fail "could not start the supervisor-loop script in the scratch herdr pane"
-sleep 1  # let the loop start and settle
+
+# `pane run` reports once Herdr accepted the command, not once the synthetic
+# supervisor has completed its startup and drawn its composer. Wait for that
+# real ready state instead of racing the first typed-input self-check against a
+# slow shell/process launch.
+wait_for_supervisor_composer() {
+  local attempt=0 composer
+  while [ "$attempt" -lt 50 ]; do
+    composer=$(fm_backend_herdr_composer_state "$SUPERVISOR_TARGET")
+    [ "$composer" = empty ] && return 0
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  fail "supervisor-loop did not render an empty composer within 5s (last state: ${composer:-unknown})"
+}
+
+wait_for_supervisor_composer
 
 # --- herdr shim: forwards to the real binary, optionally swallows one Enter --
 REAL_HERDR=$(command -v herdr)

@@ -94,6 +94,14 @@
 # auth/model catalog files and a config.toml with no MCP servers, disabled plugins, and a per-task
 # profile that excludes project-local Codex configuration.
 # Codex secondmate launches retain their existing home and are not changed here.
+# Claude ship and scout launches receive a firstmate-managed CLAUDE_CONFIG_DIR
+# under data/claude-crewmate, each in a fresh private directory copied from the
+# captain-populated data/claude-crewmate/profile (a second Anthropic account,
+# never the captain's own ~/.claude), only when that profile exists and holds
+# credentials (bin/fm-claude-crew-lib.sh's fm_claude_crew_profile_ready). An
+# absent or credential-less profile leaves the launch and meta byte-identical
+# to today's default-account behavior. Claude secondmate launches are not
+# changed here.
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
@@ -137,6 +145,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-treehouse-lease-lib.sh"
 # shellcheck source=bin/fm-git-identity.sh
 . "$SCRIPT_DIR/fm-git-identity.sh"
+# shellcheck source=bin/fm-claude-crew-lib.sh
+. "$SCRIPT_DIR/fm-claude-crew-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -241,6 +251,7 @@ FAILED_ENDPOINT_CLEANUP=0
 TASK_TMP=
 CODEX_CREWMATE_HOME=
 CODEX_ACTIVATION_TOKEN=
+CLAUDE_CREWMATE_HOME=
 SPAWN_META_WRITTEN=0
 TMUX_WINDOW_ID=
 
@@ -342,6 +353,7 @@ write_failed_treehouse_spawn_meta() {
     echo "failed_spawn=1"
     [ "$FAILED_ENDPOINT_CLEANUP" != 1 ] || echo "endpoint_cleanup_pending=1"
     [ -z "${CODEX_CREWMATE_HOME:-}" ] || echo "codex_crewmate_home=$CODEX_CREWMATE_HOME"
+    [ -z "${CLAUDE_CREWMATE_HOME:-}" ] || echo "claude_crewmate_home=$CLAUDE_CREWMATE_HOME"
     echo "model=${MODEL:-default}"
     echo "effort=${EFFORT:-default}"
     [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
@@ -373,6 +385,20 @@ remove_codex_crewmate_home() {
   local home=${CODEX_CREWMATE_HOME:-}
   [ -n "$home" ] || return 0
   python3 "$FM_ROOT/bin/fm-codex-home.py" --remove --data "$DATA" --state "$STATE" --task-id "$ID" --home "$home"
+}
+
+refresh_claude_crewmate_home() {
+  local profile home
+  profile=$(fm_claude_crew_profile_dir "$DATA")
+  fm_claude_crew_profile_ready "$profile" || return 0
+  home=$(python3 "$FM_ROOT/bin/fm-claude-home.py" --data "$DATA" --source "$profile" --task-id "$ID" --create) || return 1
+  CLAUDE_CREWMATE_HOME="$home"
+}
+
+remove_claude_crewmate_home() {
+  local home=${CLAUDE_CREWMATE_HOME:-}
+  [ -n "$home" ] || return 0
+  python3 "$FM_ROOT/bin/fm-claude-home.py" --remove --data "$DATA" --state "$STATE" --task-id "$ID" --home "$home"
 }
 
 remove_codex_home_activation_result() {
@@ -425,7 +451,7 @@ orca_spawn_abort_cleanup() {
 }
 
 spawn_abort_cleanup() {
-  local status=$? preserve_codex_home=0 clean_codex_home=0 orca_cleanup_failed=0
+  local status=$? preserve_crew_home=0 clean_crew_home=0 orca_cleanup_failed=0
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ]; then
     HERDR_PROJECTION_ABORT_CLEANUP=0
     fm_backend_herdr_projection_cleanup_exact \
@@ -434,31 +460,39 @@ spawn_abort_cleanup() {
       "$HERDR_PROJECTION_ABORT_SEEDED_PANE" || true
   fi
   if [ -n "$TREEHOUSE_LEASE_PATH_FILE" ]; then
-    clean_codex_home=1
+    clean_crew_home=1
     treehouse_spawn_abort_cleanup "$status" || true
-    if [ "$FAILED_ENDPOINT_CLEANUP" = 1 ] && [ "$TREEHOUSE_LEASE_ACQUIRED" = 1 ]; then
-      preserve_codex_home=1
+    if [ "$FAILED_ENDPOINT_CLEANUP" = 1 ]; then
+      preserve_crew_home=1
       write_failed_treehouse_spawn_meta
     fi
   fi
   if [ "$BACKEND" != orca ] && [ "$status" -ne 0 ] && [ "$TREEHOUSE_LEASE_COMMITTED" = 1 ] && [ "$SPAWN_META_WRITTEN" = 1 ]; then
-    clean_codex_home=1
+    clean_crew_home=1
     if ! treehouse_abort_endpoint_cleanup; then
-      preserve_codex_home=1
+      preserve_crew_home=1
     fi
     write_failed_treehouse_spawn_meta
   fi
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
-    clean_codex_home=1
+    clean_crew_home=1
     orca_spawn_abort_cleanup
     orca_cleanup_failed=$ORCA_ABORT_CLEANUP_FAILED
-    [ "$FAILED_ENDPOINT_CLEANUP" != 1 ] || preserve_codex_home=1
+    [ "$FAILED_ENDPOINT_CLEANUP" != 1 ] || preserve_crew_home=1
   fi
-  if [ "$clean_codex_home" -eq 1 ] && [ "$preserve_codex_home" -eq 0 ] && ! remove_codex_crewmate_home; then
-    echo "error: could not remove isolated Codex crewmate home" >&2
-    write_failed_treehouse_spawn_meta
-  elif [ "$clean_codex_home" -eq 1 ] && [ "$preserve_codex_home" -eq 0 ]; then
-    CODEX_CREWMATE_HOME=
+  if [ "$clean_crew_home" -eq 1 ] && [ "$preserve_crew_home" -eq 0 ]; then
+    if ! remove_codex_crewmate_home; then
+      echo "error: could not remove isolated Codex crewmate home" >&2
+      write_failed_treehouse_spawn_meta
+    else
+      CODEX_CREWMATE_HOME=
+    fi
+    if ! remove_claude_crewmate_home; then
+      echo "error: could not remove isolated Claude crewmate home" >&2
+      write_failed_treehouse_spawn_meta
+    else
+      CLAUDE_CREWMATE_HOME=
+    fi
   fi
   [ "$orca_cleanup_failed" -eq 0 ] || write_failed_treehouse_spawn_meta
   [ -z "$CODEX_ACTIVATION_TOKEN" ] || remove_codex_home_activation_result 2>/dev/null || true
@@ -466,8 +500,8 @@ spawn_abort_cleanup() {
     rm -rf -- "$TASK_TMP"
   fi
   if [ "$status" -ne 0 ] && [ "$SPAWN_META_WRITTEN" = 1 ] && [ "$TREEHOUSE_LEASE_COMMITTED" != 1 ] \
-    && [ "$FAILED_ENDPOINT_CLEANUP" != 1 ] && [ "$preserve_codex_home" -eq 0 ] \
-    && [ "$orca_cleanup_failed" -eq 0 ] && [ -z "$CODEX_CREWMATE_HOME" ]; then
+    && [ "$FAILED_ENDPOINT_CLEANUP" != 1 ] && [ "$preserve_crew_home" -eq 0 ] \
+    && [ "$orca_cleanup_failed" -eq 0 ] && [ -z "$CODEX_CREWMATE_HOME" ] && [ -z "$CLAUDE_CREWMATE_HOME" ]; then
     rm -f "$STATE/$ID.meta"
   fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
@@ -1887,6 +1921,13 @@ if [ "$HARNESS" = codex ] && [ "$KIND" != secondmate ]; then
   fi
 fi
 
+if [ "$HARNESS" = claude ] && [ "$KIND" != secondmate ]; then
+  refresh_claude_crewmate_home || {
+    echo "error: could not prepare isolated Claude crewmate home" >&2
+    exit 1
+  }
+fi
+
 # Per-task temp root is atomically created with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
 # Nested (not a bare /tmp/fm-<id>.<random>/gotmp) so other per-task temp can live alongside
@@ -2045,6 +2086,7 @@ TASK_META_TMP=$(mktemp "$STATE/.${ID}.meta.XXXXXX") || {
   echo "yolo=$YOLO"
   echo "tasktmp=$TASK_TMP"
   [ -z "$CODEX_CREWMATE_HOME" ] || echo "codex_crewmate_home=$CODEX_CREWMATE_HOME"
+  [ -z "$CLAUDE_CREWMATE_HOME" ] || echo "claude_crewmate_home=$CLAUDE_CREWMATE_HOME"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   # backend= is written only for a non-default (non-tmux) backend, so the
@@ -2109,6 +2151,10 @@ if [ -n "$CODEX_CREWMATE_HOME" ]; then
   sq_codex_worktree=$(shell_quote "$WT_REAL")
   sq_codex_activation_token=$(shell_quote "$CODEX_ACTIVATION_TOKEN")
   LAUNCH="exec python3 $sq_codex_home_helper --create-activate --data $sq_codex_data --source $sq_codex_source --profile $sq_codex_crewmate_profile --worktree $sq_codex_worktree --home $sq_codex_crewmate_home --result-token $sq_codex_activation_token -- $LAUNCH"
+fi
+if [ -n "$CLAUDE_CREWMATE_HOME" ]; then
+  sq_claude_crewmate_home=$(shell_quote "$CLAUDE_CREWMATE_HOME")
+  LAUNCH="CLAUDE_CONFIG_DIR=$sq_claude_crewmate_home $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")

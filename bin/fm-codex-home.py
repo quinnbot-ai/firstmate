@@ -114,13 +114,16 @@ def copy_regular_file(source, directory_fd, name):
         os.close(source_fd)
 
 
-def remove_tree(directory_fd, name):
+def remove_tree(directory_fd, name, expected_identity=None):
     try:
         child_fd = open_directory(name, directory_fd)
     except FileNotFoundError:
         return
     try:
         opened_stat = os.fstat(child_fd)
+        opened_identity = (opened_stat.st_dev, opened_stat.st_ino)
+        if expected_identity is not None and opened_identity != expected_identity:
+            raise OSError("validated managed Codex home changed before removal")
         for child in os.listdir(child_fd):
             child_stat = os.stat(child, dir_fd=child_fd, follow_symlinks=False)
             if stat.S_ISDIR(child_stat.st_mode):
@@ -130,10 +133,7 @@ def remove_tree(directory_fd, name):
     finally:
         os.close(child_fd)
     current_stat = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-    if (current_stat.st_dev, current_stat.st_ino) != (
-        opened_stat.st_dev,
-        opened_stat.st_ino,
-    ):
+    if (current_stat.st_dev, current_stat.st_ino) != opened_identity:
         raise OSError("managed Codex home changed during removal")
     os.rmdir(name, dir_fd=directory_fd)
 
@@ -253,9 +253,10 @@ def require_task_profile(args, base_fd):
                 die(f"isolated Codex home does not belong to task {args.task_id}")
         finally:
             os.close(profile_fd)
+        home_stat = os.fstat(home_fd)
     finally:
         os.close(home_fd)
-    return True
+    return home_stat
 
 
 def launch_command(args):
@@ -467,11 +468,18 @@ def remove_home(args):
         require_directory(base_fd, "isolated Codex home")
         expected = removal_home_path(args, base_fd)
         require_unreferenced_home(args, expected)
-        if not require_task_profile(args, base_fd):
+        home_stat = require_task_profile(args, base_fd)
+        if not home_stat:
             return
-        remove_tree(base_fd, managed_home_name(args.home))
+        remove_tree(
+            base_fd,
+            managed_home_name(args.home),
+            (home_stat.st_dev, home_stat.st_ino),
+        )
     except FileNotFoundError:
         pass
+    except OSError as error:
+        die(f"could not remove isolated Codex home: {error.strerror or str(error)}")
     finally:
         os.close(base_fd)
 
