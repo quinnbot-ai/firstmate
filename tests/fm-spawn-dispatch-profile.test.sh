@@ -151,8 +151,9 @@ make_seeded_secondmate_home() {
 }
 
 run_spawn() {
-  local home=$1 wt=$2 fakebin=$3 launchlog=$4 target_state
+  local home=$1 wt=$2 fakebin=$3 launchlog=$4 target_state id
   shift 4
+  id=$1
   target_state="$(dirname "$launchlog")/target-state"
   : > "$launchlog"
   printf '%s\n' live > "$target_state"
@@ -173,6 +174,11 @@ run_spawn() {
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     HOME="$CASE_DIR/user" \
     "$SPAWN" "$@" 2>&1
+}
+
+run_spawn_stable() {
+  local id=$5
+  FM_FAKE_STABLE_WINDOW_ID=1 FM_FAKE_WINDOW_NAME="fm-$id" run_spawn "$@"
 }
 
 read_case_record() {
@@ -660,8 +666,7 @@ test_codex_crewmate_home_refuses_symlink_escape() {
   printf '%s\n' 'captain-config' > "$source_home/config.toml"
   ln -s "$source_home" "$crew_root"
 
-  out=$(FM_FAKE_STABLE_WINDOW_ID=1 FM_FAKE_WINDOW_NAME="fm-$id" \
-    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(run_spawn_stable "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "Codex spawn must reject a symlinked isolated home"
   assert_contains "$out" "could not prepare isolated Codex crewmate home" \
@@ -688,8 +693,7 @@ test_codex_crewmate_home_refuses_symlinked_data_root() {
   mv "$data_root" "$real_data"
   ln -s "$real_data" "$data_root"
 
-  out=$(FM_FAKE_STABLE_WINDOW_ID=1 FM_FAKE_WINDOW_NAME="fm-$id" \
-    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(run_spawn_stable "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "Codex spawn must reject a symlinked data root"
   assert_contains "$out" "could not prepare isolated Codex crewmate home" \
@@ -731,7 +735,7 @@ exit 74
 SH
   chmod +x "$FAKEBIN_DIR/python3"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(run_spawn_stable "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "Codex spawn must fail when its private home cannot be created"
   assert_contains "$out" "could not prepare isolated Codex crewmate home" \
@@ -739,7 +743,7 @@ SH
   assert_absent "$HOME_DIR/state/$id.meta" "private-home preparation failure must not create task metadata"
   assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
     "private-home preparation failure did not return its worktree"
-  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+  assert_grep 'kill-window -t @1' "$CASE_DIR/backend.log" \
     "private-home preparation failure did not remove its task endpoint"
   [ ! -s "$LAUNCH_LOG" ] || fail "private-home preparation failure must not launch Codex"
   pass "Codex spawn cleans up a failed private-home allocation"
@@ -1155,7 +1159,7 @@ test_codex_home_activation_failure_aborts_spawn() {
   rec=$(make_spawn_case profile-codex-home-activation codex "$id")
   read_case_record "$rec"
 
-  out=$(FM_FAKE_ACTIVATION_RESULT=failed run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(FM_FAKE_ACTIVATION_RESULT=failed run_spawn_stable "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "Codex spawn must fail when terminal activation fails"
   assert_contains "$out" "isolated Codex home activation failed" \
@@ -1166,7 +1170,7 @@ test_codex_home_activation_failure_aborts_spawn() {
     "terminal activation failure did not retain its committed lease"
   assert_no_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
     "terminal activation failure must not return a committed lease implicitly"
-  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+  assert_grep 'kill-window -t @1' "$CASE_DIR/backend.log" \
     "terminal activation failure did not remove its task endpoint"
   for task_tmp in "/tmp/fm-$id".*; do
     [ ! -e "$task_tmp" ] || fail "terminal activation failure left task temporary root: $task_tmp"
@@ -1388,10 +1392,10 @@ SH
   chmod +x "$FAKEBIN_DIR/python3"
 
   out=$(FM_FAKE_TREEHOUSE_RETURN_STATUS=75 \
-    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    run_spawn_stable "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "Codex spawn must fail when private-home creation and return fail"
-  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+  assert_grep 'kill-window -t @1' "$CASE_DIR/backend.log" \
     "failed spawn cleanup did not close its endpoint before returning the lease"
   assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
     "failed isolated-home cleanup did not attempt to return its worktree"
@@ -1412,10 +1416,10 @@ test_codex_spawn_abort_accepts_an_already_absent_endpoint() {
 
   out=$(FM_FAKE_TREEHOUSE_RETURN_STATUS=0 FM_FAKE_TREEHOUSE_CLOSE_EFFECT=gone \
     FM_FAKE_BACKEND_KILL_STATUS=76 FM_FAKE_ACTIVATION_RESULT=failed \
-    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    run_spawn_stable "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "Codex spawn should report the isolated-home activation failure"
-  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+  assert_grep 'kill-window -t @1' "$CASE_DIR/backend.log" \
     "failed spawn cleanup should close a live endpoint before releasing its lease"
   assert_grep 'failed_spawn=1' "$HOME_DIR/state/$id.meta" \
     "failed spawn cleanup did not retain recovery metadata after endpoint closure"
@@ -1437,12 +1441,12 @@ SH
   chmod +x "$FAKEBIN_DIR/python3"
 
   out=$(FM_FAKE_TREEHOUSE_RETURN_STATUS=0 FM_FAKE_BACKEND_KILL_STATUS=76 \
-    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    run_spawn_stable "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "Codex spawn must fail when private-home creation and endpoint removal fail"
   assert_no_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
     "failed endpoint removal must not return a lease that still has a live endpoint"
-  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+  assert_grep 'kill-window -t @1' "$CASE_DIR/backend.log" \
     "failed endpoint removal was not attempted"
   assert_grep "window=firstmate:fm-$id" "$HOME_DIR/state/$id.meta" \
     "failed endpoint removal did not record the task endpoint"
@@ -1845,7 +1849,7 @@ test_claude_crewmate_home_refuses_symlink_escape() {
   mv "$HOME_DIR/data/claude-crewmate" "$crew_root"
   ln -s "$crew_root" "$HOME_DIR/data/claude-crewmate"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(run_spawn_stable "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "Claude spawn must reject a symlinked isolated-home base"
   assert_contains "$out" "could not prepare isolated Claude crewmate home" \
@@ -1853,7 +1857,7 @@ test_claude_crewmate_home_refuses_symlink_escape() {
   assert_absent "$HOME_DIR/state/$id.meta" "symlink rejection must not create task metadata"
   assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
     "symlink rejection did not return its worktree"
-  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+  assert_grep 'kill-window -t @1' "$CASE_DIR/backend.log" \
     "symlink rejection did not remove its task endpoint"
   [ ! -s "$LAUNCH_LOG" ] || fail "symlink rejection must not launch Claude"
   pass "Claude spawn refuses a symlinked isolated-home base directory"

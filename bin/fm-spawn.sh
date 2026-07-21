@@ -461,9 +461,7 @@ spawn_abort_cleanup() {
   if [ -n "$TREEHOUSE_LEASE_PATH_FILE" ]; then
     clean_crew_home=1
     treehouse_spawn_abort_cleanup "$status" || true
-    # A refusal before the task metadata transaction is not a spawned task.
-    # Do not turn an unconfirmed abort cleanup into durable task metadata.
-    if [ "$FAILED_ENDPOINT_CLEANUP" = 1 ] && [ "$SPAWN_META_WRITTEN" = 1 ]; then
+    if [ "$FAILED_ENDPOINT_CLEANUP" = 1 ]; then
       preserve_crew_home=1
       write_failed_treehouse_spawn_meta
     fi
