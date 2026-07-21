@@ -469,6 +469,83 @@ test_watch_arm_reclaims_reused_pid() {
   pass "watch arm reclaims a reused-pid lock without killing its holder"
 }
 
+test_watch_arm_reclaim_keeps_replaced_lock() {
+  local dir state fakebin out old replacement replacement_identity armpid lock_pid i status
+  dir=$(make_case arm-reclaim-replaced-lock)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/arm.out"
+  mark_pr_check_migration_complete "$state"
+  cat > "$fakebin/cat" <<'SH'
+#!/usr/bin/env bash
+set -u
+count=0
+for arg in "$@"; do
+  if [ "$arg" = "${FM_RECLAIM_GATE_LOCK:?}/fm-home" ]; then
+    count=$(command cat "${FM_RECLAIM_GATE_COUNT:?}" 2>/dev/null || echo 0)
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$FM_RECLAIM_GATE_COUNT"
+    if [ "$count" -eq 4 ]; then
+      : > "$FM_RECLAIM_GATE_READY"
+      while [ ! -e "$FM_RECLAIM_GATE_RELEASE" ]; do command sleep 0.01; done
+    fi
+    break
+  fi
+done
+exec /bin/cat "$@"
+SH
+  chmod +x "$fakebin/cat"
+  sleep 300 & old=$!
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$old" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' 'stale watcher identity' > "$state/.watch.lock/pid-identity"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_RECLAIM_GATE_LOCK="$state/.watch.lock" FM_RECLAIM_GATE_COUNT="$dir/gate-count" \
+    FM_RECLAIM_GATE_READY="$dir/gate-ready" FM_RECLAIM_GATE_RELEASE="$dir/gate-release" \
+    "$WATCH_ARM" > "$out" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ] && [ ! -e "$dir/gate-ready" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$dir/gate-ready" ] || {
+    kill "$armpid" "$old" 2>/dev/null || true
+    wait "$armpid" 2>/dev/null || true
+    wait "$old" 2>/dev/null || true
+    fail "arm reclaim did not reach its replacement-lock revalidation"
+  }
+  sleep 300 & replacement=$!
+  replacement_identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$replacement") \
+    || fail "could not identify replacement lock holder"
+  rm -rf "$state/.watch.lock"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$replacement" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$replacement_identity" > "$state/.watch.lock/pid-identity"
+  touch "$state/.last-watcher-beat"
+  : > "$dir/gate-release"
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF "watcher: attached pid=$replacement" "$out" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  status=0
+  [ "$lock_pid" = "$replacement" ] || status=1
+  grep -qF "watcher: attached pid=$replacement" "$out" 2>/dev/null || status=1
+  kill "$armpid" "$replacement" "$old" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  wait "$replacement" 2>/dev/null || true
+  wait "$old" 2>/dev/null || true
+  [ "$status" -eq 0 ] || fail "arm reclaim removed or displaced the replacement lock (got '$lock_pid')"
+  pass "watch arm reclaim retains a lock replaced during revalidation"
+}
+
 test_watch_arm_retains_identity_matched_stale_lock() {
   local dir state fakebin out live identity pid status lock_pid
   dir=$(make_case arm-identity-matched-stale-lock)
@@ -1312,6 +1389,7 @@ test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
 test_watch_restart_rejects_reused_pid
 test_watch_arm_reclaims_reused_pid
+test_watch_arm_reclaim_keeps_replaced_lock
 test_watch_arm_retains_identity_matched_stale_lock
 test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover

@@ -218,29 +218,47 @@ cycle_mark_predecessor_successor() {
   fm_lock_release "$CYCLE_LOG_LOCK"
 }
 
+watcher_lock_snapshot() {
+  local lock_owner
+  if [ -L "$WATCH_LOCK" ]; then
+    lock_owner=$(fm_lock_link_owner "$WATCH_LOCK" 2>/dev/null || true)
+    [ -n "$lock_owner" ] || return 1
+  elif [ -d "$WATCH_LOCK" ]; then
+    lock_owner=$WATCH_LOCK
+  else
+    return 1
+  fi
+  printf '%s\n' "$lock_owner"
+  cat "$WATCH_LOCK/pid" "$WATCH_LOCK/fm-home" "$WATCH_LOCK/watcher-path" "$WATCH_LOCK/pid-identity" 2>/dev/null
+}
+
 clear_stale_recorded_watcher_lock() {
-  local lock_home lock_path lock_identity
+  local expected_snapshot=$1 lock_home lock_path lock_identity
   lock_home=$(cat "$WATCH_LOCK/fm-home" 2>/dev/null || true)
   lock_path=$(cat "$WATCH_LOCK/watcher-path" 2>/dev/null || true)
   lock_identity=$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
   [ "$lock_home" = "$FM_HOME" ] || return 0
   [ "$lock_path" = "$WATCH" ] || return 0
   [ -n "$lock_identity" ] || return 0
+  [ "$(watcher_lock_snapshot)" = "$expected_snapshot" ] || return 0
   fm_lock_remove_path "$WATCH_LOCK" || true
 }
 
 reclaim_identity_mismatched_recorded_watcher_lock() {
   local lock_pid snapshot
-  fm_lock_try_acquire "$WATCH_LOCK.reclaim" || return 0
+  fm_lock_try_acquire "$WATCH_LOCK.steal" || return 0
+  snapshot=$(watcher_lock_snapshot) || {
+    fm_lock_release "$WATCH_LOCK.steal"
+    return 0
+  }
   lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
   if fm_pid_alive "$lock_pid" \
     && ! fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$lock_pid" "$FM_HOME"; then
-    snapshot=$(cat "$WATCH_LOCK/pid" "$WATCH_LOCK/fm-home" "$WATCH_LOCK/watcher-path" "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
-    if [ "$snapshot" = "$(cat "$WATCH_LOCK/pid" "$WATCH_LOCK/fm-home" "$WATCH_LOCK/watcher-path" "$WATCH_LOCK/pid-identity" 2>/dev/null || true)" ]; then
-      clear_stale_recorded_watcher_lock
+    if [ "$snapshot" = "$(watcher_lock_snapshot)" ]; then
+      clear_stale_recorded_watcher_lock "$snapshot"
     fi
   fi
-  fm_lock_release "$WATCH_LOCK.reclaim"
+  fm_lock_release "$WATCH_LOCK.steal"
 }
 
 # A watcher is "healthy" iff the lock names a live process that is genuinely THIS
