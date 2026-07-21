@@ -984,6 +984,8 @@ test_codex_home_activation_uses_open_descriptor() {
   home="$data/codex-crewmate/$(python3 "$ROOT/bin/fm-codex-home.py" --data "$data" --new-home-name)"
   result="$data/codex-crewmate/.fm-codex-activation.${home##*/}"
   token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  # The child shell must expand CODEX_HOME after activation, not in this test process.
+  # shellcheck disable=SC2016
   out=$(python3 "$ROOT/bin/fm-codex-home.py" --create-activate --data "$data" --source "$source" \
     --profile fm-crewmate-activation-z42 --worktree /tmp/fm-codex-activation --home "$home" --result-token "$token" -- \
     /bin/sh -c 'printf "CODEX_HOME=%s\\n" "$CODEX_HOME"; sleep 2')

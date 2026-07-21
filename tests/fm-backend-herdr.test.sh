@@ -726,6 +726,8 @@ test_spawn_task_lock_covers_all_backend_creation_and_metadata_publication() {
   wake_source=". \"\$SCRIPT_DIR/fm-wake-lib.sh\""
   acquire_pattern="fm_lock_try_acquire \"\$SPAWN_TASK_LOCK\""
   backend_pattern="^case \"\$BACKEND\" in"
+  # This is a literal source pattern for grep, so shell expansion would invalidate the assertion.
+  # shellcheck disable=SC2016
   meta_pattern='mv "$TASK_META_TMP" "$STATE/$ID.meta"'
   assert_contains "$source" "$wake_source" \
     "fm-spawn does not load the shared lock implementation"
