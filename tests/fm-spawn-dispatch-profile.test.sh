@@ -13,6 +13,14 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
+TEST_SECURITY_BIN="$TMP_ROOT/security-bin"
+mkdir -p "$TEST_SECURITY_BIN"
+cat > "$TEST_SECURITY_BIN/security" <<'SH'
+#!/usr/bin/env bash
+exit 44
+SH
+chmod 700 "$TEST_SECURITY_BIN/security"
+PATH="$TEST_SECURITY_BIN:$PATH"
 
 make_spawn_fakebin() {
   local dir=$1 fakebin
@@ -1586,13 +1594,13 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 # fake-tmux activation dance is needed: by the time run_spawn returns, the
 # task-private home already exists on disk with real content.
 
-write_fake_claude_cli() {  # <fakebin-dir> <ready-profile-dir>
-  local fakebin=$1 ready_dir=$2
+write_fake_claude_cli() {  # <fakebin-dir>
+  local fakebin=$1
   cat > "$fakebin/claude" <<SH
 #!/usr/bin/env bash
 set -u
 if [ "\$1 \$2 \$3" = "auth status --json" ]; then
-  if [ "\${CLAUDE_CONFIG_DIR:-}" = "$ready_dir" ]; then
+  if [ -f "\${CLAUDE_CONFIG_DIR:-}/.credentials.json" ]; then
     printf '%s\n' '{"loggedIn":true}'
     exit 0
   fi
@@ -1613,7 +1621,10 @@ make_claude_crew_profile() {  # <home-dir> [ready=1]
   local home=$1 ready=${2:-1} crew_profile
   crew_profile="$home/data/claude-crewmate/profile"
   mkdir -p "$crew_profile"
-  [ "$ready" -eq 0 ] || printf '{"oauthAccount":{"emailAddress":"crew@example.invalid"}}\n' > "$crew_profile/.claude.json"
+  [ "$ready" -eq 0 ] || {
+    printf '{"hasCompletedOnboarding":true,"oauthAccount":{"emailAddress":"crew@example.invalid"}}\n' > "$crew_profile/.claude.json"
+    printf '{"claudeAiOauth":{"accessToken":"test-access","refreshToken":"test-refresh"}}\n' > "$crew_profile/.credentials.json"
+  }
   printf '%s\n' "$crew_profile"
 }
 
@@ -1645,6 +1656,9 @@ EOF
   assert_grep "claude_crewmate_home=$home_dir" "$HOME_DIR/state/$ship.meta" \
     "Claude ship metadata did not retain its isolated home for cleanup"
   assert_present "$home_dir/.claude.json" "isolated Claude home did not copy the profile's credential file"
+  assert_grep '"hasCompletedOnboarding":true' "$home_dir/.claude.json" \
+    "isolated Claude home did not retain completed onboarding state"
+  assert_present "$home_dir/.credentials.json" "isolated Claude home did not copy the file credential fixture"
   assert_present "$home_dir/backups/entry.json" "isolated Claude home did not copy nested profile content"
   [ ! -e "$home_dir/settings.json" ] || fail "isolated Claude home retained the profile's settings.json"
   [ ! -e "$home_dir/hooks" ] || fail "isolated Claude home retained the profile's hooks directory"
@@ -1678,7 +1692,7 @@ test_claude_crewmate_home_absent_profile_matches_default_behavior() {
   pass "an absent claude crew profile keeps the launch and meta byte-identical to today"
 }
 
-test_claude_crewmate_home_credential_less_profile_matches_default_behavior() {
+test_claude_crewmate_home_credential_less_profile_refuses_spawn() {
   local rec id out status launch expected crew_profile
   id=claude-crew-home-noauth-z93
   rec=$(make_spawn_case claude-crew-home-noauth claude "$id")
@@ -1688,14 +1702,14 @@ test_claude_crewmate_home_credential_less_profile_matches_default_behavior() {
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
-  expect_code 0 "$status" "Claude spawn with a credential-less crew profile should succeed unchanged"
-  launch=$(cat "$LAUNCH_LOG")
-  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
-  [ "$launch" = "$expected" ] || fail "credential-less-profile claude launch changed"$'\n'"expected: $expected"$'\n'"actual:   $launch"
-  assert_no_grep 'claude_crewmate_home=' "$HOME_DIR/state/$id.meta" \
-    "credential-less claude spawn should not record claude_crewmate_home="
+  expect_code 1 "$status" "Claude spawn with a credential-less crew profile must refuse before launch"
+  assert_contains "$out" "cannot authenticate a task-private home" \
+    "credential-less Claude profile did not explain its readiness refusal"
+  [ ! -s "$LAUNCH_LOG" ] || fail "credential-less Claude profile launched a pane"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "credential-less Claude profile should not record task metadata"
   [ -d "$crew_profile" ] || fail "test setup lost the credential-less profile directory"
-  pass "a present but credential-less claude crew profile keeps the launch and meta byte-identical to today"
+  pass "a present but credential-less claude crew profile refuses before launching a pane"
 }
 
 test_claude_crewmate_home_uses_fresh_private_directory() {
@@ -1915,7 +1929,7 @@ test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch
 test_claude_crewmate_home_used_when_profile_ready
 test_claude_crewmate_home_absent_profile_matches_default_behavior
-test_claude_crewmate_home_credential_less_profile_matches_default_behavior
+test_claude_crewmate_home_credential_less_profile_refuses_spawn
 test_claude_crewmate_home_uses_fresh_private_directory
 test_claude_crewmate_home_is_removed_at_teardown
 test_claude_crewmate_home_preserved_when_referenced_by_another_task

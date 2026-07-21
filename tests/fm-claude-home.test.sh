@@ -12,6 +12,14 @@ set -u
 
 HELPER="$ROOT/bin/fm-claude-home.py"
 TMP_ROOT=$(fm_test_tmproot fm-claude-home-tests)
+TEST_SECURITY_BIN="$TMP_ROOT/security-bin"
+mkdir -p "$TEST_SECURITY_BIN"
+cat > "$TEST_SECURITY_BIN/security" <<'SH'
+#!/usr/bin/env bash
+exit 44
+SH
+chmod 700 "$TEST_SECURITY_BIN/security"
+PATH="$TEST_SECURITY_BIN:$PATH"
 
 make_profile() {  # <dir>
   mkdir -p "$1"
@@ -28,7 +36,7 @@ test_create_excludes_customization_surface_and_copies_credentials() {
   local case_dir data source home
   case_dir="$TMP_ROOT/create-excludes"
   data="$case_dir/data"
-  source="$case_dir/profile"
+  source="$data/claude-crewmate/profile"
   mkdir -p "$data"
   make_profile "$source"
   mkdir -p "$source/backups" "$source/hooks" "$source/commands"
@@ -48,6 +56,115 @@ test_create_excludes_customization_surface_and_copies_credentials() {
   [ "$(file_mode "$home")" = 700 ] \
     || fail "isolated home directory must be mode 0700"
   pass "create copies credentials and nested content while excluding customization surface"
+}
+
+test_managed_keychain_credential_is_cloned_and_removed() {
+  local case_dir data source state
+  case_dir="$TMP_ROOT/keychain-clone"
+  data="$case_dir/data"
+  source="$data/claude-crewmate/profile"
+  state="$case_dir/state"
+  mkdir -p "$data" "$state"
+  make_profile "$source"
+
+  python3 - "$HELPER" "$data" "$source" "$state" <<'PY'
+import contextlib
+import importlib.util
+import io
+import os
+import subprocess
+import sys
+from types import SimpleNamespace
+
+helper, data, source, state = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("fm_claude_home", helper)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+calls = []
+
+def fake_security(arguments, input_bytes=None):
+    calls.append((arguments, input_bytes))
+    if arguments[0] == "find-generic-password":
+        return subprocess.CompletedProcess(arguments, 0, stdout=b"test-only-secret\n")
+    return subprocess.CompletedProcess(arguments, 0, stdout=b"")
+
+module.is_macos = lambda: True
+module.run_security = fake_security
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    module.create_home(SimpleNamespace(data=data, source=source, task_id="keychain"))
+home = out.getvalue().strip()
+expected_source = module.keychain_service(source)
+expected_target = module.keychain_service(home)
+if calls[0][0][-1] != expected_source:
+    raise AssertionError("create did not read the profile-derived Keychain service")
+if calls[1][0][-2] != expected_target:
+    raise AssertionError("create did not write the task-home-derived Keychain service")
+if calls[1][1] != b"test-only-secret\n":
+    raise AssertionError("create did not transfer the mocked credential through stdin")
+module.remove_home(SimpleNamespace(data=data, state=state, task_id="keychain", home=home))
+if calls[-1][0][0] != "delete-generic-password" or calls[-1][0][-1] != expected_target:
+    raise AssertionError("remove did not delete the task-home-derived Keychain service")
+PY
+  expect_code 0 "$?" "managed Keychain credentials must be cloned and removed without real Keychain access"
+  pass "managed Keychain credentials are cloned into and removed with task homes"
+}
+
+test_readiness_requires_a_logged_in_copy() {
+  local case_dir data profile state fakebin out result
+  case_dir="$TMP_ROOT/copy-readiness"
+  data="$case_dir/data"
+  profile="$data/claude-crewmate/profile"
+  state="$case_dir/state"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$profile" "$state" "$fakebin"
+  printf '{"hasCompletedOnboarding":true}\n' > "$profile/.claude.json"
+  printf '{"claudeAiOauth":{"accessToken":"test-access"}}\n' > "$profile/.credentials.json"
+  cat > "$fakebin/claude" <<'SH'
+#!/usr/bin/env bash
+if [ -f "${CLAUDE_CONFIG_DIR:-}/.credentials.json" ]; then
+  printf '%s\n' '{"loggedIn":true}'
+  exit 0
+fi
+printf '%s\n' '{"loggedIn":false}'
+exit 1
+SH
+  cat > "$fakebin/security" <<'SH'
+#!/usr/bin/env bash
+exit 44
+SH
+  chmod 700 "$fakebin/claude" "$fakebin/security"
+
+  out=$(PATH="$fakebin:$PATH" FM_CLAUDE_CREW_CLI="$fakebin/claude" bash -c '
+    source "$1"
+    fm_claude_crew_profile_ready "$2" "$3" "$4"
+  ' _ "$ROOT/bin/fm-claude-crew-lib.sh" "$profile" "$data" "$state" 2>&1)
+  result=$?
+  expect_code 0 "$result" "readiness should accept a logged-in copy-shaped fixture"
+  [ -z "$out" ] || fail "readiness should not print credential data"
+  find "$data/claude-crewmate" -maxdepth 1 -name '.fm-claude-home.*' | grep -q . \
+    && fail "readiness probe left a managed home behind"
+
+  rm "$profile/.credentials.json"
+  cat > "$fakebin/claude" <<SH
+#!/usr/bin/env bash
+if [ "\${CLAUDE_CONFIG_DIR:-}" = "$profile" ]; then
+  printf '%s\\n' '{"loggedIn":true}'
+  exit 0
+fi
+printf '%s\\n' '{"loggedIn":false}'
+exit 1
+SH
+  chmod 700 "$fakebin/claude"
+  PATH="$fakebin:$PATH" FM_CLAUDE_CREW_CLI="$fakebin/claude" bash -c '
+    source "$1"
+    fm_claude_crew_profile_ready "$2" "$3" "$4"
+  ' _ "$ROOT/bin/fm-claude-crew-lib.sh" "$profile" "$data" "$state"
+  result=$?
+  expect_code 1 "$result" "readiness must reject a profile whose private copy is logged out"
+  find "$data/claude-crewmate" -maxdepth 1 -name '.fm-claude-home.*' | grep -q . \
+    && fail "failed readiness probe left a managed home behind"
+  pass "readiness validates a disposable private copy instead of only the profile path"
 }
 
 test_create_refuses_symlink_in_profile() {
@@ -200,6 +317,8 @@ test_create_generates_fresh_names_across_calls() {
 }
 
 test_create_excludes_customization_surface_and_copies_credentials
+test_managed_keychain_credential_is_cloned_and_removed
+test_readiness_requires_a_logged_in_copy
 test_create_refuses_symlink_in_profile
 test_remove_refuses_when_owned_by_another_task
 test_remove_preserves_home_referenced_by_another_task

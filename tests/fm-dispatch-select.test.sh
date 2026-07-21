@@ -174,13 +174,13 @@ SH
   pass "single-object use and no-select arrays preserve first-profile selection"
 }
 
-write_fake_claude_crew_cli() {  # <fakebin-dir> <ready-config-dir>
-  local fakebin=$1 ready_dir=$2
+write_fake_claude_crew_cli() {  # <fakebin-dir>
+  local fakebin=$1
   cat > "$fakebin/claude" <<SH
 #!/usr/bin/env bash
 set -u
 if [ "\$1 \$2 \$3" = "auth status --json" ]; then
-  if [ "\${CLAUDE_CONFIG_DIR:-}" = "$ready_dir" ]; then
+  if [ -f "\${CLAUDE_CONFIG_DIR:-}/.credentials.json" ]; then
     printf '%s\n' '{"loggedIn":true}'
     exit 0
   fi
@@ -190,6 +190,11 @@ fi
 exit 1
 SH
   chmod +x "$fakebin/claude"
+  cat > "$fakebin/security" <<'SH'
+#!/usr/bin/env bash
+exit 44
+SH
+  chmod +x "$fakebin/security"
 }
 
 write_fake_quota_axi_env_sensitive() {  # <fakebin-dir> <ready-config-dir>
@@ -211,7 +216,8 @@ test_ready_crew_profile_is_used_for_claude_quota() {
   case_dir="$TMP_ROOT/profile-ready"
   home="$case_dir/home"
   profile="$home/data/claude-crewmate/profile"
-  mkdir -p "$profile"
+  mkdir -p "$profile" "$home/state"
+  printf '{"claudeAiOauth":{"accessToken":"test-access"}}\n' > "$profile/.credentials.json"
   fakebin=$(fm_fakebin "$case_dir/fake")
   write_fake_claude_crew_cli "$fakebin" "$profile"
   write_fake_quota_axi_env_sensitive "$fakebin" "$profile"
