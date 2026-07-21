@@ -40,8 +40,9 @@ The watcher fingerprints both sources, wakes immediately for a changed inbox whi
 `FM_SESSION_START_OPS_INBOX_SCAN_LIMIT` bounds retained home-event records inspected at startup, defaulting to 256, and reports an explicit sampled overflow when reached.
 `FM_OPS_INBOX_TIMEOUT` bounds each configured command invocation to 10 seconds by default.
 `FM_OPS_INBOX_OUTPUT_MAX_BYTES` bounds each configured command capture to 32768 bytes by default.
-`FM_OPS_INBOX_MARKER_LIMIT` bounds the top-level entries tracked by each watcher fingerprint, defaulting to 256.
-When that limit is exceeded, the fingerprint records an overflow sentinel and the inbox must be retained below the limit before individual changes can be surfaced again.
+`FM_OPS_INBOX_MARKER_LIMIT` bounds home-event records selected for each watcher fingerprint, defaulting to 64.
+`FM_OPS_INBOX_MARKER_SCAN_LIMIT` bounds the home-event records considered before that selection, defaulting to 256.
+When either limit is exceeded, the fingerprint records an overflow sentinel and the inbox must be retained below both limits before individual changes can be surfaced again.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
@@ -429,7 +430,8 @@ FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_OPS_INBOX_TIMEOUT=10   # seconds allowed for each configured operations-inbox command
 FM_OPS_INBOX_OUTPUT_MAX_BYTES=32768   # byte cap for each configured operations-inbox command capture
-FM_OPS_INBOX_MARKER_LIMIT=256   # top-level operations-inbox entries included in each watcher fingerprint
+FM_OPS_INBOX_MARKER_LIMIT=64   # home-event records included in each watcher fingerprint
+FM_OPS_INBOX_MARKER_SCAN_LIMIT=256   # home-event records considered before fingerprint selection
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes runs rows scanned when cross-branch attribution falls back from axi status

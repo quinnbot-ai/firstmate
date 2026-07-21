@@ -44,7 +44,8 @@ Only the watcher process touches `state/.last-watcher-beat`; no helper process c
 ## Relay leases
 
 While a harness-visible `fm-watch-arm.sh` relay waits for a watcher, it holds a home-scoped lease in `state/.watch-arm.lease` and binds that lease to the exact watcher in `state/.watch-arm.bound`.
-The binding records the home, watcher path, watcher PID, watcher identity, relay PID identity, and a relay heartbeat, so a sibling home, stale lock, or recycled PID cannot satisfy it.
+The binding records the home, watcher path, watcher PID, and watcher identity.
+The lease records the relay PID identity and heartbeat as well as the same home and watcher identity, so a sibling home, stale lock, or recycled PID cannot satisfy it.
 `docs/configuration.md` owns the relay lease timing settings.
 The watcher checks a lease only after an arm has bound itself to that exact watcher, so direct manual or test watchers remain supported.
 The complete relay lease is published before the binding, so a watcher never treats an in-flight arm claim as a lost relay.
