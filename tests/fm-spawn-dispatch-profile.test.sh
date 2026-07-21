@@ -688,7 +688,8 @@ test_codex_crewmate_home_refuses_symlinked_data_root() {
   mv "$data_root" "$real_data"
   ln -s "$real_data" "$data_root"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(FM_FAKE_STABLE_WINDOW_ID=1 FM_FAKE_WINDOW_NAME="fm-$id" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "Codex spawn must reject a symlinked data root"
   assert_contains "$out" "could not prepare isolated Codex crewmate home" \
@@ -696,7 +697,7 @@ test_codex_crewmate_home_refuses_symlinked_data_root() {
   assert_absent "$real_data/codex-crewmate" "data-root symlink rejection must not create a Codex home"
   assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
     "data-root symlink rejection did not return its worktree"
-  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+  assert_grep 'kill-window -t @1' "$CASE_DIR/backend.log" \
     "data-root symlink rejection did not remove its task endpoint"
   [ ! -s "$LAUNCH_LOG" ] || fail "data-root symlink rejection must not launch Codex"
   pass "Codex spawn refuses a symlinked data root"
