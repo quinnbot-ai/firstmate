@@ -352,6 +352,9 @@ def create_home(args):
                     try:
                         if home_path is not None:
                             remove_keychain_credential(home_path)
+                    except (OSError, SystemExit):
+                        pass
+                    try:
                         remove_tree(base_fd, name)
                     except OSError:
                         pass
@@ -431,6 +434,7 @@ def remove_home(args):
         try:
             home_fd = open_directory(name, base_fd)
         except FileNotFoundError:
+            remove_keychain_credential(expected)
             return
         try:
             try:

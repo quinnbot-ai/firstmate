@@ -316,8 +316,108 @@ test_create_generates_fresh_names_across_calls() {
   pass "create generates a fresh, uniquely named private home on every call"
 }
 
+test_create_abort_cleanup_survives_keychain_failure() {
+  local case_dir data source out
+  case_dir="$TMP_ROOT/abort-keychain"
+  data="$case_dir/data"
+  source="$data/claude-crewmate/profile"
+  mkdir -p "$data"
+  make_profile "$source"
+
+  out=$(python3 - "$HELPER" "$data" "$source" 2>&1 <<'PY'
+import importlib.util
+import os
+import subprocess
+import sys
+from types import SimpleNamespace
+
+helper, data, source = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("fm_claude_home", helper)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+def fake_security(arguments, input_bytes=None):
+    if arguments[0] == "find-generic-password":
+        return subprocess.CompletedProcess(arguments, 0, stdout=b"test-only-secret\n")
+    if arguments[0] == "delete-generic-password":
+        return subprocess.CompletedProcess(arguments, 25, stdout=b"")
+    return subprocess.CompletedProcess(arguments, 0, stdout=b"")
+
+def failing_write_file(*a, **kw):
+    raise OSError(28, "No space left on device")
+
+module.is_macos = lambda: True
+module.run_security = fake_security
+module.write_file = failing_write_file
+try:
+    module.create_home(SimpleNamespace(data=data, source=source, task_id="abort"))
+except SystemExit:
+    pass
+else:
+    raise AssertionError("create must fail when the ownership marker cannot be written")
+base = os.path.join(data, "claude-crewmate")
+leftovers = [n for n in os.listdir(base) if n.startswith(".fm-claude-home.")]
+if leftovers:
+    raise AssertionError(f"abort cleanup left a partial home behind: {leftovers}")
+PY
+)
+  expect_code 0 "$?" "abort cleanup must still delete the partial home when Keychain removal fails"
+  assert_contains "$out" "No space left on device" \
+    "the original creation failure must survive the abort cleanup"
+  pass "create abort cleanup removes the partial home even when Keychain removal fails"
+}
+
+test_remove_deletes_keychain_entry_for_absent_home() {
+  local case_dir data source state
+  case_dir="$TMP_ROOT/remove-absent-keychain"
+  data="$case_dir/data"
+  source="$data/claude-crewmate/profile"
+  state="$case_dir/state"
+  mkdir -p "$data" "$state"
+  make_profile "$source"
+
+  python3 - "$HELPER" "$data" "$source" "$state" <<'PY'
+import contextlib
+import importlib.util
+import io
+import shutil
+import subprocess
+import sys
+from types import SimpleNamespace
+
+helper, data, source, state = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("fm_claude_home", helper)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+calls = []
+
+def fake_security(arguments, input_bytes=None):
+    calls.append(arguments)
+    if arguments[0] == "find-generic-password":
+        return subprocess.CompletedProcess(arguments, 0, stdout=b"test-only-secret\n")
+    return subprocess.CompletedProcess(arguments, 0, stdout=b"")
+
+module.is_macos = lambda: True
+module.run_security = fake_security
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    module.create_home(SimpleNamespace(data=data, source=source, task_id="gone"))
+home = out.getvalue().strip()
+expected_target = module.keychain_service(home)
+shutil.rmtree(home)
+module.remove_home(SimpleNamespace(data=data, state=state, task_id="gone", home=home))
+deletes = [c for c in calls if c[0] == "delete-generic-password"]
+if not deletes or deletes[-1][-1] != expected_target:
+    raise AssertionError("remove did not delete the Keychain entry for an already-absent home")
+PY
+  expect_code 0 "$?" "removing an already-absent home must still delete its Keychain entry"
+  pass "remove deletes the task-home Keychain entry even when the home is already gone"
+}
+
 test_create_excludes_customization_surface_and_copies_credentials
 test_managed_keychain_credential_is_cloned_and_removed
+test_create_abort_cleanup_survives_keychain_failure
+test_remove_deletes_keychain_entry_for_absent_home
 test_readiness_requires_a_logged_in_copy
 test_create_refuses_symlink_in_profile
 test_remove_refuses_when_owned_by_another_task
