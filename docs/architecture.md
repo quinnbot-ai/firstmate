@@ -118,6 +118,9 @@ Codex ship and scout workers additionally run with a firstmate-managed, task-pri
 That home copies only the captain's Codex authentication and model catalog, disables plugins, carries no MCP configuration, and excludes the project-local Codex configuration.
 It is recorded as `codex_crewmate_home=` in task metadata and removed only after endpoint cleanup succeeds; the full configuration contract is in [configuration.md](configuration.md#harness-support).
 Codex secondmate launches are intentionally outside this isolation rule and retain their existing home behavior.
+When a captain-populated Claude crew profile is ready, Claude ship and scout workers likewise receive a fresh, task-private `CLAUDE_CONFIG_DIR` under `data/claude-crewmate/` instead of the captain's seat account.
+The home is recorded as `claude_crewmate_home=` and is removed only after endpoint cleanup succeeds, while an absent or unready profile leaves the Claude launch unchanged.
+Claude secondmate launches intentionally retain their existing configuration; [configuration.md](configuration.md#claude-crewmate-second-account-isolation-dataclaude-crewmate) owns the full profile and quota-selection contract.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.

@@ -136,6 +136,9 @@ First launch in a fresh worktree, or first ever on a machine, may show a trust o
 After every spawn, peek the pane within about 20 seconds.
 If such a dialog is showing, accept it from an active firstmate session using `FM_HOME=<this-firstmate-home> bin/fm-send.sh <window> --key Enter`, or the choice the dialog requires, unless `FM_HOME` is already set to the active firstmate home; verify the brief started processing.
 
+For ship and scout launches only, a ready captain-populated `data/claude-crewmate/profile/` gives Claude a fresh task-private `CLAUDE_CONFIG_DIR` instead of the captain's seat account.
+An absent or unready profile preserves the default launch and metadata exactly, and Claude secondmate launches retain their existing configuration; [`docs/configuration.md`](../../docs/configuration.md#claude-crewmate-second-account-isolation-dataclaude-crewmate) owns the profile, quota, and cleanup contract.
+
 Claude renders a predicted-next-prompt suggestion as dim/faint text inside an otherwise-empty composer after a turn completes.
 A plain `tmux capture-pane` cannot tell that ghost text apart from typed text.
 Firstmate launches every claude crewmate and secondmate with `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false`, scoped to firstmate-launched agents through `bin/fm-spawn.sh`, so it never touches the captain's global config.

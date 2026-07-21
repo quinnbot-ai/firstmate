@@ -29,7 +29,23 @@
 # quota-balanced uses quota-axi --json unless --quota-json supplies a fixture.
 # FM_DISPATCH_QUOTA_AXI overrides the quota command.
 # FM_DISPATCH_STALE_CLEAR_MARGIN overrides the default 20 point stale margin.
+#
+# When this home's captain-populated data/claude-crewmate/profile holds
+# credentials for a second Claude account (bin/fm-claude-crew-lib.sh's
+# fm_claude_crew_profile_ready; docs/configuration.md), the live quota-axi call
+# runs with CLAUDE_CONFIG_DIR pointed at that profile, so the Claude candidate's
+# numbers are the account crew tasks will actually burn, not the captain's own
+# seat account. An absent or credential-less profile reads the default
+# environment exactly as before. The --quota-json fixture path is unaffected -
+# it never shells out to quota-axi at all.
 set -u
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+# shellcheck source=bin/fm-claude-crew-lib.sh
+. "$SCRIPT_DIR/fm-claude-crew-lib.sh"
 
 STALE_CLEAR_MARGIN=${FM_DISPATCH_STALE_CLEAR_MARGIN:-20}
 SELECT_OVERRIDE=
@@ -148,7 +164,12 @@ else
     first_profile
     exit 0
   fi
-  quota_json=$("$quota_cmd" --json 2>/dev/null)
+  claude_crew_profile=$(fm_claude_crew_profile_dir "$DATA")
+  if fm_claude_crew_profile_ready "$claude_crew_profile"; then
+    quota_json=$(CLAUDE_CONFIG_DIR="$claude_crew_profile" "$quota_cmd" --json 2>/dev/null)
+  else
+    quota_json=$("$quota_cmd" --json 2>/dev/null)
+  fi
   quota_status=$?
   if [ "$quota_status" -ne 0 ]; then
     log "quota-axi exited $quota_status; using first profile"
