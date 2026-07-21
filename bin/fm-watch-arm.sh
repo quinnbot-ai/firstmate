@@ -318,6 +318,17 @@ arm_lease_follow() {  # <watcher-pid>
   arm_lease_start "$1"
 }
 
+# A successor can disappear while its relay lease is being transferred.  Do not
+# let that narrow handoff failure become a silent nonzero arm exit: it is the
+# same no-successor cycle end as an attached watcher disappearing on the next
+# poll, so retain the typed failure that the harness can surface.
+follow_attached_watcher() {  # <watcher-pid>
+  arm_lease_follow "$1" && return 0
+  cycle_log_append unknown unknown attached-relay-transfer-failed none
+  fail_unexplained_cycle
+  return 1
+}
+
 report_attached() {
   local age
   age=$(fm_path_age "$BEAT")
@@ -354,7 +365,7 @@ attach_and_wait() {
       if [ "$HEALTHY_PID" != "$attached_pid" ]; then
         cycle_log_append unknown unknown lock-replaced "attached:$HEALTHY_PID"
         attached_pid=$HEALTHY_PID
-        arm_lease_follow "$attached_pid" || return 1
+        follow_attached_watcher "$attached_pid" || return 1
         cycle_begin "$attached_pid" attached
         report_attached
       fi
@@ -364,7 +375,7 @@ attach_and_wait() {
     if wait_for_healthy_successor; then
       cycle_log_append unknown unknown attached-cycle-ended "attached:$HEALTHY_PID"
       attached_pid=$HEALTHY_PID
-      arm_lease_follow "$attached_pid" || return 1
+      follow_attached_watcher "$attached_pid" || return 1
       cycle_begin "$attached_pid" attached
       report_attached
       continue

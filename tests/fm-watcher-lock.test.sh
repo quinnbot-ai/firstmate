@@ -721,6 +721,18 @@ test_arm_attaches_and_waits_for_live_fresh_watcher() {
   done
   [ "$(cat "$state/.watch-arm.lease/watcher-pid" 2>/dev/null || true)" = "$peer" ] \
     || fail "attached arm did not transfer its relay lease to the successor watcher"
+  # The lease is published before the arm records and reports the new attached
+  # cycle.  Wait for that visible state transition before ending the successor,
+  # otherwise a fast Linux scheduler can turn this cycle-end test into a
+  # transfer-race test instead.
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF "watcher: attached pid=$peer" "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$peer" "$armout" \
+    || fail "attached arm did not report its successor transition: $(cat "$armout")"
   is_live_non_zombie "$armpid" || fail "arm exited after transferring to a healthy successor"
   # After the seed dies without a successor, the attached arm must fail loudly.
   kill "$wpid" "$peer" 2>/dev/null || true
