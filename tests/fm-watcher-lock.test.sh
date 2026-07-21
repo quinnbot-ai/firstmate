@@ -1193,6 +1193,43 @@ test_arm_lease_binds_after_publication() {
   pass "arm lease does not bind the watcher before lease publication"
 }
 
+test_arm_lease_claim_keeps_equally_identified_sibling() {
+  local dir state watcher_pid sibling_pid status
+  dir=$(make_case arm-lease-identity-collision)
+  state="$dir/state"
+  sleep 60 & watcher_pid=$!
+  sleep 60 & sibling_pid=$!
+  mkdir "$state/.watch.lock" "$state/.watch-arm.lease"
+  printf '%s\n' "$watcher_pid" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' shared-identity > "$state/.watch.lock/pid-identity"
+  printf '%s\n' "$sibling_pid" > "$state/.watch-arm.lease/pid"
+  printf '%s\n' shared-identity > "$state/.watch-arm.lease/pid-identity"
+  printf '%s\n' "$dir" > "$state/.watch-arm.lease/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch-arm.lease/watcher-path"
+  printf '%s\n' "$watcher_pid" > "$state/.watch-arm.lease/watcher-pid"
+  printf '%s\n' shared-identity > "$state/.watch-arm.lease/watcher-identity"
+  touch "$state/.watch-arm.lease/heartbeat"
+  if FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_pid_identity() { printf "%s\\n" shared-identity; }
+    fm_arm_lease_claim "$2" "$3" "$4" "$5"
+  ' _ "$LIB" "$state" "$WATCH" "$watcher_pid" "$dir"; then
+    fail "duplicate arm replaced a live sibling lease with the same identity"
+  else
+    status=$?
+    [ "$status" -eq 2 ] || fail "duplicate arm returned $status instead of retaining the live sibling lease"
+  fi
+  [ -d "$state/.watch-arm.lease" ] || fail "duplicate arm removed the live sibling lease"
+  [ "$(cat "$state/.watch-arm.lease/pid")" = "$sibling_pid" ] \
+    || fail "duplicate arm replaced the live sibling lease owner"
+  kill "$watcher_pid" "$sibling_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+  wait "$sibling_pid" 2>/dev/null || true
+  pass "arm lease claim retains a live sibling despite an identity collision"
+}
+
 test_arm_lease_reclaim_respects_heartbeat_fence() {
   local dir state watcher_pid arm_pid watcher_identity arm_identity ready release holder reclaim
   dir=$(make_case arm-lease-heartbeat-fence)
@@ -1372,6 +1409,7 @@ test_pid_identity_is_locale_invariant
 test_arm_lease_rejects_reused_pid_identity
 test_arm_lease_bind_rejects_changed_watcher_identity
 test_arm_lease_binds_after_publication
+test_arm_lease_claim_keeps_equally_identified_sibling
 test_arm_lease_reclaim_respects_heartbeat_fence
 test_arm_lease_reclaims_replaced_watcher
 test_arm_lease_publishes_complete_owner
