@@ -229,6 +229,20 @@ clear_stale_recorded_watcher_lock() {
   fm_lock_remove_path "$WATCH_LOCK" || true
 }
 
+reclaim_identity_mismatched_recorded_watcher_lock() {
+  local lock_pid snapshot
+  fm_lock_try_acquire "$WATCH_LOCK.reclaim" || return 0
+  lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+  if fm_pid_alive "$lock_pid" \
+    && ! fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$lock_pid" "$FM_HOME"; then
+    snapshot=$(cat "$WATCH_LOCK/pid" "$WATCH_LOCK/fm-home" "$WATCH_LOCK/watcher-path" "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
+    if [ "$snapshot" = "$(cat "$WATCH_LOCK/pid" "$WATCH_LOCK/fm-home" "$WATCH_LOCK/watcher-path" "$WATCH_LOCK/pid-identity" 2>/dev/null || true)" ]; then
+      clear_stale_recorded_watcher_lock
+    fi
+  fi
+  fm_lock_release "$WATCH_LOCK.reclaim"
+}
+
 # A watcher is "healthy" iff the lock names a live process that is genuinely THIS
 # home's watcher (the identity match guards against a recycled/reused pid) AND the
 # liveness beacon is fresh within GRACE. Sets HEALTHY_PID on success. This is the
@@ -403,6 +417,10 @@ if [ "$mode" = restart ]; then
       clear_stale_recorded_watcher_lock
     fi
   fi
+fi
+
+if [ "$mode" = arm ]; then
+  reclaim_identity_mismatched_recorded_watcher_lock
 fi
 
 # If a genuinely live+fresh watcher already holds the lock, do not start a second

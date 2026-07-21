@@ -436,6 +436,69 @@ test_watch_restart_rejects_reused_pid() {
   pass "watch restart refuses to signal a reused pid"
 }
 
+test_watch_arm_reclaims_reused_pid() {
+  local dir state fakebin out live pid i lock_pid
+  dir=$(make_case arm-reused-pid)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/arm.out"
+  mark_pr_check_migration_complete "$state"
+  sleep 300 &
+  live=$!
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$live" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "stale watcher identity" > "$state/.watch.lock/pid-identity"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$out" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  { [ -n "$lock_pid" ] && [ "$lock_pid" != "$live" ] && kill -0 "$lock_pid" 2>/dev/null; } \
+    || fail "arm did not replace stale reused-pid lock with a live watcher (got '$lock_pid')"
+  grep -F "watcher: started pid=$lock_pid" "$out" >/dev/null || fail "arm did not report the fresh watcher it confirmed"
+  is_live_non_zombie "$live" || fail "arm killed a reused unrelated pid"
+  kill "$pid" "$lock_pid" "$live" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "watch arm reclaims a reused-pid lock without killing its holder"
+}
+
+test_watch_arm_retains_identity_matched_stale_lock() {
+  local dir state fakebin out live identity pid status lock_pid
+  dir=$(make_case arm-identity-matched-stale-lock)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/arm.out"
+  mark_pr_check_migration_complete "$state"
+  sleep 300 &
+  live=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live") \
+    || fail "could not identify identity-matched stale lock holder"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$live" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  touch -t 200001010000 "$state/.last-watcher-beat"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_GUARD_GRACE=1 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 80
+  status=$?
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "arm did not reject an identity-matched stale watcher (status $status)"
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  [ "$lock_pid" = "$live" ] || fail "arm reclaimed an identity-matched stale watcher lock (got '$lock_pid')"
+  is_live_non_zombie "$live" || fail "arm killed the identity-matched stale watcher holder"
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "watch arm retains an identity-matched stale watcher lock"
+}
+
 test_watch_restart_attaches_to_healthy_peer() {
   local dir state fakebin out peer identity armpid status i
   dir=$(make_case restart-healthy-peer)
@@ -1248,6 +1311,8 @@ test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
 test_watch_restart_rejects_reused_pid
+test_watch_arm_reclaims_reused_pid
+test_watch_arm_retains_identity_matched_stale_lock
 test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover
 test_arm_self_eviction_is_loud_without_successor
