@@ -75,13 +75,17 @@ run_review_diff() {
     "$REVIEW_DIFF" "$@"
 }
 
+pr_url() {
+  printf 'file://%s/origin.git/pull/9' "$1"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local() {
   local case_dir out
   case_dir=$(make_case pr-head-sha)
   stale_and_pr_commits "$case_dir"
   # No remote pull ref: fetch fails, recorded pr_head is the offline fallback.
   write_task_meta "$case_dir" \
-    "pr=https://github.com/example/repo/pull/9" \
+    "pr=$(pr_url "$case_dir")" \
     "pr_head=$PR_SHA"
 
   out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
@@ -101,7 +105,7 @@ test_stale_recorded_pr_head_loses_to_fetched_pull_head() {
   # Remote PR head is newer (pipeline fix); meta still points at the older local tip.
   git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/pull/9/head"
   write_task_meta "$case_dir" \
-    "pr=https://github.com/example/repo/pull/9" \
+    "pr=$(pr_url "$case_dir")" \
     "pr_head=$stale_sha"
 
   out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
@@ -122,7 +126,7 @@ test_pr_meta_fetches_pull_head_without_recorded_sha() {
   case_dir=$(make_case pr-fetch)
   stale_and_pr_commits "$case_dir"
   git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/pull/9/head"
-  write_task_meta "$case_dir" "pr=https://github.com/example/repo/pull/9"
+  write_task_meta "$case_dir" "pr=$(pr_url "$case_dir")"
 
   out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
 
@@ -130,6 +134,9 @@ test_pr_meta_fetches_pull_head_without_recorded_sha() {
   assert_not_contains "$out" 'stale-local' "pr-fetch: diff must not use the stale local branch"
   assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
     "pr-fetch: should not warn when fetch succeeds"
+  if git -C "$case_dir/wt" show-ref --verify --quiet 'refs/fm-review/pull/9/head'; then
+    fail "pr-fetch: review fetch must not create a shared pull-head ref"
+  fi
   pass "fm-review-diff fetches refs/pull/<n>/head when pr_head= is absent"
 }
 
@@ -154,7 +161,7 @@ test_unreachable_pr_head_falls_back_with_warning() {
   stale_and_pr_commits "$case_dir"
   git -C "$case_dir/wt" remote remove origin
   write_task_meta "$case_dir" \
-    "pr=https://github.com/example/repo/pull/9" \
+    "pr=$(pr_url "$case_dir")" \
     "pr_head=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 
   set +e
@@ -169,8 +176,60 @@ test_unreachable_pr_head_falls_back_with_warning() {
   pass "fm-review-diff falls back to local branch with a warning when PR head is unreachable"
 }
 
+test_pr_meta_fetches_from_matching_remote_not_origin() {
+  local case_dir out stale_sha
+  case_dir=$(make_case matching-remote)
+  stale_and_pr_commits "$case_dir"
+  stale_sha=$(git -C "$case_dir/wt" rev-parse fm/task-x1)
+  git init -q --bare "$case_dir/upstream.git"
+  git -C "$case_dir/upstream.git" symbolic-ref HEAD refs/heads/main
+  git -C "$case_dir/wt" config "url.file://$case_dir/upstream.git.insteadOf" 'ssh://git@example.invalid/owner/repo.git'
+  git -C "$case_dir/wt" remote add upstream 'ssh://git@example.invalid/owner/repo.git'
+  git -C "$case_dir/wt" push -q upstream "main:refs/heads/main"
+  git -C "$case_dir/wt" push -q upstream "pr-head-tmp:refs/pull/9/head"
+  git -C "$case_dir/wt" push -q origin "fm/task-x1:refs/pull/9/head"
+  write_task_meta "$case_dir" \
+    'pr=https://reviewer@example.invalid/owner/repo/pull/9' \
+    "pr_head=$stale_sha"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+pr-fixed' "matching-remote: diff must use the PR repository remote"
+  assert_not_contains "$out" 'stale-local' "matching-remote: origin's same-number PR must not replace the PR head"
+  pass "fm-review-diff matches SSH URI remotes and PR URLs with userinfo"
+}
+
+test_pr_meta_uses_matching_remote_for_base() {
+  local case_dir out
+  case_dir=$(make_case matching-base-remote)
+  git init -q --bare "$case_dir/upstream.git"
+  git -C "$case_dir/upstream.git" symbolic-ref HEAD refs/heads/main
+  git -C "$case_dir/wt" remote add upstream "$case_dir/upstream.git"
+  git -C "$case_dir/wt" checkout -q -b upstream-base-tmp main
+  printf 'upstream-base\n' > "$case_dir/wt/upstream.txt"
+  git -C "$case_dir/wt" add upstream.txt
+  git -C "$case_dir/wt" commit -qm "upstream base"
+  git -C "$case_dir/wt" push -q upstream "upstream-base-tmp:main"
+  git -C "$case_dir/wt" checkout -q -b upstream-pr-tmp upstream-base-tmp
+  printf 'upstream-pr\n' > "$case_dir/wt/pr.txt"
+  git -C "$case_dir/wt" add pr.txt
+  git -C "$case_dir/wt" commit -qm "upstream PR"
+  git -C "$case_dir/wt" push -q upstream "upstream-pr-tmp:refs/pull/9/head"
+  git -C "$case_dir/wt" checkout -q fm/task-x1
+  write_task_meta "$case_dir" "pr=file://$case_dir/upstream.git/pull/9"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+upstream-pr' "matching-base-remote: diff must include the upstream PR change"
+  assert_not_contains "$out" '+upstream-base' "matching-base-remote: diff must not compare an upstream PR against origin's base"
+  assert_contains "$out" 'diff base: upstream/main' "matching-base-remote: diff must name the PR repository base"
+  pass "fm-review-diff fetches the comparison base from the repository named by pr="
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
+test_pr_meta_fetches_from_matching_remote_not_origin
+test_pr_meta_uses_matching_remote_for_base

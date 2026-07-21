@@ -83,10 +83,31 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
 fm_supervision_status "$STATE" "$GRACE"
 [ "$FM_SUP_IN_FLIGHT" -gt 0 ] || exit 0
-fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && exit 0
+watcher_healthy=0
+fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && watcher_healthy=1
+arm_healthy=0
+if [ "$watcher_healthy" -eq 1 ]; then
+  fm_arm_lease_healthy "$STATE" "$WATCH" "$FM_WATCHER_HEALTHY_PID" "$FM_HOME" "$GRACE" && arm_healthy=1
+fi
+checkpoint_healthy=0
+if [ "${FM_TURNEND_HARNESS:-}" = codex ] \
+  && [ "$(fm_path_age "$STATE/.last-watcher-checkpoint")" -lt "$GRACE" ]; then
+  checkpoint_healthy=1
+fi
 
 afk=0
 [ -e "$STATE/.afk" ] && afk=1
+daemon_healthy=1
+if [ "$afk" -eq 1 ]; then
+  fm_daemon_lease_healthy "$STATE" "$SCRIPT_DIR/fm-supervise-daemon.sh" "$FM_HOME" "$GRACE" || daemon_healthy=0
+fi
+if [ "$afk" -eq 1 ] && [ "$watcher_healthy" -eq 1 ] && [ "$daemon_healthy" -eq 1 ]; then
+  exit 0
+fi
+if [ "$afk" -eq 0 ] \
+  && { { [ "$watcher_healthy" -eq 1 ] && [ "$arm_healthy" -eq 1 ]; } || [ "$checkpoint_healthy" -eq 1 ]; }; then
+  exit 0
+fi
 x_mode=0
 [ -f "$CONFIG/x-mode.env" ] && x_mode=1
 REASON=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
@@ -95,7 +116,13 @@ rule='━━━━━━━━━━━━━━━━━━━━━━━━�
 {
   printf '●%s\n' "$rule"
   printf '●  TURN WOULD END BLIND - SUPERVISION IS OFF\n'
-  printf '●  %s task(s) in flight, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_IN_FLIGHT" "$FM_SUP_BEACON_DESC"
+  if [ "$watcher_healthy" -ne 1 ]; then
+    printf '●  %s task(s) in flight, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_IN_FLIGHT" "$FM_SUP_BEACON_DESC"
+  elif [ "$afk" -eq 0 ] && [ "$arm_healthy" -ne 1 ]; then
+    printf '●  %s task(s) in flight, but the healthy watcher has no fresh identity-matched watch-arm relay lease.\n' "$FM_SUP_IN_FLIGHT"
+  else
+    printf '●  %s task(s) in flight, but away mode has no fresh identity-matched sub-supervisor daemon lease.\n' "$FM_SUP_IN_FLIGHT"
+  fi
   printf '●  %s\n' "$REASON"
   printf '●%s\n' "$rule"
 } >&2

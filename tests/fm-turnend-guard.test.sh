@@ -167,9 +167,9 @@ make_secondmate_linked_home_dir() {
 }
 
 run_hook() {
-  local dir=$1 stop_active=$2 home
+  local dir=$1 stop_active=$2 harness=${3:-claude} home
   home=$(cd "$dir" && pwd)
-  printf '{"stop_hook_active":%s}' "$stop_active" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
+  printf '{"stop_hook_active":%s}' "$stop_active" | CLAUDECODE=1 FM_HOME="$home" FM_TURNEND_HARNESS="$harness" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
 }
 
 nonexistent_pid() {
@@ -194,6 +194,21 @@ record_watcher_lock() {
   printf '%s\n' "$root" > "$dir/state/.watch.lock/fm-home"
   printf '%s\n' "$bin_dir/fm-watch.sh" > "$dir/state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$dir/state/.watch.lock/pid-identity"
+}
+
+record_arm_lease() {
+  local dir=$1 watcher_pid=$2 arm_pid=$3 watcher_id=$4 arm_id=$5 root bin_dir lease
+  root=$(cd "$dir" && pwd)
+  bin_dir=$(cd "$dir/bin" && pwd)
+  lease="$dir/state/.watch-arm.lease"
+  mkdir -p "$lease"
+  printf '%s\n' "$arm_pid" > "$lease/pid"
+  printf '%s\n' "$arm_id" > "$lease/pid-identity"
+  printf '%s\n' "$root" > "$lease/fm-home"
+  printf '%s\n' "$bin_dir/fm-watch.sh" > "$lease/watcher-path"
+  printf '%s\n' "$watcher_pid" > "$lease/watcher-pid"
+  printf '%s\n' "$watcher_id" > "$lease/watcher-identity"
+  touch "$lease/heartbeat"
 }
 
 test_hook_silent_when_no_work_in_flight() {
@@ -230,7 +245,7 @@ test_hook_blocks_when_dead_lock_has_fresh_beacon() {
 }
 
 test_hook_silent_with_live_lock_and_fresh_beacon() {
-  local dir pid identity out status
+  local dir pid arm_pid identity arm_identity out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-live-lock-fresh")
   : > "$dir/state/task1.meta"
   sleep 60 &
@@ -241,13 +256,58 @@ test_hook_silent_with_live_lock_and_fresh_beacon() {
     fail "could not identify live watcher holder"
   }
   record_watcher_lock "$dir" "$pid" "$identity"
+  sleep 60 & arm_pid=$!
+  arm_identity=$(watcher_identity "$dir" "$arm_pid") || fail "could not identify live arm holder"
+  record_arm_lease "$dir" "$pid" "$arm_pid" "$identity" "$arm_identity"
   touch "$dir/state/.last-watcher-beat"
   out=$(run_hook "$dir" false); status=$?
   kill "$pid" 2>/dev/null || true
+  kill "$arm_pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
+  wait "$arm_pid" 2>/dev/null || true
   expect_code 0 "$status" "hook must exit 0 with a live identity-matched watcher lock and fresh beacon"
   [ -z "$out" ] || fail "hook produced output despite a live fresh watcher lock: $out"
   pass "fm-turnend-guard: silent no-op with a live watcher lock and fresh beacon"
+}
+
+test_hook_blocks_when_live_watcher_has_dead_arm_lease() {
+  local dir watcher_pid arm_pid watcher_id out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-live-watcher-dead-arm")
+  : > "$dir/state/task1.meta"
+  sleep 60 & watcher_pid=$!
+  watcher_id=$(watcher_identity "$dir" "$watcher_pid") || fail "could not identify live watcher holder"
+  arm_pid=$(nonexistent_pid)
+  record_watcher_lock "$dir" "$watcher_pid" "$watcher_id"
+  record_arm_lease "$dir" "$watcher_pid" "$arm_pid" "$watcher_id" 'dead arm identity'
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_hook "$dir" false); status=$?
+  kill "$watcher_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+  expect_code 2 "$status" "hook must block when a healthy watcher has a dead arm relay lease"
+  assert_contains "$out" 'watch-arm relay lease' "arm relay failure must explain why turn end was blocked"
+  pass "fm-turnend-guard: blocks on a dead arm with a still-live watcher"
+}
+
+test_hook_allows_recent_codex_checkpoint() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-codex-checkpoint")
+  : > "$dir/state/task1.meta"
+  touch "$dir/state/.last-watcher-checkpoint"
+  out=$(run_hook "$dir" false codex); status=$?
+  expect_code 0 "$status" "guard must accept a recent Codex checkpoint"
+  [ -z "$out" ] || fail "Codex checkpoint guard produced output: $out"
+  pass "fm-turnend-guard: accepts a recent Codex foreground checkpoint"
+}
+
+test_hook_rejects_recent_checkpoint_for_non_codex() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-noncodex-checkpoint")
+  : > "$dir/state/task1.meta"
+  touch "$dir/state/.last-watcher-checkpoint"
+  out=$(run_hook "$dir" false claude); status=$?
+  expect_code 2 "$status" "guard must not treat a checkpoint as a Claude relay"
+  assert_contains "$out" "TURN WOULD END BLIND" "non-Codex checkpoint bypassed the guard"
+  pass "fm-turnend-guard: checkpoint marker is Codex-specific"
 }
 
 test_hook_blocks_with_live_lock_and_stale_beacon() {
@@ -391,7 +451,7 @@ test_hook_secondmate_loop_guard_allows_retry() {
 # harness property recorded empirically in docs/turnend-guard.md; it needs a live
 # session and cannot be a hermetic CI assertion.
 test_hook_secondmate_reinvoke_recovery_loop() {
-  local dir pid identity out status
+  local dir pid arm_pid identity arm_identity out status
   dir=$(make_secondmate_dir "$TMP_ROOT/hook-secondmate-reinvoke")
   : > "$dir/state/child1.meta"
   sleep 60 &
@@ -402,6 +462,9 @@ test_hook_secondmate_reinvoke_recovery_loop() {
     fail "could not identify live watcher holder"
   }
   record_watcher_lock "$dir" "$pid" "$identity"
+  sleep 60 & arm_pid=$!
+  arm_identity=$(watcher_identity "$dir" "$arm_pid") || fail "could not identify secondmate arm holder"
+  record_arm_lease "$dir" "$pid" "$arm_pid" "$identity" "$arm_identity"
   touch "$dir/state/.last-watcher-beat"
   out=$(run_hook "$dir" false); status=$?
   expect_code 0 "$status" "secondmate turn must end silently while its watcher is live (Stop #1)"
@@ -414,7 +477,9 @@ test_hook_secondmate_reinvoke_recovery_loop() {
   # lands. On the re-invoked recovery turn the secondmate must re-arm; if it did
   # not, the guard blocks that turn's end and forces the re-arm (Stop #2).
   kill "$pid" 2>/dev/null || true
+  kill "$arm_pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
+  wait "$arm_pid" 2>/dev/null || true
   rm -rf "$dir/state/.watch.lock"
   : > "$dir/state/child2.meta"
   touch "$dir/state/.last-watcher-beat"
@@ -618,6 +683,7 @@ test_codex_hook_invokes_shared_guard() {
   assert_contains "$command" 'pwd -P' "codex hook must anchor from the hook process working directory"
   assert_contains "$command" '.codex/hooks.json' "codex hook must verify the hook-loaded firstmate root"
   assert_contains "$command" 'fm-turnend-guard.sh' "codex hook must invoke the shared guard"
+  assert_contains "$command" 'FM_TURNEND_HARNESS=codex' "codex hook must identify the checkpoint supervision mode"
   assert_not_contains "$command" '.cwd' "codex hook must not use payload cwd to select the guard executable"
   pass ".codex/hooks.json: Stop hook invokes the shared primary guard"
 }
@@ -910,6 +976,9 @@ test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_when_dead_lock_has_fresh_beacon
 test_hook_silent_with_live_lock_and_fresh_beacon
+test_hook_blocks_when_live_watcher_has_dead_arm_lease
+test_hook_allows_recent_codex_checkpoint
+test_hook_rejects_recent_checkpoint_for_non_codex
 test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_when_unhealthy_in_primary
 test_hook_blocks_from_fm_home_state

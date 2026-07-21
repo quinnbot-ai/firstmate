@@ -13,7 +13,8 @@ A shell background operator, pipeline, redirection, wrapper, or unrelated comman
 The seatbelt rejects those command shapes before execution.
 
 This policy is not a post-arm liveness guarantee.
-`bin/fm-guard.sh`, `bin/fm-turnend-guard.sh`, the watcher lock, and the watcher beacon still prove whether supervision is healthy after an allowed call.
+`bin/fm-guard.sh` and `bin/fm-turnend-guard.sh` still prove whether supervision is healthy after an allowed call.
+The latter also requires the current mode's identity-checked relay or daemon lease; [watcher-continuity.md](watcher-continuity.md#relay-leases) owns that contract.
 
 ## Claude continuity gate
 

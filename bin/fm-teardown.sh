@@ -54,6 +54,11 @@
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
+# A Herdr presentation journal never authorizes cleanup. Teardown still closes
+# only the exact task pane from ordinary endpoint metadata and never calls
+# `workspace close`. It retires the non-authoritative journal only when a
+# read-only token correlation agrees with that endpoint and pane closure is
+# confirmed. Otherwise the journal stays quarantined for manual inspection.
 # Secondmates (kind=secondmate in meta) are retired explicitly. Normal
 # teardown refuses while their home has in-flight crewmate meta files; --force
 # is the approved discard path that prevalidates child removal targets, discards
@@ -134,7 +139,7 @@ FM_LOCK_LOG_PREFIX=teardown
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
-T=$(grep '^window=' "$META" | cut -d= -f2-)
+T=$(fm_backend_target_of_meta "$META")
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 BACKEND=$(fm_backend_of_meta "$META")
 if [ "$BACKEND" = orca ]; then
@@ -1426,6 +1431,26 @@ fi
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 begin_treehouse_lease_return_transaction || exit 1
 prepare_treehouse_lease_handoff_return || exit 1
+HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
+HERDR_PRESENTATION_RETIRE_CANDIDATE=0
+HERDR_PRESENTATION_SESSION=
+HERDR_PRESENTATION_PANE=
+if [ "$BACKEND" = herdr ] \
+   && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
+  fm_backend_source herdr || true
+  HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
+  HERDR_PRESENTATION_WORKSPACE=$(meta_value "$META" herdr_workspace_id)
+  HERDR_PRESENTATION_PANE=$(meta_value "$META" herdr_pane_id)
+  if [ -n "$HERDR_PRESENTATION_SESSION" ] \
+     && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
+     && [ -n "$HERDR_PRESENTATION_PANE" ] \
+     && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ] \
+     && fm_backend_herdr_projection_endpoint_matches_journal \
+       "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
+       "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
+    HERDR_PRESENTATION_RETIRE_CANDIDATE=1
+  fi
+fi
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ -n "$ORCA_WORKTREE_ID" ] && [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
@@ -1463,6 +1488,16 @@ finish_treehouse_lease_handoff_return || exit 1
 if [ "$BACKEND" != orca ]; then
   close_recorded_endpoint || exit 1
 fi
+if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
+  if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then
+    rm -f "$HERDR_PRESENTATION_JOURNAL"
+  else
+    echo "warning: exact herdr task-pane close could not be confirmed for $ID; retaining the presentation journal and attempting no workspace cleanup" >&2
+  fi
+elif [ "$BACKEND" = herdr ] \
+     && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
+  echo "warning: herdr presentation journal for $ID remains quarantined; no workspace cleanup was attempted" >&2
+fi
 remove_codex_crewmate_home "$CODEX_CREWMATE_HOME" || exit 1
 remove_claude_crewmate_home "$CLAUDE_CREWMATE_HOME" || exit 1
 if [ "$KIND" = secondmate ]; then
@@ -1477,7 +1512,7 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -z "$TASK_TMP" ] || rm -rf -- "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
-rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
+rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
 rm -f "$STATE/$ID.meta"
 if [ -n "$TREEHOUSE_LEASE_HANDOFF" ]; then
   rm -f "$TREEHOUSE_LEASE_HANDOFF" || \

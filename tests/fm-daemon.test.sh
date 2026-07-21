@@ -75,6 +75,122 @@ test_afk_start_reclaims_stale_daemon_lock_reused_pid() {
   pass "fm-afk-start.sh reclaims stale daemon locks whose live pid identity no longer matches"
 }
 
+test_afk_start_reclaims_stale_daemon_lease() {
+  local dir state out status lock owner daemon_pid
+  dir=$(make_supercase afk-start-stale-daemon-lease)
+  state="$dir/state"
+  lock="$state/.supervise-daemon.lock"
+  owner="$lock.owner"
+  sleep 60 & daemon_pid=$!
+  mkdir "$owner"
+  ln -s "$owner" "$lock"
+  printf '%s\n' "$daemon_pid" > "$owner/pid"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$1"; fm_pid_identity "$2" > "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$daemon_pid" "$owner/pid-identity"
+  printf '%s\n' "$dir" > "$owner/fm-home"
+  printf '%s\n' "$DAEMON" > "$owner/daemon-path"
+  touch -t 200001010000 "$owner/heartbeat"
+
+  out=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported "$AFK_START" 2>&1)
+  status=$?
+
+  [ "$status" -ne 0 ] || fail "fm-afk-start.sh should replace a stale daemon lease"
+  assert_contains "$out" "starting supervise daemon" "fm-afk-start.sh treated a stale daemon lease as healthy"
+  assert_not_contains "$out" "daemon already running" "fm-afk-start.sh refreshed a stale daemon lease"
+  [ ! -e "$lock" ] && [ ! -L "$lock" ] || fail "fm-afk-start.sh retained the stale daemon lease lock"
+  kill "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  pass "fm-afk-start.sh replaces an identity-matched daemon lease with a stale heartbeat"
+}
+
+test_daemon_lease_release_cleans_owner_metadata() {
+  local dir state lock owner
+  dir=$(make_supercase daemon-lease-cleanup)
+  state="$dir/state"
+  lock="$state/.supervise-daemon.lock"
+  . "$ROOT/bin/fm-wake-lib.sh"
+  fm_lock_try_acquire "$lock" || fail "could not acquire daemon lease fixture"
+  owner=$(fm_lock_link_owner "$lock") || fail "could not resolve daemon lease owner"
+  fm_pid_identity "${BASHPID:-$$}" > "$owner/pid-identity" || fail "could not identify daemon lease fixture"
+  fm_daemon_lease_publish "$state" "$DAEMON" "$dir" "$lock" "$owner" || fail "could not publish daemon lease fixture"
+  fm_lock_release "$lock"
+  [ ! -e "$lock" ] && [ ! -L "$lock" ] || fail "daemon lease link remained after release"
+  [ ! -d "$owner" ] || fail "daemon lease owner remained after release"
+  pass "daemon lease release removes its owner metadata and directory"
+}
+
+test_daemon_lease_heartbeat_rejects_owner_handoff() {
+  local dir state lock owner identity successor successor_identity
+  dir=$(make_supercase daemon-lease-owner-handoff)
+  state="$dir/state"
+  lock="$state/.supervise-daemon.lock"
+  . "$ROOT/bin/fm-wake-lib.sh"
+  fm_lock_try_acquire "$lock" || fail "could not acquire initial daemon lease fixture"
+  owner=${FM_LOCK_OWNER_DIR:-}
+  fm_pid_identity "${BASHPID:-$$}" > "$owner/pid-identity" || fail "could not identify initial daemon lease fixture"
+  identity=$(cat "$owner/pid-identity")
+  fm_daemon_lease_publish "$state" "$DAEMON" "$dir" "$lock" "$owner" || fail "could not publish initial daemon lease fixture"
+
+  fm_lock_release "$lock"
+  fm_lock_try_acquire "$lock" || fail "could not acquire successor daemon lease fixture"
+  successor=${FM_LOCK_OWNER_DIR:-}
+  fm_pid_identity "${BASHPID:-$$}" > "$successor/pid-identity" || fail "could not identify successor daemon lease fixture"
+  successor_identity=$(cat "$successor/pid-identity")
+  fm_daemon_lease_publish "$state" "$DAEMON" "$dir" "$lock" "$successor" || fail "could not publish successor daemon lease fixture"
+  touch -t 200001010000 "$successor/heartbeat"
+
+  if fm_daemon_lease_heartbeat "$lock" "$owner" "$identity"; then
+    fail "displaced daemon refreshed the successor lease heartbeat"
+  fi
+  [ "$(fm_path_age "$successor/heartbeat")" -gt 1000 ] || fail "displaced daemon changed the successor heartbeat"
+  fm_daemon_lease_heartbeat "$lock" "$successor" "$successor_identity" || fail "successor daemon could not refresh its own lease heartbeat"
+  [ "$(fm_path_age "$successor/heartbeat")" -lt 5 ] || fail "successor daemon did not refresh its own heartbeat"
+  fm_lock_release "$lock"
+  pass "daemon heartbeat rejects lease owner handoff"
+}
+
+test_daemon_lease_reclaim_respects_heartbeat_fence() {
+  local dir state lock owner daemon_pid identity ready release holder reclaim
+  dir=$(make_supercase daemon-lease-heartbeat-fence)
+  state="$dir/state"
+  lock="$state/.supervise-daemon.lock"
+  owner="$lock.owner"
+  ready="$dir/heartbeat-ready"
+  release="$dir/heartbeat-release"
+  sleep 60 & daemon_pid=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$daemon_pid") \
+    || fail "could not identify daemon for heartbeat fence"
+  mkdir "$owner"
+  ln -s "$owner" "$lock"
+  printf '%s\n' "$daemon_pid" > "$owner/pid"
+  printf '%s\n' "$identity" > "$owner/pid-identity"
+  printf '%s\n' "$dir" > "$owner/fm-home"
+  printf '%s\n' "$DAEMON" > "$owner/daemon-path"
+  touch -t 200001010000 "$owner/heartbeat"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2"
+    : > "$3"
+    while [ ! -e "$4" ]; do sleep 0.01; done
+    touch "$5"
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock.heartbeat" "$ready" "$release" "$owner/heartbeat" &
+  holder=$!
+  while [ ! -e "$ready" ]; do sleep 0.01; done
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; ! fm_daemon_lease_remove_stale "$2" "$3" "$4" 300' _ "$ROOT/bin/fm-wake-lib.sh" "$state" "$DAEMON" "$dir" &
+  reclaim=$!
+  sleep 0.1
+  [ -L "$lock" ] || fail "daemon reclaimer removed a lease while its heartbeat fence was held"
+  : > "$release"
+  wait "$holder" || fail "daemon heartbeat fence holder failed"
+  wait "$reclaim" || fail "daemon reclaimer did not reject the refreshed lease"
+  [ -L "$lock" ] || fail "daemon reclaimer removed a lease refreshed under its fence"
+  kill "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  pass "daemon lease reclaim cannot race a heartbeat refresh"
+}
+
 test_daemon_state_root_uses_fm_home() {
   local dir home override out
   dir=$(make_supercase daemon-fm-home)
@@ -1666,6 +1782,10 @@ test_inject_msg_defers_on_dead_shell_unknown() {
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
+test_afk_start_reclaims_stale_daemon_lease
+test_daemon_lease_release_cleans_owner_metadata
+test_daemon_lease_heartbeat_rejects_owner_handoff
+test_daemon_lease_reclaim_respects_heartbeat_fence
 test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates

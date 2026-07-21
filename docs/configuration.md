@@ -18,6 +18,7 @@ The tracked code root contains the shared instruction, skill, documentation, wor
 `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
 The producing PR and X helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-crew-state.sh` owns current-state reconciliation.
 Wake, watcher, away-mode, and X-specific state mechanics remain with their named scripts and reference sections rather than being duplicated into one exhaustive state tree here.
+`docs/watcher-continuity.md` owns the identity-checked watcher-arm and away-mode daemon lease contract, including its private lock artifacts and durable lost-relay wake.
 
 `bin/fm-session-start.sh`'s header is the single owner of session-start ordering, composed commands, digest contents, and the digest's startup mechanism.
 `docs/sessionstart-nudge.md` owns the native session-open adapter mechanics that nudge the digest command.
@@ -39,8 +40,9 @@ The watcher fingerprints both sources, wakes immediately for a changed inbox whi
 `FM_SESSION_START_OPS_INBOX_SCAN_LIMIT` bounds retained home-event records inspected at startup, defaulting to 256, and reports an explicit sampled overflow when reached.
 `FM_OPS_INBOX_TIMEOUT` bounds each configured command invocation to 10 seconds by default.
 `FM_OPS_INBOX_OUTPUT_MAX_BYTES` bounds each configured command capture to 32768 bytes by default.
-`FM_OPS_INBOX_MARKER_LIMIT` bounds the top-level entries tracked by each watcher fingerprint, defaulting to 256.
-When that limit is exceeded, the fingerprint records an overflow sentinel and the inbox must be retained below the limit before individual changes can be surfaced again.
+`FM_OPS_INBOX_MARKER_LIMIT` bounds home-event records selected for each watcher fingerprint, defaulting to 64.
+`FM_OPS_INBOX_MARKER_SCAN_LIMIT` bounds the home-event records considered before that selection, defaulting to 256.
+When either limit is exceeded, the fingerprint records an overflow sentinel and the inbox must be retained below both limits before individual changes can be surfaced again.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
@@ -88,8 +90,10 @@ A metadata-routed selector returns the recorded backend target (`terminal=` for 
 Only metadata-routed task selectors carry secondmate-marker and Codex-harness context; explicit endpoint escape hatches do not.
 These five sentences are the single owner of the task-selector vocabulary; backend guides and other documents point here instead of restating the resolution order.
 `fm-teardown.sh <id>` takes a task id directly and uses the same recorded backend target fields after loading `state/<id>.meta`.
-Herdr workspaces are derived from `FM_HOME`: the primary home uses `firstmate`, and a secondmate home marked by `.fm-secondmate-home` uses `2ndmate-<secondmate-id>`.
-Spawn, list-live, and recovery paths read that label from the active home, so a secondmate's own crewmates stay inside that secondmate home's herdr space.
+By default, Herdr workspaces are derived from `FM_HOME`: the primary home uses `firstmate`, and a secondmate home marked by `.fm-secondmate-home` uses `2ndmate-<secondmate-id>`.
+The default-container spawn, list-live, and recovery paths read that label from the active home, so a secondmate's own crewmates stay inside that secondmate home's herdr space.
+The optional local `config/herdr-presentation-spaces` presence flag instead enables Herdr's default-off disposable single-task visual projection; [`docs/herdr-backend.md`](herdr-backend.md#optional-disposable-single-task-presentation-spaces) owns its behavior, safety limits, and recovery contract.
+The flag is local to its Firstmate home and is not inherited into secondmate homes.
 For normal herdr operations, `HERDR_SESSION` selects the named session, but destructive test cleanup must not rely on `HERDR_SESSION` alone.
 Use the explicit guarded cleanup path described in [`docs/herdr-backend.md`](herdr-backend.md) instead of `herdr server stop`.
 For normal zellij operations, `FM_ZELLIJ_SESSION` selects the named session and defaults to `firstmate`.
@@ -339,10 +343,8 @@ Its request handling remains in X-specific `bin/` scripts and the `fmx-respond` 
 
 `bin/fm-x-poll.sh` calls `GET /connector/poll` with `Authorization: Bearer <FMX_PAIRING_TOKEN>`.
 HTTP 204 is silent.
-A newly offered pending mention with non-empty `text` is stored at `state/x-inbox/<request_id>.json` and wakes firstmate with `x-mention <request_id>`.
-The poll atomically claims `state/x-context/<request_id>.offered.json` before emitting that wake.
-While the inbox remains pending, later polls re-emit the idempotent wake so a crash before the watcher persists it cannot strand the mention.
-Once the inbox is drained following an answer or dismiss, subsequent offers of the same request stay silent.
+A newly offered pending mention with non-empty `text` is stored at `state/x-inbox/<request_id>.json` and wakes firstmate exactly once with `x-mention <request_id>`.
+The poll atomically claims `state/x-context/<request_id>.offered.json` before emitting that wake, and subsequent offers of the same request stay silent even after the inbox is drained following an answer or dismiss.
 Offer markers share the context registry's bounded seven-day retention, so losing or expiring the local marker lets a relay offer wake firstmate again.
 The full relay object is preserved, including `in_reply_to: {author_handle, text}` when the mention is a reply in a conversation or `null` for fresh mentions.
 At the same time the poll records a durable per-request reply context at `state/x-context/<request_id>.json` (`{request_id, platform, reply_max_chars, recorded_at}`) from the same authoritative relay payload, best-effort and keyed by `request_id` so concurrent requests never overwrite each other; it survives the inbox cleanup that follows the acknowledgement, so a delayed follow-up can recover the original platform and split budget even with no task link.
@@ -405,7 +407,7 @@ FM_BACKEND=             # optional runtime backend override for new spawns; tmux
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)
 FM_BACKEND_HERDR_COMPOSER_LINES=20  # herdr-only: tail lines scanned by composer-state guard/fallback paths; idle-baseline submit confirmation uses agent-state
 FM_BACKEND_HERDR_IDLE_RE='^Type a message\.\.\.$'  # herdr-only: empty-composer placeholder regex after shared ghost extraction plus border and prompt stripping
-FM_BACKEND_HERDR_BARE_PROMPT_RE='^(❯|›)'  # herdr-only: verified agent glyphs recognized as an UNBORDERED (bare) composer row, e.g. claude's ❯ or codex's ›; shell glyphs remain unknown rather than empty, and de-emphasised ghost/placeholder text (dim or dark-truecolor) after an agent prompt reads empty via the shared fm_composer_strip_ghost (docs/herdr-backend.md "Incident (2026-07-08)", "Incident (2026-07-10)")
+FM_BACKEND_HERDR_BARE_PROMPT_RE='^(❯|›)'  # herdr-only: verified agent glyphs recognized as an UNBORDERED (bare) composer row, e.g. claude's ❯ or codex's ›; alternation prevents a non-UTF-8 locale from byte-wise matching a box corner with the same leading byte; shell glyphs remain unknown rather than empty, and de-emphasised ghost/placeholder text (dim or dark-truecolor) after an agent prompt reads empty via the shared fm_composer_strip_ghost (docs/herdr-backend.md "Incident (2026-07-08)", "Incident (2026-07-10)")
 FM_BACKEND_HERDR_PI_COMPOSER_MAX_LINES=8  # herdr-only: maximum rows admitted between Pi's native-identity-corroborated separator pair; taller or ambiguous candidates stay unknown (docs/herdr-backend.md "Incident (2026-07-14)")
 FM_BACKEND_HERDR_SUBMIT_POLLS=6  # herdr-only: agent-state samples spread across each Enter attempt's budget when confirming a submit (docs/herdr-backend.md "Native agent-state submit confirmation")
 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0.6  # herdr-only: minimum per-Enter confirmation budget before polling agent-state after an idle baseline
@@ -424,11 +426,12 @@ FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the guarded operatio
 FM_POLL=15              # seconds between watcher poll cycles
 FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartbeats are absorbed while idle
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
-FM_OPS_INBOX_TIMEOUT=10   # seconds allowed for each configured operations-inbox command capture
-FM_OPS_INBOX_OUTPUT_MAX_BYTES=32768   # byte cap for each configured operations-inbox command capture
-FM_OPS_INBOX_MARKER_LIMIT=256   # top-level operations-inbox entries included in each watcher fingerprint
 FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls, custom checks, or X-mode dispatch)
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
+FM_OPS_INBOX_TIMEOUT=10   # seconds allowed for each configured operations-inbox command
+FM_OPS_INBOX_OUTPUT_MAX_BYTES=32768   # byte cap for each configured operations-inbox command capture
+FM_OPS_INBOX_MARKER_LIMIT=64   # home-event records included in each watcher fingerprint
+FM_OPS_INBOX_MARKER_SCAN_LIMIT=256   # home-event records considered before fingerprint selection
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes runs rows scanned when cross-branch attribution falls back from axi status
@@ -443,9 +446,12 @@ FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting X-mode completion follow-ups (7 days)
 FMX_FOLLOWUP_MAX_COUNT=3   # local cap on X-mode completion follow-ups per linked mention
 FM_LOCK_STALE_AFTER=2   # seconds before dead-pid lock records can be reclaimed; mid-acquire locks keep at least 2s grace
-FM_GUARD_GRACE=300      # seconds before guard warnings, arm health checks, and the primary turn-end guard treat a watcher beacon as stale
+FM_GUARD_GRACE=300      # seconds before guard warnings and the primary turn-end guard treat watcher-beacon or relay/daemon-lease health as stale
 FM_ARM_CONFIRM_TIMEOUT=10   # seconds fm-watch-arm waits to confirm a fresh watcher before reporting FAILED
 FM_ARM_ATTACH_POLL=0.5  # seconds between checks while fm-watch-arm is attached to an existing healthy watcher cycle
+FM_ARM_LEASE_GRACE=45   # seconds an identity-checked watch-arm relay heartbeat may be stale before a bound watcher fails closed
+FM_ARM_LEASE_TICK=5     # seconds between watch-arm relay lease heartbeats while the relay waits
+FM_DAEMON_LEASE_GRACE=45   # seconds an identity-checked away-mode daemon heartbeat may be stale before AFK start/recovery reclaims its lease
 FM_OPENCODE_ARM_READY_TIMEOUT_MS=12000   # milliseconds the OpenCode primary watcher plugin waits for an arm attempt to report started, healthy, wake, or failure
 FM_PI_ARM_READY_TIMEOUT_MS=12000   # milliseconds the Pi watcher extension waits for a successor arm to report started or attached
 FM_WATCH_ARM_RETIRE_TIMEOUT_MS=1000   # milliseconds Pi/OpenCode wait for an unready successor arm to exit before abandoning retries

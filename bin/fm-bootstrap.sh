@@ -387,7 +387,7 @@ secondmate_liveness_sweep() {
   # MID-SESSION is a harder follow-on needing a periodic liveness beacon -
   # explicitly out of scope here.
   [ -d "$STATE" ] || return 0
-  local meta id window harness backend target verdict out
+  local meta id window harness backend target expected_label verdict out
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     grep -q '^kind=secondmate$' "$meta" 2>/dev/null || continue
@@ -398,7 +398,8 @@ secondmate_liveness_sweep() {
     backend=$(fm_backend_of_meta "$meta")
     target=$(fm_backend_target_of_meta "$meta")
     [ -n "$target" ] || target="$window"
-    verdict=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null) || verdict="unknown"
+    expected_label="fm-$id"
+    verdict=$(fm_backend_agent_alive "$backend" "$target" "$expected_label" 2>/dev/null) || verdict="unknown"
     case "$harness" in
       claude|codex|opencode|pi|grok) ;;
       *) [ "$verdict" = dead ] && verdict=unknown ;;
@@ -407,7 +408,7 @@ secondmate_liveness_sweep() {
       alive)
         ;;
       dead)
-        fm_backend_kill "$backend" "$target" 2>/dev/null || true
+        fm_backend_kill "$backend" "$target" '' "$expected_label" 2>/dev/null || true
         if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
           :
         else

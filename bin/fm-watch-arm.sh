@@ -39,6 +39,14 @@
 # loud. A live cycle already present means re-arm attaches - do not start a second
 # watcher.
 #
+# While it waits, this relay publishes its identity-checked lease at
+# state/.watch-arm.lease and binds it to that exact watcher in
+# state/.watch-arm.bound.
+# It refreshes the lease heartbeat until the cycle ends and releases only the
+# owner it still identifies as itself.
+# The watcher uses that binding to fail closed after a lost relay; see
+# docs/watcher-continuity.md for the shared cross-process contract.
+#
 # Every observed watcher cycle appends one tab-separated lifecycle record to
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
 # arm/watcher identities, timestamps, exit/signal classification, beacon age,
@@ -73,8 +81,15 @@ CYCLE_LOG_LOCK="$STATE/.watch-cycle-exits.lock"
 CYCLE_LOG_MAX_BYTES=${FM_WATCH_CYCLE_LOG_MAX_BYTES:-262144}
 CYCLE_LOG_KEEP_LINES=${FM_WATCH_CYCLE_LOG_KEEP_LINES:-1000}
 ARM_PID=${BASHPID:-$$}
+ARM_LEASE_TICK=${FM_ARM_LEASE_TICK:-5}
+ARM_LEASE_OWNER=
+ARM_LEASE_TICKER=
 case "$CYCLE_LOG_MAX_BYTES" in ''|*[!0-9]*|0) CYCLE_LOG_MAX_BYTES=262144 ;; esac
 case "$CYCLE_LOG_KEEP_LINES" in ''|*[!0-9]*|0) CYCLE_LOG_KEEP_LINES=1000 ;; esac
+if ! [[ "$ARM_LEASE_TICK" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]] \
+  || ! awk -v tick="$ARM_LEASE_TICK" 'BEGIN { exit !(tick + 0 > 0) }'; then
+  ARM_LEASE_TICK=5
+fi
 
 # The lifecycle ledger is diagnostic evidence, not a supervision dependency.
 # Writes are bounded and best-effort so an observability failure cannot stall an
@@ -203,15 +218,47 @@ cycle_mark_predecessor_successor() {
   fm_lock_release "$CYCLE_LOG_LOCK"
 }
 
+watcher_lock_snapshot() {
+  local lock_owner
+  if [ -L "$WATCH_LOCK" ]; then
+    lock_owner=$(fm_lock_link_owner "$WATCH_LOCK" 2>/dev/null || true)
+    [ -n "$lock_owner" ] || return 1
+  elif [ -d "$WATCH_LOCK" ]; then
+    lock_owner=$WATCH_LOCK
+  else
+    return 1
+  fi
+  printf '%s\n' "$lock_owner"
+  cat "$WATCH_LOCK/pid" "$WATCH_LOCK/fm-home" "$WATCH_LOCK/watcher-path" "$WATCH_LOCK/pid-identity" 2>/dev/null
+}
+
 clear_stale_recorded_watcher_lock() {
-  local lock_home lock_path lock_identity
+  local expected_snapshot=$1 lock_home lock_path lock_identity
   lock_home=$(cat "$WATCH_LOCK/fm-home" 2>/dev/null || true)
   lock_path=$(cat "$WATCH_LOCK/watcher-path" 2>/dev/null || true)
   lock_identity=$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
   [ "$lock_home" = "$FM_HOME" ] || return 0
   [ "$lock_path" = "$WATCH" ] || return 0
   [ -n "$lock_identity" ] || return 0
+  [ "$(watcher_lock_snapshot)" = "$expected_snapshot" ] || return 0
   fm_lock_remove_path "$WATCH_LOCK" || true
+}
+
+reclaim_identity_mismatched_recorded_watcher_lock() {
+  local lock_pid snapshot
+  fm_lock_try_acquire "$WATCH_LOCK.steal" || return 0
+  snapshot=$(watcher_lock_snapshot) || {
+    fm_lock_release "$WATCH_LOCK.steal"
+    return 0
+  }
+  lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+  if fm_pid_alive "$lock_pid" \
+    && ! fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$lock_pid" "$FM_HOME"; then
+    if [ "$snapshot" = "$(watcher_lock_snapshot)" ]; then
+      clear_stale_recorded_watcher_lock "$snapshot"
+    fi
+  fi
+  fm_lock_release "$WATCH_LOCK.steal"
 }
 
 # A watcher is "healthy" iff the lock names a live process that is genuinely THIS
@@ -224,6 +271,62 @@ healthy_watcher() {
   HEALTHY_PID=
   fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" || return 1
   HEALTHY_PID=$FM_WATCHER_HEALTHY_PID
+}
+
+# The arm is the harness-visible notification relay.  Keep a separate lease
+# while it waits so a watcher that outlives a killed arm can fail closed rather
+# than continue with no route back to the primary session.
+arm_lease_start() {  # <watcher-pid>
+  local watcher_pid=$1 rc
+  fm_arm_lease_claim "$STATE" "$WATCH" "$watcher_pid" "$FM_HOME"
+  rc=$?
+  case "$rc" in
+    0)
+      ARM_LEASE_OWNER=$FM_ARM_LEASE_OWNER
+      (
+        while fm_arm_lease_heartbeat "$STATE" "$ARM_LEASE_OWNER"; do
+          sleep "$ARM_LEASE_TICK"
+        done
+      ) &
+      ARM_LEASE_TICKER=$!
+      ;;
+    2)
+      # A verified peer is already the active relay for this watcher.  This
+      # duplicate arm stays attached but never clears or refreshes its lease.
+      ;;
+    *)
+      echo "watcher: FAILED - could not publish watch-arm lease" >&2
+      return 1
+      ;;
+  esac
+}
+
+arm_lease_stop() {
+  if [ -n "${ARM_LEASE_TICKER:-}" ]; then
+    kill "$ARM_LEASE_TICKER" 2>/dev/null || true
+    wait "$ARM_LEASE_TICKER" 2>/dev/null || true
+    ARM_LEASE_TICKER=
+  fi
+  if [ -n "${ARM_LEASE_OWNER:-}" ]; then
+    fm_arm_lease_release "$STATE" "$ARM_LEASE_OWNER" || true
+    ARM_LEASE_OWNER=
+  fi
+}
+
+arm_lease_follow() {  # <watcher-pid>
+  arm_lease_stop
+  arm_lease_start "$1"
+}
+
+# A successor can disappear while its relay lease is being transferred.  Do not
+# let that narrow handoff failure become a silent nonzero arm exit: it is the
+# same no-successor cycle end as an attached watcher disappearing on the next
+# poll, so retain the typed failure that the harness can surface.
+follow_attached_watcher() {  # <watcher-pid>
+  arm_lease_follow "$1" && return 0
+  cycle_log_append unknown unknown attached-relay-transfer-failed none
+  fail_unexplained_cycle
+  return 1
 }
 
 report_attached() {
@@ -262,8 +365,9 @@ attach_and_wait() {
       if [ "$HEALTHY_PID" != "$attached_pid" ]; then
         cycle_log_append unknown unknown lock-replaced "attached:$HEALTHY_PID"
         attached_pid=$HEALTHY_PID
-        report_attached
+        follow_attached_watcher "$attached_pid" || return 1
         cycle_begin "$attached_pid" attached
+        report_attached
       fi
       sleep "$ATTACH_POLL"
       continue
@@ -271,8 +375,9 @@ attach_and_wait() {
     if wait_for_healthy_successor; then
       cycle_log_append unknown unknown attached-cycle-ended "attached:$HEALTHY_PID"
       attached_pid=$HEALTHY_PID
-      report_attached
+      follow_attached_watcher "$attached_pid" || return 1
       cycle_begin "$attached_pid" attached
+      report_attached
       continue
     fi
     cycle_log_append unknown unknown attached-cycle-ended none
@@ -285,6 +390,7 @@ attach_and_wait() {
 handle_attached_signal() {
   local signal=$1 rc=$2
   trap - HUP TERM INT
+  arm_lease_stop
   cycle_log_append "$rc" "$signal" arm-interrupted none
   exit "$rc"
 }
@@ -337,9 +443,13 @@ if [ "$mode" = restart ]; then
         i=$((i + 1))
       done
     else
-      clear_stale_recorded_watcher_lock
+      reclaim_identity_mismatched_recorded_watcher_lock
     fi
   fi
+fi
+
+if [ "$mode" = arm ]; then
+  reclaim_identity_mismatched_recorded_watcher_lock
 fi
 
 # If a genuinely live+fresh watcher already holds the lock, do not start a second
@@ -347,9 +457,13 @@ fi
 # then, not as an immediate empty wake. (--restart skips this: it just stopped
 # this home's watcher and wants a fresh one.)
 if [ "$mode" = arm ] && healthy_watcher; then
+  arm_lease_start "$HEALTHY_PID" || exit 1
   cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
-  report_attached
   cycle_begin "$HEALTHY_PID" attached
+  report_attached
+  trap 'handle_attached_signal HUP 129' HUP
+  trap 'handle_attached_signal TERM 143' TERM
+  trap 'handle_attached_signal INT 130' INT
   attach_and_wait "$HEALTHY_PID"
   exit $?
 fi
@@ -373,6 +487,10 @@ cleanup_child() {
 handle_arm_signal() {
   local signal=$1 rc=$2
   trap - HUP TERM INT
+  if [ -n "${ARM_LEASE_OWNER:-}" ]; then
+    fm_wake_append check watcher-arm-relay 'check: watcher arm relay lost' || true
+  fi
+  arm_lease_stop
   if [ -n "$child" ] && fm_pid_alive "$child"; then
     kill -TERM "$child" 2>/dev/null || true
     wait "$child" 2>/dev/null || true
@@ -399,6 +517,7 @@ owned_child_finished() {
   local rc=$1 signal reason_type status
   signal=$(cycle_signal_name "$rc")
   if [ "$rc" -eq 0 ] && watch_output_has_wake "$child_out"; then
+    arm_lease_stop
     reason_type=$(watch_output_reason_type "$child_out")
     cycle_log_append "$rc" "$signal" "$reason_type" none
     print_watch_output "$child_out"
@@ -410,6 +529,8 @@ owned_child_finished() {
 
   if [ "$rc" -eq 0 ]; then
     if wait_for_healthy_successor; then
+      arm_lease_stop
+      arm_lease_start "$HEALTHY_PID" || return 1
       cycle_log_append "$rc" "$signal" unexpected-clean-exit "attached:$HEALTHY_PID"
       print_watch_output "$child_out"
       rm -f "$child_out" 2>/dev/null || true
@@ -431,6 +552,7 @@ owned_child_finished() {
   fi
 
   reason_type="nonzero-exit"
+  arm_lease_stop
   [ "$signal" = none ] || reason_type="signal-exit"
   cycle_log_append "$rc" "$signal" "$reason_type" none
   print_watch_output "$child_out"
@@ -452,6 +574,10 @@ deadline=$(( $(date +%s) + CONFIRM_TIMEOUT ))
 while :; do
   if healthy_watcher; then
     if [ "$HEALTHY_PID" = "$child" ]; then
+      arm_lease_start "$child" || {
+        cleanup_child
+        exit 1
+      }
       cycle_refresh_lock_before
       cycle_mark_predecessor_successor "started:$child"
       echo "watcher: started pid=$child (beacon fresh)"
@@ -478,6 +604,7 @@ while :; do
 done
 
 trap - HUP TERM INT
+arm_lease_stop
 print_watch_output "$child_out"
 cleanup_child
 wait "$child" 2>/dev/null

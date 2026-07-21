@@ -350,23 +350,31 @@ fm_backend_of_meta() {  # <meta-file>
 }
 
 fm_backend_target_of_meta() {  # <meta-file>
-  local meta=$1 backend terminal window
+  local meta=$1 backend terminal window tmux_window_id
   backend=$(fm_backend_of_meta "$meta")
   if [ "$backend" = orca ]; then
     terminal=$(fm_meta_get "$meta" terminal)
     [ -n "$terminal" ] && { printf '%s' "$terminal"; return 0; }
+  fi
+  if [ "$backend" = tmux ]; then
+    tmux_window_id=$(fm_meta_get "$meta" tmux_window_id)
+    [ -n "$tmux_window_id" ] && { printf '%s' "$tmux_window_id"; return 0; }
   fi
   window=$(fm_meta_get "$meta" window)
   [ -n "$window" ] && printf '%s' "$window"
 }
 
 fm_backend_meta_for_window() {  # <target> <state-dir>
-  local target=$1 state=$2 meta window terminal
+  local target=$1 state=$2 meta window terminal tmux_window_id
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue
     window=$(fm_meta_get "$meta" window)
     terminal=$(fm_meta_get "$meta" terminal)
-    { [ -n "$window" ] && [ "$window" = "$target" ]; } || { [ -n "$terminal" ] && [ "$terminal" = "$target" ]; } || continue
+    tmux_window_id=$(fm_meta_get "$meta" tmux_window_id)
+    { [ -n "$window" ] && [ "$window" = "$target" ]; } \
+      || { [ -n "$terminal" ] && [ "$terminal" = "$target" ]; } \
+      || { [ -n "$tmux_window_id" ] && [ "$tmux_window_id" = "$target" ]; } \
+      || continue
     printf '%s' "$meta"
     return 0
   done
@@ -658,7 +666,8 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
   local backend=$1 target=$2 expected_label=${3:-} session pane
   case "$backend" in
     tmux)
-      tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1
+      fm_backend_source tmux || return 1
+      fm_backend_tmux_target_ready "$target" "$expected_label"
       ;;
     herdr)
       fm_backend_source herdr || return 1
@@ -697,9 +706,14 @@ fm_backend_target_absent() {  # <backend> <target> [expected-label] -> 0 absent,
   local backend=$1 target=$2 expected_label=${3:-} out status state session pane wsid title
   case "$backend" in
     tmux)
-      out=$(tmux display-message -p -t "$target" '#{pane_id}' 2>&1)
+      out=$(tmux display-message -p -t "$target" '#{window_name}' 2>&1)
       status=$?
-      [ "$status" -eq 0 ] && return 1
+      if [ "$status" -eq 0 ]; then
+        case "$target" in
+          @*) [ -z "$expected_label" ] || [ "$out" = "$expected_label" ] || return 2 ;;
+        esac
+        return 1
+      fi
       case "$out" in
         "can't find "*|"no server running on "*) return 0 ;;
         *) return 2 ;;
@@ -784,11 +798,11 @@ process.exit(process.argv[1] === "0" ? 1 : 2);
 # an action from it alone - the secondmate-liveness sweep gates a respawn on
 # `dead` only, precisely so a momentary read glitch can never duplicate a
 # live supervisor.
-fm_backend_agent_alive() {  # <backend> <target>
-  local backend=$1 target=$2
+fm_backend_agent_alive() {  # <backend> <target> [expected-label]
+  local backend=$1 target=$2 expected_label=${3:-}
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   case "$backend" in
-    tmux) fm_backend_tmux_agent_alive "$target" ;;
+    tmux) fm_backend_tmux_agent_alive "$target" "$expected_label" ;;
     herdr) fm_backend_herdr_agent_alive "$target" ;;
     zellij|orca|cmux) printf 'unknown'; return 0 ;;
     *) printf 'unknown'; return 0 ;;
