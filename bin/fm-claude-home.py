@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """Manage a firstmate-owned private Claude home for one ship or scout task.
 
-fm-spawn.sh is the sole caller.
+The callers are fm-spawn.sh (create, abort cleanup), fm-teardown.sh
+(teardown removal), and fm-claude-crew-lib.sh's readiness probe.
 It creates a mode-0700 directory below data/claude-crewmate.
 It copies the captain-populated persistent profile at
 data/claude-crewmate/profile, skipping any customization-surface entries
 (settings, hooks, MCP config, plugins, skills, commands, agents) so the
 task-private copy carries auth and nothing else.
+On macOS it also clones only the managed profile's per-config-dir
+Keychain credential into the new home's derived Keychain service, and
+removes that service entry on abort cleanup and teardown, even when the
+home directory itself is already gone.
 It never reads or copies anything from the captain's own ~/.claude or
 CLAUDE_CONFIG_DIR - the persistent profile is populated only by the
 captain's own `claude auth login` run against it directly.

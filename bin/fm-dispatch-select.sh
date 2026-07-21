@@ -35,7 +35,7 @@
 # fm_claude_crew_profile_ready; docs/configuration.md), the live quota-axi call
 # runs with CLAUDE_CONFIG_DIR pointed at that profile, so the Claude candidate's
 # numbers are the account crew tasks will actually burn, not the captain's own
-# seat account. An absent or credential-less profile reads the default
+# seat account. An absent or not-ready profile reads the default
 # environment exactly as before. The --quota-json fixture path is unaffected -
 # it never shells out to quota-axi at all.
 set -u
