@@ -1421,6 +1421,26 @@ fi
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 begin_treehouse_lease_return_transaction || exit 1
 prepare_treehouse_lease_handoff_return || exit 1
+HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
+HERDR_PRESENTATION_RETIRE_CANDIDATE=0
+HERDR_PRESENTATION_SESSION=
+HERDR_PRESENTATION_PANE=
+if [ "$BACKEND" = herdr ] \
+   && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
+  fm_backend_source herdr || true
+  HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
+  HERDR_PRESENTATION_WORKSPACE=$(meta_value "$META" herdr_workspace_id)
+  HERDR_PRESENTATION_PANE=$(meta_value "$META" herdr_pane_id)
+  if [ -n "$HERDR_PRESENTATION_SESSION" ] \
+     && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
+     && [ -n "$HERDR_PRESENTATION_PANE" ] \
+     && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ] \
+     && fm_backend_herdr_projection_endpoint_matches_journal \
+       "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
+       "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
+    HERDR_PRESENTATION_RETIRE_CANDIDATE=1
+  fi
+fi
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ -n "$ORCA_WORKTREE_ID" ] && [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
@@ -1453,26 +1473,6 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ] && [ "$TREEHOUSE_LEASE_RETURN_NEE
   fi
 fi
 
-HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
-HERDR_PRESENTATION_RETIRE_CANDIDATE=0
-HERDR_PRESENTATION_SESSION=
-HERDR_PRESENTATION_PANE=
-if [ "$BACKEND" = herdr ] \
-   && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
-  fm_backend_source herdr || true
-  HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
-  HERDR_PRESENTATION_WORKSPACE=$(meta_value "$META" herdr_workspace_id)
-  HERDR_PRESENTATION_PANE=$(meta_value "$META" herdr_pane_id)
-  if [ -n "$HERDR_PRESENTATION_SESSION" ] \
-     && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
-     && [ -n "$HERDR_PRESENTATION_PANE" ] \
-     && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ] \
-     && fm_backend_herdr_projection_endpoint_matches_journal \
-       "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
-       "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
-    HERDR_PRESENTATION_RETIRE_CANDIDATE=1
-  fi
-fi
 finish_treehouse_lease_handoff_return || exit 1
 
 if [ "$BACKEND" != orca ]; then

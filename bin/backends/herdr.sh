@@ -451,8 +451,8 @@ fm_backend_herdr_container_ensure() {  # <cwd-for-a-fresh-workspace>
 # 0.7.1 exits 1 for it; the canned-response test fakes exit 0; parsing only
 # the JSON keeps this function correct against either).
 #
-#   dead     - `pane get` responds with error code pane_not_found: the pane
-#              itself is gone (closed, or its process died and herdr already
+#   dead     - `pane get` responds with error code pane_not_found or
+#              workspace_not_found: the pane itself is gone (closed, or its process died and herdr already
 #              reaped it - verified empirically: killing a pane's shell pid
 #              on a live server makes herdr immediately drop both the pane
 #              and its tab from `pane get`/`tab list`).
@@ -488,7 +488,10 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   out=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>&1)
   code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
   if [ -n "$code" ]; then
-    [ "$code" = "pane_not_found" ] && printf 'dead' || printf 'unknown'
+    case "$code" in
+      pane_not_found|workspace_not_found) printf 'dead' ;;
+      *) printf 'unknown' ;;
+    esac
     return 0
   fi
   pid=$(printf '%s' "$out" | jq -r '.result.pane.pane_id // empty' 2>/dev/null)

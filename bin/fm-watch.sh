@@ -470,7 +470,7 @@ clear_pause_tracking() {  # <window>
 # Only a confidently dead ordinary crew may recover paused classification after
 # fm-crew-state has fallen back to stopped or unknown.
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck_file class agent_alive
+  local win=$1 task=$2 key last recheck_file class agent_alive crew_line
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
@@ -493,7 +493,8 @@ pause_state_class() {  # <window> <task>
     printf 'paused'
     return
   fi
-  class=$(crew_absorb_class "$task")
+  crew_line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || true
+  class=$(crew_absorb_class_from_line "$task" "$crew_line")
   if [ "$class" = working ]; then
     rm -f "$recheck_file"
     printf 'working'

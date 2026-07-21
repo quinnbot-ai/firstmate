@@ -1009,7 +1009,7 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
   config="$TMP_ROOT/meta-fail-config"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   mkdir -p "$data/$id" "$config"
-  mkdir -p "$state_file"
+  mkdir -p "$state"
   printf 'brief\n' > "$data/$id/brief.md"
   orca_case meta-fail
   printf '1\n' > "$RESP/1.exit"
@@ -1019,7 +1019,7 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
   cat > "$FB/mktemp" <<SH
 #!/usr/bin/env bash
 case "\${1:-}" in
-  "$state_file"/."$id".meta.*)
+  "$state"/."$id".meta.*)
     echo 'mktemp: File exists' >&2
     exit 1
     ;;

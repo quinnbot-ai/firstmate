@@ -155,6 +155,7 @@ normalize_meta() {  # <meta>
     -e 's|^herdr_workspace_id=.*$|herdr_workspace_id=<herdr-container-id>|' \
     -e 's|^herdr_tab_id=.*$|herdr_tab_id=<herdr-container-id>|' \
     -e 's|^herdr_pane_id=.*$|herdr_pane_id=<herdr-container-id>|' \
+    -e 's|^tasktmp=.*$|tasktmp=<task-temp-dir>|' \
     "$1"
 }
 
@@ -234,7 +235,6 @@ normalize_meta "$OFF_META" > "$TMP_ROOT/off.meta.normalized"
 normalize_meta "$ON_META" > "$TMP_ROOT/on.meta.normalized"
 cmp -s "$TMP_ROOT/off.meta.normalized" "$TMP_ROOT/on.meta.normalized" \
   || fail "metadata changed beyond Herdr container IDs between flag-off and projected paths"
-
 teardown_task shape "$HOME_DIR" > "$TMP_ROOT/on-teardown.out" 2> "$TMP_ROOT/on-teardown.err" \
   || fail "projected teardown failed: $(cat "$TMP_ROOT/on-teardown.err")"
 cmp -s "$TMP_ROOT/off-treehouse.log" "$TREEHOUSE_CALL_LOG" \
