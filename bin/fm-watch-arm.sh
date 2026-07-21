@@ -432,7 +432,7 @@ if [ "$mode" = restart ]; then
         i=$((i + 1))
       done
     else
-      clear_stale_recorded_watcher_lock
+      reclaim_identity_mismatched_recorded_watcher_lock
     fi
   fi
 fi
