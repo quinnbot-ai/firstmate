@@ -18,6 +18,12 @@ make_profile() {  # <dir>
   printf '{"oauthAccount":{"emailAddress":"crew@example.invalid"}}\n' > "$1/.claude.json"
 }
 
+# Portable file mode in octal. Platform-detected, never the `stat -f || stat -c`
+# fallback (which writes a partial filesystem dump on Linux; see fm-watch-triage.test.sh).
+file_mode() {
+  if [ "$(uname)" = Darwin ]; then stat -f '%Lp' "$1" 2>/dev/null; else stat -c '%a' "$1" 2>/dev/null; fi
+}
+
 test_create_excludes_customization_surface_and_copies_credentials() {
   local case_dir data source home
   case_dir="$TMP_ROOT/create-excludes"
@@ -39,7 +45,7 @@ test_create_excludes_customization_surface_and_copies_credentials() {
   [ ! -e "$home/commands" ] || fail "isolated home retained the profile's commands directory"
   [ ! -e "$home/settings.json" ] || fail "isolated home retained the profile's settings.json"
   [ ! -e "$home/.mcp.json" ] || fail "isolated home retained the profile's .mcp.json"
-  [ "$(stat -f '%Lp' "$home" 2>/dev/null || stat -c '%a' "$home")" = 700 ] \
+  [ "$(file_mode "$home")" = 700 ] \
     || fail "isolated home directory must be mode 0700"
   pass "create copies credentials and nested content while excluding customization surface"
 }
