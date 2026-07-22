@@ -80,9 +80,14 @@ git log --oneline fork/main..main   # must be empty
 [ "$(git rev-parse --abbrev-ref HEAD)" = main ] || { echo "STOP: not on main"; exit 1; }
 
 # 2. Preserve anything uncommitted before the reset - reversible, never discarded.
-if [ -n "$(git status --porcelain)" ]; then
-  git stash push -u -m "fm-main-divergence-realign-$(date +%Y%m%dT%H%M%S)"
+dirty="$(git status --porcelain)" \
+  || { echo "STOP: could not read working tree status - refusing to reset"; exit 1; }
+if [ -n "$dirty" ]; then
+  git stash push -u -m "fm-main-divergence-realign-$(date +%Y%m%dT%H%M%S)" \
+    || { echo "STOP: git stash failed - refusing to reset over uncommitted work"; exit 1; }
   echo "Stashed uncommitted work - recover it after the reset with: git stash list / git stash pop"
+  [ -z "$(git status --porcelain)" ] \
+    || { echo "STOP: working tree still dirty after stash - refusing to reset"; exit 1; }
 fi
 
 # 3. The coherent ref+index+tree update. fork/main was already fetched in step 0.
