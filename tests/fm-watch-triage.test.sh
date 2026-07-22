@@ -538,6 +538,8 @@ test_stale_terminal_status_overridden_by_active_run() {
   wait_for_exit "$pid" 40 || fail "watcher did not escalate an overridden stale terminal status past the threshold"
   grep -F "stale: $window" "$out" >/dev/null || fail "escalation did not print a stale wake"
   grep -F "possible wedge" "$out" >/dev/null || fail "escalation did not flag a possible wedge"
+  [ "$(cat "$state/.stale-since-$key" 2>/dev/null || true)" -ge $(( $(date +%s) - 10 )) ] \
+    || fail "wedge escalation did not refresh its stale recheck marker"
   unset FM_FAKE_CREW_STATE
   pass "a stale terminal-looking status is overridden and absorbed while a run is actively working, then wedge-escalated"
 }
@@ -590,10 +592,60 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
   wait_for_exit "$pid" 40 || fail "watcher did not escalate a provably-working non-terminal stale past the threshold"
   grep -F "stale: $window" "$out" >/dev/null || fail "escalation did not print a stale wake"
   grep -F "possible wedge" "$out" >/dev/null || fail "escalation did not flag a possible wedge"
-  [ ! -e "$state/.stale-since-$key" ] || fail "stale-since timer was not cleared after escalation"
+  [ "$(cat "$state/.stale-since-$key" 2>/dev/null || true)" -ge $(( $(date +%s) - 10 )) ] \
+    || fail "stale-since timer was not refreshed after escalation"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the wedge escalation failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "wedge escalation was not queued"
   pass "provably-working non-terminal stale is absorbed on first sight, then wedge-escalated past the threshold"
+}
+
+# A watcher outage can leave several provably-working panes with stale timers
+# already past their escalation window. They must produce one durable batch
+# record, refresh every timer before exiting, and retain each pane's diagnosis.
+test_expired_stale_rechecks_are_batched() {
+  local dir state fakebin out capture_file one two one_key two_key pane_hash sig pid rows payload now window task key
+  dir=$(make_case expired-stale-rechecks-batched); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  one="test:fm-expired-one"; two="test:fm-expired-two"
+  printf 'idle while validation is running' > "$capture_file"
+  pane_hash=$(hash_text "idle while validation is running")
+  for window in "$one" "$two"; do
+    task=${window#test:fm-}
+    key=$(printf '%s' "$window" | tr ':/.' '___')
+    printf 'window=%s\nkind=ship\n' "$window" > "$state/$task.meta"
+    printf 'working: awaiting CI\n' > "$state/$task.status"
+    sig=$(seen_sig "$state/$task.status"); printf '%s' "$sig" > "$state/.seen-${task}_status"
+    printf '%s' "$pane_hash" > "$state/.hash-$key"
+    printf '%s' "$pane_hash" > "$state/.stale-$key"
+    printf '1\n' > "$state/.count-$key"
+    printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  done
+  one_key=$(printf '%s' "$one" | tr ':/.' '___')
+  two_key=$(printf '%s' "$two" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · ci running'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not surface the expired stale-recheck batch"
+  rows=$(awk -F '\t' '$3 == "stale" { count++ } END { print count + 0 }' "$state/.wake-queue")
+  [ "$rows" -eq 1 ] || fail "expired stale rechecks wrote $rows wake records instead of one batch"
+  awk -F '\t' '$3 == "stale" && $4 == "stale-rechecks" { found=1 } END { exit !found }' "$state/.wake-queue" \
+    || fail "expired stale rechecks did not use the compatible batch key"
+  payload=$(awk -F '\t' '$3 == "stale" { print $5 }' "$state/.wake-queue")
+  printf '%s' "$payload" | grep -F "stale: $one (idle " >/dev/null \
+    || fail "batch payload omitted the first lane's stale reason"
+  printf '%s' "$payload" | grep -F "stale: $two (idle " >/dev/null \
+    || fail "batch payload omitted the second lane's stale reason"
+  now=$(date +%s)
+  [ "$(cat "$state/.stale-since-$one_key")" -ge $(( now - 10 )) ] \
+    || fail "first lane's stale recheck marker was not refreshed in the batch pass"
+  [ "$(cat "$state/.stale-since-$two_key")" -ge $(( now - 10 )) ] \
+    || fail "second lane's stale recheck marker was not refreshed in the batch pass"
+  grep -F 'stale-rechecks:' "$out" >/dev/null || fail "watcher did not emit the combined stale-recheck wake"
+  unset FM_FAKE_CREW_STATE
+  pass "multiple expired stale rechecks are batched into one wake and all markers refresh"
 }
 
 # --- non-terminal stale, crew NOT provably working: surfaced immediately ------
@@ -1166,7 +1218,8 @@ test_paused_authoritative_working_preserves_wedge_timer() {
   pid=$!
   wait_for_exit "$pid" 40 || fail "authoritative working state did not wedge-escalate past the threshold"
   grep -F "possible wedge" "$out" >/dev/null || fail "authoritative working wedge escalation omitted its reason"
-  [ ! -e "$state/.stale-since-$key" ] || fail "wedge timer remained after authoritative working escalation"
+  [ "$(cat "$state/.stale-since-$key" 2>/dev/null || true)" -ge $(( $(date +%s) - 10 )) ] \
+    || fail "wedge timer was not refreshed after authoritative working escalation"
   unset FM_FAKE_CREW_STATE
   pass "a paused status overridden by authoritative working preserves its wedge timer and escalates"
 }
@@ -2105,6 +2158,7 @@ test_actionable_signal_surfaced
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
+test_expired_stale_rechecks_are_batched
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
