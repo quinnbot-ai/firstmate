@@ -59,6 +59,9 @@
 # `workspace close`. It retires the non-authoritative journal only when a
 # read-only token correlation agrees with that endpoint and pane closure is
 # confirmed. Otherwise the journal stays quarantined for manual inspection.
+# Projected closes run before a leased Treehouse worktree is returned, share
+# the presentation-order lock, refuse to close the captain's active tab, and
+# restore the exact pre-close tab if cleanup focuses an unrelated workspace.
 # Secondmates (kind=secondmate in meta) are retired explicitly. Normal
 # teardown refuses while their home has in-flight crewmate meta files; --force
 # is the approved discard path that prevalidates child removal targets, discards
@@ -1438,6 +1441,7 @@ begin_treehouse_lease_return_transaction || exit 1
 prepare_treehouse_lease_handoff_return || exit 1
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
 HERDR_PRESENTATION_RETIRE_CANDIDATE=0
+HERDR_PRESENTATION_CLOSE_CONFIRMED=0
 HERDR_PRESENTATION_SESSION=
 HERDR_PRESENTATION_PANE=
 if [ "$BACKEND" = herdr ] \
@@ -1454,6 +1458,43 @@ if [ "$BACKEND" = herdr ] \
        "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
        "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
     HERDR_PRESENTATION_RETIRE_CANDIDATE=1
+  fi
+fi
+if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
+  HERDR_PRESENTATION_FOCUS_LOCK=
+  HERDR_PRESENTATION_FOCUS_LOCK_HELD=0
+  HERDR_PRESENTATION_FOCUS_LOCK_ATTEMPT=0
+  if HERDR_PRESENTATION_FOCUS_LOCK=$(fm_backend_herdr_presentation_session_lock_path "$HERDR_PRESENTATION_SESSION"); then
+    while [ "$HERDR_PRESENTATION_FOCUS_LOCK_ATTEMPT" -lt 50 ]; do
+      if fm_lock_try_acquire "$HERDR_PRESENTATION_FOCUS_LOCK"; then
+        HERDR_PRESENTATION_FOCUS_LOCK_HELD=1
+        break
+      fi
+      sleep 0.1
+      HERDR_PRESENTATION_FOCUS_LOCK_ATTEMPT=$((HERDR_PRESENTATION_FOCUS_LOCK_ATTEMPT + 1))
+    done
+  fi
+  if [ "$HERDR_PRESENTATION_FOCUS_LOCK_HELD" = 1 ]; then
+    fm_backend_herdr_projection_close_pane_focus_preserving \
+      "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" 2>/dev/null || true
+    HERDR_PRESENTATION_FOCUS_LOCK_HELD=0
+    fm_lock_release "$HERDR_PRESENTATION_FOCUS_LOCK" || true
+  else
+    echo "warning: herdr presentation focus lock unavailable; refusing a concurrent focus-unsafe pane close" >&2
+  fi
+  if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then
+    HERDR_PRESENTATION_CLOSE_CONFIRMED=1
+  fi
+  if [ "$ENDPOINT_CLEANUP_PENDING" = 1 ] || [ -n "$CODEX_CREWMATE_HOME" ] || [ -n "$CLAUDE_CREWMATE_HOME" ]; then
+    if [ "$HERDR_PRESENTATION_CLOSE_CONFIRMED" != 1 ]; then
+      echo "error: endpoint $T could not be confirmed absent before cleanup; preserving recovery metadata" >&2
+      abort_teardown_before_treehouse_return
+    fi
+  fi
+  if [ "$(meta_value "$META" treehouse_lease)" = 1 ] \
+     && [ "$HERDR_PRESENTATION_CLOSE_CONFIRMED" != 1 ]; then
+    echo "error: projected herdr endpoint $T could not be closed safely before treehouse return; preserving recovery metadata" >&2
+    abort_teardown_before_treehouse_return
   fi
 fi
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
@@ -1490,11 +1531,11 @@ fi
 
 finish_treehouse_lease_handoff_return || exit 1
 
-if [ "$BACKEND" != orca ]; then
+if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" != 1 ] && [ "$BACKEND" != orca ]; then
   close_recorded_endpoint || exit 1
 fi
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
-  if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then
+  if [ "$HERDR_PRESENTATION_CLOSE_CONFIRMED" = 1 ]; then
     rm -f "$HERDR_PRESENTATION_JOURNAL"
   else
     echo "warning: exact herdr task-pane close could not be confirmed for $ID; retaining the presentation journal and attempting no workspace cleanup" >&2
