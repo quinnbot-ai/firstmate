@@ -311,6 +311,32 @@ test_handle_wake_paused_records_pause_marker() {
   pass "handle_wake on a paused stale records a pause marker, drops the wedge marker, and does not escalate"
 }
 
+# The watcher batches several overdue stale rechecks into one
+# "stale-rechecks: [stale: <window> (<diagnosis>)]..." wake. The daemon must
+# recognize it as a wake (not idle it as non-wake stdout) and dispatch each lane
+# through ordinary stale classification: a paused lane records a pause marker,
+# a transient lane records a wedge marker, and neither escalates on the wake.
+test_handle_wake_batched_stale_rechecks_dispatch_per_lane() {
+  local dir state pkey tkey pwin twin reason
+  dir=$(make_supercase handle-stale-recheck-batch)
+  state="$dir/state"
+  pwin="sess:fm-batch-paused"
+  twin="sess:fm-batch-wedge"
+  printf 'window=%s\nkind=ship\n' "$pwin" > "$state/batch-paused.meta"
+  printf 'window=%s\nkind=ship\n' "$twin" > "$state/batch-wedge.meta"
+  printf 'paused: awaiting the vendor rate-limit reset\n' > "$state/batch-paused.status"
+  printf 'working: awaiting CI\n' > "$state/batch-wedge.status"
+  pkey=$(printf '%s' "batch-paused" | tr ':/.' '___')
+  tkey=$(printf '%s' "batch-wedge" | tr ':/.' '___')
+  reason="stale-rechecks: [stale: $pwin (paused 900s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)] [stale: $twin (idle 500s, possible wedge, escalation 2)]"
+  is_wake_reason "$reason" || fail "batched stale-recheck reason not recognized as a wake"
+  FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+  [ -e "$state/.subsuper-paused-$pkey" ] || fail "batched paused lane did not record a pause marker"
+  [ -e "$state/.subsuper-stale-$tkey" ] || fail "batched transient lane did not record a wedge marker"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a batched stale recheck escalated on the wake itself"
+  pass "a batched stale-recheck wake is dispatched per lane through stale classification"
+}
+
 test_handle_wake_paused_signal_records_pause_marker() {
   local dir state key win
   dir=$(make_supercase handle-paused-signal)
@@ -1795,6 +1821,7 @@ test_stale_transient_self_records_marker
 test_stale_terminal_escalates
 test_stale_paused_classifies_pause
 test_handle_wake_paused_records_pause_marker
+test_handle_wake_batched_stale_rechecks_dispatch_per_lane
 test_handle_wake_paused_signal_records_pause_marker
 test_handle_wake_terminal_signal_clears_pause_tracking
 test_housekeeping_migrates_watcher_pause_marker

@@ -648,6 +648,67 @@ test_expired_stale_rechecks_are_batched() {
   pass "multiple expired stale rechecks are batched into one wake and all markers refresh"
 }
 
+# A fresh stale transition later in the same scan preempts the batch: the watcher
+# exits with the fresh direct wake before the collected batch surfaces. The
+# collected lane's recheck marker and escalation counter must stay untouched so
+# the lane re-collects on the next pass instead of being silently deferred a full
+# cadence with no durable record.
+test_preempted_stale_recheck_batch_keeps_markers_expired() {
+  local dir state fakebin out capture_file one two one_key two_key pane_hash sig overdue_since pid
+  dir=$(make_case preempted-stale-recheck-batch); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  one="test:fm-aa-overdue"; two="test:fm-zz-stopped"
+  printf 'idle while validation is running' > "$capture_file"
+  pane_hash=$(hash_text "idle while validation is running")
+  one_key=$(printf '%s' "$one" | tr ':/.' '___')
+  two_key=$(printf '%s' "$two" | tr ':/.' '___')
+  # Lane one (scanned first): already-classified stale with an expired recheck timer.
+  printf 'window=%s\nkind=ship\n' "$one" > "$state/aa-overdue.meta"
+  printf 'working: awaiting CI\n' > "$state/aa-overdue.status"
+  sig=$(seen_sig "$state/aa-overdue.status"); printf '%s' "$sig" > "$state/.seen-aa-overdue_status"
+  printf '%s' "$pane_hash" > "$state/.hash-$one_key"
+  printf '%s' "$pane_hash" > "$state/.stale-$one_key"
+  printf '1\n' > "$state/.count-$one_key"
+  overdue_since=$(( $(date +%s) - 500 ))
+  printf '%s\n' "$overdue_since" > "$state/.stale-since-$one_key"
+  # Lane two (scanned second): a fresh not-provably-working stale that surfaces
+  # a direct wake at once, preempting the collected batch.
+  printf 'window=%s\nkind=ship\n' "$two" > "$state/zz-stopped.meta"
+  printf 'working: implementing\n' > "$state/zz-stopped.status"
+  sig=$(seen_sig "$state/zz-stopped.status"); printf '%s' "$sig" > "$state/.seen-zz-stopped_status"
+  printf '%s' "$pane_hash" > "$state/.hash-$two_key"
+  printf '1\n' > "$state/.count-$two_key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not surface the fresh stale that preempts the batch"
+  grep -Fx "stale: $two" "$out" >/dev/null || fail "the fresh stale transition did not win the preempted pass"
+  grep -F 'stale-rechecks:' "$out" >/dev/null && fail "a preempted pass still emitted the batch wake"
+  awk -F '\t' '$3 == "stale" && $4 == "stale-rechecks" { found=1 } END { exit found }' "$state/.wake-queue" \
+    || fail "a preempted pass still wrote the batch queue record"
+  [ "$(cat "$state/.stale-since-$one_key")" = "$overdue_since" ] \
+    || fail "a preempted batch refreshed the collected lane's recheck marker (silently deferring it a full cadence)"
+  [ ! -e "$state/.wedge-escalations-$one_key" ] \
+    || fail "a preempted batch wrote the collected lane's escalation counter without a delivered wake"
+
+  # The next pass re-collects the still-expired lane and surfaces the batch.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not surface the re-collected batch on the next pass"
+  grep -F 'stale-rechecks:' "$out" >/dev/null || fail "the re-collected lane did not surface as a batch wake"
+  awk -F '\t' '$3 == "stale" && $4 == "stale-rechecks" { found=1 } END { exit !found }' "$state/.wake-queue" \
+    || fail "the re-collected batch wrote no durable queue record"
+  [ "$(cat "$state/.stale-since-$one_key")" -ge $(( $(date +%s) - 10 )) ] \
+    || fail "the surfaced batch did not refresh the re-collected lane's recheck marker"
+  [ "$(cat "$state/.wedge-escalations-$one_key")" = "1" ] \
+    || fail "the surfaced batch did not record exactly one delivered escalation"
+  pass "a batch preempted by a fresh stale keeps its lanes expired and re-collects on the next pass"
+}
+
 # --- non-terminal stale, crew NOT provably working: surfaced immediately ------
 # The key requirement: a crew with no running pipeline that has gone quiet (and is
 # not busy) has stopped - it may be done via interactive menus, waiting, or wedged.
@@ -2159,6 +2220,7 @@ test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_expired_stale_rechecks_are_batched
+test_preempted_stale_recheck_batch_keeps_markers_expired
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
