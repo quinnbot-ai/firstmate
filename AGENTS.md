@@ -79,7 +79,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   captain.md         this home's domain-local captain preferences and working style; LOCAL, gitignored, canonical even if harness memory mirrors it, and updated with inspect-then-update
   captain-shared.md  main-authoritative shared captain preferences propagated read-only to secondmate homes; LOCAL, gitignored, owned by secondmate-provisioning
   codex-crewmate/    task-private Codex homes for ship and scout launches; LOCAL, gitignored, owned by fm-codex-home.py and removed by teardown
-  claude-crewmate/   optional second-account Claude isolation: captain-populated profile/ plus task-private homes for ship and scout launches; LOCAL, gitignored, dormant until the captain logs in (docs/configuration.md)
+  claude-crewmate/   optional second-account Claude isolation: captain-populated profile/ plus task-private homes for ship and scout launches; LOCAL, gitignored, dormant while profile/ is absent; a present profile that cannot authenticate a task-private copy refuses Claude ship/scout launches (docs/configuration.md)
   learnings.md       fleet-local operational facts and gotchas; LOCAL, gitignored; dated, evidence-backed, curated, and updated with inspect-then-update - rewrite and prune rather than append forever, the same contract as captain.md; created lazily, absent until this home has a learning to store
   projects.md        thin fleet navigation registry; firstmate-private, parsed by fm-project-mode.sh (section 6)
   secondmates.md      secondmate routing table; firstmate-private, maintained by fm-home-seed.sh (section 6)

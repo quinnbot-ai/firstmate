@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 """Manage a firstmate-owned private Claude home for one ship or scout task.
 
-fm-spawn.sh is the sole caller.
+The callers are fm-spawn.sh (create, abort cleanup), fm-teardown.sh
+(teardown removal), and fm-claude-crew-lib.sh's readiness probe.
 It creates a mode-0700 directory below data/claude-crewmate.
 It copies the captain-populated persistent profile at
 data/claude-crewmate/profile, skipping any customization-surface entries
-(settings, hooks, MCP config, plugins, skills, commands, agents) so the
-task-private copy carries auth and nothing else.
+(settings, hooks, MCP config, plugins, skills, commands, agents) and
+stripping every mcpServers section (user scope and per-project) from the
+copied .claude.json so the task-private copy carries auth and completed
+onboarding and nothing else.
+On macOS it also clones only the managed profile's per-config-dir
+Keychain credential into the new home's derived Keychain service, and
+removes that service entry on abort cleanup and teardown, even when the
+home directory itself is already gone.
 It never reads or copies anything from the captain's own ~/.claude or
 CLAUDE_CONFIG_DIR - the persistent profile is populated only by the
 captain's own `claude auth login` run against it directly.
@@ -15,9 +22,14 @@ Secondmate Claude launches do not use this helper.
 """
 
 import argparse
+import getpass
+import hashlib
+import json
 import os
+import platform
 import secrets
 import stat
+import subprocess
 import sys
 
 # Profile entries that carry customization surface (global MCP servers,
@@ -40,6 +52,80 @@ EXCLUDED_ENTRIES = {
 def die(message):
     print(f"error: {message}", file=sys.stderr)
     raise SystemExit(1)
+
+
+def is_macos():
+    return platform.system() == "Darwin"
+
+
+def keychain_service(home, legacy=False):
+    digest = hashlib.sha256(os.path.realpath(home).encode()).hexdigest()[:8]
+    prefix = "Claude Code" if legacy else "Claude Code-credentials"
+    return f"{prefix}-{digest}"
+
+
+def run_security(arguments, input_bytes=None):
+    return subprocess.run(
+        ["security", *arguments],
+        input=input_bytes,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+
+
+def clone_keychain_credential(data, source, home):
+    managed_profile = os.path.join(
+        os.path.realpath(data), "claude-crewmate", "profile"
+    )
+    if not is_macos() or os.path.realpath(source) != managed_profile:
+        return False
+    account = getpass.getuser()
+    for legacy in (False, True):
+        source_result = run_security(
+            [
+                "find-generic-password",
+                "-a",
+                account,
+                "-w",
+                "-s",
+                keychain_service(source, legacy),
+            ]
+        )
+        if source_result.returncode != 0:
+            continue
+        target_result = run_security(
+            [
+                "add-generic-password",
+                "-U",
+                "-a",
+                account,
+                "-s",
+                keychain_service(home),
+                "-w",
+            ],
+            source_result.stdout,
+        )
+        if target_result.returncode != 0:
+            die("could not seed isolated Claude Keychain credential")
+        return True
+    return False
+
+
+def remove_keychain_credential(home):
+    if not is_macos():
+        return
+    result = run_security(
+        [
+            "delete-generic-password",
+            "-a",
+            getpass.getuser(),
+            "-s",
+            keychain_service(home),
+        ]
+    )
+    if result.returncode not in (0, 44):
+        die("could not remove isolated Claude Keychain credential")
 
 
 def open_directory(name, directory_fd=None):
@@ -93,6 +179,43 @@ def write_file(directory_fd, name, content, mode=0o600):
         os.close(fd)
 
 
+def remove_mcp_servers(value):
+    if isinstance(value, dict):
+        value.pop("mcpServers", None)
+        for child in value.values():
+            remove_mcp_servers(child)
+    elif isinstance(value, list):
+        for child in value:
+            remove_mcp_servers(child)
+
+
+def sanitized_claude_json(content):
+    try:
+        config = json.loads(content.decode())
+    except (UnicodeDecodeError, ValueError):
+        config = None
+    if not isinstance(config, dict):
+        die("Claude profile .claude.json is not a JSON object")
+    remove_mcp_servers(config)
+    return (json.dumps(config, separators=(",", ":")) + "\n").encode()
+
+
+def read_regular_file(source_dir_fd, name):
+    source_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=source_dir_fd)
+    try:
+        if not stat.S_ISREG(os.fstat(source_fd).st_mode):
+            die(f"Claude profile source entry is not regular: {name}")
+        chunks = []
+        while True:
+            chunk = os.read(source_fd, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(source_fd)
+
+
 def copy_regular_file(source_dir_fd, name, target_dir_fd):
     source_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=source_dir_fd)
     try:
@@ -134,7 +257,14 @@ def copy_tree(source_dir_fd, target_dir_fd, top_level):
             finally:
                 os.close(child_source_fd)
         elif stat.S_ISREG(entry_stat.st_mode):
-            copy_regular_file(source_dir_fd, entry, target_dir_fd)
+            if top_level and entry == ".claude.json":
+                write_file(
+                    target_dir_fd,
+                    entry,
+                    sanitized_claude_json(read_regular_file(source_dir_fd, entry)),
+                )
+            else:
+                copy_regular_file(source_dir_fd, entry, target_dir_fd)
         else:
             die(f"Claude profile source entry is not a file or directory: {entry}")
 
@@ -242,12 +372,20 @@ def create_home(args):
         try:
             home_created = False
             name = None
+            home_path = None
             try:
                 while True:
                     name = ".fm-claude-home." + secrets.token_hex(16)
                     try:
                         os.mkdir(name, 0o700, dir_fd=base_fd)
                         home_created = True
+                        home_path = os.path.join(
+                            directory_path(
+                                base_fd,
+                                os.path.join(os.path.abspath(args.data), "claude-crewmate"),
+                            ),
+                            name,
+                        )
                         break
                     except FileExistsError:
                         continue
@@ -256,13 +394,18 @@ def create_home(args):
                     require_directory(home_fd, "isolated Claude home")
                     os.fchmod(home_fd, 0o700)
                     copy_tree(source_fd, home_fd, top_level=True)
+                    clone_keychain_credential(args.data, args.source, home_path)
                     write_file(home_fd, ownership_marker_name(task_id), b"")
                 finally:
                     os.close(home_fd)
-                data_real = directory_path(base_fd, os.path.join(os.path.abspath(args.data), "claude-crewmate"))
-                print(os.path.join(data_real, name))
+                print(home_path)
             except BaseException:
                 if home_created:
+                    try:
+                        if home_path is not None:
+                            remove_keychain_credential(home_path)
+                    except (OSError, SystemExit):
+                        pass
                     try:
                         remove_tree(base_fd, name)
                     except OSError:
@@ -343,6 +486,7 @@ def remove_home(args):
         try:
             home_fd = open_directory(name, base_fd)
         except FileNotFoundError:
+            remove_keychain_credential(expected)
             return
         try:
             try:
@@ -365,6 +509,7 @@ def remove_home(args):
             expected_identity = (home_stat.st_dev, home_stat.st_ino)
         finally:
             os.close(home_fd)
+        remove_keychain_credential(expected)
         remove_tree(base_fd, name, expected_identity)
     except FileNotFoundError:
         pass

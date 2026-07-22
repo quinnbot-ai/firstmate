@@ -233,6 +233,18 @@ Waiting for agents'
   pass "invalid busy signature regexes fall back to defaults without diagnostics"
 }
 
+test_valid_busy_signature_regexes_override_defaults() {
+  local out pane
+  pane='Custom startup
+Custom wait'
+  out=$(FM_STARTUP_SPINNER_RE='Custom startup' FM_BUSY_WAIT_SPIN_RE='Custom wait' \
+    bash -c '. "$1"; pane_is_startup_spinner "$2" && printf startup; pane_is_busy_wait_spin "$2" && printf busy' \
+    _ "$ROOT/bin/fm-classify-lib.sh" "$pane" 2>&1) \
+    || fail "valid busy signature regexes prevented classifier initialization"
+  [ "$out" = 'startupbusy' ] || fail "valid busy signature regex overrides were replaced by defaults: $out"
+  pass "valid busy signature regexes override the defaults"
+}
+
 # crew_is_provably_working: the absorb-only-when-provably-working predicate. It is
 # benign (absorb) ONLY when fm-crew-state.sh reports the crew as working from an
 # actively-running pipeline step (source run-step) or a busy pane (source pane);
@@ -2080,6 +2092,7 @@ test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives
 test_pane_progress_classifier_uses_current_footer
 test_invalid_busy_signature_regexes_fall_back_once
+test_valid_busy_signature_regexes_override_defaults
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier

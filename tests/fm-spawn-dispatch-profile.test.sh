@@ -13,6 +13,14 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
+TEST_SECURITY_BIN="$TMP_ROOT/security-bin"
+mkdir -p "$TEST_SECURITY_BIN"
+cat > "$TEST_SECURITY_BIN/security" <<'SH'
+#!/usr/bin/env bash
+exit 44
+SH
+chmod 700 "$TEST_SECURITY_BIN/security"
+PATH="$TEST_SECURITY_BIN:$PATH"
 
 make_spawn_fakebin() {
   local dir=$1 fakebin
@@ -98,10 +106,17 @@ SH
 set -u
 [ -z "${FM_FAKE_BACKEND_LOG:-}" ] || printf 'treehouse %s\n' "$*" >> "$FM_FAKE_BACKEND_LOG"
 case "${1:-}" in
-  get) printf '%s\n' "${FM_FAKE_PANE_PATH:?}" ;;
+  get)
+    [ "${FM_FAKE_TREEHOUSE_GET_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_TREEHOUSE_GET_STATUS}"
+    printf '%s\n' "${FM_FAKE_PANE_PATH:?}"
+    ;;
   return)
     [ "${FM_FAKE_TREEHOUSE_CLOSE_EFFECT:-none}" != gone ] || printf '%s\n' gone > "${FM_FAKE_TARGET_STATE:?}"
     exit "${FM_FAKE_TREEHOUSE_RETURN_STATUS:-0}"
+    ;;
+  status)
+    [ -z "${FM_FAKE_TREEHOUSE_STATUS_OUTPUT:-}" ] || printf '%s\n' "$FM_FAKE_TREEHOUSE_STATUS_OUTPUT"
+    exit "${FM_FAKE_TREEHOUSE_STATUS_EXIT:-0}"
     ;;
 esac
 SH
@@ -1380,6 +1395,80 @@ test_codex_teardown_refuses_symlinked_data_root() {
   pass "Codex teardown rejects symlinked data roots"
 }
 
+test_failed_lease_acquisition_does_not_block_later_spawns() {
+  local rec id retry out status
+  id=treehouse-get-fail-z95
+  retry=treehouse-get-retry-z96
+  rec=$(make_spawn_case treehouse-get-fail claude "$id" "$retry")
+  read_case_record "$rec"
+
+  out=$(FM_FAKE_TREEHOUSE_GET_STATUS=9 \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "spawn must fail when treehouse cannot acquire a lease"
+  assert_contains "$out" "could not acquire a leased worktree" \
+    "the lease-acquisition failure was not reported"
+  find "$HOME_DIR/state" -name ".${id}.treehouse-lease.*" -type f | grep -q . \
+    && fail "a failed lease acquisition retained an empty handoff that blocks every later spawn"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$retry" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "a later spawn must succeed after a transient lease-acquisition failure"
+  pass "a failed lease acquisition leaves no handoff behind to block later spawns"
+}
+
+test_interrupted_lease_acquisition_retains_handoff() {
+  local rec id out status
+  id=treehouse-get-interrupted-z97
+  rec=$(make_spawn_case treehouse-get-interrupted claude "$id")
+  read_case_record "$rec"
+
+  out=$(FM_FAKE_TREEHOUSE_GET_STATUS=143 \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "spawn must fail when treehouse lease acquisition is interrupted"
+  assert_contains "$out" "could not acquire a leased worktree" \
+    "the interrupted lease acquisition was not reported"
+  find "$HOME_DIR/state" -name ".${id}.treehouse-lease.*" -type f | grep -q . \
+    || fail "an interrupted lease acquisition discarded its indeterminate handoff"
+  pass "an interrupted lease acquisition retains its indeterminate handoff"
+}
+
+test_failed_lease_still_held_in_pool_retains_handoff() {
+  local rec id out status
+  id=treehouse-get-held-z98
+  rec=$(make_spawn_case treehouse-get-held claude "$id")
+  read_case_record "$rec"
+
+  out=$(FM_FAKE_TREEHOUSE_GET_STATUS=9 \
+    FM_FAKE_TREEHOUSE_STATUS_OUTPUT="1     leased       ~/.treehouse/project-be30a4/1/project  (held by $id)" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "spawn must fail when treehouse dies after recording a lease"
+  assert_contains "$out" "could not acquire a leased worktree" \
+    "the lease-acquisition failure was not reported"
+  find "$HOME_DIR/state" -name ".${id}.treehouse-lease.*" -type f | grep -q . \
+    || fail "a failed acquisition whose lease the pool still holds discarded its recovery handoff"
+  pass "a failed acquisition whose lease survived in the pool retains its handoff"
+}
+
+test_failed_lease_with_unreadable_pool_retains_handoff() {
+  local rec id out status
+  id=treehouse-get-pool-unreadable-z99
+  rec=$(make_spawn_case treehouse-get-pool-unreadable claude "$id")
+  read_case_record "$rec"
+
+  out=$(FM_FAKE_TREEHOUSE_GET_STATUS=9 FM_FAKE_TREEHOUSE_STATUS_EXIT=1 \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "spawn must fail when the lease acquisition and pool read both fail"
+  assert_contains "$out" "could not acquire a leased worktree" \
+    "the lease-acquisition failure was not reported"
+  find "$HOME_DIR/state" -name ".${id}.treehouse-lease.*" -type f | grep -q . \
+    || fail "an unconfirmed lease-free failure discarded its recovery handoff"
+  pass "a failed acquisition with an unreadable pool retains its handoff"
+}
+
 test_codex_crewmate_home_records_failed_worktree_return() {
   local rec id out status handoff
   id=profile-codex-home-return-z22
@@ -1613,13 +1702,13 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 # fake-tmux activation dance is needed: by the time run_spawn returns, the
 # task-private home already exists on disk with real content.
 
-write_fake_claude_cli() {  # <fakebin-dir> <ready-profile-dir>
-  local fakebin=$1 ready_dir=$2
+write_fake_claude_cli() {  # <fakebin-dir>
+  local fakebin=$1
   cat > "$fakebin/claude" <<SH
 #!/usr/bin/env bash
 set -u
 if [ "\$1 \$2 \$3" = "auth status --json" ]; then
-  if [ "\${CLAUDE_CONFIG_DIR:-}" = "$ready_dir" ]; then
+  if [ -f "\${CLAUDE_CONFIG_DIR:-}/.credentials.json" ]; then
     printf '%s\n' '{"loggedIn":true}'
     exit 0
   fi
@@ -1640,7 +1729,10 @@ make_claude_crew_profile() {  # <home-dir> [ready=1]
   local home=$1 ready=${2:-1} crew_profile
   crew_profile="$home/data/claude-crewmate/profile"
   mkdir -p "$crew_profile"
-  [ "$ready" -eq 0 ] || printf '{"oauthAccount":{"emailAddress":"crew@example.invalid"}}\n' > "$crew_profile/.claude.json"
+  [ "$ready" -eq 0 ] || {
+    printf '{"hasCompletedOnboarding":true,"oauthAccount":{"emailAddress":"crew@example.invalid"}}\n' > "$crew_profile/.claude.json"
+    printf '{"claudeAiOauth":{"accessToken":"test-access","refreshToken":"test-refresh"}}\n' > "$crew_profile/.credentials.json"
+  }
   printf '%s\n' "$crew_profile"
 }
 
@@ -1672,6 +1764,9 @@ EOF
   assert_grep "claude_crewmate_home=$home_dir" "$HOME_DIR/state/$ship.meta" \
     "Claude ship metadata did not retain its isolated home for cleanup"
   assert_present "$home_dir/.claude.json" "isolated Claude home did not copy the profile's credential file"
+  assert_grep '"hasCompletedOnboarding":true' "$home_dir/.claude.json" \
+    "isolated Claude home did not retain completed onboarding state"
+  assert_present "$home_dir/.credentials.json" "isolated Claude home did not copy the file credential fixture"
   assert_present "$home_dir/backups/entry.json" "isolated Claude home did not copy nested profile content"
   [ ! -e "$home_dir/settings.json" ] || fail "isolated Claude home retained the profile's settings.json"
   [ ! -e "$home_dir/hooks" ] || fail "isolated Claude home retained the profile's hooks directory"
@@ -1705,7 +1800,7 @@ test_claude_crewmate_home_absent_profile_matches_default_behavior() {
   pass "an absent claude crew profile keeps the launch and meta byte-identical to today"
 }
 
-test_claude_crewmate_home_credential_less_profile_matches_default_behavior() {
+test_claude_crewmate_home_credential_less_profile_refuses_spawn() {
   local rec id out status launch expected crew_profile
   id=claude-crew-home-noauth-z93
   rec=$(make_spawn_case claude-crew-home-noauth claude "$id")
@@ -1715,14 +1810,16 @@ test_claude_crewmate_home_credential_less_profile_matches_default_behavior() {
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
-  expect_code 0 "$status" "Claude spawn with a credential-less crew profile should succeed unchanged"
-  launch=$(cat "$LAUNCH_LOG")
-  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
-  [ "$launch" = "$expected" ] || fail "credential-less-profile claude launch changed"$'\n'"expected: $expected"$'\n'"actual:   $launch"
-  assert_no_grep 'claude_crewmate_home=' "$HOME_DIR/state/$id.meta" \
-    "credential-less claude spawn should not record claude_crewmate_home="
+  expect_code 1 "$status" "Claude spawn with a credential-less crew profile must refuse before launch"
+  assert_contains "$out" "cannot authenticate a task-private home" \
+    "credential-less Claude profile did not explain its readiness refusal"
+  [ ! -s "$LAUNCH_LOG" ] || fail "credential-less Claude profile launched a pane"
+  if [ -f "$HOME_DIR/state/$id.meta" ]; then
+    assert_no_grep 'claude_crewmate_home=' "$HOME_DIR/state/$id.meta" \
+      "credential-less Claude profile recorded an unprovisioned credential home"
+  fi
   [ -d "$crew_profile" ] || fail "test setup lost the credential-less profile directory"
-  pass "a present but credential-less claude crew profile keeps the launch and meta byte-identical to today"
+  pass "a present but credential-less claude crew profile refuses before launching a pane"
 }
 
 test_claude_crewmate_home_uses_fresh_private_directory() {
@@ -1929,6 +2026,10 @@ test_codex_teardown_preserves_metadata_when_endpoint_query_is_unavailable
 test_codex_teardown_refuses_malformed_task_temp_metadata
 test_codex_teardown_accepts_legacy_task_temp_metadata
 test_codex_teardown_refuses_symlinked_data_root
+test_failed_lease_acquisition_does_not_block_later_spawns
+test_interrupted_lease_acquisition_retains_handoff
+test_failed_lease_still_held_in_pool_retains_handoff
+test_failed_lease_with_unreadable_pool_retains_handoff
 test_codex_crewmate_home_records_failed_worktree_return
 test_codex_spawn_abort_accepts_an_already_absent_endpoint
 test_codex_crewmate_home_records_failed_endpoint_removal
@@ -1942,7 +2043,7 @@ test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch
 test_claude_crewmate_home_used_when_profile_ready
 test_claude_crewmate_home_absent_profile_matches_default_behavior
-test_claude_crewmate_home_credential_less_profile_matches_default_behavior
+test_claude_crewmate_home_credential_less_profile_refuses_spawn
 test_claude_crewmate_home_uses_fresh_private_directory
 test_claude_crewmate_home_is_removed_at_teardown
 test_claude_crewmate_home_preserved_when_referenced_by_another_task

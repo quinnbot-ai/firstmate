@@ -97,11 +97,12 @@
 # Claude ship and scout launches receive a firstmate-managed CLAUDE_CONFIG_DIR
 # under data/claude-crewmate, each in a fresh private directory copied from the
 # captain-populated data/claude-crewmate/profile (a second Anthropic account,
-# never the captain's own ~/.claude), only when that profile exists and holds
-# credentials (bin/fm-claude-crew-lib.sh's fm_claude_crew_profile_ready). An
-# absent or credential-less profile leaves the launch and meta byte-identical
-# to today's default-account behavior. Claude secondmate launches are not
-# changed here.
+# never the captain's own ~/.claude), only when that profile and a disposable
+# copy both authenticate (bin/fm-claude-crew-lib.sh's
+# fm_claude_crew_profile_ready). An absent profile leaves the launch and meta
+# byte-identical to today's default-account behavior, while a present but
+# unusable profile refuses the Claude spawn before a pane can reach onboarding.
+# Claude secondmate launches are not changed here.
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
@@ -389,7 +390,11 @@ remove_codex_crewmate_home() {
 refresh_claude_crewmate_home() {
   local profile home
   profile=$(fm_claude_crew_profile_dir "$DATA")
-  fm_claude_crew_profile_ready "$profile" || return 0
+  [ -d "$profile" ] || return 0
+  if ! fm_claude_crew_profile_ready "$profile" "$DATA" "$STATE"; then
+    echo "error: configured Claude crewmate profile cannot authenticate a task-private home" >&2
+    return 1
+  fi
   home=$(python3 "$FM_ROOT/bin/fm-claude-home.py" --data "$DATA" --source "$profile" --task-id "$ID" --create) || return 1
   CLAUDE_CREWMATE_HOME="$home"
 }
@@ -1835,7 +1840,21 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     echo "error: could not create treehouse lease handoff for $ID" >&2
     exit 1
   }
-  if ! ( cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID" > "$TREEHOUSE_LEASE_PATH_FILE" ); then
+  treehouse_get_status=0
+  ( cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID" > "$TREEHOUSE_LEASE_PATH_FILE" ) \
+    || treehouse_get_status=$?
+  if [ "$treehouse_get_status" -ne 0 ]; then
+    # A nonzero get may still have durably recorded a lease before it could
+    # print the path, so an exit status alone never proves the empty handoff is
+    # lease-free. Discard it only after `treehouse status` reads the pool and
+    # shows no lease held by this task; on any lease hit or unreadable pool the
+    # handoff stays as recovery evidence.
+    if [ "$treehouse_get_status" -lt 128 ] && [ ! -s "$TREEHOUSE_LEASE_PATH_FILE" ] \
+      && treehouse_pool_status=$(cd "$PROJ_ABS" && treehouse status 2>/dev/null) \
+      && ! printf '%s\n' "$treehouse_pool_status" | grep -qF "held by $ID)" \
+      && rm -f "$TREEHOUSE_LEASE_PATH_FILE"; then
+      TREEHOUSE_LEASE_PATH_FILE=
+    fi
     echo "error: treehouse could not acquire a leased worktree for $ID" >&2
     exit 1
   fi
@@ -2117,7 +2136,7 @@ TASK_META_TMP=$(mktemp "$STATE/.${ID}.meta.XXXXXX") || {
 } > "$TASK_META_TMP"
 mv "$TASK_META_TMP" "$STATE/$ID.meta"
 TASK_META_TMP=
-TREEHOUSE_LEASE_COMMITTED=1
+[ "$BACKEND" = orca ] || TREEHOUSE_LEASE_COMMITTED=1
 if [ -n "$TREEHOUSE_LEASE_PATH_FILE" ] && ! rm -f "$TREEHOUSE_LEASE_PATH_FILE"; then
   echo "warning: committed treehouse lease handoff retained at $TREEHOUSE_LEASE_PATH_FILE; a later spawn will clear it without returning the committed worktree" >&2
 fi

@@ -35,7 +35,7 @@
 # fm_claude_crew_profile_ready; docs/configuration.md), the live quota-axi call
 # runs with CLAUDE_CONFIG_DIR pointed at that profile, so the Claude candidate's
 # numbers are the account crew tasks will actually burn, not the captain's own
-# seat account. An absent or credential-less profile reads the default
+# seat account. An absent or not-ready profile reads the default
 # environment exactly as before. The --quota-json fixture path is unaffected -
 # it never shells out to quota-axi at all.
 set -u
@@ -44,6 +44,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-claude-crew-lib.sh
 . "$SCRIPT_DIR/fm-claude-crew-lib.sh"
 
@@ -165,7 +166,7 @@ else
     exit 0
   fi
   claude_crew_profile=$(fm_claude_crew_profile_dir "$DATA")
-  if fm_claude_crew_profile_ready "$claude_crew_profile"; then
+  if fm_claude_crew_profile_ready "$claude_crew_profile" "$DATA" "$STATE"; then
     quota_json=$(CLAUDE_CONFIG_DIR="$claude_crew_profile" "$quota_cmd" --json 2>/dev/null)
   else
     quota_json=$("$quota_cmd" --json 2>/dev/null)
