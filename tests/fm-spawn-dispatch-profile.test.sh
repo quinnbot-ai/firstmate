@@ -98,6 +98,10 @@ case "${1:-}" in
     [ "${FM_FAKE_TREEHOUSE_CLOSE_EFFECT:-none}" != gone ] || printf '%s\n' gone > "${FM_FAKE_TARGET_STATE:?}"
     exit "${FM_FAKE_TREEHOUSE_RETURN_STATUS:-0}"
     ;;
+  status)
+    [ -z "${FM_FAKE_TREEHOUSE_STATUS_OUTPUT:-}" ] || printf '%s\n' "$FM_FAKE_TREEHOUSE_STATUS_OUTPUT"
+    exit "${FM_FAKE_TREEHOUSE_STATUS_EXIT:-0}"
+    ;;
 esac
 SH
   chmod +x "$fakebin/treehouse"
@@ -1403,6 +1407,41 @@ test_interrupted_lease_acquisition_retains_handoff() {
   pass "an interrupted lease acquisition retains its indeterminate handoff"
 }
 
+test_failed_lease_still_held_in_pool_retains_handoff() {
+  local rec id out status
+  id=treehouse-get-held-z98
+  rec=$(make_spawn_case treehouse-get-held claude "$id")
+  read_case_record "$rec"
+
+  out=$(FM_FAKE_TREEHOUSE_GET_STATUS=9 \
+    FM_FAKE_TREEHOUSE_STATUS_OUTPUT="1     leased       ~/.treehouse/project-be30a4/1/project  (held by $id)" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "spawn must fail when treehouse dies after recording a lease"
+  assert_contains "$out" "could not acquire a leased worktree" \
+    "the lease-acquisition failure was not reported"
+  find "$HOME_DIR/state" -name ".${id}.treehouse-lease.*" -type f | grep -q . \
+    || fail "a failed acquisition whose lease the pool still holds discarded its recovery handoff"
+  pass "a failed acquisition whose lease survived in the pool retains its handoff"
+}
+
+test_failed_lease_with_unreadable_pool_retains_handoff() {
+  local rec id out status
+  id=treehouse-get-pool-unreadable-z99
+  rec=$(make_spawn_case treehouse-get-pool-unreadable claude "$id")
+  read_case_record "$rec"
+
+  out=$(FM_FAKE_TREEHOUSE_GET_STATUS=9 FM_FAKE_TREEHOUSE_STATUS_EXIT=1 \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "spawn must fail when the lease acquisition and pool read both fail"
+  assert_contains "$out" "could not acquire a leased worktree" \
+    "the lease-acquisition failure was not reported"
+  find "$HOME_DIR/state" -name ".${id}.treehouse-lease.*" -type f | grep -q . \
+    || fail "an unconfirmed lease-free failure discarded its recovery handoff"
+  pass "a failed acquisition with an unreadable pool retains its handoff"
+}
+
 test_codex_crewmate_home_records_failed_worktree_return() {
   local rec id out status handoff
   id=profile-codex-home-return-z22
@@ -1962,6 +2001,8 @@ test_codex_teardown_accepts_legacy_task_temp_metadata
 test_codex_teardown_refuses_symlinked_data_root
 test_failed_lease_acquisition_does_not_block_later_spawns
 test_interrupted_lease_acquisition_retains_handoff
+test_failed_lease_still_held_in_pool_retains_handoff
+test_failed_lease_with_unreadable_pool_retains_handoff
 test_codex_crewmate_home_records_failed_worktree_return
 test_codex_spawn_abort_accepts_an_already_absent_endpoint
 test_codex_crewmate_home_records_failed_endpoint_removal

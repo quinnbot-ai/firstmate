@@ -1724,7 +1724,14 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   ( cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID" > "$TREEHOUSE_LEASE_PATH_FILE" ) \
     || treehouse_get_status=$?
   if [ "$treehouse_get_status" -ne 0 ]; then
+    # A nonzero get may still have durably recorded a lease before it could
+    # print the path, so an exit status alone never proves the empty handoff is
+    # lease-free. Discard it only after `treehouse status` reads the pool and
+    # shows no lease held by this task; on any lease hit or unreadable pool the
+    # handoff stays as recovery evidence.
     if [ "$treehouse_get_status" -lt 128 ] && [ ! -s "$TREEHOUSE_LEASE_PATH_FILE" ] \
+      && treehouse_pool_status=$(cd "$PROJ_ABS" && treehouse status 2>/dev/null) \
+      && ! printf '%s\n' "$treehouse_pool_status" | grep -qF "held by $ID)" \
       && rm -f "$TREEHOUSE_LEASE_PATH_FILE"; then
       TREEHOUSE_LEASE_PATH_FILE=
     fi
