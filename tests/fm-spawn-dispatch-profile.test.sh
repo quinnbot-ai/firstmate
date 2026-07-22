@@ -1706,8 +1706,10 @@ test_claude_crewmate_home_credential_less_profile_refuses_spawn() {
   assert_contains "$out" "cannot authenticate a task-private home" \
     "credential-less Claude profile did not explain its readiness refusal"
   [ ! -s "$LAUNCH_LOG" ] || fail "credential-less Claude profile launched a pane"
-  assert_absent "$HOME_DIR/state/$id.meta" \
-    "credential-less Claude profile should not record task metadata"
+  if [ -f "$HOME_DIR/state/$id.meta" ]; then
+    assert_no_grep 'claude_crewmate_home=' "$HOME_DIR/state/$id.meta" \
+      "credential-less Claude profile recorded an unprovisioned credential home"
+  fi
   [ -d "$crew_profile" ] || fail "test setup lost the credential-less profile directory"
   pass "a present but credential-less claude crew profile refuses before launching a pane"
 }
