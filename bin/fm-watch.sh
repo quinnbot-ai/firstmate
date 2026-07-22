@@ -30,8 +30,15 @@
 #                          also carries a "demand-deep-inspection" marker so the
 #                          wake payload itself, not just repetition, forces a
 #                          closer look instead of another routine supervision
-#                          resume. Expired stale rechecks from the same poll are
-#                          batched into one compatible stale wake. Unless afk is active.
+#                          resume. Unless afk is active.
+#   stale-rechecks: [stale: <window> (<reason>)]...
+#                          already-tracked stale rechecks (wedge escalations and
+#                          declared-pause re-surfaces) that expired in the same
+#                          poll, batched into one compatible stale wake (queue
+#                          kind stale, key stale-rechecks) with each lane's full
+#                          reason retained; each lane's marker refresh commits
+#                          only after the batch's durable record lands. Unless
+#                          afk is active.
 #                          A busy pane with unchanged footer progress is also
 #                          surfaced as stale: Codex's zero-context startup spinner
 #                          after FM_STARTUP_ZERO_CONTEXT_SECS, or an unchanged
