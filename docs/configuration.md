@@ -206,7 +206,7 @@ The inherited-local-material contract is owned by `secondmate-provisioning`; for
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
 For Pi secondmate launches, `fm-spawn.sh` starts Pi with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 For Codex ship and scout launches, `fm-spawn.sh` creates one private task home under `data/codex-crewmate/` and runs the process with that directory as `CODEX_HOME`.
-The helper copies only `auth.json` and `models_cache.json` from the captain's current `CODEX_HOME`, or `~/.codex` when it is unset, then writes an isolated configuration that disables plugins, contains no MCP configuration, and keeps the task worktree untrusted.
+The helper copies only `auth.json` and `models_cache.json` from the captain's current `CODEX_HOME`, or `~/.codex` when it is unset, then writes an isolated configuration with `model_auto_compact_token_limit = 150000`, disabled plugins, no MCP configuration, and an untrusted task worktree.
 Project-local `.codex/config.toml` is deliberately excluded from those launches, so it cannot re-enable MCP servers or plugins.
 The captain's Codex home is never modified, and Codex secondmate launches intentionally keep their existing home behavior.
 The task metadata records `codex_crewmate_home=`, and normal teardown removes that managed home after endpoint cleanup succeeds.
