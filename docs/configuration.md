@@ -78,7 +78,8 @@ A herdr spawn additionally version-gates against the installed `herdr` binary's 
 A zellij spawn additionally version-gates against the installed `zellij` binary's version and requires `jq`, refusing loudly when either is missing or the version is older than 0.44.
 A cmux spawn additionally version-gates against the installed `cmux` binary's version, requires `jq`, and requires the control socket to be reachable and accessible (see [`docs/cmux-backend.md`](cmux-backend.md) "Setup" for the one-time socket-access configuration this needs; Automation mode is the recommended socket control mode, with Password mode supported via `config/cmux-socket-password`), refusing loudly and non-retryably on a `cmuxOnly`/unauthenticated socket.
 A backend spawn refusal from a missing dependency, version gate, or unauthenticated socket is terminal for that selected backend; firstmate surfaces it as a blocker instead of silently retrying another backend.
-Task meta records `backend=` only for a non-default backend; an absent `backend=` means `tmux`, preserving existing default-path meta files.
+Task meta records `backend=` only for a non-default backend; an absent `backend=` means `tmux`.
+A tmux task additionally records `tmux_window_id=`, the stable tmux window id captured at spawn, with `window=fm-<id>` kept as the shared firstmate alias.
 A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
 A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
 An Orca task additionally records `orca_worktree_id=` and `terminal=`, with `window=fm-<id>` kept as the shared firstmate alias.
@@ -86,7 +87,7 @@ A cmux task additionally records `cmux_workspace_id=` and `cmux_surface_id=`.
 Task selectors for `fm-peek.sh`, `fm-send.sh`, and `fm-crew-state.sh` resolve centrally through `fm_backend_resolve_selector`.
 A selector containing `:` is passed through as an explicit backend endpoint escape hatch.
 Otherwise an exact task id matching `state/<id>.meta` wins before the legacy `fm-<id>` label fallback, so task ids that themselves start with `fm-` route to their own metadata instead of being stripped.
-A metadata-routed selector returns the recorded backend target (`terminal=` for Orca, otherwise `window=`), and matching explicit targets can still recover the recorded backend when metadata contains the same endpoint.
+A metadata-routed selector returns the recorded backend target (`terminal=` for Orca, `tmux_window_id=` for a tmux task that recorded one and otherwise `window=`), and matching explicit targets can still recover the recorded backend when metadata contains the same endpoint.
 Only metadata-routed task selectors carry secondmate-marker and Codex-harness context; explicit endpoint escape hatches do not.
 These five sentences are the single owner of the task-selector vocabulary; backend guides and other documents point here instead of restating the resolution order.
 `fm-teardown.sh <id>` takes a task id directly and uses the same recorded backend target fields after loading `state/<id>.meta`.
@@ -233,6 +234,7 @@ For Claude ship and scout launches, once the profile is ready, `fm-spawn.sh` cre
 The helper copies the profile directory's contents - including `.claude.json`'s completed-onboarding state and any supported `.credentials.json` file - into the fresh task-private home, excluding `settings.json`, `settings.local.json`, `.mcp.json`, `CLAUDE.md`, `commands/`, `agents/`, `hooks/`, `plugins/`, and `skills/`, and stripping every `mcpServers` section (user scope and per-project) from the copied `.claude.json` itself, so a crew launch can never inherit global MCP servers, plugins, or other customization surface even if the persistent profile is someday touched by more than a bare login.
 On macOS, Claude Code 2.1.216 stores OAuth credentials in Keychain service `Claude Code-credentials-<hash>`, where `<hash>` is the first eight hexadecimal characters of SHA-256 over the canonical `CLAUDE_CONFIG_DIR` path, under the local macOS username.
 The helper clones only the firstmate profile's matching entry into the new task-home-derived service and removes that entry during abort cleanup and normal teardown, so no task token accumulates after its managed home is gone.
+When reading the source entry it also accepts an older-format `Claude Code-<hash>` service name, so a profile logged in by a pre-2.1.216 Claude still seeds the isolated task credential; the cloned target is always written in the current `Claude Code-credentials-<hash>` format.
 It never reads from or writes to the captain's own `~/.claude` or default `CLAUDE_CONFIG_DIR` - the whole point is account separation, and seat credentials are never copied into the crew profile.
 The task metadata records `claude_crewmate_home=`, and normal teardown removes that managed home after endpoint cleanup succeeds, mirroring the Codex managed-home safety contract above (a spawn or teardown that cannot confirm endpoint cleanup preserves the metadata and managed home for later safe recovery).
 Claude secondmate launches are unaffected and keep their existing `CLAUDE_CONFIG_DIR` behavior.

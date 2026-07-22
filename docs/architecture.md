@@ -124,6 +124,7 @@ Lease acquisition and return use a private durable handoff record, and any unsaf
 If a same-project live task meta predates that marker, allocation fails closed until teardown instead of risking an unleased detached or uncommitted worktree.
 Spawn-time current-path reads can transiently report a foreground child process, so the canonical leased worktree root is accepted immediately while every other changed candidate must persist for two polls before the isolation check can reject it.
 Before launching a ship or scout worker, firstmate pins its worktree-local Git author identity without changing global or shared project Git configuration.
+That identity is a fixed fleet default rather than one derived from the operator's own Git config, and it is not currently configurable per home.
 `bin/fm-git-identity.sh`'s header owns the exact identities and the protected Epstein-project predicates.
 Codex ship and scout workers additionally run with a firstmate-managed, task-private `CODEX_HOME` under `data/codex-crewmate/`.
 That home copies only the captain's Codex authentication and model catalog, disables plugins, carries no MCP configuration, and excludes the project-local Codex configuration.
