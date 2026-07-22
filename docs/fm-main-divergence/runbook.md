@@ -9,19 +9,23 @@ A crewmate produced and exercised this runbook in an isolated worktree; it does 
 
 Remotes in this repo: `origin` = `kunchenguid/firstmate` (the upstream template repo), `fork` = `quinnbot-ai/firstmate` (this fleet's own fork, where its PRs land and merge).
 
-At audit time (2026-07-20):
+At audit time (2026-07-22), after an explicit `git fetch --prune` of both remotes:
 
-- Local `main` (primary checkout): `579f6d9` - `fix: absorb declared pauses at parked gates (#9)`
-- `fork/main`: `87b4df4` - `fix(spawn): tolerate transient cwd reads and clean up refused spawns (#15)`
-- `origin/main`: `4ab61fa` - `feat(wake): enrich drained signals with bounded status context (#747)`
+- Local `main` (primary checkout): `324d729` - `feat(spawn): isolate Claude crewmates on a second Anthropic account (#19)`
+- `fork/main`: `cdf71f4` - `fix: batch expired watcher stale rechecks into one wake (#22)`
+- `origin/main`: `673b6ad` - `feat: shard portable tests and add bounded local parallelism (#841)`
 
-`git merge-base --is-ancestor main fork/main` returned true, and `git log fork/main..main` was empty: local `main` is a **literal git ancestor of `fork/main`** - every commit on local `main` already exists on `fork/main` by the same hash.
+`git merge-base --is-ancestor main fork/main` returned true, `git log fork/main..main` was empty, and `git cherry -v fork/main main` was empty.
+The patch-id audit of the (empty) `fork/main..main` range likewise found no local-only patch.
+Local `main` is therefore a **literal git ancestor of `fork/main`** - every local-main change already landed on the fork by the same hash.
 There was no local-only content that had never landed on `fork/main`, so no needs-decision was required before proceeding.
 
-Local `main` had simply fallen behind `fork/main` by four PRs (`#12`, `#13`, `#14`, `#15`) that were merged straight into the fork and never pulled back into the primary checkout.
+Local `main` was four commits behind `fork/main` at that audit point.
 See "Root cause" below for why: `/updatefirstmate` never looks at the `fork` remote, only `origin`.
 
-`fork/main` and `origin/main` diverged from a common ancestor at `bc1a21b`: `fork/main` carries 16 commits since then (fork-local features - isolated Codex homes, ops-inbox surfacing, pause-absorb fixes, worktree leases, watcher escalation - interleaved with commits also present upstream), while `origin/main` carries a different 8 commits since then (upstream watcher/supervision/x-mode fixes this fleet wants: `3729081`, `b2bf95f`, `7a9b4dd`, `15b0fb9`, `ab8cea6`, `68c6110`, `c12bdea`, `4ab61fa`).
+`fork/main` and `origin/main` diverged at `bc1a21b`.
+At audit time, `git rev-list --left-right --count fork/main...origin/main` reported `23 25`.
+This sync merges the complete current upstream tip, including the original watcher, supervision, and X-mode fixes (`3729081` through `4ab61fa`) plus the 17 later upstream commits.
 
 This PR (`fm/fm-main-divergence`) merges `origin/main` into a branch off `fork/main`, preserving both sides, and is the shippable change of this task.
 **Do not run the sequence below until that PR has merged into `fork/main`.**
