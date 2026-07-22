@@ -430,6 +430,18 @@ EOF
     "isolated Codex config retained MCP server entries"
   assert_grep 'plugins = false' "$crew_home/config.toml" \
     "isolated Codex config did not disable plugins"
+  assert_grep 'model_auto_compact_token_limit = 150000' "$crew_home/config.toml" \
+    "isolated Codex config did not set the auto-compaction token limit"
+  python3 - "$crew_home/config.toml" <<'PY' || fail "isolated Codex base config is not valid TOML or has the auto-compaction key in the wrong section"
+import pathlib
+import sys
+import tomllib
+
+content = pathlib.Path(sys.argv[1]).read_text()
+parsed = tomllib.loads(content)
+assert parsed["model_auto_compact_token_limit"] == 150000
+assert content.index("model_auto_compact_token_limit = 150000") < content.index("[features]")
+PY
   assert_no_grep '[plugins.' "$crew_home/config.toml" \
     "isolated Codex config retained plugin registrations"
   assert_grep "trust_level = \"untrusted\"" "$crew_home/config.toml" \

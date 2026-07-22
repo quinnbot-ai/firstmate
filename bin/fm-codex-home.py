@@ -537,7 +537,7 @@ def create_home(args, command=None):
                     require_directory(home_fd, "isolated Codex home")
                     os.fchmod(home_fd, 0o700)
                     base_config = (
-                        '# Firstmate Codex crewmate home.\n[features]\nplugins = false\n[projects."%s"]\ntrust_level = "untrusted"\n'
+                        '# Firstmate Codex crewmate home.\nmodel_auto_compact_token_limit = 150000\n[features]\nplugins = false\n[projects."%s"]\ntrust_level = "untrusted"\n'
                         % worktree
                     )
                     write_file(home_fd, "config.toml", base_config.encode())
