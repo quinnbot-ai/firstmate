@@ -73,6 +73,23 @@ if [ "${1:-}" = "list-windows" ]; then
   fi
   exit 0
 fi
+if [ "${1:-}" = "display-message" ]; then
+  for _arg in "$@"; do
+    if [ "$_arg" = '#{pane_current_command}' ]; then
+      printf '%s\n' "${FM_FAKE_TMUX_CURRENT_COMMAND:-}"
+      exit 0
+    fi
+    if [ "$_arg" = '#{window_name}' ]; then
+      printf '%s\n' "${FM_FAKE_TMUX_WINDOW##*:}"
+      exit 0
+    fi
+    if [ "$_arg" = '#{pane_id}' ]; then
+      printf '%s\n' '%fake-pane'
+      exit 0
+    fi
+  done
+  exit 1
+fi
 if [ "${1:-}" = "capture-pane" ]; then
   if [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ]; then
     cat "$FM_FAKE_TMUX_CAPTURE"
@@ -208,10 +225,8 @@ COMPOSER="${FM_FAKE_COMPOSER:?FM_FAKE_COMPOSER unset}"
 case "${1:-}" in
   display-message)
     print=0
-    for a in "$@"; do case "$a" in
-      *cursor_y*) printf '0\n'; exit 0 ;;
-      *pane_current_command*) printf 'codex\n'; exit 0 ;;
-    esac; done
+    for a in "$@"; do case "$a" in *cursor_y*) printf '0\n'; exit 0 ;; esac; done
+    for a in "$@"; do case "$a" in *pane_current_command*) printf 'claude\n'; exit 0 ;; esac; done
     for a in "$@"; do [ "$a" = "-p" ] && print=1; done
     [ "$print" = 1 ] && printf 'fakepane\n'
     exit 0 ;;

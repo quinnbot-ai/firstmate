@@ -27,6 +27,17 @@
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
+#   Herdr additionally supports a default-off presentation-only layout when the
+#   local config/herdr-presentation-spaces flag exists. A clean fresh task first
+#   writes state/<id>.herdr-presentation atomically, then creates a disposable
+#   workspace containing only the ordinary task pane. The journal and visible
+#   random token are never endpoint or ownership authority. Existing, ambiguous,
+#   or recovered state is never adopted, reused, closed, or deleted through that
+#   presentation path; a flat launch is allowed only after duplicate-agent risk
+#   is independently absent. Treehouse allocation and task metadata are unchanged.
+#   Every single-task invocation holds one task-id-scoped lock across backend
+#   creation through metadata publication, so concurrent same-id spawns serialize
+#   even when they select different backends.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -83,6 +94,15 @@
 # auth/model catalog files and a config.toml with no MCP servers, disabled plugins, and a per-task
 # profile that excludes project-local Codex configuration.
 # Codex secondmate launches retain their existing home and are not changed here.
+# Claude ship and scout launches receive a firstmate-managed CLAUDE_CONFIG_DIR
+# under data/claude-crewmate, each in a fresh private directory copied from the
+# captain-populated data/claude-crewmate/profile (a second Anthropic account,
+# never the captain's own ~/.claude), only when that profile and a disposable
+# copy both authenticate (bin/fm-claude-crew-lib.sh's
+# fm_claude_crew_profile_ready). An absent profile leaves the launch and meta
+# byte-identical to today's default-account behavior, while a present but
+# unusable profile refuses the Claude spawn before a pane can reach onboarding.
+# Claude secondmate launches are not changed here.
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
@@ -110,6 +130,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SUB_HOME_MARKER=".fm-secondmate-home"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
@@ -124,6 +146,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-treehouse-lease-lib.sh"
 # shellcheck source=bin/fm-git-identity.sh
 . "$SCRIPT_DIR/fm-git-identity.sh"
+# shellcheck source=bin/fm-claude-crew-lib.sh
+. "$SCRIPT_DIR/fm-claude-crew-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -208,6 +232,12 @@ fi
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+HERDR_PROJECTION_ABORT_CLEANUP=0
+HERDR_PROJECTION_ABORT_SESSION=
+HERDR_PROJECTION_ABORT_TASK_PANE=
+HERDR_PROJECTION_ABORT_SEEDED_PANE=
+SPAWN_TASK_LOCK=
+SPAWN_TASK_LOCK_HELD=0
 TREEHOUSE_LEASE_PATH_FILE=
 TREEHOUSE_LEASE_COMMITTED=0
 TREEHOUSE_LEASE_LOCK=
@@ -221,7 +251,9 @@ FAILED_ENDPOINT_CLEANUP=0
 TASK_TMP=
 CODEX_CREWMATE_HOME=
 CODEX_ACTIVATION_TOKEN=
+CLAUDE_CREWMATE_HOME=
 SPAWN_META_WRITTEN=0
+TMUX_WINDOW_ID=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -282,12 +314,13 @@ EOF
 }
 
 treehouse_abort_endpoint_cleanup() {
-  [ -n "${T:-}" ] || return 0
-  if fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
+  local endpoint_target=${TMUX_WINDOW_ID:-${T:-}}
+  [ -n "$endpoint_target" ] || return 0
+  if fm_backend_target_absent "$BACKEND" "$endpoint_target" "fm-$ID"; then
     return 0
   fi
-  if FM_BACKEND_KILL_STRICT=1 fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "fm-$ID" 2>/dev/null \
-    && fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
+  if FM_BACKEND_KILL_STRICT=1 fm_backend_kill "$BACKEND" "$endpoint_target" "${ZELLIJ_TAB_ID:-}" "fm-$ID" 2>/dev/null \
+    && fm_backend_target_absent "$BACKEND" "$endpoint_target" "fm-$ID"; then
     return 0
   fi
   FAILED_ENDPOINT_CLEANUP=1
@@ -307,6 +340,7 @@ write_failed_treehouse_spawn_meta() {
       echo "window=$W"
     else
       echo "window=${T:-}"
+      [ -z "$TMUX_WINDOW_ID" ] || echo "tmux_window_id=$TMUX_WINDOW_ID"
     fi
     echo "worktree=$WT"
     echo "project=$PROJ_ABS"
@@ -319,6 +353,7 @@ write_failed_treehouse_spawn_meta() {
     echo "failed_spawn=1"
     [ "$FAILED_ENDPOINT_CLEANUP" != 1 ] || echo "endpoint_cleanup_pending=1"
     [ -z "${CODEX_CREWMATE_HOME:-}" ] || echo "codex_crewmate_home=$CODEX_CREWMATE_HOME"
+    [ -z "${CLAUDE_CREWMATE_HOME:-}" ] || echo "claude_crewmate_home=$CLAUDE_CREWMATE_HOME"
     echo "model=${MODEL:-default}"
     echo "effort=${EFFORT:-default}"
     [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
@@ -350,6 +385,24 @@ remove_codex_crewmate_home() {
   local home=${CODEX_CREWMATE_HOME:-}
   [ -n "$home" ] || return 0
   python3 "$FM_ROOT/bin/fm-codex-home.py" --remove --data "$DATA" --state "$STATE" --task-id "$ID" --home "$home"
+}
+
+refresh_claude_crewmate_home() {
+  local profile home
+  profile=$(fm_claude_crew_profile_dir "$DATA")
+  [ -d "$profile" ] || return 0
+  if ! fm_claude_crew_profile_ready "$profile" "$DATA" "$STATE"; then
+    echo "error: configured Claude crewmate profile cannot authenticate a task-private home" >&2
+    return 1
+  fi
+  home=$(python3 "$FM_ROOT/bin/fm-claude-home.py" --data "$DATA" --source "$profile" --task-id "$ID" --create) || return 1
+  CLAUDE_CREWMATE_HOME="$home"
+}
+
+remove_claude_crewmate_home() {
+  local home=${CLAUDE_CREWMATE_HOME:-}
+  [ -n "$home" ] || return 0
+  python3 "$FM_ROOT/bin/fm-claude-home.py" --remove --data "$DATA" --state "$STATE" --task-id "$ID" --home "$home"
 }
 
 remove_codex_home_activation_result() {
@@ -402,33 +455,48 @@ orca_spawn_abort_cleanup() {
 }
 
 spawn_abort_cleanup() {
-  local status=$? preserve_codex_home=0 clean_codex_home=0 orca_cleanup_failed=0
+  local status=$? preserve_crew_home=0 clean_crew_home=0 orca_cleanup_failed=0
+  if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ]; then
+    HERDR_PROJECTION_ABORT_CLEANUP=0
+    fm_backend_herdr_projection_cleanup_exact \
+      "$HERDR_PROJECTION_ABORT_SESSION" \
+      "$HERDR_PROJECTION_ABORT_TASK_PANE" \
+      "$HERDR_PROJECTION_ABORT_SEEDED_PANE" || true
+  fi
   if [ -n "$TREEHOUSE_LEASE_PATH_FILE" ]; then
-    clean_codex_home=1
+    clean_crew_home=1
     treehouse_spawn_abort_cleanup "$status" || true
     if [ "$FAILED_ENDPOINT_CLEANUP" = 1 ]; then
-      preserve_codex_home=1
+      preserve_crew_home=1
       write_failed_treehouse_spawn_meta
     fi
   fi
   if [ "$BACKEND" != orca ] && [ "$status" -ne 0 ] && [ "$TREEHOUSE_LEASE_COMMITTED" = 1 ] && [ "$SPAWN_META_WRITTEN" = 1 ]; then
-    clean_codex_home=1
+    clean_crew_home=1
     if ! treehouse_abort_endpoint_cleanup; then
-      preserve_codex_home=1
+      preserve_crew_home=1
     fi
     write_failed_treehouse_spawn_meta
   fi
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
-    clean_codex_home=1
+    clean_crew_home=1
     orca_spawn_abort_cleanup
     orca_cleanup_failed=$ORCA_ABORT_CLEANUP_FAILED
-    [ "$FAILED_ENDPOINT_CLEANUP" != 1 ] || preserve_codex_home=1
+    [ "$FAILED_ENDPOINT_CLEANUP" != 1 ] || preserve_crew_home=1
   fi
-  if [ "$clean_codex_home" -eq 1 ] && [ "$preserve_codex_home" -eq 0 ] && ! remove_codex_crewmate_home; then
-    echo "error: could not remove isolated Codex crewmate home" >&2
-    write_failed_treehouse_spawn_meta
-  elif [ "$clean_codex_home" -eq 1 ] && [ "$preserve_codex_home" -eq 0 ]; then
-    CODEX_CREWMATE_HOME=
+  if [ "$clean_crew_home" -eq 1 ] && [ "$preserve_crew_home" -eq 0 ]; then
+    if ! remove_codex_crewmate_home; then
+      echo "error: could not remove isolated Codex crewmate home" >&2
+      write_failed_treehouse_spawn_meta
+    else
+      CODEX_CREWMATE_HOME=
+    fi
+    if ! remove_claude_crewmate_home; then
+      echo "error: could not remove isolated Claude crewmate home" >&2
+      write_failed_treehouse_spawn_meta
+    else
+      CLAUDE_CREWMATE_HOME=
+    fi
   fi
   [ "$orca_cleanup_failed" -eq 0 ] || write_failed_treehouse_spawn_meta
   [ -z "$CODEX_ACTIVATION_TOKEN" ] || remove_codex_home_activation_result 2>/dev/null || true
@@ -436,9 +504,13 @@ spawn_abort_cleanup() {
     rm -rf -- "$TASK_TMP"
   fi
   if [ "$status" -ne 0 ] && [ "$SPAWN_META_WRITTEN" = 1 ] && [ "$TREEHOUSE_LEASE_COMMITTED" != 1 ] \
-    && [ "$FAILED_ENDPOINT_CLEANUP" != 1 ] && [ "$preserve_codex_home" -eq 0 ] \
-    && [ "$orca_cleanup_failed" -eq 0 ] && [ -z "$CODEX_CREWMATE_HOME" ]; then
+    && [ "$FAILED_ENDPOINT_CLEANUP" != 1 ] && [ "$preserve_crew_home" -eq 0 ] \
+    && [ "$orca_cleanup_failed" -eq 0 ] && [ -z "$CODEX_CREWMATE_HOME" ] && [ -z "$CLAUDE_CREWMATE_HOME" ]; then
     rm -f "$STATE/$ID.meta"
+  fi
+  if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
+    SPAWN_TASK_LOCK_HELD=0
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
   fi
   [ -z "$TASK_META_TMP" ] || rm -f "$TASK_META_TMP" || true
   treehouse_lease_transaction_release
@@ -484,6 +556,12 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
+if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
+  echo "error: another spawn is already creating task $ID" >&2
+  exit 1
+fi
+SPAWN_TASK_LOCK_HELD=1
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
@@ -1526,6 +1604,48 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   WT_REAL=$wt_real
 }
 
+# A stale presentation journal never grants launch authority.
+# When authoritative metadata already exists, require its endpoint to be
+# positively dead before the journal's read-only token inspection may allow a
+# flat fallback.
+herdr_projection_existing_meta_allows_flat() {  # <meta>
+  local meta=$1 old_backend old_target old_session old_pane old_state
+  old_backend=$(fm_backend_of_meta "$meta")
+  old_target=$(fm_backend_target_of_meta "$meta")
+  [ -n "$old_target" ] || {
+    echo "error: existing metadata for $ID has no endpoint; refusing duplicate launch while its herdr presentation journal is quarantined" >&2
+    return 1
+  }
+  if [ "$old_backend" = herdr ]; then
+    fm_backend_herdr_parse_target "$old_target" || {
+      echo "error: existing herdr endpoint for $ID is malformed; refusing duplicate launch" >&2
+      return 1
+    }
+    old_session=$FM_BACKEND_HERDR_SESSION
+    old_pane=$FM_BACKEND_HERDR_PANE
+    fm_backend_herdr_server_ensure "$old_session" || {
+      echo "error: existing herdr endpoint for $ID could not be inspected; refusing duplicate launch" >&2
+      return 1
+    }
+    old_state=$(fm_backend_herdr_pane_agent_state "$old_session" "$old_pane")
+    case "$old_state" in
+      dead|no-agent) return 0 ;;
+      live|unknown)
+        echo "error: existing herdr endpoint for $ID is $old_state; refusing duplicate launch" >&2
+        return 1
+        ;;
+    esac
+  fi
+  old_state=$(fm_backend_agent_alive "$old_backend" "$old_target")
+  case "$old_state" in
+    dead) return 0 ;;
+    alive|unknown)
+      echo "error: existing $old_backend endpoint for $ID is $old_state; refusing duplicate launch" >&2
+      return 1
+      ;;
+  esac
+}
+
 W="fm-$ID"
 case "$BACKEND" in
   tmux)
@@ -1538,6 +1658,7 @@ case "$BACKEND" in
     # rename-critical worktree-detection steps below; the persisted window= handle
     # stays $T (the name form), which is safe now that rename is disabled.
     WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+    TMUX_WINDOW_ID=$WID
     WT_TARGET="$WID"
     ;;
   herdr)
@@ -1556,21 +1677,59 @@ case "$BACKEND" in
     if [ "$KIND" = secondmate ]; then
       HERDR_LABEL_HOME=$PROJ_ABS
     fi
-    HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$PROJ_ABS") || exit 1
-    # fm_backend_herdr_container_ensure echoes "<session>:<workspace_id>\t<seeded_default_tab_id>"
-    # (the second field empty when this call ADOPTED a pre-existing workspace
-    # rather than creating a fresh one). Split on the guaranteed single tab
-    # character; the seeded tab id is threaded through to create_task
-    # untouched, which is the only function permitted to prune it (never
-    # re-derived from labels - see docs/herdr-backend.md "Default-tab prune").
-    CONTAINER=${HERDR_CONTAINER_RAW%%$'\t'*}
-    HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
-    HERDR_SES=${CONTAINER%%:*}
-    HERDR_WORKSPACE_ID=${CONTAINER#*:}
-    HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
-    read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
+    HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
+    HERDR_PROJECTED=0
+    if [ -f "$CONFIG/herdr-presentation-spaces" ]; then
+      if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
+        if [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
+          herdr_projection_existing_meta_allows_flat "$STATE/$ID.meta" || exit 1
+        fi
+        HERDR_RECOVERY_SESSION=$(fm_backend_herdr_session)
+        fm_backend_herdr_projection_recovery_allows_flat \
+          "$HERDR_RECOVERY_SESSION" "$HERDR_PRESENTATION_JOURNAL" "$ID" || exit 1
+      elif [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+        HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
+        HERDR_PROJECTION_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" \
+          fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
+        if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
+          "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
+          if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
+            HERDR_PROJECTION_ABORT_CLEANUP=1
+            HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
+            HERDR_PROJECTION_ABORT_TASK_PANE=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
+            HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
+          fi
+          exit 1
+        fi
+        HERDR_PROJECTED=1
+        HERDR_SES=$FM_BACKEND_HERDR_PROJECTION_SESSION
+        HERDR_WORKSPACE_ID=$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID
+        HERDR_SEEDED_DEFAULT_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID
+        HERDR_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
+        HERDR_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
+        HERDR_PROJECTION_ABORT_CLEANUP=1
+        HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
+        HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
+        HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
+      fi
+    fi
+    if [ "$HERDR_PROJECTED" -ne 1 ]; then
+      HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$PROJ_ABS") || exit 1
+      # fm_backend_herdr_container_ensure echoes "<session>:<workspace_id>\t<seeded_default_tab_id>"
+      # (the second field empty when this call ADOPTED a pre-existing workspace
+      # rather than creating a fresh one). Split on the guaranteed single tab
+      # character; the seeded tab id is threaded through to create_task
+      # untouched, which is the only function permitted to prune it (never
+      # re-derived from labels - see docs/herdr-backend.md "Default-tab prune").
+      CONTAINER=${HERDR_CONTAINER_RAW%%$'\t'*}
+      HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
+      HERDR_SES=${CONTAINER%%:*}
+      HERDR_WORKSPACE_ID=${CONTAINER#*:}
+      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
+    fi
     if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
       echo "error: herdr did not return a tab/pane id for $W" >&2
       exit 1
@@ -1681,7 +1840,21 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     echo "error: could not create treehouse lease handoff for $ID" >&2
     exit 1
   }
-  if ! ( cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID" > "$TREEHOUSE_LEASE_PATH_FILE" ); then
+  treehouse_get_status=0
+  ( cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID" > "$TREEHOUSE_LEASE_PATH_FILE" ) \
+    || treehouse_get_status=$?
+  if [ "$treehouse_get_status" -ne 0 ]; then
+    # A nonzero get may still have durably recorded a lease before it could
+    # print the path, so an exit status alone never proves the empty handoff is
+    # lease-free. Discard it only after `treehouse status` reads the pool and
+    # shows no lease held by this task; on any lease hit or unreadable pool the
+    # handoff stays as recovery evidence.
+    if [ "$treehouse_get_status" -lt 128 ] && [ ! -s "$TREEHOUSE_LEASE_PATH_FILE" ] \
+      && treehouse_pool_status=$(cd "$PROJ_ABS" && treehouse status 2>/dev/null) \
+      && ! printf '%s\n' "$treehouse_pool_status" | grep -qF "held by $ID)" \
+      && rm -f "$TREEHOUSE_LEASE_PATH_FILE"; then
+      TREEHOUSE_LEASE_PATH_FILE=
+    fi
     echo "error: treehouse could not acquire a leased worktree for $ID" >&2
     exit 1
   fi
@@ -1763,6 +1936,13 @@ if [ "$HARNESS" = codex ] && [ "$KIND" != secondmate ]; then
   if [ -f "$WT_REAL/.codex/config.toml" ]; then
     echo "warning: Codex crewmate ignores project config $WT_REAL/.codex/config.toml to keep MCPs and plugins disabled" >&2
   fi
+fi
+
+if [ "$HARNESS" = claude ] && [ "$KIND" != secondmate ]; then
+  refresh_claude_crewmate_home || {
+    echo "error: could not prepare isolated Claude crewmate home" >&2
+    exit 1
+  }
 fi
 
 # Per-task temp root is atomically created with Go's build temp nested at gotmp/. Go won't
@@ -1913,6 +2093,7 @@ TASK_META_TMP=$(mktemp "$STATE/.${ID}.meta.XXXXXX") || {
 }
 {
   echo "window=$META_WINDOW"
+  [ "$BACKEND" != tmux ] || echo "tmux_window_id=$TMUX_WINDOW_ID"
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
@@ -1922,6 +2103,7 @@ TASK_META_TMP=$(mktemp "$STATE/.${ID}.meta.XXXXXX") || {
   echo "yolo=$YOLO"
   echo "tasktmp=$TASK_TMP"
   [ -z "$CODEX_CREWMATE_HOME" ] || echo "codex_crewmate_home=$CODEX_CREWMATE_HOME"
+  [ -z "$CLAUDE_CREWMATE_HOME" ] || echo "claude_crewmate_home=$CLAUDE_CREWMATE_HOME"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   # backend= is written only for a non-default (non-tmux) backend, so the
@@ -1954,7 +2136,7 @@ TASK_META_TMP=$(mktemp "$STATE/.${ID}.meta.XXXXXX") || {
 } > "$TASK_META_TMP"
 mv "$TASK_META_TMP" "$STATE/$ID.meta"
 TASK_META_TMP=
-TREEHOUSE_LEASE_COMMITTED=1
+[ "$BACKEND" = orca ] || TREEHOUSE_LEASE_COMMITTED=1
 if [ -n "$TREEHOUSE_LEASE_PATH_FILE" ] && ! rm -f "$TREEHOUSE_LEASE_PATH_FILE"; then
   echo "warning: committed treehouse lease handoff retained at $TREEHOUSE_LEASE_PATH_FILE; a later spawn will clear it without returning the committed worktree" >&2
 fi
@@ -1987,6 +2169,10 @@ if [ -n "$CODEX_CREWMATE_HOME" ]; then
   sq_codex_activation_token=$(shell_quote "$CODEX_ACTIVATION_TOKEN")
   LAUNCH="exec python3 $sq_codex_home_helper --create-activate --data $sq_codex_data --source $sq_codex_source --profile $sq_codex_crewmate_profile --worktree $sq_codex_worktree --home $sq_codex_crewmate_home --result-token $sq_codex_activation_token -- $LAUNCH"
 fi
+if [ -n "$CLAUDE_CREWMATE_HOME" ]; then
+  sq_claude_crewmate_home=$(shell_quote "$CLAUDE_CREWMATE_HOME")
+  LAUNCH="CLAUDE_CONFIG_DIR=$sq_claude_crewmate_home $LAUNCH"
+fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
@@ -1998,6 +2184,7 @@ spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
+[ "${HERDR_PROJECTED:-0}" -ne 1 ] || HERDR_PROJECTION_ABORT_CLEANUP=0
 spawn_send_key "$T" Enter
 if [ -n "$CODEX_ACTIVATION_TOKEN" ]; then
   wait_for_codex_home_activation "$CODEX_CREWMATE_HOME" "$CODEX_ACTIVATION_TOKEN" || exit 1

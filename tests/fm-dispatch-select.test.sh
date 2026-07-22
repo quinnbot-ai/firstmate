@@ -174,6 +174,122 @@ SH
   pass "single-object use and no-select arrays preserve first-profile selection"
 }
 
+write_fake_claude_crew_cli() {  # <fakebin-dir>
+  local fakebin=$1
+  cat > "$fakebin/claude" <<SH
+#!/usr/bin/env bash
+set -u
+if [ "\$1 \$2 \$3" = "auth status --json" ]; then
+  if [ -f "\${CLAUDE_CONFIG_DIR:-}/.credentials.json" ]; then
+    printf '%s\n' '{"loggedIn":true}'
+    exit 0
+  fi
+  printf '%s\n' '{"loggedIn":false}'
+  exit 1
+fi
+exit 1
+SH
+  chmod +x "$fakebin/claude"
+  cat > "$fakebin/security" <<'SH'
+#!/usr/bin/env bash
+exit 44
+SH
+  chmod +x "$fakebin/security"
+}
+
+write_fake_quota_axi_env_sensitive() {  # <fakebin-dir> <ready-config-dir>
+  local fakebin=$1 ready_dir=$2
+  cat > "$fakebin/quota-axi" <<SH
+#!/usr/bin/env bash
+set -u
+if [ "\${CLAUDE_CONFIG_DIR:-}" = "$ready_dir" ]; then
+  printf '%s\n' '{"providers":[{"provider":"claude","state":{"status":"fresh"},"windows":[{"id":"five_hour","kind":"session","percentRemaining":90},{"id":"seven_day","kind":"weekly","percentRemaining":90}]},{"provider":"codex","state":{"status":"fresh"},"windows":[{"id":"five_hour","kind":"session","percentRemaining":50},{"id":"weekly","kind":"weekly","percentRemaining":50}]}]}'
+else
+  printf '%s\n' '{"providers":[{"provider":"claude","state":{"status":"fresh"},"windows":[{"id":"five_hour","kind":"session","percentRemaining":5},{"id":"seven_day","kind":"weekly","percentRemaining":5}]},{"provider":"codex","state":{"status":"fresh"},"windows":[{"id":"five_hour","kind":"session","percentRemaining":50},{"id":"weekly","kind":"weekly","percentRemaining":50}]}]}'
+fi
+SH
+  chmod +x "$fakebin/quota-axi"
+}
+
+test_ready_crew_profile_is_used_for_claude_quota() {
+  local case_dir home profile fakebin out
+  case_dir="$TMP_ROOT/profile-ready"
+  home="$case_dir/home"
+  profile="$home/data/claude-crewmate/profile"
+  mkdir -p "$profile" "$home/state"
+  printf '{"claudeAiOauth":{"accessToken":"test-access"}}\n' > "$profile/.credentials.json"
+  fakebin=$(fm_fakebin "$case_dir/fake")
+  write_fake_claude_crew_cli "$fakebin" "$profile"
+  write_fake_quota_axi_env_sensitive "$fakebin" "$profile"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-dispatch-select.sh" --select quota-balanced "$profiles")
+  [ "$out" = '{"harness":"claude","model":"claude-sonnet-5","effort":"high"}' ] \
+    || fail "ready crew profile should give Claude the higher-quota win, got: $out"
+  pass "a ready claude crew profile is read for the Claude quota candidate"
+}
+
+test_absent_crew_profile_reads_default_environment() {
+  local case_dir home fakebin out
+  case_dir="$TMP_ROOT/profile-absent"
+  home="$case_dir/home"
+  mkdir -p "$home/data"
+  fakebin=$(fm_fakebin "$case_dir/fake")
+  write_fake_claude_crew_cli "$fakebin" "$home/data/claude-crewmate/profile"
+  write_fake_quota_axi_env_sensitive "$fakebin" "$home/data/claude-crewmate/profile"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-dispatch-select.sh" --select quota-balanced "$profiles")
+  [ "$out" = '{"harness":"codex","model":"gpt-5.5","effort":"high"}' ] \
+    || fail "absent crew profile should read the default environment, got: $out"
+  pass "an absent claude crew profile leaves quota-axi reading the default environment"
+}
+
+test_credential_less_crew_profile_reads_default_environment() {
+  local case_dir home profile fakebin out
+  case_dir="$TMP_ROOT/profile-not-logged-in"
+  home="$case_dir/home"
+  profile="$home/data/claude-crewmate/profile"
+  mkdir -p "$profile"
+  fakebin=$(fm_fakebin "$case_dir/fake")
+  # A different "ready" dir than the real profile: the fake claude reports
+  # loggedIn:false for the real profile, matching an initialized-but-empty dir.
+  write_fake_claude_crew_cli "$fakebin" "$profile/never-matches"
+  write_fake_quota_axi_env_sensitive "$fakebin" "$profile"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-dispatch-select.sh" --select quota-balanced "$profiles")
+  [ "$out" = '{"harness":"codex","model":"gpt-5.5","effort":"high"}' ] \
+    || fail "credential-less crew profile should read the default environment, got: $out"
+  pass "a present but credential-less claude crew profile leaves quota-axi reading the default environment"
+}
+
+test_quota_json_fixture_ignores_crew_profile() {
+  local case_dir home profile fakebin quota out
+  case_dir="$TMP_ROOT/profile-fixture-bypass"
+  home="$case_dir/home"
+  profile="$home/data/claude-crewmate/profile"
+  mkdir -p "$profile"
+  fakebin=$(fm_fakebin "$case_dir/fake")
+  write_fake_claude_crew_cli "$fakebin" "$profile"
+  marker="$case_dir/quota-axi-called"
+  cat > "$fakebin/quota-axi" <<SH
+#!/usr/bin/env bash
+printf called > '$marker'
+exit 1
+SH
+  chmod +x "$fakebin/quota-axi"
+  quota="$case_dir/quota.json"
+  write_quota "$quota" fresh 80 30 fresh 70 60
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-dispatch-select.sh" --select quota-balanced --quota-json "$quota" "$profiles")
+  [ "$out" = '{"harness":"codex","model":"gpt-5.5","effort":"high"}' ] \
+    || fail "quota-json fixture result changed, got: $out"
+  [ ! -e "$marker" ] || fail "quota-json fixture should never shell out to quota-axi"
+  pass "the --quota-json fixture path never touches the claude crew profile or quota-axi"
+}
+
 test_higher_min_vendor_wins
 test_exact_tie_uses_first_profile
 test_quota_missing_falls_back_to_first
@@ -182,5 +298,9 @@ test_bad_quota_json_falls_back_to_first
 test_stale_with_cache_needs_clear_margin_to_beat_fresh
 test_vendor_absent_or_unusable_falls_back_conservatively
 test_backward_compatible_first_selection
+test_ready_crew_profile_is_used_for_claude_quota
+test_absent_crew_profile_reads_default_environment
+test_credential_less_crew_profile_reads_default_environment
+test_quota_json_fixture_ignores_crew_profile
 
 echo "# all fm-dispatch-select tests passed"

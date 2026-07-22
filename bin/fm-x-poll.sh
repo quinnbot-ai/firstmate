@@ -16,7 +16,7 @@
 #       context to state/x-context/<request_id>.json (best-effort), atomically
 #       claim state/x-context/<request_id>.offered.json, and print one compact
 #       line "x-mention <request_id>" (which becomes the watcher wake payload)
-#   an already offered request_id without a pending inbox -> print nothing, exit 0
+#   an already offered request_id                -> print nothing, exit 0
 # The full object is stashed verbatim, so any conversation context the relay
 # includes (in_reply_to: {author_handle, text}, null for a fresh mention) is
 # preserved for fmx-respond to handle follow-ups with continuity. The durable
@@ -118,16 +118,17 @@ case "$REQ" in
   ''|.*|*[!A-Za-z0-9._-]*) clear_error; exit 0 ;;
 esac
 
-INBOX="$STATE/x-inbox"
+# The offer marker outlives the inbox file, which fmx-respond removes after a
+# successful answer or dismiss. Checking it before the inbox stash keeps both a
+# still-pending request and the relay's brief post-answer re-offer silent without
+# recreating a drained inbox. The startup prune above bounds marker retention.
 if fmx_private_artifact_file_valid "$STATE/x-context" "$REQ.offered.json" 600; then
   clear_error
   clear_claim_error
-  if fmx_private_artifact_file_valid "$INBOX" "$REQ.json" 600; then
-    printf 'x-mention %s\n' "$REQ"
-  fi
   exit 0
 fi
 
+INBOX="$STATE/x-inbox"
 # Stash the full mention object atomically so a concurrent reader never sees a
 # half-written file.
 if ! (set -o pipefail; jq '.' "$BODY_FILE" 2>/dev/null \

@@ -67,6 +67,51 @@ function literalEvalPayload(position) {
   return payloads.map((payload) => payload.value).join(" ");
 }
 
+function timeWrappedPosition(position, root) {
+  if (!position.command || basename(position.command.value) !== "time") return position;
+  let index = position.index + 1;
+  while (position.words[index]) {
+    const word = position.words[index];
+    if (word.value === "--") {
+      index += 1;
+      break;
+    }
+    if (word.value.startsWith("--")) {
+      const option = word.value.slice(2).split("=", 1)[0];
+      if (["output", "format"].includes(option)) {
+        index += word.value.includes("=") ? 1 : 2;
+        continue;
+      }
+      if (["append", "portability", "verbose"].includes(option)) {
+        index += 1;
+        continue;
+      }
+      const script = position.words.slice(index + 1).find((candidate) => fleetScript(candidate.value, root));
+      return script ? { ...position, index: position.words.indexOf(script), command: script } : position;
+    }
+    if (/^-[A-Za-z]+$/.test(word.value)) {
+      let consumedArgument = false;
+      for (let offset = 1; offset < word.value.length; offset += 1) {
+        const option = word.value[offset];
+        if (["a", "l", "p", "v"].includes(option)) continue;
+        if (!["f", "o"].includes(option)) {
+          const script = position.words.slice(index + 1).find((candidate) => fleetScript(candidate.value, root));
+          return script ? { ...position, index: position.words.indexOf(script), command: script } : position;
+        }
+        index += offset + 1 === word.value.length ? 2 : 1;
+        consumedArgument = true;
+        break;
+      }
+      if (!consumedArgument) {
+        index += 1;
+      }
+      continue;
+    }
+    break;
+  }
+  return { ...position, index, command: position.words[index] };
+}
+
 function collectExecutedFleetScripts(command, root, depth = 0) {
   if (depth > 12) return [];
   const lexed = new Lexer(command).tokenize();
@@ -75,7 +120,7 @@ function collectExecutedFleetScripts(command, root, depth = 0) {
   const program = splitProgram(lexed.tokens);
 
   for (const tokens of program.nodes) {
-    const position = commandPosition(tokens);
+    const position = timeWrappedPosition(commandPosition(tokens), root);
     const direct = fleetScript(position.command?.value || "", root);
     if (direct) scripts.push(direct);
 

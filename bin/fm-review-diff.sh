@@ -49,23 +49,27 @@ PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 [ -d "$WT" ] || { echo "error: worktree for task $ID is missing: $WT" >&2; exit 1; }
 [ -d "$PROJ" ] || { echo "error: project for task $ID is missing: $PROJ" >&2; exit 1; }
 
-default_branch() {
-  local ref branch
-  ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+default_branch() {  # <remote>
+  local remote=$1 ref branch
+  ref=$(git -C "$WT" symbolic-ref --quiet --short "refs/remotes/$remote/HEAD" 2>/dev/null || true)
   if [ -n "$ref" ]; then
-    echo "${ref#origin/}"
+    echo "${ref#"$remote/"}"
+    return 0
+  fi
+  ref=$(git -C "$WT" ls-remote --symref "$remote" HEAD 2>/dev/null | awk '/^ref: / { sub("refs/heads/", "", $2); print $2; exit }' || true)
+  if [ -n "$ref" ]; then
+    echo "$ref"
     return 0
   fi
   for branch in main master; do
-    if git -C "$PROJ" show-ref --verify --quiet "refs/heads/$branch"; then
+    if git -C "$WT" show-ref --verify --quiet "refs/remotes/$remote/$branch" \
+      || git -C "$WT" show-ref --verify --quiet "refs/heads/$branch"; then
       echo "$branch"
       return 0
     fi
   done
   return 1
 }
-
-DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
 
 BRANCH="fm/$ID"
 if ! git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; then
@@ -91,23 +95,79 @@ pr_number_from_target() {
   printf '%s' "$n"
 }
 
+normalize_repository() {  # <URL>
+  local url=$1 repository authority path
+  case "$url" in
+    file://*) repository=${url#file://} ;;
+    *://*)
+      repository=${url#*://}
+      authority=${repository%%/*}
+      path=${repository#*/}
+      [ "$path" != "$repository" ] || return 1
+      authority=${authority##*@}
+      authority=${authority%%:*}
+      [ -n "$authority" ] || return 1
+      repository=$authority/$path
+      ;;
+    *@*:*)
+      authority=${url#*@}
+      authority=${authority%%:*}
+      path=${url#*:}
+      [ -n "$authority" ] && [ -n "$path" ] || return 1
+      repository=$authority/$path
+      ;;
+    *) repository=$url ;;
+  esac
+  repository=${repository%/}
+  repository=${repository%.git}
+  [ -n "$repository" ] || return 1
+  printf '%s' "$repository"
+}
+
+remote_repository() {  # <remote>
+  local remote=$1 url
+  url=$(git -C "$WT" config --get "remote.$remote.url" 2>/dev/null) \
+    || url=$(git -C "$WT" remote get-url "$remote" 2>/dev/null) \
+    || return 1
+  normalize_repository "$url"
+}
+
+pr_repository() {  # <PR URL>
+  local target=$1 repository
+  case "$target" in
+    *"/pull/"*) repository=${target%/pull/*} ;;
+    *) return 1 ;;
+  esac
+  normalize_repository "$repository"
+}
+
+remote_for_pr() {  # <PR URL>
+  local target=$1 repository remote candidate
+  repository=$(pr_repository "$target") || return 1
+  while IFS= read -r remote; do
+    candidate=$(remote_repository "$remote" 2>/dev/null || true)
+    [ "$candidate" = "$repository" ] && { printf '%s' "$remote"; return 0; }
+  done < <(git -C "$WT" remote)
+  return 1
+}
+
 fetch_pull_head() {
-  local n=$1 resolved
-  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
-  # Fetch into a private ref so a later base-branch fetch cannot clobber the
-  # compare tip via FETCH_HEAD, and so we never review a stale local object.
-  git -C "$WT" fetch --quiet origin \
-    "+refs/pull/$n/head:refs/fm-review/pull/$n/head" >/dev/null 2>&1 || return 1
-  resolved=$(git -C "$WT" rev-parse --verify "refs/fm-review/pull/$n/head^{commit}" 2>/dev/null) || return 1
+  local remote=$1 n=$2 resolved
+  git -C "$WT" fetch --quiet "$remote" "refs/pull/$n/head" >/dev/null 2>&1 || return 1
+  resolved=$(git -C "$WT" rev-parse --verify 'FETCH_HEAD^{commit}' 2>/dev/null) || return 1
   [ -n "$resolved" ] || return 1
   printf '%s' "$resolved"
 }
 
 resolve_pr_head() {
-  local pr_url=$1 recorded_head=$2 n resolved
+  local pr_url=$1 recorded_head=$2 n remote resolved
   n=$(pr_number_from_target "$pr_url") || true
-  if [ -n "$n" ]; then
-    if resolved=$(fetch_pull_head "$n"); then
+  remote=$(remote_for_pr "$pr_url" 2>/dev/null || true)
+  case "$pr_url" in
+    [0-9]*) [ -n "$remote" ] || remote=origin ;;
+  esac
+  if [ -n "$n" ] && [ -n "$remote" ]; then
+    if resolved=$(fetch_pull_head "$remote" "$n"); then
       printf '%s' "$resolved"
       return 0
     fi
@@ -124,6 +184,12 @@ resolve_pr_head() {
 
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD_RECORDED=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
+BASE_REMOTE=origin
+if [ -n "$PR_URL" ] && [[ "$PR_URL" != [0-9]* ]]; then
+  BASE_REMOTE=$(remote_for_pr "$PR_URL" 2>/dev/null || true)
+  [ -n "$BASE_REMOTE" ] || BASE_REMOTE=origin
+fi
+DEFAULT=$(default_branch "$BASE_REMOTE") || { echo "error: cannot determine default branch for $PROJ on $BASE_REMOTE; expected $BASE_REMOTE/HEAD, main, or master" >&2; exit 1; }
 COMPARE_REF=$BRANCH
 if [ -n "$PR_URL" ]; then
   if PR_HEAD=$(resolve_pr_head "$PR_URL" "$PR_HEAD_RECORDED"); then
@@ -133,11 +199,11 @@ if [ -n "$PR_URL" ]; then
   fi
 fi
 
-if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
+if git -C "$WT" remote get-url "$BASE_REMOTE" >/dev/null 2>&1; then
   # Update the remote-tracking ref itself; a bare single-branch fetch can leave
   # origin/<default> stale on some Git versions and only refresh FETCH_HEAD.
-  git -C "$WT" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet
-  BASE="origin/$DEFAULT"
+  git -C "$WT" fetch "$BASE_REMOTE" "+refs/heads/$DEFAULT:refs/remotes/$BASE_REMOTE/$DEFAULT" --quiet
+  BASE="$BASE_REMOTE/$DEFAULT"
 else
   BASE="$DEFAULT"
 fi

@@ -69,7 +69,7 @@ test_stale_watch_lock_reclaimed() {
   done
   mkdir "$state/.watch.lock"
   printf '%s\n' "$dead_pid" > "$state/.watch.lock/pid"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  PATH="$fakebin:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   i=0
   live=0
@@ -436,6 +436,146 @@ test_watch_restart_rejects_reused_pid() {
   pass "watch restart refuses to signal a reused pid"
 }
 
+test_watch_arm_reclaims_reused_pid() {
+  local dir state fakebin out live pid i lock_pid
+  dir=$(make_case arm-reused-pid)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/arm.out"
+  mark_pr_check_migration_complete "$state"
+  sleep 300 &
+  live=$!
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$live" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "stale watcher identity" > "$state/.watch.lock/pid-identity"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$out" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  { [ -n "$lock_pid" ] && [ "$lock_pid" != "$live" ] && kill -0 "$lock_pid" 2>/dev/null; } \
+    || fail "arm did not replace stale reused-pid lock with a live watcher (got '$lock_pid')"
+  grep -F "watcher: started pid=$lock_pid" "$out" >/dev/null || fail "arm did not report the fresh watcher it confirmed"
+  is_live_non_zombie "$live" || fail "arm killed a reused unrelated pid"
+  kill "$pid" "$lock_pid" "$live" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "watch arm reclaims a reused-pid lock without killing its holder"
+}
+
+test_watch_arm_reclaim_keeps_replaced_lock() {
+  local dir state fakebin out old replacement replacement_identity armpid lock_pid i status
+  dir=$(make_case arm-reclaim-replaced-lock)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/arm.out"
+  mark_pr_check_migration_complete "$state"
+  cat > "$fakebin/cat" <<'SH'
+#!/usr/bin/env bash
+set -u
+count=0
+for arg in "$@"; do
+  if [ "$arg" = "${FM_RECLAIM_GATE_LOCK:?}/fm-home" ]; then
+    count=$(command cat "${FM_RECLAIM_GATE_COUNT:?}" 2>/dev/null || echo 0)
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$FM_RECLAIM_GATE_COUNT"
+    if [ "$count" -eq 4 ]; then
+      : > "$FM_RECLAIM_GATE_READY"
+      while [ ! -e "$FM_RECLAIM_GATE_RELEASE" ]; do command sleep 0.01; done
+    fi
+    break
+  fi
+done
+exec /bin/cat "$@"
+SH
+  chmod +x "$fakebin/cat"
+  sleep 300 & old=$!
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$old" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' 'stale watcher identity' > "$state/.watch.lock/pid-identity"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_RECLAIM_GATE_LOCK="$state/.watch.lock" FM_RECLAIM_GATE_COUNT="$dir/gate-count" \
+    FM_RECLAIM_GATE_READY="$dir/gate-ready" FM_RECLAIM_GATE_RELEASE="$dir/gate-release" \
+    "$WATCH_ARM" > "$out" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ] && [ ! -e "$dir/gate-ready" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$dir/gate-ready" ] || {
+    kill "$armpid" "$old" 2>/dev/null || true
+    wait "$armpid" 2>/dev/null || true
+    wait "$old" 2>/dev/null || true
+    fail "arm reclaim did not reach its replacement-lock revalidation"
+  }
+  sleep 300 & replacement=$!
+  replacement_identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$replacement") \
+    || fail "could not identify replacement lock holder"
+  rm -rf "$state/.watch.lock"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$replacement" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$replacement_identity" > "$state/.watch.lock/pid-identity"
+  touch "$state/.last-watcher-beat"
+  : > "$dir/gate-release"
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF "watcher: attached pid=$replacement" "$out" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  status=0
+  [ "$lock_pid" = "$replacement" ] || status=1
+  grep -qF "watcher: attached pid=$replacement" "$out" 2>/dev/null || status=1
+  kill "$armpid" "$replacement" "$old" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  wait "$replacement" 2>/dev/null || true
+  wait "$old" 2>/dev/null || true
+  [ "$status" -eq 0 ] || fail "arm reclaim removed or displaced the replacement lock (got '$lock_pid')"
+  pass "watch arm reclaim retains a lock replaced during revalidation"
+}
+
+test_watch_arm_retains_identity_matched_stale_lock() {
+  local dir state fakebin out live identity pid status lock_pid
+  dir=$(make_case arm-identity-matched-stale-lock)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/arm.out"
+  mark_pr_check_migration_complete "$state"
+  sleep 300 &
+  live=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live") \
+    || fail "could not identify identity-matched stale lock holder"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$live" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  touch -t 200001010000 "$state/.last-watcher-beat"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_GUARD_GRACE=1 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 80
+  status=$?
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "arm did not reject an identity-matched stale watcher (status $status)"
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  [ "$lock_pid" = "$live" ] || fail "arm reclaimed an identity-matched stale watcher lock (got '$lock_pid')"
+  is_live_non_zombie "$live" || fail "arm killed the identity-matched stale watcher holder"
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "watch arm retains an identity-matched stale watcher lock"
+}
+
 test_watch_restart_attaches_to_healthy_peer() {
   local dir state fakebin out peer identity armpid status i
   dir=$(make_case restart-healthy-peer)
@@ -443,7 +583,9 @@ test_watch_restart_attaches_to_healthy_peer() {
   fakebin="$dir/fakebin"
   out="$dir/restart.out"
   mark_pr_check_migration_complete "$state"
-  node -e 'process.on("SIGTERM", () => {}); setTimeout(() => {}, 300000)' &
+  # Keep the peer owned by this test and explicitly TERM-resistant: --restart
+  # must attach to it after its scoped signal, never rely on Node signal timing.
+  bash -c 'trap "" TERM; while :; do sleep 1; done' &
   peer=$!
   identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify peer pid"
   mkdir "$state/.watch.lock"
@@ -527,14 +669,14 @@ test_arm_self_eviction_is_loud_without_successor() {
 }
 
 test_arm_attaches_and_waits_for_live_fresh_watcher() {
-  local dir state fakebin out armout i wpid armpid status
+  local dir state fakebin out armout i wpid peer peer_identity armpid status home
   dir=$(make_case arm-attach)
   state="$dir/state"
   fakebin="$dir/fakebin"
   out="$dir/watch.out"
   armout="$dir/arm.out"
   # A genuinely live watcher with a fresh beacon already holds the singleton.
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  PATH="$fakebin:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wpid=$!
   i=0
   while [ "$i" -lt 60 ]; do
@@ -545,7 +687,7 @@ test_arm_attaches_and_waits_for_live_fresh_watcher() {
   [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "seed watcher did not take the lock"
   # Arming must attach to the existing watcher, NOT start a second one, and NOT
   # exit while the seed still holds the healthy lock.
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$armout" &
+  PATH="$fakebin:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$armout" &
   armpid=$!
   i=0
   while [ "$i" -lt 80 ]; do
@@ -558,14 +700,49 @@ test_arm_attaches_and_waits_for_live_fresh_watcher() {
   ! grep -qF 'watcher: FAILED' "$armout" || fail "arm reported FAILED for a healthy watcher"
   [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] || fail "arm disturbed the healthy watcher's lock"
   is_live_non_zombie "$armpid" || fail "arm exited while the seed watcher was still healthy"
+  home=$(cat "$state/.watch.lock/fm-home" 2>/dev/null || true)
+  [ -n "$home" ] || fail "seed watcher did not record its home"
+  sleep 60 &
+  peer=$!
+  peer_identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") \
+    || fail "could not identify successor watcher"
+  rm -f "$state/.watch.lock"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$peer" > "$state/.watch.lock/pid"
+  printf '%s\n' "$home" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$peer_identity" > "$state/.watch.lock/pid-identity"
+  touch "$state/.last-watcher-beat"
+  i=0
+  while [ "$i" -lt 80 ]; do
+    [ "$(cat "$state/.watch-arm.lease/watcher-pid" 2>/dev/null || true)" = "$peer" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch-arm.lease/watcher-pid" 2>/dev/null || true)" = "$peer" ] \
+    || fail "attached arm did not transfer its relay lease to the successor watcher"
+  # The lease is published before the arm records and reports the new attached
+  # cycle.  Wait for that visible state transition before ending the successor,
+  # otherwise a fast Linux scheduler can turn this cycle-end test into a
+  # transfer-race test instead.
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF "watcher: attached pid=$peer" "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$peer" "$armout" \
+    || fail "attached arm did not report its successor transition: $(cat "$armout")"
+  is_live_non_zombie "$armpid" || fail "arm exited after transferring to a healthy successor"
   # After the seed dies without a successor, the attached arm must fail loudly.
-  kill "$wpid" 2>/dev/null || true
+  kill "$wpid" "$peer" 2>/dev/null || true
   wait "$wpid" 2>/dev/null || true
+  wait "$peer" 2>/dev/null || true
   wait_for_exit "$armpid" 80
   status=$?
   [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "attached arm did not fail after seed died (status $status)"
   grep -qF 'watcher: FAILED - cycle ended without an actionable reason' "$armout" || fail "attached arm did not emit the typed cycle-end failure"
-  pass "arm attaches to a live fresh watcher and fails loudly when that cycle has no successor"
+  pass "arm transfers its relay lease to a successor and fails loudly when no successor remains"
 }
 
 test_attached_arm_signal_is_recorded_in_cycle_ledger() {
@@ -679,8 +856,34 @@ test_arm_hup_cleans_child_and_temp_output() {
   pass "arm cleans child watcher and temp output on HUP"
 }
 
+test_arm_cancellation_queues_lost_relay_wake() {
+  local dir state fakebin armout i armpid lock_pid status
+  dir=$(make_case arm-cancel-lost-relay)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'watcher: started pid=' "$armout" || fail "arm did not start before cancellation check"
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  kill -TERM "$armpid" 2>/dev/null || fail "could not cancel arm"
+  wait_for_exit "$armpid" 80
+  status=$?
+  [ "$status" -eq 143 ] || fail "cancelled arm did not exit with TERM status (got $status)"
+  grep "$(printf '\tcheck\twatcher-arm-relay\tcheck: watcher arm relay lost')" "$state/.wake-queue" >/dev/null \
+    || fail "arm cancellation did not synchronously queue the lost-relay wake"
+  ! is_live_non_zombie "$lock_pid" || fail "arm cancellation left its child watcher running"
+  pass "arm cancellation queues the durable lost-relay wake before stopping its watcher"
+}
+
 test_arm_propagates_immediate_wake_before_confirmation() {
-  local dir state fakebin armout drain_out check_file rc
+  local dir state fakebin armout drain_out rearm_out check_file rc rearm_pid watcher_pid i
   dir=$(make_case arm-immediate-wake)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -704,7 +907,26 @@ SH
   ! grep -qF 'watcher: FAILED' "$armout" || fail "arm printed FAILED after a valid immediate wake"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after immediate arm wake failed"
   grep "$(printf '\tcheck\t')" "$drain_out" | grep -F "$check_file" | grep -F 'merged: https://example.test/pr/7' >/dev/null || fail "immediate check wake was not queued"
-  pass "arm propagates an immediate watcher wake before confirmation"
+  # A normal actionable close clears its lease before the next arm starts.  The
+  # replacement must not mistake that handoff for a lost relay and manufacture
+  # a second check wake.
+  rm -f "$check_file" "$state/task.check-trust"
+  rearm_out="$dir/rearm.out"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$rearm_out" &
+  rearm_pid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$rearm_out" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  grep -qF "watcher: started pid=$watcher_pid" "$rearm_out" || fail "normal close did not re-arm a replacement watcher"
+  ! grep -F 'watcher arm relay lost' "$rearm_out" "$state/.wake-queue" >/dev/null 2>&1 \
+    || fail "normal close followed by immediate re-arm falsely reported a lost relay"
+  kill "$rearm_pid" "$watcher_pid" 2>/dev/null || true
+  wait "$rearm_pid" 2>/dev/null || true
+  pass "arm propagates an immediate watcher wake before confirmation and re-arms without a false lost-relay wake"
 }
 
 test_arm_waits_for_peer_beacon_after_child_stands_down() {
@@ -909,8 +1131,301 @@ test_pid_identity_is_locale_invariant() {
   pass "fm_pid_identity is locale-invariant across LC_ALL/LC_TIME"
 }
 
+test_arm_lease_rejects_reused_pid_identity() {
+  local dir state watcher_pid arm_pid watcher_identity
+  dir=$(make_case arm-lease-pid-reuse)
+  state="$dir/state"
+  sleep 60 & watcher_pid=$!
+  sleep 60 & arm_pid=$!
+  watcher_identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$watcher_pid") \
+    || fail "could not identify watcher for arm-lease reuse test"
+  mkdir "$state/.watch-arm.lease"
+  printf '%s\n' "$arm_pid" > "$state/.watch-arm.lease/pid"
+  printf '%s\n' 'reused-pid-old-identity' > "$state/.watch-arm.lease/pid-identity"
+  printf '%s\n' "$dir" > "$state/.watch-arm.lease/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch-arm.lease/watcher-path"
+  printf '%s\n' "$watcher_pid" > "$state/.watch-arm.lease/watcher-pid"
+  printf '%s\n' "$watcher_identity" > "$state/.watch-arm.lease/watcher-identity"
+  touch "$state/.watch-arm.lease/heartbeat"
+  if FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_arm_lease_healthy "$2" "$3" "$4" "$5" 300' _ "$LIB" "$state" "$WATCH" "$watcher_pid" "$dir"; then
+    fail "a live PID with a mismatched old identity passed the arm lease predicate"
+  fi
+  kill "$watcher_pid" "$arm_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+  wait "$arm_pid" 2>/dev/null || true
+  pass "arm lease rejects a recycled PID whose process identity changed"
+}
+
+test_arm_lease_bind_rejects_changed_watcher_identity() {
+  local dir state watcher_pid
+  dir=$(make_case arm-lease-bind-pid-reuse)
+  state="$dir/state"
+  watcher_pid=$$
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$watcher_pid" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' 'replacement-identity' > "$state/.watch.lock/pid-identity"
+  if FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_pid_identity() { printf "%s\\n" replacement-identity; }
+    fm_arm_lease_bind_watcher "$2" "$3" "$4" "$5" original-identity
+  ' _ "$LIB" "$state" "$WATCH" "$watcher_pid" "$dir"; then
+    fail "arm lease bound a watcher whose identity changed during acquisition"
+  fi
+  [ ! -e "$state/.watch-arm.bound" ] || fail "arm lease published a stale watcher identity"
+  pass "arm lease bind rejects watcher identity changes during acquisition"
+}
+
+test_arm_lease_binds_after_publication() {
+  local dir state watcher_pid watcher_identity
+  dir=$(make_case arm-lease-bind-before-publication)
+  state="$dir/state"
+  sleep 60 & watcher_pid=$!
+  watcher_identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$watcher_pid") \
+    || fail "could not identify watcher for pre-publication binding"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$watcher_pid" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$watcher_identity" > "$state/.watch.lock/pid-identity"
+  if FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire() { return 1; }
+    fm_arm_lease_remove_stale() { return 1; }
+    ! fm_arm_lease_claim "$2" "$3" "$4" "$5"
+  ' _ "$LIB" "$state" "$WATCH" "$watcher_pid" "$dir"; then
+    :
+  else
+    fail "arm lease claim unexpectedly published under a forced acquisition failure"
+  fi
+  [ ! -e "$state/.watch-arm.bound" ] || fail "failed lease publication bound the watcher"
+  kill "$watcher_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+  pass "arm lease does not bind the watcher before lease publication"
+}
+
+test_arm_lease_claim_keeps_equally_identified_sibling() {
+  local dir state watcher_pid sibling_pid status
+  dir=$(make_case arm-lease-identity-collision)
+  state="$dir/state"
+  sleep 60 & watcher_pid=$!
+  sleep 60 & sibling_pid=$!
+  mkdir "$state/.watch.lock" "$state/.watch-arm.lease"
+  printf '%s\n' "$watcher_pid" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' shared-identity > "$state/.watch.lock/pid-identity"
+  printf '%s\n' "$sibling_pid" > "$state/.watch-arm.lease/pid"
+  printf '%s\n' shared-identity > "$state/.watch-arm.lease/pid-identity"
+  printf '%s\n' "$dir" > "$state/.watch-arm.lease/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch-arm.lease/watcher-path"
+  printf '%s\n' "$watcher_pid" > "$state/.watch-arm.lease/watcher-pid"
+  printf '%s\n' shared-identity > "$state/.watch-arm.lease/watcher-identity"
+  touch "$state/.watch-arm.lease/heartbeat"
+  if FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_pid_identity() { printf "%s\\n" shared-identity; }
+    fm_arm_lease_claim "$2" "$3" "$4" "$5"
+  ' _ "$LIB" "$state" "$WATCH" "$watcher_pid" "$dir"; then
+    fail "duplicate arm replaced a live sibling lease with the same identity"
+  else
+    status=$?
+    [ "$status" -eq 2 ] || fail "duplicate arm returned $status instead of retaining the live sibling lease"
+  fi
+  [ -d "$state/.watch-arm.lease" ] || fail "duplicate arm removed the live sibling lease"
+  [ "$(cat "$state/.watch-arm.lease/pid")" = "$sibling_pid" ] \
+    || fail "duplicate arm replaced the live sibling lease owner"
+  kill "$watcher_pid" "$sibling_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+  wait "$sibling_pid" 2>/dev/null || true
+  pass "arm lease claim retains a live sibling despite an identity collision"
+}
+
+test_arm_lease_reclaim_respects_heartbeat_fence() {
+  local dir state watcher_pid arm_pid watcher_identity arm_identity ready release holder reclaim
+  dir=$(make_case arm-lease-heartbeat-fence)
+  state="$dir/state"
+  ready="$dir/heartbeat-ready"
+  release="$dir/heartbeat-release"
+  sleep 60 & watcher_pid=$!
+  sleep 60 & arm_pid=$!
+  watcher_identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$watcher_pid") \
+    || fail "could not identify watcher for heartbeat fence"
+  arm_identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$arm_pid") \
+    || fail "could not identify arm for heartbeat fence"
+  mkdir "$state/.watch.lock" "$state/.watch-arm.lease.owner"
+  ln -s "$state/.watch-arm.lease.owner" "$state/.watch-arm.lease"
+  printf '%s\n' "$watcher_pid" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$watcher_identity" > "$state/.watch.lock/pid-identity"
+  printf '%s\n' "$arm_pid" > "$state/.watch-arm.lease.owner/pid"
+  printf '%s\n' "$arm_identity" > "$state/.watch-arm.lease.owner/pid-identity"
+  printf '%s\n' "$dir" > "$state/.watch-arm.lease.owner/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch-arm.lease.owner/watcher-path"
+  printf '%s\n' "$watcher_pid" > "$state/.watch-arm.lease.owner/watcher-pid"
+  printf '%s\n' "$watcher_identity" > "$state/.watch-arm.lease.owner/watcher-identity"
+  touch -t 200001010000 "$state/.watch-arm.lease.owner/heartbeat"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2"
+    : > "$3"
+    while [ ! -e "$4" ]; do sleep 0.01; done
+    touch "$5"
+    fm_lock_release "$2"
+  ' _ "$LIB" "$state/.watch-arm.lease.heartbeat" "$ready" "$release" "$state/.watch-arm.lease.owner/heartbeat" &
+  holder=$!
+  while [ ! -e "$ready" ]; do sleep 0.01; done
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; ! fm_arm_lease_remove_stale "$2" "$3" "$4" "$5" 300' _ "$LIB" "$state" "$WATCH" "$watcher_pid" "$dir" &
+  reclaim=$!
+  sleep 0.1
+  [ -L "$state/.watch-arm.lease" ] || fail "reclaimer removed a lease while heartbeat renewal held its fence"
+  : > "$release"
+  wait "$holder" || fail "heartbeat fence holder failed"
+  wait "$reclaim" || fail "reclaimer did not reject the refreshed lease"
+  [ -L "$state/.watch-arm.lease" ] || fail "reclaimer removed a lease refreshed under its fence"
+  kill "$watcher_pid" "$arm_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+  wait "$arm_pid" 2>/dev/null || true
+  pass "arm lease reclaim cannot race a heartbeat refresh"
+}
+
+test_arm_lease_reclaims_replaced_watcher() {
+  local dir state old_watcher new_watcher old_arm old_watcher_identity new_watcher_identity old_arm_identity
+  dir=$(make_case arm-lease-replaced-watcher)
+  state="$dir/state"
+  sleep 60 & old_watcher=$!
+  sleep 60 & new_watcher=$!
+  sleep 60 & old_arm=$!
+  old_watcher_identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$old_watcher") \
+    || fail "could not identify replaced watcher fixture"
+  new_watcher_identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$new_watcher") \
+    || fail "could not identify replacement watcher fixture"
+  old_arm_identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$old_arm") \
+    || fail "could not identify prior arm fixture"
+  mkdir "$state/.watch-arm.lease.owner"
+  ln -s "$state/.watch-arm.lease.owner" "$state/.watch-arm.lease"
+  printf '%s\n' "$old_arm" > "$state/.watch-arm.lease.owner/pid"
+  printf '%s\n' "$old_arm_identity" > "$state/.watch-arm.lease.owner/pid-identity"
+  printf '%s\n' "$dir" > "$state/.watch-arm.lease.owner/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch-arm.lease.owner/watcher-path"
+  printf '%s\n' "$old_watcher" > "$state/.watch-arm.lease.owner/watcher-pid"
+  printf '%s\n' "$old_watcher_identity" > "$state/.watch-arm.lease.owner/watcher-identity"
+  touch "$state/.watch-arm.lease.owner/heartbeat"
+  kill "$old_watcher" 2>/dev/null || true
+  wait "$old_watcher" 2>/dev/null || true
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$new_watcher" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$new_watcher_identity" > "$state/.watch.lock/pid-identity"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_arm_lease_claim "$2" "$3" "$4" "$5"' _ "$LIB" "$state" "$WATCH" "$new_watcher" "$dir" \
+    || fail "replacement arm could not reclaim a fresh lease bound to a dead watcher"
+  [ "$(cat "$state/.watch-arm.lease/watcher-pid")" = "$new_watcher" ] \
+    || fail "replacement arm retained the dead watcher's lease binding"
+  kill "$new_watcher" "$old_arm" 2>/dev/null || true
+  wait "$new_watcher" 2>/dev/null || true
+  wait "$old_arm" 2>/dev/null || true
+  pass "arm lease reclaim treats a stopped bound watcher as stale despite a live prior arm"
+}
+
+test_arm_lease_publishes_complete_owner() {
+  local dir state watcher_pid watcher_identity ready release claim_pid i field
+  dir=$(make_case arm-lease-atomic-publication)
+  state="$dir/state"
+  ready="$dir/publish-ready"
+  release="$dir/publish-release"
+  sleep 60 & watcher_pid=$!
+  watcher_identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$watcher_pid") \
+    || fail "could not identify watcher for atomic arm-lease publication"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$watcher_pid" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$watcher_identity" > "$state/.watch.lock/pid-identity"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ARM_LEASE_PUBLISH_READY="$ready" FM_ARM_LEASE_PUBLISH_RELEASE="$release" \
+    bash -c '
+      . "$1"
+      printf() {
+        command printf "$@"
+        case "$*" in
+          *"/pid-identity"*)
+            : > "$FM_ARM_LEASE_PUBLISH_READY"
+            while [ ! -e "$FM_ARM_LEASE_PUBLISH_RELEASE" ]; do command sleep 0.01; done
+            ;;
+        esac
+      }
+      fm_arm_lease_claim "$2" "$3" "$4" "$5"
+    ' _ "$LIB" "$state" "$WATCH" "$watcher_pid" "$dir" &
+  claim_pid=$!
+  i=0
+  while [ "$i" -lt 80 ] && [ ! -e "$ready" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ ! -e "$ready" ]; then
+    : > "$release"
+    wait "$claim_pid" 2>/dev/null || true
+    kill "$watcher_pid" 2>/dev/null || true
+    wait "$watcher_pid" 2>/dev/null || true
+    fail "arm lease publication did not reach the pre-link pause"
+  fi
+  [ ! -e "$state/.watch-arm.lease" ] || fail "incomplete arm lease became observable"
+  : > "$release"
+  wait "$claim_pid" || fail "arm lease claim failed after publication release"
+  for field in pid pid-identity fm-home watcher-path watcher-pid watcher-identity heartbeat; do
+    [ -e "$state/.watch-arm.lease/$field" ] || fail "published arm lease is missing $field"
+  done
+  [ -f "$state/.watch-arm.bound" ] || fail "published arm lease did not bind its watcher"
+  kill "$watcher_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+  pass "arm lease publishes complete metadata before its owner link"
+}
+
+test_arm_lease_tick_rejects_invalid_values() {
+  local dir state fakebin armout armpid watcher_pid i
+  dir=$(make_case arm-lease-tick-validation)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mark_pr_check_migration_complete "$state"
+  cat > "$fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = invalid ]; then
+  : > "${FM_INVALID_ARM_TICK_USED:?}"
+  exit 1
+fi
+exec /bin/sleep "$@"
+SH
+  chmod +x "$fakebin/sleep"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_LEASE_TICK=invalid FM_INVALID_ARM_TICK_USED="$dir/invalid-tick" "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  grep -qF "watcher: started pid=$watcher_pid" "$armout" || fail "arm with an invalid lease tick did not start"
+  sleep 0.2
+  [ ! -e "$dir/invalid-tick" ] || fail "arm ticker passed an invalid interval to sleep"
+  kill "$armpid" "$watcher_pid" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  pass "arm lease ticker replaces invalid intervals before starting"
+}
+
 test_singleton_start
 test_pid_identity_is_locale_invariant
+test_arm_lease_rejects_reused_pid_identity
+test_arm_lease_bind_rejects_changed_watcher_identity
+test_arm_lease_binds_after_publication
+test_arm_lease_claim_keeps_equally_identified_sibling
+test_arm_lease_reclaim_respects_heartbeat_fence
+test_arm_lease_reclaims_replaced_watcher
+test_arm_lease_publishes_complete_owner
+test_arm_lease_tick_rejects_invalid_values
 test_stale_watch_lock_reclaimed
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings
@@ -923,6 +1438,9 @@ test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
 test_watch_restart_rejects_reused_pid
+test_watch_arm_reclaims_reused_pid
+test_watch_arm_reclaim_keeps_replaced_lock
+test_watch_arm_retains_identity_matched_stale_lock
 test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover
 test_arm_self_eviction_is_loud_without_successor
@@ -930,6 +1448,7 @@ test_arm_attaches_and_waits_for_live_fresh_watcher
 test_attached_arm_signal_is_recorded_in_cycle_ledger
 test_arm_starts_and_self_heals
 test_arm_hup_cleans_child_and_temp_output
+test_arm_cancellation_queues_lost_relay_wake
 test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable

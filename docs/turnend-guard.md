@@ -32,6 +32,14 @@ That is the same identity-matched live lock and fresh beacon check used by `bin/
 A stale beacon blocks even if a watcher pid is still live.
 A fresh leftover beacon blocks if the watcher lock is missing, dead, or identity-mismatched.
 
+## Relay-health predicate
+
+With work in flight outside away mode, the guard considers supervision healthy only when the current home's watcher has both a fresh identity-checked watcher lock and a fresh identity-matched watch-arm relay lease.
+Codex is the exception because its normal supervision is a bounded foreground checkpoint rather than a relay; its Stop hook receives an explicit `FM_TURNEND_HARNESS=codex` marker and accepts a recent quiet `state/.last-watcher-checkpoint` marker.
+With `state/.afk` present, it instead requires that healthy watcher plus a fresh identity-matched sub-supervisor daemon lease.
+The guard therefore fails closed at the next turn boundary when a harness task manager has killed the normal-mode relay or the away-mode daemon while leaving its watcher PID behind.
+The lease bindings, heartbeat intervals, durable watcher-side lost-relay wake, and safe replacement rules are owned by [watcher-continuity.md](watcher-continuity.md#relay-leases).
+
 `FM_STATE_OVERRIDE` wins over `FM_HOME/state`, and `FM_HOME` wins over repo-root `state/`.
 `FM_GUARD_GRACE` controls the beacon freshness window and defaults to 300 seconds.
 If `jq` is missing or hook stdin is empty, the guard fails open and exits 0 because it cannot safely read loop-guard fields.

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Manage a firstmate-owned private Codex home for one ship or scout task.
 
-fm-spawn.sh is the sole caller.
+The callers are fm-spawn.sh (create, abort cleanup) and fm-teardown.sh
+(teardown removal).
 It creates a mode-0700 directory below data/codex-crewmate.
 It copies only the captain's auth.json and models_cache.json.
 It writes a no-plugin and no-MCP configuration.
@@ -35,6 +36,15 @@ def open_directory(name, directory_fd=None):
 def require_directory(fd, label):
     if not stat.S_ISDIR(os.fstat(fd).st_mode):
         die(f"{label} must be a directory")
+
+
+def require_not_symlink(name, label, directory_fd=None):
+    try:
+        mode = os.stat(name, dir_fd=directory_fd, follow_symlinks=False).st_mode
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(mode):
+        die(f"{label} must not be a symlink")
 
 
 def directory_path(fd, fallback):
@@ -105,13 +115,16 @@ def copy_regular_file(source, directory_fd, name):
         os.close(source_fd)
 
 
-def remove_tree(directory_fd, name):
+def remove_tree(directory_fd, name, expected_identity=None):
     try:
         child_fd = open_directory(name, directory_fd)
     except FileNotFoundError:
         return
     try:
         opened_stat = os.fstat(child_fd)
+        opened_identity = (opened_stat.st_dev, opened_stat.st_ino)
+        if expected_identity is not None and opened_identity != expected_identity:
+            raise OSError("validated managed Codex home changed before removal")
         for child in os.listdir(child_fd):
             child_stat = os.stat(child, dir_fd=child_fd, follow_symlinks=False)
             if stat.S_ISDIR(child_stat.st_mode):
@@ -121,10 +134,7 @@ def remove_tree(directory_fd, name):
     finally:
         os.close(child_fd)
     current_stat = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-    if (current_stat.st_dev, current_stat.st_ino) != (
-        opened_stat.st_dev,
-        opened_stat.st_ino,
-    ):
+    if (current_stat.st_dev, current_stat.st_ino) != opened_identity:
         raise OSError("managed Codex home changed during removal")
     os.rmdir(name, dir_fd=directory_fd)
 
@@ -244,9 +254,10 @@ def require_task_profile(args, base_fd):
                 die(f"isolated Codex home does not belong to task {args.task_id}")
         finally:
             os.close(profile_fd)
+        home_stat = os.fstat(home_fd)
     finally:
         os.close(home_fd)
-    return True
+    return home_stat
 
 
 def launch_command(args):
@@ -422,9 +433,12 @@ def activate_command(args, home_fd, command, result_fd, token):
 def validate_data_root(data):
     if not data:
         die("isolated Codex home requires --data")
-    data_fd = open_directory(os.path.abspath(data))
+    data = os.path.abspath(data)
+    require_not_symlink(data, "firstmate data")
+    data_fd = open_directory(data)
     try:
         require_directory(data_fd, "firstmate data")
+        require_not_symlink("codex-crewmate", "isolated Codex home", data_fd)
         try:
             base_fd = open_directory("codex-crewmate", data_fd)
         except FileNotFoundError:
@@ -455,11 +469,18 @@ def remove_home(args):
         require_directory(base_fd, "isolated Codex home")
         expected = removal_home_path(args, base_fd)
         require_unreferenced_home(args, expected)
-        if not require_task_profile(args, base_fd):
+        home_stat = require_task_profile(args, base_fd)
+        if not home_stat:
             return
-        remove_tree(base_fd, managed_home_name(args.home))
+        remove_tree(
+            base_fd,
+            managed_home_name(args.home),
+            (home_stat.st_dev, home_stat.st_ino),
+        )
     except FileNotFoundError:
         pass
+    except OSError as error:
+        die(f"could not remove isolated Codex home: {error.strerror or str(error)}")
     finally:
         os.close(base_fd)
 
@@ -477,10 +498,12 @@ def create_home(args, command=None):
     worktree = toml_basic_string(args.worktree)
     try:
         data = os.path.abspath(args.data)
+        require_not_symlink(data, "firstmate data")
         data_fd = open_directory(data)
         require_directory(data_fd, "firstmate data")
         data = directory_path(data_fd, data)
         try:
+            require_not_symlink("codex-crewmate", "isolated Codex home", data_fd)
             try:
                 os.mkdir("codex-crewmate", 0o700, dir_fd=data_fd)
             except FileExistsError:
@@ -514,7 +537,7 @@ def create_home(args, command=None):
                     require_directory(home_fd, "isolated Codex home")
                     os.fchmod(home_fd, 0o700)
                     base_config = (
-                        '# Firstmate Codex crewmate home.\n[features]\nplugins = false\n[projects."%s"]\ntrust_level = "untrusted"\n'
+                        '# Firstmate Codex crewmate home.\nmodel_auto_compact_token_limit = 150000\n[features]\nplugins = false\n[projects."%s"]\ntrust_level = "untrusted"\n'
                         % worktree
                     )
                     write_file(home_fd, "config.toml", base_config.encode())

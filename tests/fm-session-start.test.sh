@@ -374,7 +374,7 @@ SH
 
   stat_log="$home/stat.log"
   real_stat=$(command -v stat)
-  cat > "$fakebin/stat" <<SH
+cat > "$fakebin/stat" <<SH
 #!/usr/bin/env bash
 case "\$*" in
   *"$home/ops-inbox"*) printf '%s\\n' "\$*" >> "$stat_log" ;;

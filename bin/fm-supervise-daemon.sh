@@ -138,6 +138,9 @@
 #          SIGTERM/SIGINT shut down within ~1s, flush escalations, release the
 #          lock. A crashing fm-watch.sh is logged and restarted, never killing
 #          the daemon; a tight crash-restart spin is detected and backed off.
+#          The daemon lease binds this home, script path, process identity, and
+#          a loop heartbeat, stops on ownership loss, and cleans up only its
+#          own lock metadata. docs/watcher-continuity.md owns that contract.
 set -u
 
 FM_DAEMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1160,7 +1163,7 @@ should_force_self() {  # <reason>
 is_wake_reason() {  # <reason>
   local reason=$1
   case "$reason" in
-    signal:*|stale:*|check:*|heartbeat|heartbeat:*) return 0 ;;
+    signal:*|stale:*|stale-rechecks:*|check:*|heartbeat|heartbeat:*) return 0 ;;
   esac
   return 1
 }
@@ -1169,11 +1172,35 @@ is_wake_reason() {  # <reason>
 # Side effects: logging, marker records, escalation buffer appends.
 handle_wake() {  # <reason> <state>
   local reason=$1 state=$2 decision action distilled task last
-  local kind="" arg=""
+  local kind="" arg="" rest item
   if should_force_self "$reason"; then
     log "wake force-self (FM_INJECT_SKIP): $reason"
     return
   fi
+  # A batched stale-recheck wake carries one "[stale: <window> (<diagnosis>)]"
+  # segment per overdue lane. Dispatch each lane through the ordinary stale
+  # classification, dropping the diagnosis suffix so the window resolves to its
+  # task; classify_stale re-derives paused/wedge state from the status log.
+  case "$reason" in
+    stale-rechecks:*)
+      rest=${reason#stale-rechecks:}
+      while :; do
+        case "$rest" in
+          *"["*"]"*) ;;
+          *) break ;;
+        esac
+        rest=${rest#*"["}
+        item=${rest%%"]"*}
+        rest=${rest#*"]"}
+        [ -n "$item" ] || continue
+        case "$item" in
+          "stale: "*) handle_wake "${item%% (*}" "$state" ;;
+          *)          handle_wake "$item" "$state" ;;
+        esac
+      done
+      return
+      ;;
+  esac
   case "$reason" in
     signal:*) kind=signal; arg="${reason#signal: }"
               decision=$(classify_signal "$arg" "$state") ;;
@@ -1260,6 +1287,7 @@ fm_super_main() {
   local LOG="$STATE/.supervise-daemon.log"
   local WATCH_ERR="$STATE/.supervise-daemon.watcher.err"
   local LOCK="$STATE/.supervise-daemon.lock"
+  local DAEMON_OWNER="" DAEMON_IDENTITY="" DAEMON_PID=""
   local PIDFILE="$STATE/.supervise-daemon.pid"
   local INJECT_FAIL_SLEEP=${FM_INJECT_FAIL_SLEEP:-$INJECT_FAIL_SLEEP_DEFAULT}
   local CRASH_THRESHOLD=${FM_CRASH_THRESHOLD:-$CRASH_THRESHOLD_DEFAULT}
@@ -1278,8 +1306,31 @@ fm_super_main() {
     fi
     exit 1
   fi
+  DAEMON_OWNER=${FM_LOCK_OWNER_DIR:-}
+  if [ -z "$DAEMON_OWNER" ]; then
+    echo "error: could not retain supervise-daemon lease owner" >&2
+    fm_lock_release "$LOCK" 2>/dev/null || true
+    exit 1
+  fi
+  DAEMON_PID=${BASHPID:-$$}
+  fm_pid_identity "$DAEMON_PID" > "$DAEMON_OWNER/pid-identity" || {
+    echo "error: could not identify supervise-daemon lease owner" >&2
+    fm_lock_release "$LOCK" 2>/dev/null || true
+    exit 1
+  }
+  DAEMON_IDENTITY=$(cat "$DAEMON_OWNER/pid-identity" 2>/dev/null || true)
+  if [ -z "$DAEMON_IDENTITY" ]; then
+    echo "error: could not retain supervise-daemon lease identity" >&2
+    fm_lock_release "$LOCK" 2>/dev/null || true
+    exit 1
+  fi
   echo "$$" > "$PIDFILE"
-  fm_pid_identity "${BASHPID:-$$}" > "$LOCK/pid-identity" 2>/dev/null || true
+  fm_daemon_lease_publish "$STATE" "$FM_DAEMON_DIR/fm-supervise-daemon.sh" "$FM_HOME" "$LOCK" "$DAEMON_OWNER" || {
+    echo "error: could not publish supervise-daemon lease" >&2
+    fm_lock_release "$LOCK" 2>/dev/null || true
+    rm -f "$PIDFILE" 2>/dev/null || true
+    exit 1
+  }
 
   # --- auto-discover the supervisor BACKEND (tmux vs herdr) first -----------
   # Priority: FM_SUPERVISOR_BACKEND override > $TMUX_PANE (tmux) > $HERDR_ENV=1
@@ -1363,6 +1414,7 @@ fm_super_main() {
   # --- shutdown: flush buffered escalations, reap child, release lock -------
   local WATCHER_PID="" CUR_TMP=""
   cleanup() {
+    local exit_code=${1:-0}
     trap - TERM INT
     wedge_alarm_stop_active_notifier
     escalate_flush "$STATE" 2>/dev/null || true
@@ -1374,9 +1426,11 @@ fm_super_main() {
       rm -f "$CUR_TMP" 2>/dev/null || true
     fi
     fm_lock_release "$LOCK" 2>/dev/null || true
-    rm -f "$PIDFILE" 2>/dev/null || true
+    if [ "$(cat "$PIDFILE" 2>/dev/null || true)" = "$DAEMON_PID" ]; then
+      rm -f "$PIDFILE" 2>/dev/null || true
+    fi
     log "daemon shutting down"
-    exit 0
+    exit "$exit_code"
   }
   trap cleanup TERM INT
 
@@ -1408,6 +1462,10 @@ fm_super_main() {
 
   local rc reason
   while true; do
+    fm_daemon_lease_heartbeat "$LOCK" "$DAEMON_OWNER" "$DAEMON_IDENTITY" || {
+      log "ERROR: supervise-daemon lease ownership lost; stopping"
+      cleanup 1
+    }
     # --- pane-gone guard (preserved) ---------------------------------------
     # With the #29 watcher's enqueue-before-suppress, a wake is no longer
     # swallowed by running the watcher with no injection target. We still back

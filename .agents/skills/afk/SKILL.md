@@ -46,6 +46,7 @@ batched digest rather than per-wake injections.
    Both paths share `bin/fm-afk-start.sh` as the daemon entry.
    The native path tells it that the launcher already prepared lifecycle state; the terminal-backed path lets the entry perform its existing state setup inside the new terminal.
    It exits immediately if the identity-backed daemon lock already names a live process, otherwise it execs `bin/fm-supervise-daemon.sh` in the foreground.
+   The daemon refreshes an identity-checked lease while it runs; with work in flight, the primary turn-end guard treats a missing or stale daemon lease as blind supervision even when an old PID remains recorded.
    The daemon is **presence-gated**: it injects escalations only while
    `state/.afk` exists, and stays quiet otherwise.
 
@@ -143,6 +144,7 @@ Classify each wake this way:
 - `signal` or `stale` for a declared `paused:` external wait -> self-handle and track the pause rather than a wedge.
   If it remains declared and idle past `FM_PAUSE_RESURFACE_SECS` (default 3600s), housekeeping sends one awaiting-external recheck and resets the pause window.
 - `check` -> always escalate. Check scripts print only when firstmate should wake.
+- `stale-rechecks`, the watcher's one batched wake carrying a `[stale: <window> (<diagnosis>)]` segment per overdue recheck lane -> dispatch each lane through the `stale` rules here rather than idling the batch as non-wake output or escalating it whole.
 - `stale` whose reason reports a busy pane with zero progress -> escalate immediately for deep inspection; `docs/architecture.md` owns the watcher-side progress signatures and thresholds.
 - `stale` with a terminal status -> escalate. Non-terminal stale is transient:
   record a marker and self-handle. If the pane is still idle past

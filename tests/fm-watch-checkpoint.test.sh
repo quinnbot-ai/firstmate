@@ -25,6 +25,7 @@ test_quiet_checkpoint_exits_124_cleanly() {
   expect_code 124 "$status" "quiet checkpoint exit"
   assert_contains "$(cat "$out")" "checkpoint: no actionable wake within 1s" "quiet checkpoint line missing"
   assert_absent "$home/state/.watch.lock/pid" "watch lock pid survived quiet checkpoint timeout"
+  [ -f "$home/state/.last-watcher-checkpoint" ] || fail "quiet checkpoint did not persist its supervision marker"
   pass "quiet checkpoint exits 124 with a clean checkpoint line and no live lock"
 }
 

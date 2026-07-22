@@ -13,6 +13,14 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
+TEST_SECURITY_BIN="$TMP_ROOT/security-bin"
+mkdir -p "$TEST_SECURITY_BIN"
+cat > "$TEST_SECURITY_BIN/security" <<'SH'
+#!/usr/bin/env bash
+exit 44
+SH
+chmod 700 "$TEST_SECURITY_BIN/security"
+PATH="$TEST_SECURITY_BIN:$PATH"
 
 make_spawn_fakebin() {
   local dir=$1 fakebin
@@ -20,18 +28,29 @@ make_spawn_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
-case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
-  *"#{pane_id}"*)
-    [ "${FM_FAKE_TARGET_QUERY_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_TARGET_QUERY_STATUS}"
-    if [ "$(cat "${FM_FAKE_TARGET_STATE:?}" 2>/dev/null)" != live ]; then
-      printf '%s\n' "can't find window: ${3:-unknown}" >&2
-      exit 1
-    fi
-    printf '%s\n' '@1'
-    exit 0
-    ;;
-esac
+if [ "${1:-}" = display-message ]; then
+  case "$*" in
+    *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+    *"#{window_name}"*)
+      [ "${FM_FAKE_TARGET_QUERY_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_TARGET_QUERY_STATUS}"
+      if [ "$(cat "${FM_FAKE_TARGET_STATE:?}" 2>/dev/null)" != live ]; then
+        printf '%s\n' "can't find window: ${3:-unknown}" >&2
+        exit 1
+      fi
+      printf '%s\n' "${FM_FAKE_WINDOW_NAME:-firstmate}"
+      exit 0
+      ;;
+    *"#{pane_id}"*)
+      [ "${FM_FAKE_TARGET_QUERY_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_TARGET_QUERY_STATUS}"
+      if [ "$(cat "${FM_FAKE_TARGET_STATE:?}" 2>/dev/null)" != live ]; then
+        printf '%s\n' "can't find window: ${3:-unknown}" >&2
+        exit 1
+      fi
+      printf '%s\n' '@1'
+      exit 0
+      ;;
+  esac
+fi
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
@@ -41,7 +60,12 @@ case "${1:-}" in
     [ "$status" -ne 0 ] || [ "${FM_FAKE_BACKEND_CLOSE_EFFECT:-gone}" != gone ] || printf '%s\n' gone > "${FM_FAKE_TARGET_STATE:?}"
     exit "$status"
     ;;
-  has-session|new-session|new-window)
+  new-window)
+    [ -z "${FM_FAKE_BACKEND_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_BACKEND_LOG"
+    [ "${FM_FAKE_STABLE_WINDOW_ID:-0}" != 1 ] || printf '%s\n' '@1'
+    exit 0
+    ;;
+  has-session|new-session)
     [ -z "${FM_FAKE_BACKEND_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_BACKEND_LOG"
     exit 0
     ;;
@@ -82,10 +106,17 @@ SH
 set -u
 [ -z "${FM_FAKE_BACKEND_LOG:-}" ] || printf 'treehouse %s\n' "$*" >> "$FM_FAKE_BACKEND_LOG"
 case "${1:-}" in
-  get) printf '%s\n' "${FM_FAKE_PANE_PATH:?}" ;;
+  get)
+    [ "${FM_FAKE_TREEHOUSE_GET_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_TREEHOUSE_GET_STATUS}"
+    printf '%s\n' "${FM_FAKE_PANE_PATH:?}"
+    ;;
   return)
     [ "${FM_FAKE_TREEHOUSE_CLOSE_EFFECT:-none}" != gone ] || printf '%s\n' gone > "${FM_FAKE_TARGET_STATE:?}"
     exit "${FM_FAKE_TREEHOUSE_RETURN_STATUS:-0}"
+    ;;
+  status)
+    [ -z "${FM_FAKE_TREEHOUSE_STATUS_OUTPUT:-}" ] || printf '%s\n' "$FM_FAKE_TREEHOUSE_STATUS_OUTPUT"
+    exit "${FM_FAKE_TREEHOUSE_STATUS_EXIT:-0}"
     ;;
 esac
 SH
@@ -135,8 +166,9 @@ make_seeded_secondmate_home() {
 }
 
 run_spawn() {
-  local home=$1 wt=$2 fakebin=$3 launchlog=$4 target_state
+  local home=$1 wt=$2 fakebin=$3 launchlog=$4 target_state id
   shift 4
+  id=$1
   target_state="$(dirname "$launchlog")/target-state"
   : > "$launchlog"
   printf '%s\n' live > "$target_state"
@@ -150,11 +182,18 @@ run_spawn() {
     FM_FAKE_BACKEND_CLOSE_EFFECT="${FM_FAKE_BACKEND_CLOSE_EFFECT:-gone}" \
     FM_FAKE_TREEHOUSE_CLOSE_EFFECT="${FM_FAKE_TREEHOUSE_CLOSE_EFFECT:-none}" \
     FM_FAKE_TARGET_QUERY_STATUS="${FM_FAKE_TARGET_QUERY_STATUS:-0}" \
+    FM_FAKE_STABLE_WINDOW_ID="${FM_FAKE_STABLE_WINDOW_ID:-0}" \
+    FM_FAKE_WINDOW_NAME="${FM_FAKE_WINDOW_NAME:-firstmate}" \
     FM_FAKE_TARGET_STATE="$target_state" \
     FM_FAKE_ACTIVATION_RESULT="${FM_FAKE_ACTIVATION_RESULT:-ready}" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     HOME="$CASE_DIR/user" \
     "$SPAWN" "$@" 2>&1
+}
+
+run_spawn_stable() {
+  local id=$5
+  FM_FAKE_STABLE_WINDOW_ID=1 FM_FAKE_WINDOW_NAME="fm-$id" run_spawn "$@"
 }
 
 read_case_record() {
@@ -190,7 +229,7 @@ assert_private_activation_result() {  # <task-id> <result-path> <message>
 materialize_codex_home() {  # <home> <data> <source> <profile> <worktree>
   python3 "$ROOT/bin/fm-codex-home.py" --create-activate --data "$2" --source "$3" \
     --profile "$4" --worktree "$5" --home "$1" \
-    --result-token 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef -- /bin/sh -c 'sleep 2' >/dev/null
+    --result-token 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef -- /bin/sleep 2 >/dev/null
   python3 "$ROOT/bin/fm-codex-home.py" --remove-activation-result --data "$2" --home "$1"
 }
 
@@ -391,6 +430,18 @@ EOF
     "isolated Codex config retained MCP server entries"
   assert_grep 'plugins = false' "$crew_home/config.toml" \
     "isolated Codex config did not disable plugins"
+  assert_grep 'model_auto_compact_token_limit = 150000' "$crew_home/config.toml" \
+    "isolated Codex config did not set the auto-compaction token limit"
+  python3 - "$crew_home/config.toml" <<'PY' || fail "isolated Codex base config is not valid TOML or has the auto-compaction key in the wrong section"
+import pathlib
+import sys
+import tomllib
+
+content = pathlib.Path(sys.argv[1]).read_text()
+parsed = tomllib.loads(content)
+assert parsed["model_auto_compact_token_limit"] == 150000
+assert content.index("model_auto_compact_token_limit = 150000") < content.index("[features]")
+PY
   assert_no_grep '[plugins.' "$crew_home/config.toml" \
     "isolated Codex config retained plugin registrations"
   assert_grep "trust_level = \"untrusted\"" "$crew_home/config.toml" \
@@ -642,7 +693,7 @@ test_codex_crewmate_home_refuses_symlink_escape() {
   printf '%s\n' 'captain-config' > "$source_home/config.toml"
   ln -s "$source_home" "$crew_root"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(run_spawn_stable "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "Codex spawn must reject a symlinked isolated home"
   assert_contains "$out" "could not prepare isolated Codex crewmate home" \
@@ -653,7 +704,7 @@ test_codex_crewmate_home_refuses_symlink_escape() {
   assert_absent "$HOME_DIR/state/$id.meta" "symlink rejection must not create task metadata"
   assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
     "symlink rejection did not return its worktree"
-  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+  assert_grep 'kill-window -t @1' "$CASE_DIR/backend.log" \
     "symlink rejection did not remove its task endpoint"
   [ ! -s "$LAUNCH_LOG" ] || fail "symlink rejection must not launch Codex"
   pass "Codex spawn refuses isolated-home symlink escapes"
@@ -669,7 +720,7 @@ test_codex_crewmate_home_refuses_symlinked_data_root() {
   mv "$data_root" "$real_data"
   ln -s "$real_data" "$data_root"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(run_spawn_stable "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "Codex spawn must reject a symlinked data root"
   assert_contains "$out" "could not prepare isolated Codex crewmate home" \
@@ -677,7 +728,7 @@ test_codex_crewmate_home_refuses_symlinked_data_root() {
   assert_absent "$real_data/codex-crewmate" "data-root symlink rejection must not create a Codex home"
   assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
     "data-root symlink rejection did not return its worktree"
-  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+  assert_grep 'kill-window -t @1' "$CASE_DIR/backend.log" \
     "data-root symlink rejection did not remove its task endpoint"
   [ ! -s "$LAUNCH_LOG" ] || fail "data-root symlink rejection must not launch Codex"
   pass "Codex spawn refuses a symlinked data root"
@@ -711,7 +762,7 @@ exit 74
 SH
   chmod +x "$FAKEBIN_DIR/python3"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(run_spawn_stable "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "Codex spawn must fail when its private home cannot be created"
   assert_contains "$out" "could not prepare isolated Codex crewmate home" \
@@ -719,7 +770,7 @@ SH
   assert_absent "$HOME_DIR/state/$id.meta" "private-home preparation failure must not create task metadata"
   assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
     "private-home preparation failure did not return its worktree"
-  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+  assert_grep 'kill-window -t @1' "$CASE_DIR/backend.log" \
     "private-home preparation failure did not remove its task endpoint"
   [ ! -s "$LAUNCH_LOG" ] || fail "private-home preparation failure must not launch Codex"
   pass "Codex spawn cleans up a failed private-home allocation"
@@ -975,8 +1026,11 @@ test_codex_home_activation_uses_open_descriptor() {
   home="$data/codex-crewmate/$(python3 "$ROOT/bin/fm-codex-home.py" --data "$data" --new-home-name)"
   result="$data/codex-crewmate/.fm-codex-activation.${home##*/}"
   token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  # The child shell must expand CODEX_HOME after activation, not in this test process.
+  # shellcheck disable=SC2016
   out=$(python3 "$ROOT/bin/fm-codex-home.py" --create-activate --data "$data" --source "$source" \
-    --profile fm-crewmate-activation-z42 --worktree /tmp/fm-codex-activation --home "$home" --result-token "$token" -- /bin/sh -c "printf 'CODEX_HOME=%s\\n' \"\$CODEX_HOME\"; sleep 2")
+    --profile fm-crewmate-activation-z42 --worktree /tmp/fm-codex-activation --home "$home" --result-token "$token" -- \
+    /bin/sh -c 'printf "CODEX_HOME=%s\\n" "$CODEX_HOME"; sleep 2')
   codex_home_value=$(printf '%s\n' "$out" | sed -n 's/^CODEX_HOME=//p' | head -n 1)
   [ -n "$codex_home_value" ] || fail "Codex activation must export CODEX_HOME to the child"
   case "$codex_home_value" in
@@ -990,6 +1044,66 @@ test_codex_home_activation_uses_open_descriptor() {
   python3 "$ROOT/bin/fm-codex-home.py" --remove --data "$data" --state "$(dirname "$data")/state" --task-id activation-z42 --home "$home"
   assert_absent "$home" "descriptor-activated Codex home must remain removable"
   pass "Codex activation passes a real-path home resolved from the retained descriptor"
+}
+
+test_codex_home_removal_preserves_a_replacement_after_validation() {
+  local data state home status
+  data="$TMP_ROOT/codex-remove-replaced-data"
+  state="$TMP_ROOT/codex-remove-replaced-state"
+  home="$data/codex-crewmate/.fm-codex-home.0123456789abcdef0123456789abcdef"
+  mkdir -p "$home" "$state"
+  : > "$home/fm-crewmate-owner.config.toml"
+
+  python3 - "$ROOT/bin/fm-codex-home.py" "$data" "$state" "$home" <<'PY'
+import contextlib
+import importlib.util
+import io
+import os
+import sys
+from types import SimpleNamespace
+
+helper, data, state, home = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("fm_codex_home", helper)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+original_open = module.open_directory
+original_close = module.os.close
+target = {"fd": None, "replaced": False}
+
+def open_directory(name, directory_fd=None):
+    fd = original_open(name, directory_fd)
+    if name == os.path.basename(home) and target["fd"] is None:
+        target["fd"] = fd
+    return fd
+
+def close(fd):
+    original_close(fd)
+    if fd == target["fd"] and not target["replaced"]:
+        target["replaced"] = True
+        os.rename(home, home + ".validated")
+        os.mkdir(home, 0o700)
+        with open(os.path.join(home, "replacement"), "w", encoding="utf-8") as file:
+            file.write("preserve")
+
+module.open_directory = open_directory
+module.os.close = close
+with contextlib.redirect_stderr(io.StringIO()):
+    try:
+        module.remove_home(
+            SimpleNamespace(data=data, state=state, task_id="owner", home=home, create_activate=False)
+        )
+    except SystemExit as error:
+        if error.code != 1:
+            raise
+    else:
+        raise AssertionError("removal accepted a replacement home")
+if not os.path.isfile(os.path.join(home, "replacement")):
+    raise AssertionError("removal deleted the replacement home")
+PY
+  status=$?
+  expect_code 0 "$status" "Codex removal must preserve a home replaced after ownership validation"
+  [ -f "$home/replacement" ] || fail "Codex removal deleted a replacement home"
+  pass "Codex removal preserves a replacement after ownership validation"
 }
 
 test_codex_home_activation_reports_exec_failure() {
@@ -1072,7 +1186,7 @@ test_codex_home_activation_failure_aborts_spawn() {
   rec=$(make_spawn_case profile-codex-home-activation codex "$id")
   read_case_record "$rec"
 
-  out=$(FM_FAKE_ACTIVATION_RESULT=failed run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(FM_FAKE_ACTIVATION_RESULT=failed run_spawn_stable "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "Codex spawn must fail when terminal activation fails"
   assert_contains "$out" "isolated Codex home activation failed" \
@@ -1083,7 +1197,7 @@ test_codex_home_activation_failure_aborts_spawn() {
     "terminal activation failure did not retain its committed lease"
   assert_no_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
     "terminal activation failure must not return a committed lease implicitly"
-  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+  assert_grep 'kill-window -t @1' "$CASE_DIR/backend.log" \
     "terminal activation failure did not remove its task endpoint"
   for task_tmp in "/tmp/fm-$id".*; do
     [ ! -e "$task_tmp" ] || fail "terminal activation failure left task temporary root: $task_tmp"
@@ -1293,6 +1407,80 @@ test_codex_teardown_refuses_symlinked_data_root() {
   pass "Codex teardown rejects symlinked data roots"
 }
 
+test_failed_lease_acquisition_does_not_block_later_spawns() {
+  local rec id retry out status
+  id=treehouse-get-fail-z95
+  retry=treehouse-get-retry-z96
+  rec=$(make_spawn_case treehouse-get-fail claude "$id" "$retry")
+  read_case_record "$rec"
+
+  out=$(FM_FAKE_TREEHOUSE_GET_STATUS=9 \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "spawn must fail when treehouse cannot acquire a lease"
+  assert_contains "$out" "could not acquire a leased worktree" \
+    "the lease-acquisition failure was not reported"
+  find "$HOME_DIR/state" -name ".${id}.treehouse-lease.*" -type f | grep -q . \
+    && fail "a failed lease acquisition retained an empty handoff that blocks every later spawn"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$retry" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "a later spawn must succeed after a transient lease-acquisition failure"
+  pass "a failed lease acquisition leaves no handoff behind to block later spawns"
+}
+
+test_interrupted_lease_acquisition_retains_handoff() {
+  local rec id out status
+  id=treehouse-get-interrupted-z97
+  rec=$(make_spawn_case treehouse-get-interrupted claude "$id")
+  read_case_record "$rec"
+
+  out=$(FM_FAKE_TREEHOUSE_GET_STATUS=143 \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "spawn must fail when treehouse lease acquisition is interrupted"
+  assert_contains "$out" "could not acquire a leased worktree" \
+    "the interrupted lease acquisition was not reported"
+  find "$HOME_DIR/state" -name ".${id}.treehouse-lease.*" -type f | grep -q . \
+    || fail "an interrupted lease acquisition discarded its indeterminate handoff"
+  pass "an interrupted lease acquisition retains its indeterminate handoff"
+}
+
+test_failed_lease_still_held_in_pool_retains_handoff() {
+  local rec id out status
+  id=treehouse-get-held-z98
+  rec=$(make_spawn_case treehouse-get-held claude "$id")
+  read_case_record "$rec"
+
+  out=$(FM_FAKE_TREEHOUSE_GET_STATUS=9 \
+    FM_FAKE_TREEHOUSE_STATUS_OUTPUT="1     leased       ~/.treehouse/project-be30a4/1/project  (held by $id)" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "spawn must fail when treehouse dies after recording a lease"
+  assert_contains "$out" "could not acquire a leased worktree" \
+    "the lease-acquisition failure was not reported"
+  find "$HOME_DIR/state" -name ".${id}.treehouse-lease.*" -type f | grep -q . \
+    || fail "a failed acquisition whose lease the pool still holds discarded its recovery handoff"
+  pass "a failed acquisition whose lease survived in the pool retains its handoff"
+}
+
+test_failed_lease_with_unreadable_pool_retains_handoff() {
+  local rec id out status
+  id=treehouse-get-pool-unreadable-z99
+  rec=$(make_spawn_case treehouse-get-pool-unreadable claude "$id")
+  read_case_record "$rec"
+
+  out=$(FM_FAKE_TREEHOUSE_GET_STATUS=9 FM_FAKE_TREEHOUSE_STATUS_EXIT=1 \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "spawn must fail when the lease acquisition and pool read both fail"
+  assert_contains "$out" "could not acquire a leased worktree" \
+    "the lease-acquisition failure was not reported"
+  find "$HOME_DIR/state" -name ".${id}.treehouse-lease.*" -type f | grep -q . \
+    || fail "an unconfirmed lease-free failure discarded its recovery handoff"
+  pass "a failed acquisition with an unreadable pool retains its handoff"
+}
+
 test_codex_crewmate_home_records_failed_worktree_return() {
   local rec id out status handoff
   id=profile-codex-home-return-z22
@@ -1305,10 +1493,10 @@ SH
   chmod +x "$FAKEBIN_DIR/python3"
 
   out=$(FM_FAKE_TREEHOUSE_RETURN_STATUS=75 \
-    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    run_spawn_stable "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "Codex spawn must fail when private-home creation and return fail"
-  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+  assert_grep 'kill-window -t @1' "$CASE_DIR/backend.log" \
     "failed spawn cleanup did not close its endpoint before returning the lease"
   assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
     "failed isolated-home cleanup did not attempt to return its worktree"
@@ -1329,10 +1517,10 @@ test_codex_spawn_abort_accepts_an_already_absent_endpoint() {
 
   out=$(FM_FAKE_TREEHOUSE_RETURN_STATUS=0 FM_FAKE_TREEHOUSE_CLOSE_EFFECT=gone \
     FM_FAKE_BACKEND_KILL_STATUS=76 FM_FAKE_ACTIVATION_RESULT=failed \
-    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    run_spawn_stable "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "Codex spawn should report the isolated-home activation failure"
-  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+  assert_grep 'kill-window -t @1' "$CASE_DIR/backend.log" \
     "failed spawn cleanup should close a live endpoint before releasing its lease"
   assert_grep 'failed_spawn=1' "$HOME_DIR/state/$id.meta" \
     "failed spawn cleanup did not retain recovery metadata after endpoint closure"
@@ -1353,13 +1541,13 @@ exit 73
 SH
   chmod +x "$FAKEBIN_DIR/python3"
 
-  out=$(FM_FAKE_TREEHOUSE_RETURN_STATUS=0 FM_FAKE_BACKEND_KILL_STATUS=76 FM_FAKE_TARGET_QUERY_STATUS=77 \
-    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(FM_FAKE_TREEHOUSE_RETURN_STATUS=0 FM_FAKE_BACKEND_KILL_STATUS=76 \
+    run_spawn_stable "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "Codex spawn must fail when private-home creation and endpoint removal fail"
   assert_no_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
     "failed endpoint removal must not return a lease that still has a live endpoint"
-  assert_grep "kill-window -t firstmate:fm-$id" "$CASE_DIR/backend.log" \
+  assert_grep 'kill-window -t @1' "$CASE_DIR/backend.log" \
     "failed endpoint removal was not attempted"
   assert_grep "window=firstmate:fm-$id" "$HOME_DIR/state/$id.meta" \
     "failed endpoint removal did not record the task endpoint"
@@ -1519,6 +1707,294 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+# --- Claude crewmate second-account profile isolation ----------------------
+#
+# Unlike Codex, the isolated home is created synchronously by fm-spawn.sh
+# itself (bin/fm-claude-home.py) before the launch command is sent, so no
+# fake-tmux activation dance is needed: by the time run_spawn returns, the
+# task-private home already exists on disk with real content.
+
+write_fake_claude_cli() {  # <fakebin-dir>
+  local fakebin=$1
+  cat > "$fakebin/claude" <<SH
+#!/usr/bin/env bash
+set -u
+if [ "\$1 \$2 \$3" = "auth status --json" ]; then
+  if [ -f "\${CLAUDE_CONFIG_DIR:-}/.credentials.json" ]; then
+    printf '%s\n' '{"loggedIn":true}'
+    exit 0
+  fi
+  printf '%s\n' '{"loggedIn":false}'
+  exit 1
+fi
+printf 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude fake session\n'
+exit 0
+SH
+  chmod +x "$fakebin/claude"
+}
+
+claude_config_dir_from_launch() {
+  printf '%s\n' "$1" | sed -n "s/^CLAUDE_CONFIG_DIR='\\([^']*\\)'.*/\\1/p"
+}
+
+make_claude_crew_profile() {  # <home-dir> [ready=1]
+  local home=$1 ready=${2:-1} crew_profile
+  crew_profile="$home/data/claude-crewmate/profile"
+  mkdir -p "$crew_profile"
+  [ "$ready" -eq 0 ] || {
+    printf '{"hasCompletedOnboarding":true,"oauthAccount":{"emailAddress":"crew@example.invalid"}}\n' > "$crew_profile/.claude.json"
+    printf '{"claudeAiOauth":{"accessToken":"test-access","refreshToken":"test-refresh"}}\n' > "$crew_profile/.credentials.json"
+  }
+  printf '%s\n' "$crew_profile"
+}
+
+test_claude_crewmate_home_used_when_profile_ready() {
+  local rec ship scout out status launch crew_profile home_dir
+  ship=claude-crew-home-ship-z90
+  scout=claude-crew-home-scout-z91
+  rec=$(make_spawn_case claude-crew-home-ready claude "$ship" "$scout")
+  read_case_record "$rec"
+  write_fake_claude_cli "$FAKEBIN_DIR" "$HOME_DIR/data/claude-crewmate/profile"
+  crew_profile=$(make_claude_crew_profile "$HOME_DIR")
+  printf '%s\n' 'noise' > "$crew_profile/backups-marker"
+  mkdir -p "$crew_profile/backups"
+  printf '%s\n' 'b' > "$crew_profile/backups/entry.json"
+  cat > "$crew_profile/settings.json" <<'EOF'
+{"mcpServers":{"shared_memory":{"command":"broken-memory-server"}}}
+EOF
+  mkdir -p "$crew_profile/hooks"
+  printf '%s\n' 'h' > "$crew_profile/hooks/x.sh"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$ship" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "Claude ship spawn should succeed with a ready crew profile"
+  launch=$(cat "$LAUNCH_LOG")
+  home_dir=$(claude_config_dir_from_launch "$launch")
+  [ -n "$home_dir" ] || fail "Claude ship launch did not carry an isolated CLAUDE_CONFIG_DIR"
+  case "${home_dir##*/}" in .fm-claude-home.*) : ;; *) fail "Claude launch did not use a private per-task home: $home_dir" ;; esac
+  [ -d "$home_dir" ] || fail "Claude ship spawn did not materialize the private home synchronously"
+  assert_grep "claude_crewmate_home=$home_dir" "$HOME_DIR/state/$ship.meta" \
+    "Claude ship metadata did not retain its isolated home for cleanup"
+  assert_present "$home_dir/.claude.json" "isolated Claude home did not copy the profile's credential file"
+  assert_grep '"hasCompletedOnboarding":true' "$home_dir/.claude.json" \
+    "isolated Claude home did not retain completed onboarding state"
+  assert_present "$home_dir/.credentials.json" "isolated Claude home did not copy the file credential fixture"
+  assert_present "$home_dir/backups/entry.json" "isolated Claude home did not copy nested profile content"
+  [ ! -e "$home_dir/settings.json" ] || fail "isolated Claude home retained the profile's settings.json"
+  [ ! -e "$home_dir/hooks" ] || fail "isolated Claude home retained the profile's hooks directory"
+  [ ! -L "$home_dir/.claude.json" ] || fail "isolated Claude credential file must not point into the captain profile"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$scout" "$PROJ_DIR" --scout)
+  status=$?
+  expect_code 0 "$status" "Claude scout spawn should also use the isolated home"
+  launch=$(cat "$LAUNCH_LOG")
+  home_dir=$(claude_config_dir_from_launch "$launch")
+  [ -n "$home_dir" ] || fail "Claude scout launch did not expose an isolated CLAUDE_CONFIG_DIR"
+  pass "Claude ship and scout launches use a fresh crew-profile home, excluding customization surface"
+}
+
+test_claude_crewmate_home_absent_profile_matches_default_behavior() {
+  local rec id out status launch expected
+  id=claude-crew-home-absent-z92
+  rec=$(make_spawn_case claude-crew-home-absent claude "$id")
+  read_case_record "$rec"
+  write_fake_claude_cli "$FAKEBIN_DIR" "$HOME_DIR/data/claude-crewmate/profile"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "Claude spawn without a crew profile should succeed unchanged"
+  launch=$(cat "$LAUNCH_LOG")
+  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
+  [ "$launch" = "$expected" ] || fail "absent-profile claude launch changed"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+  assert_no_grep 'claude_crewmate_home=' "$HOME_DIR/state/$id.meta" \
+    "absent-profile claude spawn should not record claude_crewmate_home="
+  [ ! -e "$HOME_DIR/data/claude-crewmate" ] || fail "absent-profile claude spawn should not create data/claude-crewmate"
+  pass "an absent claude crew profile keeps the launch and meta byte-identical to today"
+}
+
+test_claude_crewmate_home_credential_less_profile_refuses_spawn() {
+  local rec id out status launch expected crew_profile
+  id=claude-crew-home-noauth-z93
+  rec=$(make_spawn_case claude-crew-home-noauth claude "$id")
+  read_case_record "$rec"
+  crew_profile=$(make_claude_crew_profile "$HOME_DIR" 0)
+  write_fake_claude_cli "$FAKEBIN_DIR" "$HOME_DIR/data/claude-crewmate/never-ready"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "Claude spawn with a credential-less crew profile must refuse before launch"
+  assert_contains "$out" "cannot authenticate a task-private home" \
+    "credential-less Claude profile did not explain its readiness refusal"
+  [ ! -s "$LAUNCH_LOG" ] || fail "credential-less Claude profile launched a pane"
+  if [ -f "$HOME_DIR/state/$id.meta" ]; then
+    assert_no_grep 'claude_crewmate_home=' "$HOME_DIR/state/$id.meta" \
+      "credential-less Claude profile recorded an unprovisioned credential home"
+  fi
+  [ -d "$crew_profile" ] || fail "test setup lost the credential-less profile directory"
+  pass "a present but credential-less claude crew profile refuses before launching a pane"
+}
+
+test_claude_crewmate_home_uses_fresh_private_directory() {
+  local rec id out status legacy_home home_dir launch home_base home_parent
+  id=claude-crew-home-fresh-z94
+  rec=$(make_spawn_case claude-crew-home-fresh claude "$id")
+  read_case_record "$rec"
+  write_fake_claude_cli "$FAKEBIN_DIR" "$HOME_DIR/data/claude-crewmate/profile"
+  make_claude_crew_profile "$HOME_DIR" >/dev/null
+  legacy_home="$HOME_DIR/data/claude-crewmate/.fm-claude-home.legacy0000000000000000000000000"
+  mkdir -p "$legacy_home"
+  printf '{"oauthAccount":{"emailAddress":"legacy@example.invalid"}}\n' > "$legacy_home/.claude.json"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "Claude spawn should not reuse a legacy isolated home"
+  launch=$(cat "$LAUNCH_LOG")
+  home_dir=$(claude_config_dir_from_launch "$launch")
+  [ -n "$home_dir" ] || fail "Claude launch did not expose a fresh isolated CLAUDE_CONFIG_DIR"
+  [ "$home_dir" != "$legacy_home" ] || fail "Claude launch reused the legacy isolated home"
+  home_base=$(cd "$HOME_DIR/data/claude-crewmate" && pwd -P)
+  home_parent=$(cd "$(dirname "$home_dir")" && pwd -P)
+  [ "$home_parent" = "$home_base" ] || fail "Claude launch did not use a private per-task home: $home_dir"
+  assert_not_contains "$(cat "$home_dir/.claude.json" 2>/dev/null || true)" "legacy@example.invalid" \
+    "fresh Claude home inherited legacy authentication"
+  pass "Claude spawn uses a fresh private isolated home, never a legacy one"
+}
+
+test_claude_crewmate_home_is_removed_at_teardown() {
+  local rec id out status launch home_dir target_state
+  id=claude-crew-home-teardown-z95
+  rec=$(make_spawn_case claude-crew-home-teardown claude "$id")
+  read_case_record "$rec"
+  write_fake_claude_cli "$FAKEBIN_DIR" "$HOME_DIR/data/claude-crewmate/profile"
+  make_claude_crew_profile "$HOME_DIR" >/dev/null
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "Claude spawn should prepare a private home before teardown"
+  launch=$(cat "$LAUNCH_LOG")
+  home_dir=$(claude_config_dir_from_launch "$launch")
+  [ -d "$home_dir" ] || fail "Claude spawn did not create the private home to be torn down"
+  target_state="$CASE_DIR/target-state"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_FAKE_TARGET_STATE="$target_state" \
+    FM_FAKE_BACKEND_LOG="$CASE_DIR/backend.log" PATH="$FAKEBIN_DIR:$PATH" \
+    "$TEARDOWN" "$id" --force 2>&1)
+  status=$?
+  expect_code 0 "$status" "teardown should remove a recorded Claude private home"
+  [ ! -e "$home_dir" ] || fail "teardown left the credential-bearing Claude private home behind"
+  assert_absent "$HOME_DIR/state/$id.meta" "teardown should remove metadata only after private-home cleanup"
+  pass "teardown removes the recorded private Claude home"
+}
+
+test_claude_crewmate_home_preserved_when_referenced_by_another_task() {
+  local rec id sibling out status launch home_dir sibling_home target_state meta
+  id=claude-crew-home-owner-z96
+  sibling=claude-crew-home-owner-z97
+  rec=$(make_spawn_case claude-crew-home-owner claude "$id")
+  read_case_record "$rec"
+  write_fake_claude_cli "$FAKEBIN_DIR" "$HOME_DIR/data/claude-crewmate/profile"
+  make_claude_crew_profile "$HOME_DIR" >/dev/null
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "Claude spawn should prepare a private home ownership case"
+  launch=$(cat "$LAUNCH_LOG")
+  home_dir=$(claude_config_dir_from_launch "$launch")
+  sibling_home=$(python3 "$ROOT/bin/fm-claude-home.py" --data "$HOME_DIR/data" --source "$HOME_DIR/data/claude-crewmate/profile" \
+    --task-id "$sibling" --create)
+  meta="$HOME_DIR/state/$id.meta"
+  sed "s|^claude_crewmate_home=.*|claude_crewmate_home=$sibling_home|" "$meta" > "$meta.next" && mv "$meta.next" "$meta"
+  fm_write_meta "$HOME_DIR/state/$sibling.meta" \
+    "window=fm-$sibling" "worktree=$WT_DIR" "project=$PROJ_DIR" "harness=claude" \
+    "kind=ship" "mode=no-mistakes" "claude_crewmate_home=$sibling_home"
+  target_state="$CASE_DIR/target-state"
+  printf 'gone\n' > "$target_state"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_FAKE_TARGET_STATE="$target_state" \
+    FM_FAKE_BACKEND_LOG="$CASE_DIR/backend.log" PATH="$FAKEBIN_DIR:$PATH" \
+    "$TEARDOWN" "$id" --force 2>&1)
+  status=$?
+  expect_code 1 "$status" "teardown must reject another task's Claude home"
+  assert_contains "$out" "referenced by another active task" \
+    "teardown did not explain the conflicting Claude-home metadata"
+  [ -d "$sibling_home" ] || fail "teardown removed the sibling task's credential home"
+  [ -f "$meta" ] || fail "teardown discarded metadata after rejecting a sibling Claude home"
+  [ -d "$home_dir" ] || fail "test setup unexpectedly removed the original Claude home"
+  pass "teardown preserves a Claude home referenced by another task"
+}
+
+test_claude_crewmate_home_does_not_block_secondmate_launch() {
+  local rec id sm out status
+  id=claude-crew-home-secondmate-z98
+  rec=$(make_spawn_case claude-crew-home-secondmate claude "$id")
+  read_case_record "$rec"
+  write_fake_claude_cli "$FAKEBIN_DIR" "$HOME_DIR/data/claude-crewmate/profile"
+  make_claude_crew_profile "$HOME_DIR" >/dev/null
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "Claude secondmate spawn should not require or use a crew profile"
+  assert_grep "kind=secondmate" "$HOME_DIR/state/$id.meta" "secondmate meta missing kind=secondmate"
+  assert_no_grep 'claude_crewmate_home=' "$HOME_DIR/state/$id.meta" \
+    "Claude secondmate launch must keep its existing CLAUDE_CONFIG_DIR behavior"
+  assert_not_contains "$(cat "$LAUNCH_LOG")" "CLAUDE_CONFIG_DIR=" \
+    "Claude secondmate launch must keep its existing CLAUDE_CONFIG_DIR behavior"
+  pass "a ready claude crew profile does not affect secondmate launches"
+}
+
+test_claude_crewmate_home_refuses_symlink_escape() {
+  local rec id out status crew_root
+  id=claude-crew-home-symlink-z99
+  rec=$(make_spawn_case claude-crew-home-symlink claude "$id")
+  read_case_record "$rec"
+  write_fake_claude_cli "$FAKEBIN_DIR" "$HOME_DIR/data/claude-crewmate/profile"
+  make_claude_crew_profile "$HOME_DIR" >/dev/null
+  crew_root="$HOME_DIR/data/claude-crewmate-real"
+  mv "$HOME_DIR/data/claude-crewmate" "$crew_root"
+  ln -s "$crew_root" "$HOME_DIR/data/claude-crewmate"
+
+  out=$(run_spawn_stable "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "Claude spawn must reject a symlinked isolated-home base"
+  assert_contains "$out" "could not prepare isolated Claude crewmate home" \
+    "Claude spawn did not report the symlink escape"
+  assert_absent "$HOME_DIR/state/$id.meta" "symlink rejection must not create task metadata"
+  assert_grep "treehouse return --force $WT_DIR" "$CASE_DIR/backend.log" \
+    "symlink rejection did not return its worktree"
+  assert_grep 'kill-window -t @1' "$CASE_DIR/backend.log" \
+    "symlink rejection did not remove its task endpoint"
+  [ ! -s "$LAUNCH_LOG" ] || fail "symlink rejection must not launch Claude"
+  pass "Claude spawn refuses a symlinked isolated-home base directory"
+}
+
+test_claude_crewmate_home_refuses_symlinked_data_root() {
+  local rec id out status data_root real_data
+  id=claude-crew-home-data-symlink-z100
+  rec=$(make_spawn_case claude-crew-home-data-symlink claude "$id")
+  read_case_record "$rec"
+  write_fake_claude_cli "$FAKEBIN_DIR" "$HOME_DIR/data/claude-crewmate/profile"
+  make_claude_crew_profile "$HOME_DIR" >/dev/null
+  data_root="$HOME_DIR/data"
+  real_data="$CASE_DIR/real-data"
+  mv "$data_root" "$real_data"
+  ln -s "$real_data" "$data_root"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "Claude spawn must reject a symlinked data root"
+  assert_contains "$out" "could not prepare isolated Claude crewmate home" \
+    "Claude spawn did not report the data-root symlink escape"
+  find "$real_data/claude-crewmate" -maxdepth 1 -name '.fm-claude-home.*' 2>/dev/null | grep -q . \
+    && fail "data-root symlink rejection must not create a Claude home"
+  [ ! -s "$LAUNCH_LOG" ] || fail "data-root symlink rejection must not launch Claude"
+  pass "Claude spawn refuses a symlinked data root"
+}
+
 test_no_profile_keeps_claude_launch_unchanged
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
@@ -1549,6 +2025,7 @@ test_raw_custom_dynamic_execution_fails_closed
 test_raw_script_dispatches_fail_closed
 test_codex_crewmate_home_uses_private_directory
 test_codex_home_activation_uses_open_descriptor
+test_codex_home_removal_preserves_a_replacement_after_validation
 test_codex_home_activation_reports_exec_failure
 test_codex_home_activation_refuses_replaced_path
 test_codex_home_activation_result_refuses_symlink
@@ -1561,6 +2038,10 @@ test_codex_teardown_preserves_metadata_when_endpoint_query_is_unavailable
 test_codex_teardown_refuses_malformed_task_temp_metadata
 test_codex_teardown_accepts_legacy_task_temp_metadata
 test_codex_teardown_refuses_symlinked_data_root
+test_failed_lease_acquisition_does_not_block_later_spawns
+test_interrupted_lease_acquisition_retains_handoff
+test_failed_lease_still_held_in_pool_retains_handoff
+test_failed_lease_with_unreadable_pool_retains_handoff
 test_codex_crewmate_home_records_failed_worktree_return
 test_codex_spawn_abort_accepts_an_already_absent_endpoint
 test_codex_crewmate_home_records_failed_endpoint_removal
@@ -1572,5 +2053,14 @@ test_opencode_threads_model_and_ignores_effort_axis
 test_pi_threads_model_and_max_effort
 test_batch_forwards_shared_profile_flags
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_claude_crewmate_home_used_when_profile_ready
+test_claude_crewmate_home_absent_profile_matches_default_behavior
+test_claude_crewmate_home_credential_less_profile_refuses_spawn
+test_claude_crewmate_home_uses_fresh_private_directory
+test_claude_crewmate_home_is_removed_at_teardown
+test_claude_crewmate_home_preserved_when_referenced_by_another_task
+test_claude_crewmate_home_does_not_block_secondmate_launch
+test_claude_crewmate_home_refuses_symlink_escape
+test_claude_crewmate_home_refuses_symlinked_data_root
 
 echo "# all fm-spawn-dispatch-profile tests passed"

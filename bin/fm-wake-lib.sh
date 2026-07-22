@@ -79,6 +79,284 @@ fm_watcher_healthy() {
   return 0
 }
 
+# A watch-arm lease binds the harness-tracked relay to the exact watcher it is
+# waiting for.  The lock's pid is the arm pid; the extra fields deliberately
+# make a recycled pid, a sibling home, or a successor watcher fail closed.
+FM_ARM_LEASE_OWNER=
+FM_ARM_LEASE_HEALTHY_PID=
+fm_arm_lease_owner() {  # <state>
+  local lease="$1/.watch-arm.lease"
+  if [ -L "$lease" ]; then
+    fm_lock_link_owner "$lease"
+    return
+  fi
+  [ -d "$lease" ] && printf '%s\n' "$lease"
+}
+
+fm_arm_lease_bind_watcher() {  # <state> <watch-path> <watcher-pid> <home> <watcher-identity>
+  local state=$1 watch_path=$2 watcher_pid=$3 home=$4 watcher_identity=$5 bound current_identity tmp
+  bound="$state/.watch-arm.bound"
+  fm_watcher_lock_matches_pid "$state" "$watch_path" "$watcher_pid" "$home" || return 1
+  current_identity=$(fm_pid_identity "$watcher_pid") || return 1
+  [ "$current_identity" = "$watcher_identity" ] || return 1
+  tmp=$(umask 077; mktemp "$state/.watch-arm.bound.XXXXXX" 2>/dev/null) || return 1
+  if ! printf '%s\n%s\n%s\n%s\n' "$home" "$watch_path" "$watcher_pid" "$watcher_identity" > "$tmp" \
+    || ! mv -f "$tmp" "$bound"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+fm_arm_lease_watcher_bound() {  # <state> <watch-path> <watcher-pid> <home>
+  local state=$1 watch_path=$2 watcher_pid=$3 home=$4 bound bound_home bound_path bound_pid bound_identity current
+  bound="$state/.watch-arm.bound"
+  [ -f "$bound" ] && [ ! -L "$bound" ] || return 1
+  {
+    IFS= read -r bound_home
+    IFS= read -r bound_path
+    IFS= read -r bound_pid
+    IFS= read -r bound_identity
+  } < "$bound" || return 1
+  [ "$bound_home" = "$home" ] && [ "$bound_path" = "$watch_path" ] && [ "$bound_pid" = "$watcher_pid" ] || return 1
+  current=$(fm_pid_identity "$watcher_pid") || return 1
+  [ -n "$bound_identity" ] && [ "$current" = "$bound_identity" ] || return 1
+  fm_watcher_lock_matches_pid "$state" "$watch_path" "$watcher_pid" "$home"
+}
+
+fm_arm_lease_healthy() {  # <state> <watch-path> <watcher-pid> <home> [grace]
+  local state=$1 watch_path=$2 watcher_pid=$3 home=$4 grace=${5:-${FM_ARM_LEASE_GRACE:-45}}
+  local owner arm_pid arm_identity watcher_identity current_arm current_watcher lease_home lease_path
+  FM_ARM_LEASE_HEALTHY_PID=
+  owner=$(fm_arm_lease_owner "$state" 2>/dev/null || true)
+  [ -n "$owner" ] || return 1
+  arm_pid=$(cat "$owner/pid" 2>/dev/null || true)
+  arm_identity=$(cat "$owner/pid-identity" 2>/dev/null || true)
+  lease_home=$(cat "$owner/fm-home" 2>/dev/null || true)
+  lease_path=$(cat "$owner/watcher-path" 2>/dev/null || true)
+  watcher_identity=$(cat "$owner/watcher-identity" 2>/dev/null || true)
+  [ "$lease_home" = "$home" ] && [ "$lease_path" = "$watch_path" ] || return 1
+  [ "$(cat "$owner/watcher-pid" 2>/dev/null || true)" = "$watcher_pid" ] || return 1
+  [ -n "$arm_identity" ] && [ -n "$watcher_identity" ] || return 1
+  current_arm=$(fm_pid_identity "$arm_pid") || return 1
+  current_watcher=$(fm_pid_identity "$watcher_pid") || return 1
+  [ "$current_arm" = "$arm_identity" ] && [ "$current_watcher" = "$watcher_identity" ] || return 1
+  [ "$(fm_path_age "$owner/heartbeat")" -lt "$grace" ] || return 1
+  # shellcheck disable=SC2034 # Read by callers after fm_arm_lease_healthy returns.
+  FM_ARM_LEASE_HEALTHY_PID=$arm_pid
+}
+
+fm_arm_lease_remove_stale() {  # <state> <watch-path> <watcher-pid> <home> [grace]
+  local state=$1 watch_path=$2 watcher_pid=$3 home=$4 grace=${5:-${FM_ARM_LEASE_GRACE:-45}}
+  local lease heartbeat_lock owner pid identity current watcher_pid_bound watcher_identity_bound watcher_current snapshot rc=1
+  lease="$state/.watch-arm.lease"
+  heartbeat_lock="$lease.heartbeat"
+  fm_lock_acquire_wait "$heartbeat_lock"
+  owner=$(fm_arm_lease_owner "$state" 2>/dev/null || true)
+  [ -n "$owner" ] || { fm_lock_release "$heartbeat_lock"; return 1; }
+  snapshot=$(cat "$owner/pid" "$owner/pid-identity" "$owner/fm-home" "$owner/watcher-path" "$owner/watcher-pid" "$owner/watcher-identity" 2>/dev/null || true)
+  pid=$(cat "$owner/pid" 2>/dev/null || true)
+  identity=$(cat "$owner/pid-identity" 2>/dev/null || true)
+  current=$(fm_pid_identity "$pid" 2>/dev/null || true)
+  watcher_pid_bound=$(cat "$owner/watcher-pid" 2>/dev/null || true)
+  watcher_identity_bound=$(cat "$owner/watcher-identity" 2>/dev/null || true)
+  watcher_current=$(fm_pid_identity "$watcher_pid_bound" 2>/dev/null || true)
+  # A live relay gets a short publication grace, but a stale heartbeat is a
+  # failed relay even if its pid still exists and may be wedged.
+  if [ "$current" = "$identity" ] \
+    && [ "$watcher_current" = "$watcher_identity_bound" ] \
+    && [ "$(fm_path_age "$owner/heartbeat")" -lt "$grace" ]; then
+    fm_lock_release "$heartbeat_lock"
+    return 1
+  fi
+  [ "$(cat "$owner/pid" "$owner/pid-identity" "$owner/fm-home" "$owner/watcher-path" "$owner/watcher-pid" "$owner/watcher-identity" 2>/dev/null || true)" = "$snapshot" ] || {
+    fm_lock_release "$heartbeat_lock"
+    return 1
+  }
+  if [ -L "$lease" ]; then
+    fm_lock_points_to_owner "$lease" "$owner" || { fm_lock_release "$heartbeat_lock"; return 1; }
+    rm -f "$lease" 2>/dev/null || { fm_lock_release "$heartbeat_lock"; return 1; }
+  elif [ "$lease" != "$owner" ]; then
+    fm_lock_release "$heartbeat_lock"
+    return 1
+  fi
+  rm -f "$owner/heartbeat" "$owner/watcher-pid" "$owner/watcher-identity" 2>/dev/null || true
+  fm_lock_clean_known_files "$owner"
+  rmdir "$owner" 2>/dev/null || true
+  rc=0
+  fm_lock_release "$heartbeat_lock"
+  return "$rc"
+}
+
+fm_arm_lease_claim() {  # <state> <watch-path> <watcher-pid> <home>
+  local state=$1 watch_path=$2 watcher_pid=$3 home=$4 lease owner arm_pid arm_identity watcher_identity owner_pid owner_identity
+  lease="$state/.watch-arm.lease"
+  FM_ARM_LEASE_OWNER=
+  # Do not use fm_current_pid through command substitution here: that would
+  # identify the short-lived substitution subshell instead of this relay.
+  arm_pid=${BASHPID:-$$}
+  arm_identity=$(fm_pid_identity "$arm_pid") || return 1
+  watcher_identity=$(fm_pid_identity "$watcher_pid") || return 1
+  FM_ARM_LEASE_PUBLISH_IDENTITY=$arm_identity
+  FM_ARM_LEASE_PUBLISH_HOME=$home
+  FM_ARM_LEASE_PUBLISH_WATCH_PATH=$watch_path
+  FM_ARM_LEASE_PUBLISH_WATCHER_PID=$watcher_pid
+  FM_ARM_LEASE_PUBLISH_WATCHER_IDENTITY=$watcher_identity
+  if ! fm_lock_try_acquire "$lease" fm_arm_lease_publish_owner; then
+    # This arm may be following a confirmed watcher successor.  Its previous
+    # lease is still deliberately healthy as a process, but it is bound to the
+    # predecessor and therefore cannot satisfy the new watcher identity.  Only
+    # this exact owner may release it before publishing the replacement.
+    owner=$(fm_arm_lease_owner "$state" 2>/dev/null || true)
+    if [ -n "$owner" ]; then
+      owner_pid=$(cat "$owner/pid" 2>/dev/null || true)
+      owner_identity=$(cat "$owner/pid-identity" 2>/dev/null || true)
+    fi
+    if [ -n "$owner" ] && [ "$owner_pid" = "$arm_pid" ] && [ "$owner_identity" = "$arm_identity" ]; then
+      fm_arm_lease_release "$state" "$owner" || return 1
+      fm_lock_try_acquire "$lease" fm_arm_lease_publish_owner || return 1
+    elif fm_arm_lease_healthy "$state" "$watch_path" "$watcher_pid" "$home"; then
+      return 2
+    else
+      fm_arm_lease_remove_stale "$state" "$watch_path" "$watcher_pid" "$home" || return 1
+      fm_lock_try_acquire "$lease" fm_arm_lease_publish_owner || return 1
+    fi
+  fi
+  owner=${FM_LOCK_OWNER_DIR:-}
+  [ -n "$owner" ] || return 1
+  if ! fm_arm_lease_bind_watcher "$state" "$watch_path" "$watcher_pid" "$home" "$watcher_identity"; then
+    fm_arm_lease_release "$state" "$owner" || true
+    return 1
+  fi
+  # shellcheck disable=SC2034 # Read by callers after fm_arm_lease_claim returns.
+  FM_ARM_LEASE_OWNER=$owner
+}
+
+fm_arm_lease_publish_owner() {  # <owner>
+  local owner=$1
+  printf '%s\n' "$FM_ARM_LEASE_PUBLISH_IDENTITY" > "$owner/pid-identity" \
+    && printf '%s\n' "$FM_ARM_LEASE_PUBLISH_HOME" > "$owner/fm-home" \
+    && printf '%s\n' "$FM_ARM_LEASE_PUBLISH_WATCH_PATH" > "$owner/watcher-path" \
+    && printf '%s\n' "$FM_ARM_LEASE_PUBLISH_WATCHER_PID" > "$owner/watcher-pid" \
+    && printf '%s\n' "$FM_ARM_LEASE_PUBLISH_WATCHER_IDENTITY" > "$owner/watcher-identity" \
+    && touch "$owner/heartbeat"
+}
+
+fm_arm_lease_heartbeat() {  # <state> <owner>
+  local state=$1 owner=$2 current stored heartbeat_lock rc=1
+  heartbeat_lock="$state/.watch-arm.lease.heartbeat"
+  fm_lock_acquire_wait "$heartbeat_lock"
+  [ "$(fm_arm_lease_owner "$state" 2>/dev/null || true)" = "$owner" ] || {
+    fm_lock_release "$heartbeat_lock"
+    return 1
+  }
+  stored=$(cat "$owner/pid-identity" 2>/dev/null || true)
+  current=$(fm_pid_identity "$(cat "$owner/pid" 2>/dev/null || true)") || {
+    fm_lock_release "$heartbeat_lock"
+    return 1
+  }
+  if [ -n "$stored" ] && [ "$current" = "$stored" ] && touch "$owner/heartbeat"; then
+    rc=0
+  fi
+  fm_lock_release "$heartbeat_lock"
+  return "$rc"
+}
+
+fm_arm_lease_release() {  # <state> <owner>
+  local state=$1 owner=$2 lease current stored
+  lease="$state/.watch-arm.lease"
+  [ "$(fm_arm_lease_owner "$state" 2>/dev/null || true)" = "$owner" ] || return 0
+  stored=$(cat "$owner/pid-identity" 2>/dev/null || true)
+  current=$(fm_pid_identity "$(cat "$owner/pid" 2>/dev/null || true)") || return 0
+  [ -n "$stored" ] && [ "$current" = "$stored" ] || return 0
+  fm_lock_release "$lease"
+  rm -f "$owner/heartbeat" "$owner/watcher-pid" "$owner/watcher-identity" 2>/dev/null || true
+  fm_lock_clean_known_files "$owner"
+  rmdir "$owner" 2>/dev/null || true
+}
+
+fm_daemon_lease_publish() {  # <state> <daemon-path> <home> <lock> <owner>
+  local state=$1 daemon_path=$2 home=$3 lock=$4 owner=$5 pid stored current
+  [ -n "$owner" ] || return 1
+  fm_lock_points_to_owner "$lock" "$owner" || return 1
+  pid=$(cat "$owner/pid" 2>/dev/null || true)
+  stored=$(cat "$owner/pid-identity" 2>/dev/null || true)
+  current=$(fm_pid_identity "$pid") || return 1
+  [ -n "$stored" ] && [ "$current" = "$stored" ] || return 1
+  printf '%s\n' "$home" > "$owner/fm-home"
+  printf '%s\n' "$daemon_path" > "$owner/daemon-path"
+  touch "$owner/heartbeat"
+}
+
+fm_daemon_lease_healthy() {  # <state> <daemon-path> <home> [grace]
+  local state=$1 daemon_path=$2 home=$3 grace=${4:-${FM_DAEMON_LEASE_GRACE:-45}}
+  local lock owner pid stored current
+  lock="$state/.supervise-daemon.lock"
+  owner=$(fm_lock_link_owner "$lock" 2>/dev/null || true)
+  [ -n "$owner" ] || return 1
+  pid=$(cat "$owner/pid" 2>/dev/null || true)
+  stored=$(cat "$owner/pid-identity" 2>/dev/null || true)
+  current=$(fm_pid_identity "$pid") || return 1
+  [ -n "$stored" ] && [ "$current" = "$stored" ] || return 1
+  [ "$(cat "$owner/fm-home" 2>/dev/null || true)" = "$home" ] || return 1
+  [ "$(cat "$owner/daemon-path" 2>/dev/null || true)" = "$daemon_path" ] || return 1
+  [ "$(fm_path_age "$owner/heartbeat")" -lt "$grace" ]
+}
+
+fm_daemon_lease_remove_stale() {  # <state> <daemon-path> <home> [grace]
+  local state=$1 daemon_path=$2 home=$3 grace=${4:-${FM_DAEMON_LEASE_GRACE:-45}}
+  local lock steal heartbeat_lock owner pid identity snapshot current rc=1
+  lock="$state/.supervise-daemon.lock"
+  steal="$lock.steal"
+  heartbeat_lock="$lock.heartbeat"
+
+  fm_lock_try_acquire "$steal" || return 1
+  fm_lock_acquire_wait "$heartbeat_lock"
+  if [ -L "$lock" ]; then
+    owner=$(fm_lock_link_owner "$lock" 2>/dev/null || true)
+  elif [ -d "$lock" ]; then
+    owner=$lock
+  else
+    owner=
+  fi
+  if [ -n "$owner" ]; then
+    snapshot=$(cat "$owner/pid" "$owner/pid-identity" "$owner/fm-home" "$owner/daemon-path" 2>/dev/null || true)
+    pid=$(cat "$owner/pid" 2>/dev/null || true)
+    identity=$(cat "$owner/pid-identity" 2>/dev/null || true)
+    current=$(fm_pid_identity "$pid" 2>/dev/null || true)
+    if [ -n "$identity" ] \
+      && { [ "$current" != "$identity" ] \
+        || { [ "$(cat "$owner/fm-home" 2>/dev/null || true)" = "$home" ] \
+          && [ "$(cat "$owner/daemon-path" 2>/dev/null || true)" = "$daemon_path" ] \
+          && [ "$(fm_path_age "$owner/heartbeat")" -ge "$grace" ]; }; } \
+      && [ "$(cat "$owner/pid" "$owner/pid-identity" "$owner/fm-home" "$owner/daemon-path" 2>/dev/null || true)" = "$snapshot" ] \
+      && [ "$(fm_pid_identity "$pid" 2>/dev/null || true)" = "$current" ]; then
+      if { [ -L "$lock" ] && fm_lock_points_to_owner "$lock" "$owner"; } \
+        || { [ ! -L "$lock" ] && [ "$lock" = "$owner" ] && [ -d "$lock" ]; }; then
+        fm_lock_remove_path "$lock" && rc=0
+      fi
+    fi
+  fi
+  fm_lock_release "$heartbeat_lock"
+  fm_lock_release "$steal"
+  return "$rc"
+}
+
+fm_daemon_lease_heartbeat() {  # <lock> <owner> <identity>
+  local lock=$1 owner=$2 identity=$3 pid stored current heartbeat_lock rc=1
+  heartbeat_lock="$lock.heartbeat"
+  fm_lock_acquire_wait "$heartbeat_lock"
+  [ -n "$owner" ] && [ -n "$identity" ] || { fm_lock_release "$heartbeat_lock"; return 1; }
+  fm_lock_points_to_owner "$lock" "$owner" || { fm_lock_release "$heartbeat_lock"; return 1; }
+  pid=$(cat "$owner/pid" 2>/dev/null || true)
+  stored=$(cat "$owner/pid-identity" 2>/dev/null || true)
+  current=$(fm_pid_identity "$pid") || { fm_lock_release "$heartbeat_lock"; return 1; }
+  if [ "$stored" = "$identity" ] && [ "$current" = "$identity" ] && touch "$owner/heartbeat"; then
+    rc=0
+  fi
+  fm_lock_release "$heartbeat_lock"
+  return "$rc"
+}
+
 fm_lock_clean_known_files() {
   local lockdir=$1
   rm -f \
@@ -86,6 +364,10 @@ fm_lock_clean_known_files() {
     "$lockdir/fm-home" \
     "$lockdir/pid-identity" \
     "$lockdir/watcher-path" \
+    "$lockdir/watcher-pid" \
+    "$lockdir/watcher-identity" \
+    "$lockdir/daemon-path" \
+    "$lockdir/heartbeat" \
     2>/dev/null || true
 }
 
@@ -179,7 +461,7 @@ fm_lock_claim() {
 }
 
 fm_lock_try_create() {
-  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
+  local lockdir=$1 allowed_steal_owner=${2:-} owner_prepare=${3:-} ownerdir
   FM_LOCK_OWNER_DIR=
   ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
@@ -187,6 +469,10 @@ fm_lock_try_create() {
     return 1
   fi
   if ! fm_lock_prepare_owner "$ownerdir"; then
+    fm_lock_discard_owner "$ownerdir"
+    return 1
+  fi
+  if [ -n "$owner_prepare" ] && ! "$owner_prepare" "$ownerdir"; then
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
@@ -249,11 +535,11 @@ fm_lock_recheck_stale_owner() {
 }
 
 fm_lock_try_acquire() {
-  local lockdir=$1 pid steal cur rc steal_owner primary_owner
+  local lockdir=$1 owner_prepare=${2:-} pid steal cur rc steal_owner primary_owner
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
 
-  if fm_lock_try_create "$lockdir"; then
+  if fm_lock_try_create "$lockdir" '' "$owner_prepare"; then
     return 0
   fi
 
@@ -309,7 +595,7 @@ fm_lock_try_acquire() {
 
   fm_lock_remove_path "$lockdir" || true
   rc=1
-  if fm_lock_try_create "$lockdir" "$steal_owner"; then
+  if fm_lock_try_create "$lockdir" "$steal_owner" "$owner_prepare"; then
     rc=0
   fi
   if [ "$rc" -ne 0 ]; then

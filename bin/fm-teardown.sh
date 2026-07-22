@@ -46,11 +46,19 @@
 # quarantine entries with the rest of the volatile state.
 # Codex ship and scout tasks record a firstmate-managed private home under
 # data/codex-crewmate in codex_crewmate_home= metadata.
-# Teardown removes that home only after endpoint cleanup succeeds.
-# When failed-spawn cleanup cannot confirm the endpoint absent, it preserves the metadata and private home for a later safe recovery attempt.
+# Claude ship and scout tasks record one the same way under data/claude-crewmate
+# in claude_crewmate_home= metadata, only when the captain has populated a
+# second-account crew profile (docs/configuration.md).
+# Teardown removes those homes only after endpoint cleanup succeeds.
+# When failed-spawn cleanup cannot confirm the endpoint absent, it preserves the metadata and private home(s) for a later safe recovery attempt.
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
+# A Herdr presentation journal never authorizes cleanup. Teardown still closes
+# only the exact task pane from ordinary endpoint metadata and never calls
+# `workspace close`. It retires the non-authoritative journal only when a
+# read-only token correlation agrees with that endpoint and pane closure is
+# confirmed. Otherwise the journal stays quarantined for manual inspection.
 # Secondmates (kind=secondmate in meta) are retired explicitly. Normal
 # teardown refuses while their home has in-flight crewmate meta files; --force
 # is the approved discard path that prevalidates child removal targets, discards
@@ -131,7 +139,7 @@ FM_LOCK_LOG_PREFIX=teardown
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
-T=$(grep '^window=' "$META" | cut -d= -f2-)
+T=$(fm_backend_target_of_meta "$META")
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 BACKEND=$(fm_backend_of_meta "$META")
 if [ "$BACKEND" = orca ]; then
@@ -144,6 +152,7 @@ PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 # absent for tasks spawned before that change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
 CODEX_CREWMATE_HOME=$(grep '^codex_crewmate_home=' "$META" | cut -d= -f2- || true)
+CLAUDE_CREWMATE_HOME=$(grep '^claude_crewmate_home=' "$META" | cut -d= -f2- || true)
 ENDPOINT_CLEANUP_PENDING=$(grep '^endpoint_cleanup_pending=' "$META" | tail -1 | cut -d= -f2- || true)
 ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
 ORCA_WORKTREE_CLEANUP_COMPLETE=$(fm_meta_get "$META" orca_worktree_cleanup_complete)
@@ -290,6 +299,11 @@ restore_treehouse_lease_handoff() {
   [ "$TREEHOUSE_LEASE_RETURN_NEEDED" = 1 ] || return 0
   fm_treehouse_lease_handoff_write "$TREEHOUSE_LEASE_HANDOFF" leased "$WT" || \
     echo "error: could not restore treehouse lease handoff $TREEHOUSE_LEASE_HANDOFF after return failure" >&2
+}
+
+abort_teardown_before_treehouse_return() {
+  restore_treehouse_lease_handoff
+  exit 1
 }
 
 require_orca_worktree_id() {
@@ -1100,10 +1114,16 @@ remove_codex_crewmate_home() {
   python3 "$FM_ROOT/bin/fm-codex-home.py" --remove --data "$DATA" --state "$STATE" --task-id "$ID" --home "$home"
 }
 
+remove_claude_crewmate_home() {
+  local home=$1
+  [ -n "$home" ] || return 0
+  python3 "$FM_ROOT/bin/fm-claude-home.py" --remove --data "$DATA" --state "$STATE" --task-id "$ID" --home "$home"
+}
+
 close_recorded_endpoint() {
   local tab_id absence_status require_confirmed_absence=0
   tab_id=$(meta_value "$META" zellij_tab_id)
-  if [ "$ENDPOINT_CLEANUP_PENDING" = 1 ] || [ -n "$CODEX_CREWMATE_HOME" ]; then
+  if [ "$ENDPOINT_CLEANUP_PENDING" = 1 ] || [ -n "$CODEX_CREWMATE_HOME" ] || [ -n "$CLAUDE_CREWMATE_HOME" ]; then
     require_confirmed_absence=1
   fi
   if [ "$BACKEND" = orca ] && [ -n "${T_ORCA:-}" ]; then
@@ -1416,19 +1436,39 @@ fi
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 begin_treehouse_lease_return_transaction || exit 1
 prepare_treehouse_lease_handoff_return || exit 1
+HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
+HERDR_PRESENTATION_RETIRE_CANDIDATE=0
+HERDR_PRESENTATION_SESSION=
+HERDR_PRESENTATION_PANE=
+if [ "$BACKEND" = herdr ] \
+   && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
+  fm_backend_source herdr || true
+  HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
+  HERDR_PRESENTATION_WORKSPACE=$(meta_value "$META" herdr_workspace_id)
+  HERDR_PRESENTATION_PANE=$(meta_value "$META" herdr_pane_id)
+  if [ -n "$HERDR_PRESENTATION_SESSION" ] \
+     && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
+     && [ -n "$HERDR_PRESENTATION_PANE" ] \
+     && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ] \
+     && fm_backend_herdr_projection_endpoint_matches_journal \
+       "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
+       "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
+    HERDR_PRESENTATION_RETIRE_CANDIDATE=1
+  fi
+fi
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ -n "$ORCA_WORKTREE_ID" ] && [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
     ORCA_PATH_MATCH_VERIFIED=1
   fi
-  [ -z "$T_ORCA" ] || close_recorded_endpoint || exit 1
+  [ -z "$T_ORCA" ] || close_recorded_endpoint || abort_teardown_before_treehouse_return
   if [ -n "$ORCA_WORKTREE_ID" ] && [ -d "$WT" ]; then
-    detach_and_drop_task_branch || exit 1
+    detach_and_drop_task_branch || abort_teardown_before_treehouse_return
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
   fi
   [ -z "$ORCA_WORKTREE_ID" ] || fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ] && [ "$TREEHOUSE_LEASE_RETURN_NEEDED" = 1 ]; then
-  detach_and_drop_task_branch || exit 1
+  detach_and_drop_task_branch || abort_teardown_before_treehouse_return
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
   # Kills remaining processes in the worktree (including the agent), resets, returns
@@ -1453,7 +1493,18 @@ finish_treehouse_lease_handoff_return || exit 1
 if [ "$BACKEND" != orca ]; then
   close_recorded_endpoint || exit 1
 fi
+if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
+  if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then
+    rm -f "$HERDR_PRESENTATION_JOURNAL"
+  else
+    echo "warning: exact herdr task-pane close could not be confirmed for $ID; retaining the presentation journal and attempting no workspace cleanup" >&2
+  fi
+elif [ "$BACKEND" = herdr ] \
+     && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
+  echo "warning: herdr presentation journal for $ID remains quarantined; no workspace cleanup was attempted" >&2
+fi
 remove_codex_crewmate_home "$CODEX_CREWMATE_HOME" || exit 1
+remove_claude_crewmate_home "$CLAUDE_CREWMATE_HOME" || exit 1
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"
@@ -1466,7 +1517,7 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -z "$TASK_TMP" ] || rm -rf -- "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
-rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
+rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
 rm -f "$STATE/$ID.meta"
 if [ -n "$TREEHOUSE_LEASE_HANDOFF" ]; then
   rm -f "$TREEHOUSE_LEASE_HANDOFF" || \
