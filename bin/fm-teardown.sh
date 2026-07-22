@@ -1553,8 +1553,8 @@ if [ "$KIND" = secondmate ]; then
 fi
 remove_grok_turnend_auth "$STATE" "$ID"
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
-  remove_busy_progress_tracking "$STATE" "$T"
-  # Remove the per-task temp root, including its gotmp/, recorded by spawn.
+remove_busy_progress_tracking "$STATE" "$T"
+# Remove the per-task temp root, including its gotmp/, recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -z "$TASK_TMP" ] || rm -rf -- "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
