@@ -1163,7 +1163,7 @@ should_force_self() {  # <reason>
 is_wake_reason() {  # <reason>
   local reason=$1
   case "$reason" in
-    signal:*|stale:*|check:*|heartbeat|heartbeat:*) return 0 ;;
+    signal:*|stale:*|stale-rechecks:*|check:*|heartbeat|heartbeat:*) return 0 ;;
   esac
   return 1
 }
@@ -1172,11 +1172,35 @@ is_wake_reason() {  # <reason>
 # Side effects: logging, marker records, escalation buffer appends.
 handle_wake() {  # <reason> <state>
   local reason=$1 state=$2 decision action distilled task last
-  local kind="" arg=""
+  local kind="" arg="" rest item
   if should_force_self "$reason"; then
     log "wake force-self (FM_INJECT_SKIP): $reason"
     return
   fi
+  # A batched stale-recheck wake carries one "[stale: <window> (<diagnosis>)]"
+  # segment per overdue lane. Dispatch each lane through the ordinary stale
+  # classification, dropping the diagnosis suffix so the window resolves to its
+  # task; classify_stale re-derives paused/wedge state from the status log.
+  case "$reason" in
+    stale-rechecks:*)
+      rest=${reason#stale-rechecks:}
+      while :; do
+        case "$rest" in
+          *"["*"]"*) ;;
+          *) break ;;
+        esac
+        rest=${rest#*"["}
+        item=${rest%%"]"*}
+        rest=${rest#*"]"}
+        [ -n "$item" ] || continue
+        case "$item" in
+          "stale: "*) handle_wake "${item%% (*}" "$state" ;;
+          *)          handle_wake "$item" "$state" ;;
+        esac
+      done
+      return
+      ;;
+  esac
   case "$reason" in
     signal:*) kind=signal; arg="${reason#signal: }"
               decision=$(classify_signal "$arg" "$state") ;;

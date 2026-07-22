@@ -31,6 +31,14 @@
 #                          wake payload itself, not just repetition, forces a
 #                          closer look instead of another routine supervision
 #                          resume. Unless afk is active.
+#   stale-rechecks: [stale: <window> (<reason>)]...
+#                          already-tracked stale rechecks (wedge escalations and
+#                          declared-pause re-surfaces) that expired in the same
+#                          poll, batched into one compatible stale wake (queue
+#                          kind stale, key stale-rechecks) with each lane's full
+#                          reason retained; each lane's marker refresh commits
+#                          only after the batch's durable record lands. Unless
+#                          afk is active.
 #                          A busy pane with unchanged footer progress is also
 #                          surfaced as stale: Codex's zero-context startup spinner
 #                          after FM_STARTUP_ZERO_CONTEXT_SECS, or an unchanged
@@ -286,6 +294,48 @@ wake() {
   exit 0
 }
 
+# Expired stale rechecks are discovered while scanning every recorded window.
+# Keep their full individual reason text until that scan completes, then emit one
+# ordinary stale queue record so an outage does not cost one watcher arm per lane.
+# Fresh stale transitions remain direct wakes because they have not yet entered a
+# recheck cadence. Each lane's marker refresh and counter write are collected as
+# deferred commit specs and applied only after the batch's durable record lands:
+# a fresh stale wake later in the same scan (or a crash) exits before the batch
+# surfaces, and an already-refreshed marker would silently defer that lane a full
+# cadence with no queue record. Uncommitted lanes stay expired and re-collect on
+# the next poll, so a preempted batch can at worst duplicate, never lose.
+STALE_RECHECK_REASONS=()
+STALE_RECHECK_COMMITS=()
+collect_stale_recheck() {  # <reason> [refresh<TAB><file> | write<TAB><file><TAB><value>]...
+  local reason=$1 spec commits=
+  shift
+  for spec in "$@"; do
+    commits="$commits$spec"$'\n'
+  done
+  STALE_RECHECK_REASONS+=("$reason")
+  STALE_RECHECK_COMMITS+=("$commits")
+}
+
+surface_collected_stale_rechecks() {
+  local reason item op path value
+  [ "${#STALE_RECHECK_REASONS[@]}" -gt 0 ] || return 0
+  reason="stale-rechecks:"
+  for item in "${STALE_RECHECK_REASONS[@]}"; do
+    reason="$reason [$item]"
+  done
+  fm_wake_append stale stale-rechecks "$reason" || exit 1
+  for item in "${STALE_RECHECK_COMMITS[@]}"; do
+    while IFS=$'\t' read -r op path value; do
+      [ -n "$op" ] || continue
+      case "$op" in
+        refresh) date +%s > "$path" ;;
+        write)   printf '%s\n' "$value" > "$path" ;;
+      esac
+    done <<< "$item"
+  done
+  wake "$reason"
+}
+
 # Consecutive wedge-escalation count for a window past FM_WEDGE_DEMAND_INSPECT_COUNT
 # (default 3): a pane that keeps re-wedging on the SAME stale hash - each
 # escalation gets absorbed again as "still validating" one poll later, since the
@@ -403,14 +453,13 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
         n=$(next_escalation_count "$escalation_file")
-        echo "$n" > "$escalation_file"
         reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
           reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
         fi
-        fm_wake_append stale "$win" "$reason" || exit 1
-        rm -f "$since_file"
-        wake "$reason"
+        collect_stale_recheck "$reason" \
+          refresh$'\t'"$since_file" \
+          write$'\t'"$escalation_file"$'\t'"$n"
       fi
       ;;
   esac
@@ -442,9 +491,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   rf_age=$(age_of "$rf")   # 999999 when no prior re-surface
   if [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$rf_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
     reason="stale: $win (paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)"
-    fm_wake_append stale "$win" "$reason" || exit 1
-    date +%s > "$rf"
-    wake "$reason"
+    collect_stale_recheck "$reason" refresh$'\t'"$rf"
   fi
   triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
 }
@@ -1273,6 +1320,12 @@ EOF
       fi
     fi
   done < <(recorded_windows)
+
+  # A watcher gap can leave several long-cadence stale rechecks overdue at once.
+  # Surface every expired reason found above in one wake, refreshing each lane's
+  # marker only once the batch's durable record lands, preserving one watcher
+  # cycle for the complete batch.
+  surface_collected_stale_rechecks
 
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive
