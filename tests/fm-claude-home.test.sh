@@ -58,6 +58,49 @@ test_create_excludes_customization_surface_and_copies_credentials() {
   pass "create copies credentials and nested content while excluding customization surface"
 }
 
+test_create_strips_mcp_servers_from_claude_json() {
+  local case_dir data source home out status
+  case_dir="$TMP_ROOT/create-strips-mcp"
+  data="$case_dir/data"
+  source="$case_dir/profile"
+  mkdir -p "$data" "$source"
+  printf '%s\n' '{"hasCompletedOnboarding":true,"mcpServers":{"inherited":{"command":"x"}},"projects":{"/tmp/p":{"mcpServers":{"inherited2":{"command":"x"}},"nested":[{"mcpServers":{"inherited3":{"command":"x"}}}],"hasTrustDialogAccepted":true}}}' \
+    > "$source/.claude.json"
+
+  home=$(python3 "$HELPER" --data "$data" --source "$source" --task-id mcp --create)
+  python3 - "$home" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1] + "/.claude.json", encoding="utf-8") as file:
+    config = json.load(file)
+if "mcpServers" in config:
+    raise AssertionError("copied .claude.json retained user-scope mcpServers")
+if not config.get("hasCompletedOnboarding"):
+    raise AssertionError("copied .claude.json lost completed-onboarding state")
+def contains_mcp_servers(value):
+    if isinstance(value, dict):
+        return "mcpServers" in value or any(contains_mcp_servers(child) for child in value.values())
+    if isinstance(value, list):
+        return any(contains_mcp_servers(child) for child in value)
+    return False
+
+if contains_mcp_servers(config):
+    raise AssertionError("copied .claude.json retained a nested mcpServers section")
+projects = config.get("projects")
+if not (projects or {}).get("/tmp/p", {}).get("hasTrustDialogAccepted"):
+    raise AssertionError("copied .claude.json lost non-MCP project state")
+PY
+  expect_code 0 "$?" "the task-private .claude.json must keep onboarding state but no mcpServers"
+
+  printf '%s\n' 'not json' > "$source/.claude.json"
+  out=$(python3 "$HELPER" --data "$data" --source "$source" --task-id mcp2 --create 2>&1)
+  status=$?
+  expect_code 1 "$status" "create must refuse a profile whose .claude.json is not a JSON object"
+  assert_contains "$out" "not a JSON object" "create did not explain the .claude.json refusal"
+  pass "create strips every mcpServers section from the copied .claude.json"
+}
+
 test_managed_keychain_credential_is_cloned_and_removed() {
   local case_dir data source state
   case_dir="$TMP_ROOT/keychain-clone"
@@ -415,6 +458,7 @@ PY
 }
 
 test_create_excludes_customization_surface_and_copies_credentials
+test_create_strips_mcp_servers_from_claude_json
 test_managed_keychain_credential_is_cloned_and_removed
 test_create_abort_cleanup_survives_keychain_failure
 test_remove_deletes_keychain_entry_for_absent_home

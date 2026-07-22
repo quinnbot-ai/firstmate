@@ -90,7 +90,10 @@ SH
 set -u
 [ -z "${FM_FAKE_BACKEND_LOG:-}" ] || printf 'treehouse %s\n' "$*" >> "$FM_FAKE_BACKEND_LOG"
 case "${1:-}" in
-  get) printf '%s\n' "${FM_FAKE_PANE_PATH:?}" ;;
+  get)
+    [ "${FM_FAKE_TREEHOUSE_GET_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_TREEHOUSE_GET_STATUS}"
+    printf '%s\n' "${FM_FAKE_PANE_PATH:?}"
+    ;;
   return)
     [ "${FM_FAKE_TREEHOUSE_CLOSE_EFFECT:-none}" != gone ] || printf '%s\n' gone > "${FM_FAKE_TARGET_STATE:?}"
     exit "${FM_FAKE_TREEHOUSE_RETURN_STATUS:-0}"
@@ -1361,6 +1364,45 @@ test_codex_teardown_refuses_symlinked_data_root() {
   pass "Codex teardown rejects symlinked data roots"
 }
 
+test_failed_lease_acquisition_does_not_block_later_spawns() {
+  local rec id retry out status
+  id=treehouse-get-fail-z95
+  retry=treehouse-get-retry-z96
+  rec=$(make_spawn_case treehouse-get-fail claude "$id" "$retry")
+  read_case_record "$rec"
+
+  out=$(FM_FAKE_TREEHOUSE_GET_STATUS=9 \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "spawn must fail when treehouse cannot acquire a lease"
+  assert_contains "$out" "could not acquire a leased worktree" \
+    "the lease-acquisition failure was not reported"
+  find "$HOME_DIR/state" -name ".${id}.treehouse-lease.*" -type f | grep -q . \
+    && fail "a failed lease acquisition retained an empty handoff that blocks every later spawn"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$retry" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "a later spawn must succeed after a transient lease-acquisition failure"
+  pass "a failed lease acquisition leaves no handoff behind to block later spawns"
+}
+
+test_interrupted_lease_acquisition_retains_handoff() {
+  local rec id out status
+  id=treehouse-get-interrupted-z97
+  rec=$(make_spawn_case treehouse-get-interrupted claude "$id")
+  read_case_record "$rec"
+
+  out=$(FM_FAKE_TREEHOUSE_GET_STATUS=143 \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "spawn must fail when treehouse lease acquisition is interrupted"
+  assert_contains "$out" "could not acquire a leased worktree" \
+    "the interrupted lease acquisition was not reported"
+  find "$HOME_DIR/state" -name ".${id}.treehouse-lease.*" -type f | grep -q . \
+    || fail "an interrupted lease acquisition discarded its indeterminate handoff"
+  pass "an interrupted lease acquisition retains its indeterminate handoff"
+}
+
 test_codex_crewmate_home_records_failed_worktree_return() {
   local rec id out status handoff
   id=profile-codex-home-return-z22
@@ -1918,6 +1960,8 @@ test_codex_teardown_preserves_metadata_when_endpoint_query_is_unavailable
 test_codex_teardown_refuses_malformed_task_temp_metadata
 test_codex_teardown_accepts_legacy_task_temp_metadata
 test_codex_teardown_refuses_symlinked_data_root
+test_failed_lease_acquisition_does_not_block_later_spawns
+test_interrupted_lease_acquisition_retains_handoff
 test_codex_crewmate_home_records_failed_worktree_return
 test_codex_spawn_abort_accepts_an_already_absent_endpoint
 test_codex_crewmate_home_records_failed_endpoint_removal

@@ -591,6 +591,40 @@ SH
   pass "teardown restores a treehouse lease handoff after return failure"
 }
 
+test_detach_refusal_restores_lease_handoff() {
+  local case_dir handoff rc real_git
+  case_dir=$(make_case teardown-lease-detach-refusal)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'treehouse_lease=1\n' >> "$case_dir/state/task-x1.meta"
+  handoff="$case_dir/state/.task-x1.treehouse-lease.stale"
+  printf 'leased=%s\n' "$case_dir/wt" > "$handoff"
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  real_git=$(command -v git)
+  cat > "$case_dir/fakebin/git" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  [ "\$arg" = --detach ] && exit 1
+done
+exec "$real_git" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+
+  set +e
+  run_teardown "$case_dir" >/dev/null 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "teardown must stop when the branch detach fails"
+  assert_contains "$(cat "$case_dir/stderr")" "cannot detach worktree" \
+    "the refusal must come from the detach step, after the handoff was marked returning"
+  assert_contains "$(cat "$handoff")" "leased=$case_dir/wt" \
+    "a failed detach left the lease handoff stuck at returning instead of restoring it"
+  assert_present "$case_dir/state/task-x1.meta" "a failed detach must retain task metadata"
+  pass "a failed branch detach restores the lease handoff for a clean retry"
+}
+
 test_teardown_persists_returning_handoff_across_return_crash() {
   local case_dir handoff out rc
   case_dir=$(make_case teardown-lease-return-crash)
@@ -1707,6 +1741,7 @@ SH
 test_local_only_fork_remote_allows
 test_teardown_tombstones_retained_treehouse_lease_handoff
 test_teardown_restores_lease_handoff_after_return_failure
+test_detach_refusal_restores_lease_handoff
 test_teardown_persists_returning_handoff_across_return_crash
 test_teardown_accepts_canonical_treehouse_handoff_path
 test_teardown_recovers_its_empty_initial_handoff

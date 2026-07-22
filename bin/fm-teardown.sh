@@ -296,6 +296,11 @@ restore_treehouse_lease_handoff() {
     echo "error: could not restore treehouse lease handoff $TREEHOUSE_LEASE_HANDOFF after return failure" >&2
 }
 
+abort_teardown_before_treehouse_return() {
+  restore_treehouse_lease_handoff
+  exit 1
+}
+
 require_orca_worktree_id() {
   local meta=$1 id
   id=$(meta_value "$meta" orca_worktree_id)
@@ -1431,14 +1436,14 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
     ORCA_PATH_MATCH_VERIFIED=1
   fi
-  [ -z "$T_ORCA" ] || close_recorded_endpoint || exit 1
+  [ -z "$T_ORCA" ] || close_recorded_endpoint || abort_teardown_before_treehouse_return
   if [ -n "$ORCA_WORKTREE_ID" ] && [ -d "$WT" ]; then
-    detach_and_drop_task_branch || exit 1
+    detach_and_drop_task_branch || abort_teardown_before_treehouse_return
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
   fi
   [ -z "$ORCA_WORKTREE_ID" ] || fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ] && [ "$TREEHOUSE_LEASE_RETURN_NEEDED" = 1 ]; then
-  detach_and_drop_task_branch || exit 1
+  detach_and_drop_task_branch || abort_teardown_before_treehouse_return
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
   # Kills remaining processes in the worktree (including the agent), resets, returns

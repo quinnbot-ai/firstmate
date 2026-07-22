@@ -1720,7 +1720,14 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     echo "error: could not create treehouse lease handoff for $ID" >&2
     exit 1
   }
-  if ! ( cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID" > "$TREEHOUSE_LEASE_PATH_FILE" ); then
+  treehouse_get_status=0
+  ( cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID" > "$TREEHOUSE_LEASE_PATH_FILE" ) \
+    || treehouse_get_status=$?
+  if [ "$treehouse_get_status" -ne 0 ]; then
+    if [ "$treehouse_get_status" -lt 128 ] && [ ! -s "$TREEHOUSE_LEASE_PATH_FILE" ] \
+      && rm -f "$TREEHOUSE_LEASE_PATH_FILE"; then
+      TREEHOUSE_LEASE_PATH_FILE=
+    fi
     echo "error: treehouse could not acquire a leased worktree for $ID" >&2
     exit 1
   fi
@@ -2001,7 +2008,7 @@ TASK_META_TMP=$(mktemp "$STATE/.${ID}.meta.XXXXXX") || {
 } > "$TASK_META_TMP"
 mv "$TASK_META_TMP" "$STATE/$ID.meta"
 TASK_META_TMP=
-TREEHOUSE_LEASE_COMMITTED=1
+[ "$BACKEND" = orca ] || TREEHOUSE_LEASE_COMMITTED=1
 if [ -n "$TREEHOUSE_LEASE_PATH_FILE" ] && ! rm -f "$TREEHOUSE_LEASE_PATH_FILE"; then
   echo "warning: committed treehouse lease handoff retained at $TREEHOUSE_LEASE_PATH_FILE; a later spawn will clear it without returning the committed worktree" >&2
 fi

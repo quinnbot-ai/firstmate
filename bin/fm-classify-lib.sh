@@ -69,13 +69,9 @@ FM_CLASSIFY_STARTUP_SPINNER_RE_DEFAULT='Starting MCP servers'
 FM_CLASSIFY_BUSY_WAIT_SPIN_RE_DEFAULT='Waiting for agents|No agents completed yet'
 
 normalize_pane_signature_regex() {  # <configured-regex> <default-regex>
-  local configured=$1 fallback=$2 status
-  if grep -Eq "$configured" </dev/null 2>/dev/null; then
-    printf '%s' "$configured"
-    return 0
-  fi
-  status=$?
-  if [ "$status" -eq 1 ]; then
+  local configured=$1 fallback=$2 status=0
+  grep -Eq "$configured" </dev/null 2>/dev/null || status=$?
+  if [ "$status" -le 1 ]; then
     printf '%s' "$configured"
   else
     printf '%s' "$fallback"

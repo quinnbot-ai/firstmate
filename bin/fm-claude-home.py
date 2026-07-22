@@ -6,8 +6,10 @@ The callers are fm-spawn.sh (create, abort cleanup), fm-teardown.sh
 It creates a mode-0700 directory below data/claude-crewmate.
 It copies the captain-populated persistent profile at
 data/claude-crewmate/profile, skipping any customization-surface entries
-(settings, hooks, MCP config, plugins, skills, commands, agents) so the
-task-private copy carries auth and nothing else.
+(settings, hooks, MCP config, plugins, skills, commands, agents) and
+stripping every mcpServers section (user scope and per-project) from the
+copied .claude.json so the task-private copy carries auth and completed
+onboarding and nothing else.
 On macOS it also clones only the managed profile's per-config-dir
 Keychain credential into the new home's derived Keychain service, and
 removes that service entry on abort cleanup and teardown, even when the
@@ -22,6 +24,7 @@ Secondmate Claude launches do not use this helper.
 import argparse
 import getpass
 import hashlib
+import json
 import os
 import platform
 import secrets
@@ -176,6 +179,43 @@ def write_file(directory_fd, name, content, mode=0o600):
         os.close(fd)
 
 
+def remove_mcp_servers(value):
+    if isinstance(value, dict):
+        value.pop("mcpServers", None)
+        for child in value.values():
+            remove_mcp_servers(child)
+    elif isinstance(value, list):
+        for child in value:
+            remove_mcp_servers(child)
+
+
+def sanitized_claude_json(content):
+    try:
+        config = json.loads(content.decode())
+    except (UnicodeDecodeError, ValueError):
+        config = None
+    if not isinstance(config, dict):
+        die("Claude profile .claude.json is not a JSON object")
+    remove_mcp_servers(config)
+    return (json.dumps(config, separators=(",", ":")) + "\n").encode()
+
+
+def read_regular_file(source_dir_fd, name):
+    source_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=source_dir_fd)
+    try:
+        if not stat.S_ISREG(os.fstat(source_fd).st_mode):
+            die(f"Claude profile source entry is not regular: {name}")
+        chunks = []
+        while True:
+            chunk = os.read(source_fd, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(source_fd)
+
+
 def copy_regular_file(source_dir_fd, name, target_dir_fd):
     source_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=source_dir_fd)
     try:
@@ -217,7 +257,14 @@ def copy_tree(source_dir_fd, target_dir_fd, top_level):
             finally:
                 os.close(child_source_fd)
         elif stat.S_ISREG(entry_stat.st_mode):
-            copy_regular_file(source_dir_fd, entry, target_dir_fd)
+            if top_level and entry == ".claude.json":
+                write_file(
+                    target_dir_fd,
+                    entry,
+                    sanitized_claude_json(read_regular_file(source_dir_fd, entry)),
+                )
+            else:
+                copy_regular_file(source_dir_fd, entry, target_dir_fd)
         else:
             die(f"Claude profile source entry is not a file or directory: {entry}")
 
