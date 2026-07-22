@@ -126,7 +126,7 @@ async function sessionOwnsLock(paths) {
 
 function classifyArmClose(stdout, stderr, code, signal) {
   const combined = `${stdout}\n${stderr}`;
-  const reason = combined.split(/\r?\n/).find((line) => /^(signal:|stale:|check:|heartbeat($|:))/.test(line));
+  const reason = combined.split(/\r?\n/).find((line) => /^(signal:|stale:|stale-rechecks:|check:|heartbeat($|:))/.test(line));
   if (reason) return { kind: "actionable", message: reason };
   const healthy = combined.split(/\r?\n/).find((line) => /^watcher: healthy\b/.test(line));
   if (healthy) {
@@ -157,7 +157,7 @@ function classifyArmClose(stdout, stderr, code, signal) {
 
 function observeArmOutput(stdout, stderr, settleReadiness) {
   const combined = `${stdout}\n${stderr}`;
-  if (combined.split(/\r?\n/).some((line) => /^(signal:|stale:|check:|heartbeat($|:))/.test(line))) {
+  if (combined.split(/\r?\n/).some((line) => /^(signal:|stale:|stale-rechecks:|check:|heartbeat($|:))/.test(line))) {
     setArmStatus("wake");
     settleReadiness("wake");
     return;

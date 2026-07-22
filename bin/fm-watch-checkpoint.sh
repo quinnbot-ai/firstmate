@@ -89,7 +89,7 @@ run_with_perl_timeout >"$OUT" 2>"$ERR"
 RC=$?
 set -e
 
-if grep -E '^(signal:|stale:|check:|heartbeat($|:))' "$OUT" >/dev/null 2>&1; then
+if grep -E '^(signal:|stale:|stale-rechecks:|check:|heartbeat($|:))' "$OUT" >/dev/null 2>&1; then
   cat "$OUT"
   [ ! -s "$ERR" ] || cat "$ERR" >&2
   exit 0
