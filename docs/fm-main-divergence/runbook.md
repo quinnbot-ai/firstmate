@@ -9,21 +9,26 @@ A crewmate produced and exercised this runbook in an isolated worktree; it does 
 
 Remotes in this repo: `origin` = `kunchenguid/firstmate` (the upstream template repo), `fork` = `quinnbot-ai/firstmate` (this fleet's own fork, where its PRs land and merge).
 
-At audit time (2026-07-20):
+At audit time (2026-07-22), after an explicit `git fetch --prune` of both remotes:
 
-- Local `main` (primary checkout): `579f6d9` - `fix: absorb declared pauses at parked gates (#9)`
-- `fork/main`: `87b4df4` - `fix(spawn): tolerate transient cwd reads and clean up refused spawns (#15)`
-- `origin/main`: `4ab61fa` - `feat(wake): enrich drained signals with bounded status context (#747)`
+- Local `main` (primary checkout): `324d729` - `feat(spawn): isolate Claude crewmates on a second Anthropic account (#19)`
+- `fork/main`: `cdf71f4` - `fix: batch expired watcher stale rechecks into one wake (#22)`
+- `origin/main`: `5549834` - `fix: preserve trustworthy Bearings data in partial snapshots (#875)`
 
-`git merge-base --is-ancestor main fork/main` returned true, and `git log fork/main..main` was empty: local `main` is a **literal git ancestor of `fork/main`** - every commit on local `main` already exists on `fork/main` by the same hash.
+`git merge-base --is-ancestor main fork/main` returned true, `git log fork/main..main` was empty, and `git cherry -v fork/main main` was empty.
+The patch-id audit of the (empty) `fork/main..main` range likewise found no local-only patch.
+Local `main` is therefore a **literal git ancestor of `fork/main`** - every local-main change already landed on the fork by the same hash.
 There was no local-only content that had never landed on `fork/main`, so no needs-decision was required before proceeding.
 
-Local `main` had simply fallen behind `fork/main` by four PRs (`#12`, `#13`, `#14`, `#15`) that were merged straight into the fork and never pulled back into the primary checkout.
+Local `main` was four commits behind `fork/main` at that audit point.
 See "Root cause" below for why: `/updatefirstmate` never looks at the `fork` remote, only `origin`.
 
-`fork/main` and `origin/main` diverged from a common ancestor at `bc1a21b`: `fork/main` carries 16 commits since then (fork-local features - isolated Codex homes, ops-inbox surfacing, pause-absorb fixes, worktree leases, watcher escalation - interleaved with commits also present upstream), while `origin/main` carries a different 8 commits since then (upstream watcher/supervision/x-mode fixes this fleet wants: `3729081`, `b2bf95f`, `7a9b4dd`, `15b0fb9`, `ab8cea6`, `68c6110`, `c12bdea`, `4ab61fa`).
+`fork/main` and `origin/main` diverged at `bc1a21b`.
+At audit time, `git rev-list --left-right --count fork/main...origin/main` reported `23 30`.
+This sync merges the complete current upstream tip, including the original watcher, supervision, and X-mode fixes (`3729081` through `4ab61fa`) plus the 22 later upstream commits.
 
-This PR (`fm/fm-main-divergence`) merges `origin/main` into a branch off `fork/main`, preserving both sides, and is the shippable change of this task.
+This PR (`fm/fm-main-divergence`) merges `origin/main` at `5549834` into a branch refreshed through `fork/main` at `cdf71f4`, preserving both sides, and is the shippable change of this task.
+`git merge-base --is-ancestor 5549834 HEAD` confirms that the complete audited upstream tip is present in the resulting branch.
 **Do not run the sequence below until that PR has merged into `fork/main`.**
 
 ## Pre-checks (copy-paste runnable, exercised against a scratch clone)
@@ -63,7 +68,8 @@ Escalate instead of proceeding; this mirrors the same equivalence proof this tas
 The sequence below updates ref, index, and working tree together in one atomic `reset --hard`, after safely stashing anything uncommitted so nothing unlanded is ever discarded (prime directive #3).
 
 ```sh
-cd /Users/nick/ventures/agent-ops/firstmate   # the primary checkout - confirm this before running anything
+cd /Users/nick/ventures/agent-ops/firstmate \
+  || { echo "STOP: primary checkout not found - refusing to run anywhere else"; exit 1; }
 
 # 0. Re-run the pre-checks above against THIS checkout first.
 git fetch fork '+refs/heads/main:refs/remotes/fork/main' \
@@ -76,9 +82,14 @@ git log --oneline fork/main..main   # must be empty
 [ "$(git rev-parse --abbrev-ref HEAD)" = main ] || { echo "STOP: not on main"; exit 1; }
 
 # 2. Preserve anything uncommitted before the reset - reversible, never discarded.
-if [ -n "$(git status --porcelain)" ]; then
-  git stash push -u -m "fm-main-divergence-realign-$(date +%Y%m%dT%H%M%S)"
+dirty="$(git status --porcelain)" \
+  || { echo "STOP: could not read working tree status - refusing to reset"; exit 1; }
+if [ -n "$dirty" ]; then
+  git stash push -u -m "fm-main-divergence-realign-$(date +%Y%m%dT%H%M%S)" \
+    || { echo "STOP: git stash failed - refusing to reset over uncommitted work"; exit 1; }
   echo "Stashed uncommitted work - recover it after the reset with: git stash list / git stash pop"
+  [ -z "$(git status --porcelain)" ] \
+    || { echo "STOP: working tree still dirty after stash - refusing to reset"; exit 1; }
 fi
 
 # 3. The coherent ref+index+tree update. fork/main was already fetched in step 0.

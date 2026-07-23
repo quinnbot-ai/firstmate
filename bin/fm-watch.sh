@@ -94,6 +94,11 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-check-lib.sh"
 # shellcheck source=bin/fm-ops-inbox-lib.sh
 . "$SCRIPT_DIR/fm-ops-inbox-lib.sh"
+# Parent-owned secondmate missed-report guards: durable pending-reply
+# expectations created by fm-send on marked secondmate requests. The tick is
+# cheap when no records exist and never scrapes secondmate conversation.
+# shellcheck source=bin/fm-pending-reply-lib.sh
+. "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -1039,6 +1044,12 @@ while :; do
     surface_ops_inbox_change
   fi
 
+  # Parent-owned secondmate pending-reply reconciliation: resolve correlated
+  # parent reports, observe backend busy/idle turn completion, send one recovery
+  # repost after grace, and escalate once if the recovery turn is also missed.
+  # No conversation scraping; unresolved records are never silently expired.
+  fm_pending_reply_tick "$STATE" || true
+
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
   # Evaluated BEFORE the signal scan: wake() exits the cycle, so a check placed
@@ -1062,11 +1073,13 @@ while :; do
       else
         id=$(basename "$c" .check.sh)
         if fm_pr_poll_artifacts_valid "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+          provider=$FM_PR_DATA_PROVIDER
           url=$FM_PR_DATA_URL
-          owner=$FM_PR_DATA_OWNER
-          repo=$FM_PR_DATA_REPO
+          host=$FM_PR_DATA_HOST
+          path=$FM_PR_DATA_PATH
           number=$FM_PR_DATA_NUMBER
-          run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated "$url" "$owner" "$repo" "$number" || exit 1
+          run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
+            "$provider" "$url" "$host" "$path" "$number" || exit 1
           out=$FM_CHECK_RESULT
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
