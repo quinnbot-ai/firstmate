@@ -3,9 +3,8 @@
 #
 # Runs ShellCheck over firstmate's tracked shell scripts at ShellCheck's default
 # severity (which reports info, warning, and error - the levels CI fails on).
-# The lint command, the file set, the config, AND the pinned ShellCheck version
-# live here and ONLY here, so the gates cannot drift apart: both invoke this
-# script with no arguments.
+# The lint command, file set, and config live here and ONLY here, so the gates
+# cannot drift apart: both invoke this script with no arguments.
 #   - CI:       .github/workflows/ci.yml installs the version this script prints
 #               via `--required-version`, then runs `bin/fm-lint.sh`.
 #   - Pre-push: .no-mistakes.yaml `commands.lint` runs `bin/fm-lint.sh`, so the
@@ -16,9 +15,9 @@
 #
 # Version parity: CI's ShellCheck used to float with the runner image, and
 # ShellCheck retired SC2015 in 0.11.0, so an older CI ShellCheck rejected an
-# SC2015 that a newer local one no longer emits. This script pins one exact
-# version (REQUIRED_SHELLCHECK) and asserts the resolved `shellcheck` matches it,
-# so CI and local run the identical rule set. This is not a CI relaxation: it
+# SC2015 that a newer local one no longer emits. The installer pins one exact
+# version, and this script asserts the resolved `shellcheck` matches it, so CI
+# and local run the identical rule set. This is not a CI relaxation: it
 # adopts one upstream release consistently; the only difference from the old
 # floating CI is dropping the upstream-retired, false-positive-prone SC2015.
 # No severity downgrade and no blanket exclude of checks - every still-supported
@@ -29,7 +28,7 @@
 #   fm-lint.sh                    lint the canonical file set (what both gates run)
 #   fm-lint.sh <path>...          lint only the given paths with the same config
 #                                  (developer convenience; the gates never pass args)
-#   fm-lint.sh --required-version print the pinned ShellCheck version and exit
+#   fm-lint.sh --required-version print the installer-owned ShellCheck version
 #                                  (CI reads this to install the exact same one)
 #
 # Exit status is ShellCheck's own on a lint run, so a caller (CI or the gate)
@@ -37,28 +36,32 @@
 # missing ShellCheck fails before linting with a distinct message.
 set -eu
 
-# The single source of the pinned ShellCheck version. Bump here and CI follows
-# automatically via `--required-version`; the test suite reads it the same way.
-REQUIRED_SHELLCHECK=0.11.0
-
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
 
-# Expose the pinned version without needing ShellCheck installed, so CI can read
-# it to install the exact same build before any lint runs.
+# Expose the installer-owned version without needing ShellCheck installed, so CI
+# can read it to install the exact same build before any lint runs.
 if [ "${1:-}" = "--required-version" ]; then
-  printf '%s\n' "$REQUIRED_SHELLCHECK"
-  exit 0
+  exec "$ROOT/bin/fm-install-shellcheck.sh" --required-version
 fi
 
-# Enforce the pin so local and CI resolve the identical rule set.
-if ! command -v shellcheck >/dev/null 2>&1; then
-  printf 'fm-lint.sh: ShellCheck not found; install ShellCheck %s for CI parity.\n' \
-    "$REQUIRED_SHELLCHECK" >&2
-  exit 127
+# Prefer the exact binary installed by CI's installer. RUNNER_TEMP is the
+# install root in CI, and TMPDIR keeps the same destination discoverable for
+# local installs that follow the installer convention.
+REQUIRED_SHELLCHECK=$("$ROOT/bin/fm-install-shellcheck.sh" --required-version)
+PINNED_BIN="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/bin/shellcheck"
+if [ -x "$PINNED_BIN" ]; then
+  shellcheck_bin=$PINNED_BIN
+else
+  printf "fm-lint.sh: pinned ShellCheck is absent; falling back to PATH. Install it with bin/fm-install-shellcheck.sh \"\$RUNNER_TEMP/bin\".\n" >&2
+  if ! shellcheck_bin=$(command -v shellcheck); then
+    printf 'fm-lint.sh: ShellCheck not found; install ShellCheck %s for CI parity.\n' \
+      "$REQUIRED_SHELLCHECK" >&2
+    exit 127
+  fi
 fi
 unset SHELLCHECK_OPTS
-resolved=$(shellcheck --version | awk '/^version:/ {print $2; exit}')
+resolved=$("$shellcheck_bin" --version | awk '/^version:/ {print $2; exit}')
 # Log the resolved version to stderr so both CI and local runs record it.
 printf 'fm-lint.sh: ShellCheck %s (pinned %s)\n' "$resolved" "$REQUIRED_SHELLCHECK" >&2
 if [ "$resolved" != "$REQUIRED_SHELLCHECK" ]; then
@@ -68,9 +71,9 @@ if [ "$resolved" != "$REQUIRED_SHELLCHECK" ]; then
 fi
 
 if [ "$#" -gt 0 ]; then
-  exec shellcheck --norc "$@"
+  exec "$shellcheck_bin" --norc "$@"
 fi
 
 # Canonical file set: the ONE authoritative definition. Callers reference this
 # script; they never re-spell these globs.
-exec shellcheck --norc bin/*.sh bin/backends/*.sh tests/*.sh
+exec "$shellcheck_bin" --norc bin/*.sh bin/backends/*.sh tests/*.sh

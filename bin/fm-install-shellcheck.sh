@@ -3,13 +3,19 @@
 #
 # Usage:
 #   fm-install-shellcheck.sh <destination-directory>
+#   fm-install-shellcheck.sh --required-version
 set -eu
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="$("$ROOT/bin/fm-lint.sh" --required-version)"
+VERSION=0.11.0
 SHA256=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
 ARCHIVE="shellcheck-v${VERSION}.linux.x86_64.tar.xz"
 URL="https://github.com/koalaman/shellcheck/releases/download/v${VERSION}/${ARCHIVE}"
+
+if [ "${1:-}" = "--required-version" ]; then
+  printf '%s\n' "$VERSION"
+  exit 0
+fi
+
 DESTINATION=${1:?usage: fm-install-shellcheck.sh <destination-directory>}
 TMP=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/fm-shellcheck.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
