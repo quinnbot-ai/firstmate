@@ -1137,6 +1137,13 @@ remove_claude_crewmate_home() {
 
 close_recorded_endpoint() {
   local tab_id absence_status require_confirmed_absence=0
+  if [ -z "$T" ]; then
+    if recorded_detached_window_confirms_absence; then
+      return 0
+    fi
+    echo "error: no backend endpoint target recorded for task $ID; preserving recovery metadata" >&2
+    return 1
+  fi
   tab_id=$(meta_value "$META" zellij_tab_id)
   if [ "$ENDPOINT_CLEANUP_PENDING" = 1 ] || [ -n "$CODEX_CREWMATE_HOME" ] || [ -n "$CLAUDE_CREWMATE_HOME" ]; then
     require_confirmed_absence=1
@@ -1145,9 +1152,6 @@ close_recorded_endpoint() {
     require_confirmed_absence=1
   fi
   if [ "$require_confirmed_absence" = 1 ]; then
-    if recorded_detached_window_confirms_absence; then
-      return 0
-    fi
     if fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
       return 0
     else

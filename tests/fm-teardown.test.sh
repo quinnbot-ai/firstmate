@@ -1665,6 +1665,64 @@ SH
   pass "a detached window record confirms endpoint absence for teardown cleanup"
 }
 
+test_detached_window_without_pending_cleanup_never_kills() {
+  local case_dir out rc
+  case_dir=$(make_case detached-window-no-pending)
+  write_meta "$case_dir" local-only ship
+  sed -i.bak '/^window=/c\
+window_detached_2026-07-19=fm-task-x1' "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak"
+  wt_commit "$case_dir" "detached endpoint without pending cleanup"
+  add_fork_with_pushed_branch "$case_dir"
+  cat > "$case_dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/tmux-calls"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+
+  set +e
+  out=$(run_teardown "$case_dir" 2>&1)
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "detached-window-no-pending: teardown should complete without endpoint cleanup"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "detached-window-no-pending: teardown left recovery metadata behind"
+  if [ -f "$case_dir/tmux-calls" ] && grep -q 'kill-window' "$case_dir/tmux-calls"; then
+    fail "detached-window-no-pending: teardown invoked tmux kill-window without a recorded target"
+  fi
+  pass "a detached record without pending cleanup never reaches best-effort tmux kill"
+}
+
+test_detached_window_with_retained_target_still_probes() {
+  local case_dir out rc
+  case_dir=$(make_case detached-window-retained-target)
+  write_meta "$case_dir" local-only ship
+  sed -i.bak '/^window=/c\
+window_detached_2026-07-19=fm-task-x1' "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak"
+  printf '%s\n' 'tmux_window_id=@7' 'endpoint_cleanup_pending=1' >> "$case_dir/state/task-x1.meta"
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+echo 'unexpected tmux failure' >&2
+exit 7
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+
+  set +e
+  out=$(run_teardown "$case_dir" --force 2>&1)
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "detached-window-retained-target: teardown should preserve metadata"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "detached-window-retained-target: teardown discarded recovery metadata"
+  assert_contains "$out" "could not be confirmed absent" \
+    "detached-window-retained-target: teardown skipped the endpoint absence probe"
+  pass "a detached record with a retained window id still probes endpoint absence"
+}
+
 test_live_window_with_unknown_endpoint_preserves_metadata() {
   local case_dir out rc
   case_dir=$(make_case live-window-unknown-endpoint)
@@ -1955,6 +2013,8 @@ test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_clears_busy_progress_tracking
 test_detached_window_confirms_endpoint_absence
+test_detached_window_without_pending_cleanup_never_kills
+test_detached_window_with_retained_target_still_probes
 test_live_window_with_unknown_endpoint_preserves_metadata
 test_legacy_task_temp_directory_allows_and_removes
 test_legacy_task_temp_adversarial_paths_refuse
