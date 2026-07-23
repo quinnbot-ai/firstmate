@@ -46,14 +46,20 @@ if [ "${1:-}" = "--required-version" ]; then
 fi
 
 # Prefer the exact binary installed by CI's installer. RUNNER_TEMP is the
-# install root in CI, and TMPDIR keeps the same destination discoverable for
-# local installs that follow the installer convention.
+# install root in CI; locally the convention is a user-owned XDG cache
+# directory, never a world-writable /tmp path another user could seed.
 REQUIRED_SHELLCHECK=$("$ROOT/bin/fm-install-shellcheck.sh" --required-version)
-PINNED_BIN="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/bin/shellcheck"
+if [ -n "${RUNNER_TEMP:-}" ]; then
+  PINNED_DIR="$RUNNER_TEMP/bin"
+else
+  PINNED_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/fm-shellcheck/bin"
+fi
+PINNED_BIN="$PINNED_DIR/shellcheck"
 if [ -x "$PINNED_BIN" ]; then
   shellcheck_bin=$PINNED_BIN
 else
-  printf "fm-lint.sh: pinned ShellCheck is absent; falling back to PATH. Install it with bin/fm-install-shellcheck.sh \"\$RUNNER_TEMP/bin\".\n" >&2
+  printf 'fm-lint.sh: pinned ShellCheck is absent; falling back to PATH. Install it with bin/fm-install-shellcheck.sh "%s".\n' \
+    "$PINNED_DIR" >&2
   if ! shellcheck_bin=$(command -v shellcheck); then
     printf 'fm-lint.sh: ShellCheck not found; install ShellCheck %s for CI parity.\n' \
       "$REQUIRED_SHELLCHECK" >&2
@@ -63,10 +69,10 @@ fi
 unset SHELLCHECK_OPTS
 resolved=$("$shellcheck_bin" --version | awk '/^version:/ {print $2; exit}')
 # Log the resolved version to stderr so both CI and local runs record it.
-printf 'fm-lint.sh: ShellCheck %s (pinned %s)\n' "$resolved" "$REQUIRED_SHELLCHECK" >&2
+printf 'fm-lint.sh: ShellCheck %s at %s (pinned %s)\n' "$resolved" "$shellcheck_bin" "$REQUIRED_SHELLCHECK" >&2
 if [ "$resolved" != "$REQUIRED_SHELLCHECK" ]; then
-  printf 'fm-lint.sh: ShellCheck %s required for CI parity, found %s. Install %s.\n' \
-    "$REQUIRED_SHELLCHECK" "$resolved" "$REQUIRED_SHELLCHECK" >&2
+  printf 'fm-lint.sh: ShellCheck %s required for CI parity, found %s at %s. Install %s.\n' \
+    "$REQUIRED_SHELLCHECK" "$resolved" "$shellcheck_bin" "$REQUIRED_SHELLCHECK" >&2
   exit 1
 fi
 

@@ -26,12 +26,24 @@ INSTALLER="$ROOT/bin/fm-install-shellcheck.sh"
 CANON='bin/*.sh bin/backends/*.sh tests/*.sh'
 # The pinned version, read from the installer owner.
 REQUIRED=$("$LINT" --required-version)
+# The pinned archive checksum for THIS host platform, mirroring the installer's
+# per-platform table so the fake sha256sum below satisfies the real check.
+case "$(uname -s).$(uname -m)" in
+  Darwin.arm64) PINNED_SHA=56affdd8de5527894dca6dc3d7e0a99a873b0f004d7aabc30ae407d3f48b0a79 ;;
+  *) PINNED_SHA=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198 ;;
+esac
 
-# True only when the resolved shellcheck is exactly the pinned version, so the
-# lint-running tests below match what CI enforces instead of a runner default.
+# True only when the shellcheck fm-lint.sh itself resolves is exactly the
+# pinned version, so the lint-running tests below match what CI enforces
+# instead of a runner default. Probing through the one owner keeps this guard
+# on the script's own selection order (pinned binary first, then PATH).
 pinned_ready() {
-  command -v shellcheck >/dev/null 2>&1 || return 1
-  [ "$(shellcheck --version | awk '/^version:/ {print $2; exit}')" = "$REQUIRED" ]
+  local tmp probe
+  tmp=$(fm_test_tmproot fm-lint-ready)
+  mkdir -p "$tmp"
+  probe="$tmp/probe.sh"
+  printf '#!/usr/bin/env bash\ntrue\n' > "$probe"
+  "$LINT" "$probe" >/dev/null 2>&1
 }
 
 test_owner_exists_and_executable() {
@@ -77,6 +89,7 @@ test_ci_installs_and_logs_the_pinned_version() {
   # number) and log the resolved version as parity evidence.
   assert_grep 'VERSION=0.11.0' "$INSTALLER" "installer must use its owned ShellCheck pin"
   [ "$(grep -Fc "bin/fm-install-shellcheck.sh \"\$RUNNER_TEMP/bin\"" "$CI")" -eq 4 ] || fail "lint and all three portable behavior jobs must use the shared ShellCheck installer"
+  assert_grep "SHA256=$PINNED_SHA" "$INSTALLER" "installer must pin this platform's ShellCheck archive checksum"
   assert_grep "ACTUAL_SHA256=\$(sha256sum" "$INSTALLER" "installer must calculate the ShellCheck archive checksum"
   assert_grep "[ \"\$ACTUAL_SHA256\" = \"\$SHA256\" ]" "$INSTALLER" "installer must verify the ShellCheck archive checksum"
   assert_grep "\"\$DESTINATION/shellcheck\" --version" "$INSTALLER" "installer must log the resolved ShellCheck version as evidence"
@@ -105,9 +118,9 @@ while [ "$#" -gt 0 ]; do
 done
 exit 2
 SH
-  cat > "$fakebin/sha256sum" <<'SH'
+  cat > "$fakebin/sha256sum" <<SH
 #!/usr/bin/env bash
-printf '8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  %s\n' "$1"
+printf '%s  %s\n' "$PINNED_SHA" "\$1"
 SH
   cat > "$fakebin/tar" <<'SH'
 #!/usr/bin/env bash
@@ -172,6 +185,26 @@ test_pinned_binary_wins_over_path() {
   pass "fm-lint.sh selects the pinned binary before PATH"
 }
 
+test_local_pin_resolves_to_user_cache() {
+  # Outside CI (no RUNNER_TEMP) the pinned binary must live under the
+  # user-owned XDG cache, never a world-writable /tmp path.
+  local tmp fakebin cache marker fixture out
+  tmp=$(fm_test_tmproot fm-lint-xdg)
+  fakebin=$(fm_fakebin "$tmp")
+  cache="$tmp/cache"
+  marker="$tmp/selected"
+  fixture="$tmp/fixture.sh"
+  : > "$fixture"
+  mkdir -p "$cache/fm-shellcheck/bin"
+  make_fake_shellcheck "$cache/fm-shellcheck/bin/shellcheck" "$REQUIRED" "$marker"
+  make_fake_shellcheck "$fakebin/shellcheck" 0.9.9 "$tmp/path-selected"
+  out=$(RUNNER_TEMP= XDG_CACHE_HOME="$cache" PATH="$fakebin:$PATH" "$LINT" "$fixture" 2>&1) \
+    || fail "fm-lint.sh rejected the user-cache pinned binary"$'\n'"$out"
+  [ "$(cat "$marker")" = "$cache/fm-shellcheck/bin/shellcheck" ] \
+    || fail "fm-lint.sh did not select the user-cache installer binary"
+  pass "fm-lint.sh resolves the local pin under the user cache, not /tmp"
+}
+
 test_falls_back_to_path_with_warning() {
   local tmp fakebin runner_temp fixture marker out
   tmp=$(fm_test_tmproot fm-lint-fallback)
@@ -187,8 +220,8 @@ test_falls_back_to_path_with_warning() {
     || fail "fm-lint.sh did not fall back to PATH"
   assert_contains "$out" 'pinned ShellCheck is absent; falling back to PATH' \
     "fm-lint.sh did not warn about the missing pinned binary"
-  assert_contains "$out" "bin/fm-install-shellcheck.sh \"\$RUNNER_TEMP/bin\"" \
-    "fm-lint.sh warning did not name the installer command"
+  assert_contains "$out" "bin/fm-install-shellcheck.sh \"$runner_temp/bin\"" \
+    "fm-lint.sh warning did not name the resolved installer destination"
   pass "fm-lint.sh warns and falls back to PATH when the pin is absent"
 }
 
@@ -293,6 +326,7 @@ test_pins_an_explicit_version
 test_ci_installs_and_logs_the_pinned_version
 test_installer_retries_transient_download_failure
 test_pinned_binary_wins_over_path
+test_local_pin_resolves_to_user_cache
 test_falls_back_to_path_with_warning
 test_rejects_wrong_shellcheck_version
 test_catches_a_real_lint_defect
