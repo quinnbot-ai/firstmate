@@ -13,7 +13,7 @@ At audit time (2026-07-22), after an explicit `git fetch --prune` of both remote
 
 - Local `main` (primary checkout): `324d729` - `feat(spawn): isolate Claude crewmates on a second Anthropic account (#19)`
 - `fork/main`: `cdf71f4` - `fix: batch expired watcher stale rechecks into one wake (#22)`
-- `origin/main`: `673b6ad` - `feat: shard portable tests and add bounded local parallelism (#841)`
+- `origin/main`: `5549834` - `fix: preserve trustworthy Bearings data in partial snapshots (#875)`
 
 `git merge-base --is-ancestor main fork/main` returned true, `git log fork/main..main` was empty, and `git cherry -v fork/main main` was empty.
 The patch-id audit of the (empty) `fork/main..main` range likewise found no local-only patch.
@@ -24,10 +24,11 @@ Local `main` was four commits behind `fork/main` at that audit point.
 See "Root cause" below for why: `/updatefirstmate` never looks at the `fork` remote, only `origin`.
 
 `fork/main` and `origin/main` diverged at `bc1a21b`.
-At audit time, `git rev-list --left-right --count fork/main...origin/main` reported `23 25`.
-This sync merges the complete current upstream tip, including the original watcher, supervision, and X-mode fixes (`3729081` through `4ab61fa`) plus the 17 later upstream commits.
+At audit time, `git rev-list --left-right --count fork/main...origin/main` reported `23 30`.
+This sync merges the complete current upstream tip, including the original watcher, supervision, and X-mode fixes (`3729081` through `4ab61fa`) plus the 22 later upstream commits.
 
-This PR (`fm/fm-main-divergence`) merges `origin/main` into a branch off `fork/main`, preserving both sides, and is the shippable change of this task.
+This PR (`fm/fm-main-divergence`) merges `origin/main` at `5549834` into a branch refreshed through `fork/main` at `cdf71f4`, preserving both sides, and is the shippable change of this task.
+`git merge-base --is-ancestor 5549834 HEAD` confirms that the complete audited upstream tip is present in the resulting branch.
 **Do not run the sequence below until that PR has merged into `fork/main`.**
 
 ## Pre-checks (copy-paste runnable, exercised against a scratch clone)
