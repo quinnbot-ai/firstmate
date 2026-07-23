@@ -1337,11 +1337,28 @@ test_arm_lease_reclaims_replaced_watcher() {
 }
 
 test_arm_lease_publishes_complete_owner() {
-  local dir state watcher_pid watcher_identity ready release claim_pid i field
+  local dir state fakebin real_ln watcher_pid watcher_identity ready release claim_pid i field
   dir=$(make_case arm-lease-atomic-publication)
   state="$dir/state"
+  fakebin="$dir/fakebin"
+  real_ln=$(command -v ln) || fail "could not find ln for atomic arm-lease publication"
   ready="$dir/publish-ready"
   release="$dir/publish-release"
+  # The owner preparation callback runs immediately before ln publishes the
+  # lease symlink, so intercept that link operation instead of inferring it
+  # from printf arguments or platform-specific process-identity text.
+  cat > "$fakebin/ln" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = -s ] && [ "${3:-}" = "${FM_ARM_LEASE_PUBLISH_LINK:?}" ]; then
+  : > "${FM_ARM_LEASE_PUBLISH_READY:?}"
+  while [ ! -e "${FM_ARM_LEASE_PUBLISH_RELEASE:?}" ]; do
+    /bin/sleep 0.01
+  done
+fi
+exec "${FM_REAL_LN:?}" "$@"
+SH
+  chmod +x "$fakebin/ln"
   sleep 60 & watcher_pid=$!
   watcher_identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$watcher_pid") \
     || fail "could not identify watcher for atomic arm-lease publication"
@@ -1350,18 +1367,10 @@ test_arm_lease_publishes_complete_owner() {
   printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
   printf '%s\n' "$watcher_identity" > "$state/.watch.lock/pid-identity"
-  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ARM_LEASE_PUBLISH_READY="$ready" FM_ARM_LEASE_PUBLISH_RELEASE="$release" \
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ARM_LEASE_PUBLISH_LINK="$state/.watch-arm.lease" \
+    FM_ARM_LEASE_PUBLISH_READY="$ready" FM_ARM_LEASE_PUBLISH_RELEASE="$release" FM_REAL_LN="$real_ln" \
     bash -c '
       . "$1"
-      printf() {
-        command printf "$@"
-        case "$*" in
-          *"/pid-identity"*)
-            : > "$FM_ARM_LEASE_PUBLISH_READY"
-            while [ ! -e "$FM_ARM_LEASE_PUBLISH_RELEASE" ]; do command sleep 0.01; done
-            ;;
-        esac
-      }
       fm_arm_lease_claim "$2" "$3" "$4" "$5"
     ' _ "$LIB" "$state" "$WATCH" "$watcher_pid" "$dir" &
   claim_pid=$!
