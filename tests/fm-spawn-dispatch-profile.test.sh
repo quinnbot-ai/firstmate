@@ -1697,7 +1697,7 @@ JSON
   assert_contains "$diagnostic" "selection basis: quota-selected" "selection did not expose its quota basis"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5.5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5.5' -c 'model_reasoning_effort=\"high\"'" \
+  assert_contains "$launch" "-- codex --profile 'fm-crewmate-$id' --disable plugins --model 'gpt-5.5' -c 'model_reasoning_effort=\"high\"'" \
     "quota-selected default profile did not reach the concrete launch"
   pass "top-level default array resolves through quota selection into the real spawn path"
 }
