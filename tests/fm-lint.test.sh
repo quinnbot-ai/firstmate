@@ -198,7 +198,7 @@ test_local_pin_resolves_to_user_cache() {
   mkdir -p "$cache/fm-shellcheck/bin"
   make_fake_shellcheck "$cache/fm-shellcheck/bin/shellcheck" "$REQUIRED" "$marker"
   make_fake_shellcheck "$fakebin/shellcheck" 0.9.9 "$tmp/path-selected"
-  out=$(RUNNER_TEMP= XDG_CACHE_HOME="$cache" PATH="$fakebin:$PATH" "$LINT" "$fixture" 2>&1) \
+  out=$(RUNNER_TEMP='' XDG_CACHE_HOME="$cache" PATH="$fakebin:$PATH" "$LINT" "$fixture" 2>&1) \
     || fail "fm-lint.sh rejected the user-cache pinned binary"$'\n'"$out"
   [ "$(cat "$marker")" = "$cache/fm-shellcheck/bin/shellcheck" ] \
     || fail "fm-lint.sh did not select the user-cache installer binary"
