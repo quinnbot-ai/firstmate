@@ -3,13 +3,33 @@
 #
 # Usage:
 #   fm-install-shellcheck.sh <destination-directory>
+#   fm-install-shellcheck.sh --required-version
 set -eu
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="$("$ROOT/bin/fm-lint.sh" --required-version)"
-SHA256=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
-ARCHIVE="shellcheck-v${VERSION}.linux.x86_64.tar.xz"
+VERSION=0.11.0
+
+if [ "${1:-}" = "--required-version" ]; then
+  printf '%s\n' "$VERSION"
+  exit 0
+fi
+
+case "$(uname -s).$(uname -m)" in
+  Linux.x86_64)
+    PLATFORM=linux.x86_64
+    SHA256=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+    ;;
+  Darwin.arm64)
+    PLATFORM=darwin.aarch64
+    SHA256=56affdd8de5527894dca6dc3d7e0a99a873b0f004d7aabc30ae407d3f48b0a79
+    ;;
+  *)
+    printf 'fm-install-shellcheck.sh: unsupported platform %s.%s\n' "$(uname -s)" "$(uname -m)" >&2
+    exit 1
+    ;;
+esac
+ARCHIVE="shellcheck-v${VERSION}.${PLATFORM}.tar.xz"
 URL="https://github.com/koalaman/shellcheck/releases/download/v${VERSION}/${ARCHIVE}"
+
 DESTINATION=${1:?usage: fm-install-shellcheck.sh <destination-directory>}
 TMP=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/fm-shellcheck.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
@@ -25,7 +45,11 @@ while ! curl -fsSL "$URL" -o "$TMP/$ARCHIVE"; do
   sleep "$download_attempt"
   download_attempt=$((download_attempt + 1))
 done
-ACTUAL_SHA256=$(sha256sum "$TMP/$ARCHIVE" | awk '{print $1}')
+if command -v sha256sum >/dev/null 2>&1; then
+  ACTUAL_SHA256=$(sha256sum "$TMP/$ARCHIVE" | awk '{print $1}')
+else
+  ACTUAL_SHA256=$(shasum -a 256 "$TMP/$ARCHIVE" | awk '{print $1}')
+fi
 [ "$ACTUAL_SHA256" = "$SHA256" ] || {
   printf 'fm-install-shellcheck.sh: checksum mismatch for %s\n' "$ARCHIVE" >&2
   exit 1
