@@ -1366,7 +1366,9 @@ test_arm_lease_publishes_complete_owner() {
     ' _ "$LIB" "$state" "$WATCH" "$watcher_pid" "$dir" &
   claim_pid=$!
   i=0
-  while [ "$i" -lt 80 ] && [ ! -e "$ready" ]; do
+  # CI can delay this background shell behind the serial suite without changing
+  # the publication invariant, so allow a bounded twenty-second scheduling grace.
+  while [ "$i" -lt 200 ] && [ ! -e "$ready" ]; do
     sleep 0.1
     i=$((i + 1))
   done
