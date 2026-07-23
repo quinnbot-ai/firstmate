@@ -141,8 +141,25 @@ FM_LOCK_LOG_PREFIX=teardown
 
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
+# A window_detached_* record replaces the live window= record only after the
+# endpoint is gone, so its presence with no window= is recorded proof of
+# endpoint absence (docs/architecture.md#runtime-session-backends). Any other
+# resolvable target (e.g. a retained tmux_window_id=) takes precedence and is
+# still probed before cleanup.
+recorded_detached_window_confirms_absence() {
+  grep -q '^window=' "$META" && return 1
+  grep -Eq '^window_detached_[^=]+=' "$META"
+}
+
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
-T=$(fm_backend_target_of_meta "$META")
+if T=$(fm_backend_target_of_meta "$META"); then
+  :
+elif recorded_detached_window_confirms_absence; then
+  T=
+else
+  echo "error: no backend target recorded in $META" >&2
+  exit 1
+fi
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 BACKEND=$(fm_backend_of_meta "$META")
 if [ "$BACKEND" = orca ]; then
@@ -1125,6 +1142,13 @@ remove_claude_crewmate_home() {
 
 close_recorded_endpoint() {
   local tab_id absence_status require_confirmed_absence=0
+  if [ -z "$T" ]; then
+    if recorded_detached_window_confirms_absence; then
+      return 0
+    fi
+    echo "error: no backend endpoint target recorded for task $ID; preserving recovery metadata" >&2
+    return 1
+  fi
   tab_id=$(meta_value "$META" zellij_tab_id)
   if [ "$ENDPOINT_CLEANUP_PENDING" = 1 ] || [ -n "$CODEX_CREWMATE_HOME" ] || [ -n "$CLAUDE_CREWMATE_HOME" ]; then
     require_confirmed_absence=1
