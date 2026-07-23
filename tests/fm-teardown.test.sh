@@ -1633,6 +1633,63 @@ test_teardown_clears_busy_progress_tracking() {
   pass "teardown removes pane-owned busy-progress state"
 }
 
+test_detached_window_confirms_endpoint_absence() {
+  local case_dir out rc
+  case_dir=$(make_case detached-window-absence)
+  write_meta "$case_dir" local-only ship
+  sed -i.bak '/^window=/c\
+window_detached_2026-07-19=fm-task-x1' "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak"
+  printf '%s\n' 'endpoint_cleanup_pending=1' >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" "detached endpoint cleanup"
+  add_fork_with_pushed_branch "$case_dir"
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+[ "\$1" = return ] && [ "\$2" = --force ] && [ "\$3" = "$case_dir/wt" ] || exit 23
+touch "$case_dir/treehouse-returned"
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  out=$(run_teardown "$case_dir" 2>&1)
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "detached-window-absence: teardown should accept recorded detached endpoint absence"
+  assert_present "$case_dir/treehouse-returned" \
+    "detached-window-absence: teardown did not return the worktree"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "detached-window-absence: teardown left recovery metadata behind"
+  assert_not_contains "$out" "could not be confirmed absent" \
+    "detached-window-absence: teardown reported an already-confirmed endpoint as unknown"
+  pass "a detached window record confirms endpoint absence for teardown cleanup"
+}
+
+test_live_window_with_unknown_endpoint_preserves_metadata() {
+  local case_dir out rc
+  case_dir=$(make_case live-window-unknown-endpoint)
+  write_meta "$case_dir" local-only ship
+  printf '%s\n' 'endpoint_cleanup_pending=1' >> "$case_dir/state/task-x1.meta"
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+echo 'unexpected tmux failure' >&2
+exit 7
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+
+  set +e
+  out=$(run_teardown "$case_dir" --force 2>&1)
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "live-window-unknown-endpoint: teardown should preserve metadata"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "live-window-unknown-endpoint: teardown discarded recovery metadata"
+  assert_contains "$out" "could not be confirmed absent" \
+    "live-window-unknown-endpoint: teardown did not explain the safety refusal"
+  pass "a live window with an unknown endpoint still preserves recovery metadata"
+}
+
 test_legacy_task_temp_directory_allows_and_removes() {
   local case_dir rc task_tmp
   case_dir=$(make_case legacy-task-temp)
@@ -1897,6 +1954,8 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_clears_busy_progress_tracking
+test_detached_window_confirms_endpoint_absence
+test_live_window_with_unknown_endpoint_preserves_metadata
 test_legacy_task_temp_directory_allows_and_removes
 test_legacy_task_temp_adversarial_paths_refuse
 test_herdr_teardown_clears_escalation_marker

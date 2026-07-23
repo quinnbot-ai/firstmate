@@ -141,8 +141,20 @@ FM_LOCK_LOG_PREFIX=teardown
 
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
+recorded_detached_window_confirms_absence() {
+  grep -q '^window=' "$META" && return 1
+  grep -Eq '^window_detached_[^=]+=' "$META"
+}
+
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
-T=$(fm_backend_target_of_meta "$META")
+if T=$(fm_backend_target_of_meta "$META"); then
+  :
+elif recorded_detached_window_confirms_absence; then
+  T=
+else
+  echo "error: no backend target recorded in $META" >&2
+  exit 1
+fi
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 BACKEND=$(fm_backend_of_meta "$META")
 if [ "$BACKEND" = orca ]; then
@@ -1133,6 +1145,9 @@ close_recorded_endpoint() {
     require_confirmed_absence=1
   fi
   if [ "$require_confirmed_absence" = 1 ]; then
+    if recorded_detached_window_confirms_absence; then
+      return 0
+    fi
     if fm_backend_target_absent "$BACKEND" "$T" "fm-$ID"; then
       return 0
     else
