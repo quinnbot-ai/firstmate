@@ -43,7 +43,7 @@ To set it up:
 2. Set **Socket Control Mode** to **Automation mode** (recommended).
 3. There is no step 3 - no password to configure or distribute.
 
-If you prefer **Password mode** instead: set the mode and a password in Settings > Automation, then make that same password available to firstmate - either as the first line of a local, gitignored `config/cmux-socket-password` file under the effective config directory, or exported as `CMUX_SOCKET_PASSWORD` in the environment firstmate runs in.
+If you prefer **Password mode** instead: set the mode and a password in Settings > Automation, then make that same password available to firstmate - either as the first non-empty line of a local, gitignored `config/cmux-socket-password` file under the effective config directory, or exported as `CMUX_SOCKET_PASSWORD` in the environment firstmate runs in.
 `config/cmux-socket-password` is the durable choice; the adapter reads it fresh on every call from `${FM_CONFIG_OVERRIDE:-$FM_HOME/config}` and passes it through without ever overriding an operator's own ambient `CMUX_SOCKET_PASSWORD` when the file is absent.
 A configured password is harmless if you later switch to Automation mode: cmux's CLI sends the `auth` handshake preemptively and tolerates the server's "Unknown command 'auth'" reply in non-password modes (verified from source, `cli/cmux.swift` `authenticateSocketClientIfNeeded`).
 Do not edit `~/.config/cmux/cmux.json` by hand for any of this: the mode change cannot be applied over the socket that is itself still rejecting connections, and the app's config writer drops a hand-added `socketPassword` key entirely (see "Socket control modes" below for that finding).
