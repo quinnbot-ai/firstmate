@@ -17,8 +17,8 @@
 #   then tmux.
 #   Spawn-capable backends are the reference tmux adapter and experimental
 #   herdr, zellij, orca, and cmux. Orca owns both the task worktree and
-#   terminal, so ship/scout Orca spawns do not run treehouse get; cmux is a
-#   session provider only, exactly like herdr/zellij, so it does. An
+#   terminal, so ship/scout Orca spawns do not acquire a treehouse lease; cmux
+#   is a session provider only, exactly like herdr/zellij, so it does. An
 #   auto-detected herdr or cmux spawn prints a loud stderr notice;
 #   auto-detected tmux stays silent; zellij and orca are never auto-detected.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
@@ -77,6 +77,10 @@
 #   secondmate receives the primary's read-only shared captain-preference file
 #   (fm-config-inherit-lib.sh). A successful launch clears pending inherited
 #   config reread generations because the new agent reads the converged files.
+#   Treehouse-backed ship and scout worktrees are acquired with `treehouse get
+#   --lease --lease-holder <task-id>`, which holds the pool slot until this
+#   task's fm-teardown returns it. A live pre-lease meta for the same project
+#   fails the new spawn before allocation, preserving its unleased worktree.
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
@@ -84,6 +88,7 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   Every ship/scout task worktree receives a pinned worktree-local author identity.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -101,6 +106,20 @@
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
+# Codex ship and scout launches receive a firstmate-managed CODEX_HOME under
+# data/codex-crewmate, each in a fresh private directory with only copied
+# auth/model catalog files and a config.toml with no MCP servers, disabled plugins, and a per-task
+# profile that excludes project-local Codex configuration.
+# Codex secondmate launches retain their existing home and are not changed here.
+# Claude ship and scout launches receive a firstmate-managed CLAUDE_CONFIG_DIR
+# under data/claude-crewmate, each in a fresh private directory copied from the
+# captain-populated data/claude-crewmate/profile (a second Anthropic account,
+# never the captain's own ~/.claude), only when that profile and a disposable
+# copy both authenticate (bin/fm-claude-crew-lib.sh's
+# fm_claude_crew_profile_ready). An absent profile leaves the launch and meta
+# byte-identical to today's default-account behavior, while a present but
+# unusable profile refuses the Claude spawn before a pane can reach onboarding.
+# Claude secondmate launches are not changed here.
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
@@ -138,6 +157,12 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-treehouse-lease-lib.sh
+. "$SCRIPT_DIR/fm-treehouse-lease-lib.sh"
+# shellcheck source=bin/fm-git-identity.sh
+. "$SCRIPT_DIR/fm-git-identity.sh"
+# shellcheck source=bin/fm-claude-crew-lib.sh
+. "$SCRIPT_DIR/fm-claude-crew-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -232,6 +257,22 @@ SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+TREEHOUSE_LEASE_PATH_FILE=
+TREEHOUSE_LEASE_COMMITTED=0
+TREEHOUSE_LEASE_LOCK=
+TREEHOUSE_LEASE_LOCK_HELD=0
+TASK_META_TMP=
+ORCA_WORKTREE_CLEANUP_COMPLETE=0
+ORCA_ABORT_CLEANUP_FAILED=0
+ORCA_ABORT_ENDPOINT_ABSENT=1
+ORCA_TERMINAL_CONFIRMED_ABSENT=0
+FAILED_ENDPOINT_CLEANUP=0
+TASK_TMP=
+CODEX_CREWMATE_HOME=
+CODEX_ACTIVATION_TOKEN=
+CLAUDE_CREWMATE_HOME=
+SPAWN_META_WRITTEN=0
+TMUX_WINDOW_ID=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -250,8 +291,189 @@ parse_orca_worktree_result() {
   fi
 }
 
+treehouse_spawn_abort_cleanup() {
+  local status=$1 lease_path='' lease_validation='' lease_state='' handoff_record
+  [ "$TREEHOUSE_LEASE_COMMITTED" = 1 ] && return "$status"
+  [ -n "$TREEHOUSE_LEASE_PATH_FILE" ] || return "$status"
+  if ! treehouse_abort_endpoint_cleanup; then
+    return "$status"
+  fi
+  handoff_record=$(fm_treehouse_lease_handoff_read "$TREEHOUSE_LEASE_PATH_FILE") || {
+    echo "error: refusing to roll back malformed treehouse lease handoff $TREEHOUSE_LEASE_PATH_FILE; handoff retained" >&2
+    return "$status"
+  }
+  IFS=$'\t' read -r lease_state lease_path <<EOF
+$handoff_record
+EOF
+  case "$lease_path" in
+    '') echo "error: treehouse lease handoff has no path after spawn abort; handoff retained at $TREEHOUSE_LEASE_PATH_FILE" >&2 ;;
+    /*)
+      lease_validation=$(treehouse_lease_path_validation "$lease_path")
+      if [ "$lease_validation" != valid ]; then
+        echo "error: refusing to roll back invalid treehouse lease path '$lease_path'; handoff retained at $TREEHOUSE_LEASE_PATH_FILE" >&2
+        return "$status"
+      fi
+      if treehouse_lease_handoff_is_committed "$lease_path"; then
+        rm -f "$TREEHOUSE_LEASE_PATH_FILE" || \
+          echo "warning: committed treehouse lease handoff retained at $TREEHOUSE_LEASE_PATH_FILE" >&2
+      elif [ "$lease_state" = returned ]; then
+        rm -f "$TREEHOUSE_LEASE_PATH_FILE" || \
+          echo "error: returned treehouse lease handoff could not be removed: $TREEHOUSE_LEASE_PATH_FILE" >&2
+      elif [ "$lease_state" = returning ]; then
+        echo "error: refusing to retry treehouse lease return with an indeterminate handoff at $TREEHOUSE_LEASE_PATH_FILE" >&2
+      elif treehouse_lease_handoff_return "$TREEHOUSE_LEASE_PATH_FILE" "$lease_path"; then
+        :
+      else
+        echo "error: failed to roll back treehouse lease $lease_path after spawn abort; handoff retained at $TREEHOUSE_LEASE_PATH_FILE" >&2
+      fi
+      ;;
+    *) echo "error: refusing to roll back invalid treehouse lease path '$lease_path'; handoff retained at $TREEHOUSE_LEASE_PATH_FILE" >&2 ;;
+  esac
+  return "$status"
+}
+
+treehouse_abort_endpoint_cleanup() {
+  local endpoint_target=${TMUX_WINDOW_ID:-${T:-}}
+  [ -n "$endpoint_target" ] || return 0
+  if fm_backend_target_absent "$BACKEND" "$endpoint_target" "fm-$ID"; then
+    return 0
+  fi
+  if FM_BACKEND_KILL_STRICT=1 fm_backend_kill "$BACKEND" "$endpoint_target" "${ZELLIJ_TAB_ID:-}" "fm-$ID" 2>/dev/null \
+    && fm_backend_target_absent "$BACKEND" "$endpoint_target" "fm-$ID"; then
+    return 0
+  fi
+  FAILED_ENDPOINT_CLEANUP=1
+  return 1
+}
+
+treehouse_lease_transaction_release() {
+  [ "$TREEHOUSE_LEASE_LOCK_HELD" = 1 ] || return 0
+  fm_lock_release "$TREEHOUSE_LEASE_LOCK" 2>/dev/null || true
+  TREEHOUSE_LEASE_LOCK_HELD=0
+}
+
+write_failed_treehouse_spawn_meta() {
+  mkdir -p "$STATE" 2>/dev/null || return 0
+  {
+    if [ "$BACKEND" = orca ]; then
+      echo "window=$W"
+    else
+      echo "window=${T:-}"
+    fi
+    echo "worktree=$WT"
+    echo "project=$PROJ_ABS"
+    echo "harness=$HARNESS"
+    echo "kind=$KIND"
+    echo "mode=${MODE:-no-mistakes}"
+    echo "yolo=${YOLO:-off}"
+    echo "tasktmp=${TASK_TMP:-}"
+    [ "$KIND" = secondmate ] || [ "$BACKEND" = orca ] || echo "treehouse_lease=1"
+    echo "failed_spawn=1"
+    [ "$FAILED_ENDPOINT_CLEANUP" != 1 ] || echo "endpoint_cleanup_pending=1"
+    [ -z "${CODEX_CREWMATE_HOME:-}" ] || echo "codex_crewmate_home=$CODEX_CREWMATE_HOME"
+    [ -z "${CLAUDE_CREWMATE_HOME:-}" ] || echo "claude_crewmate_home=$CLAUDE_CREWMATE_HOME"
+    echo "model=${MODEL:-default}"
+    echo "effort=${EFFORT:-default}"
+    [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
+    if [ "$BACKEND" = herdr ]; then
+      echo "herdr_session=${HERDR_SES:-}"
+      echo "herdr_workspace_id=${HERDR_WORKSPACE_ID:-}"
+      echo "herdr_tab_id=${HERDR_TAB_ID:-}"
+      echo "herdr_pane_id=${HERDR_PANE_ID:-}"
+    fi
+    if [ "$BACKEND" = zellij ]; then
+      echo "zellij_session=${ZELLIJ_SES:-}"
+      echo "zellij_tab_id=${ZELLIJ_TAB_ID:-}"
+      echo "zellij_pane_id=${ZELLIJ_PANE_ID:-}"
+    fi
+    if [ "$BACKEND" = cmux ]; then
+      echo "cmux_workspace_id=${CMUX_WORKSPACE_ID:-}"
+      echo "cmux_surface_id=${CMUX_SURFACE_ID:-}"
+    fi
+    if [ "$BACKEND" = orca ]; then
+      echo "orca_worktree_id=${ORCA_WORKTREE_ID:-}"
+      [ "${ORCA_WORKTREE_CLEANUP_COMPLETE:-0}" != 1 ] || echo "orca_worktree_cleanup_complete=1"
+      [ "${ORCA_TERMINAL_CONFIRMED_ABSENT:-0}" != 1 ] || echo "orca_terminal_absent=1"
+      [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
+    fi
+  } > "$STATE/$ID.meta" 2>/dev/null || true
+}
+
+remove_codex_crewmate_home() {
+  local home=${CODEX_CREWMATE_HOME:-}
+  [ -n "$home" ] || return 0
+  python3 "$FM_ROOT/bin/fm-codex-home.py" --remove --data "$DATA" --state "$STATE" --task-id "$ID" --home "$home"
+}
+
+refresh_claude_crewmate_home() {
+  local profile home
+  profile=$(fm_claude_crew_profile_dir "$DATA")
+  [ -d "$profile" ] || return 0
+  if ! fm_claude_crew_profile_ready "$profile" "$DATA" "$STATE"; then
+    echo "error: configured Claude crewmate profile cannot authenticate a task-private home" >&2
+    return 1
+  fi
+  home=$(python3 "$FM_ROOT/bin/fm-claude-home.py" --data "$DATA" --source "$profile" --task-id "$ID" --create) || return 1
+  CLAUDE_CREWMATE_HOME="$home"
+}
+
+remove_claude_crewmate_home() {
+  local home=${CLAUDE_CREWMATE_HOME:-}
+  [ -n "$home" ] || return 0
+  python3 "$FM_ROOT/bin/fm-claude-home.py" --remove --data "$DATA" --state "$STATE" --task-id "$ID" --home "$home"
+}
+
+remove_codex_home_activation_result() {
+  local home=${CODEX_CREWMATE_HOME:-}
+  [ -n "$home" ] || return 0
+  python3 "$FM_ROOT/bin/fm-codex-home.py" --remove-activation-result --data "$DATA" --home "$home"
+}
+
+orca_spawn_abort_cleanup() {
+  local cleanup_failed=0 terminal_absent=1
+  [ "$ORCA_ABORT_CLEANUP" = 1 ] || return 0
+  ORCA_ABORT_CLEANUP=0
+  if [ -z "${ORCA_TERMINAL:-}" ]; then
+    ORCA_TERMINAL_CONFIRMED_ABSENT=1
+  fi
+  if [ -n "${ORCA_TERMINAL:-}" ]; then
+    terminal_absent=0
+    if fm_backend_target_absent orca "$ORCA_TERMINAL"; then
+      ORCA_TERMINAL=
+      T=
+      terminal_absent=1
+    else
+      FM_BACKEND_KILL_STRICT=1 fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
+      if fm_backend_target_absent orca "$ORCA_TERMINAL"; then
+        ORCA_TERMINAL=
+        T=
+        terminal_absent=1
+      else
+        cleanup_failed=1
+        FAILED_ENDPOINT_CLEANUP=1
+        echo "error: Orca terminal cleanup is unconfirmed; retaining failed-spawn resources for recovery" >&2
+      fi
+    fi
+  fi
+  if [ "$terminal_absent" = 1 ] && [ -n "${ORCA_WORKTREE_ID:-}" ]; then
+    if fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
+      ORCA_WORKTREE_ID=
+      ORCA_WORKTREE_CLEANUP_COMPLETE=1
+      WT=
+    else
+      cleanup_failed=1
+    fi
+  elif [ -n "${ORCA_WORKTREE_ID:-}" ]; then
+    cleanup_failed=1
+  fi
+  ORCA_ABORT_ENDPOINT_ABSENT=$terminal_absent
+  ORCA_TERMINAL_CONFIRMED_ABSENT=$terminal_absent
+  ORCA_ABORT_CLEANUP_FAILED=$cleanup_failed
+  return 0
+}
+
 spawn_abort_cleanup() {
-  local status=$?
+  local status=$? preserve_crew_home=0 clean_crew_home=0 orca_cleanup_failed=0
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
     if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
@@ -270,33 +492,50 @@ spawn_abort_cleanup() {
     HERDR_PRESENTATION_ORDER_LOCK_HELD=0
     fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
   fi
+  if [ -n "$TREEHOUSE_LEASE_PATH_FILE" ]; then
+    clean_crew_home=1
+    treehouse_spawn_abort_cleanup "$status" || true
+    if [ "$FAILED_ENDPOINT_CLEANUP" = 1 ]; then
+      preserve_crew_home=1
+      write_failed_treehouse_spawn_meta
+    fi
+  fi
+  if [ "$BACKEND" != orca ] && [ "$status" -ne 0 ] && [ "$TREEHOUSE_LEASE_COMMITTED" = 1 ] && [ "$SPAWN_META_WRITTEN" = 1 ]; then
+    clean_crew_home=1
+    if ! treehouse_abort_endpoint_cleanup; then
+      preserve_crew_home=1
+    fi
+    write_failed_treehouse_spawn_meta
+  fi
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
-    ORCA_ABORT_CLEANUP=0
-    if [ -n "${ORCA_TERMINAL:-}" ]; then
-      fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
+    clean_crew_home=1
+    orca_spawn_abort_cleanup
+    orca_cleanup_failed=$ORCA_ABORT_CLEANUP_FAILED
+    [ "$FAILED_ENDPOINT_CLEANUP" != 1 ] || preserve_crew_home=1
+  fi
+  if [ "$clean_crew_home" -eq 1 ] && [ "$preserve_crew_home" -eq 0 ]; then
+    if ! remove_codex_crewmate_home; then
+      echo "error: could not remove isolated Codex crewmate home" >&2
+      write_failed_treehouse_spawn_meta
+    else
+      CODEX_CREWMATE_HOME=
     fi
-    if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
-      if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
-        mkdir -p "$STATE" 2>/dev/null || true
-        if [ -d "$STATE" ]; then
-          {
-            echo "window=$W"
-            echo "worktree=${WT:-}"
-            echo "project=$PROJ_ABS"
-            echo "harness=$HARNESS"
-            echo "kind=$KIND"
-            echo "mode=${MODE:-no-mistakes}"
-            echo "yolo=${YOLO:-off}"
-            echo "tasktmp=${TASK_TMP:-}"
-            echo "model=${MODEL:-default}"
-            echo "effort=${EFFORT:-default}"
-            echo "backend=orca"
-            echo "orca_worktree_id=$ORCA_WORKTREE_ID"
-            [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
-          } > "$STATE/$ID.meta" 2>/dev/null || true
-        fi
-      fi
+    if ! remove_claude_crewmate_home; then
+      echo "error: could not remove isolated Claude crewmate home" >&2
+      write_failed_treehouse_spawn_meta
+    else
+      CLAUDE_CREWMATE_HOME=
     fi
+  fi
+  [ "$orca_cleanup_failed" -eq 0 ] || write_failed_treehouse_spawn_meta
+  [ -z "$CODEX_ACTIVATION_TOKEN" ] || remove_codex_home_activation_result 2>/dev/null || true
+  if [ -n "$TASK_TMP" ] && { [ "$BACKEND" != orca ] || [ "$ORCA_ABORT_ENDPOINT_ABSENT" = 1 ]; }; then
+    rm -rf -- "$TASK_TMP"
+  fi
+  if [ "$status" -ne 0 ] && [ "$SPAWN_META_WRITTEN" = 1 ] && [ "$TREEHOUSE_LEASE_COMMITTED" != 1 ] \
+    && [ "$FAILED_ENDPOINT_CLEANUP" != 1 ] && [ "$preserve_crew_home" -eq 0 ] \
+    && [ "$orca_cleanup_failed" -eq 0 ] && [ -z "$CODEX_CREWMATE_HOME" ] && [ -z "$CLAUDE_CREWMATE_HOME" ]; then
+    rm -f "$STATE/$ID.meta"
   fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
@@ -306,6 +545,8 @@ spawn_abort_cleanup() {
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
   fi
+  [ -z "$TASK_META_TMP" ] || rm -f "$TASK_META_TMP" || true
+  treehouse_lease_transaction_release
   return "$status"
 }
 trap spawn_abort_cleanup EXIT
@@ -428,7 +669,7 @@ launch_template() {
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex --profile __CODEXPROFILE__ --disable plugins __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -451,13 +692,443 @@ launch_template() {
   esac
 }
 
+raw_launch_word_is() {
+  local word=$1 expected=$2 base lowered
+  base=${word##*/}
+  lowered=$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]') || return 1
+  [ "$lowered" = "$expected" ]
+}
+
+raw_launch_word_is_codex() {
+  raw_launch_word_is "$1" codex
+}
+
+raw_launch_word_is_dynamic_dispatcher() {
+  local word=$1
+  raw_launch_word_is "$word" find || raw_launch_word_is "$word" xargs || raw_launch_word_is "$word" parallel
+}
+
+raw_launch_word_is_indirect_dispatcher() {
+  local word=$1
+  raw_launch_word_is "$word" eval || raw_launch_word_is "$word" python || raw_launch_word_is "$word" python3 || raw_launch_word_is "$word" pypy || raw_launch_word_is "$word" perl || raw_launch_word_is "$word" ruby || raw_launch_word_is "$word" node || raw_launch_word_is "$word" nodejs || raw_launch_word_is "$word" php || raw_launch_word_is "$word" lua
+}
+
+raw_launch_word_is_script_dispatcher() {
+  local word=$1 base
+  raw_launch_word_is "$word" source || [ "$word" = . ] && return 0
+  base=${word##*/}
+  case "$base" in
+    *.sh|*.bash|*.zsh|*.command) return 0 ;;
+  esac
+  case "$word" in
+    ./*|../*) return 0 ;;
+  esac
+  return 1
+}
+
+raw_launch_mentions_codex() {
+  local raw=$1 status
+  while [ -n "$raw" ]; do
+    raw_launch_read_word "$raw"
+    status=$?
+    [ "$status" -eq 0 ] || return "$status"
+    raw_launch_word_is_codex "$RAW_LAUNCH_WORD" && return 0
+    raw=$RAW_LAUNCH_REST
+  done
+  return 1
+}
+
+raw_launch_has_codex_dispatch_argument() {
+  local raw=$1 previous='' status
+  while [ -n "$raw" ]; do
+    raw_launch_read_word "$raw"
+    status=$?
+    [ "$status" -eq 0 ] || return "$status"
+    if raw_launch_word_is_codex "$RAW_LAUNCH_WORD" && [[ "$previous" != -* ]]; then
+      return 0
+    fi
+    previous=$RAW_LAUNCH_WORD
+    raw=$RAW_LAUNCH_REST
+  done
+  return 1
+}
+
+raw_launch_has_dynamic_execution() {
+  local raw=$1 len=${#1} i=0 char next quote=''
+  while [ "$i" -lt "$len" ]; do
+    char=${raw:i:1}
+    next=${raw:i+1:1}
+    case "$quote" in
+      "'")
+        [ "$char" = "'" ] && quote=
+        ;;
+      '"')
+        case "$char" in
+          '"') quote= ;;
+          \\) i=$((i + 1)) ;;
+          '$') [ "$next" = '(' ] && return 0 ;;
+          '`') return 0 ;;
+        esac
+        ;;
+      '')
+        case "$char" in
+          "'") quote="'" ;;
+          '"') quote='"' ;;
+          \\) i=$((i + 1)) ;;
+          '$') [ "$next" = '(' ] && return 0 ;;
+          '`') return 0 ;;
+          ';'|'&'|'|'|'('|')'|$'\n'|$'\r') return 0 ;;
+          '<'|'>') [ "$next" = '(' ] && return 0 ;;
+        esac
+        ;;
+    esac
+    i=$((i + 1))
+  done
+  return 1
+}
+
+raw_launch_wrapped_command_status() {
+  raw_launch_starts_codex "$1"
+  local status=$?
+  [ "$status" -ne 0 ] || return 2
+  return "$status"
+}
+
+raw_launch_read_word() {
+  local raw=$1 len=${#1} i=0 char quote='' word=
+  while [ "$i" -lt "$len" ]; do
+    char=${raw:i:1}
+    case "$char" in
+      ' '|$'\t'|$'\n'|$'\r') i=$((i + 1)) ;;
+      *) break ;;
+    esac
+  done
+  [ "$i" -lt "$len" ] || return 1
+  while [ "$i" -lt "$len" ]; do
+    char=${raw:i:1}
+    case "$quote" in
+      "'")
+        if [ "$char" = "'" ]; then quote=; else word+=$char; fi
+        ;;
+      '"')
+        case "$char" in
+          '"') quote= ;;
+          \\)
+            i=$((i + 1))
+            [ "$i" -lt "$len" ] || return 2
+            word+=${raw:i:1}
+            ;;
+          '$'|'`') return 2 ;;
+          *) word+=$char ;;
+        esac
+        ;;
+      '')
+        case "$char" in
+          ' '|$'\t'|$'\n'|$'\r') break ;;
+          "'") quote="'" ;;
+          '"') quote='"' ;;
+          \\)
+            i=$((i + 1))
+            [ "$i" -lt "$len" ] || return 2
+            word+=${raw:i:1}
+            ;;
+          '$'|'`'|';'|'&'|'|'|'('|')'|'<'|'>'|'*'|'?'|'['|']'|'{'|'}'|'!'|'~') return 2 ;;
+          *) word+=$char ;;
+        esac
+        ;;
+    esac
+    i=$((i + 1))
+  done
+  [ -z "$quote" ] || return 2
+  RAW_LAUNCH_WORD=$word
+  RAW_LAUNCH_REST=${raw:i}
+}
+
+raw_launch_starts_codex() {
+  local raw=$1 word status state=prefix nested
+  while :; do
+    raw_launch_read_word "$raw"
+    status=$?
+    [ "$status" -eq 0 ] || return "$status"
+    word=$RAW_LAUNCH_WORD
+    raw=$RAW_LAUNCH_REST
+    case "$state" in
+      prefix)
+        case "$word" in
+          [A-Za-z_][A-Za-z0-9_]*=*) ;;
+          *)
+            if raw_launch_word_is "$word" env; then
+              state='env'
+            elif raw_launch_word_is "$word" command; then
+              state='command'
+            elif raw_launch_word_is "$word" exec; then
+              state='command'
+            elif raw_launch_word_is "$word" builtin; then
+              state='builtin'
+            elif raw_launch_word_is "$word" sh || raw_launch_word_is "$word" bash || raw_launch_word_is "$word" zsh || raw_launch_word_is "$word" dash || raw_launch_word_is "$word" ksh; then
+              state=shell
+            elif raw_launch_word_is "$word" nice; then
+              state='nice'
+            elif raw_launch_word_is "$word" timeout; then
+              state=timeout
+            elif raw_launch_word_is "$word" sudo; then
+              state=sudo
+            elif raw_launch_word_is_script_dispatcher "$word"; then
+              return 2
+            elif raw_launch_word_is_dynamic_dispatcher "$word"; then
+              return 2
+            elif raw_launch_word_is_indirect_dispatcher "$word"; then
+              return 2
+            elif raw_launch_word_is "$word" nohup || raw_launch_word_is "$word" time || raw_launch_word_is "$word" stdbuf || raw_launch_word_is "$word" setsid || raw_launch_word_is "$word" chrt || raw_launch_word_is "$word" ionice || raw_launch_word_is "$word" taskset || raw_launch_word_is "$word" script; then
+              state=wrapper
+            else
+              raw_launch_word_is_codex "$word"
+              return $?
+            fi
+            ;;
+        esac
+        ;;
+      env)
+        case "$word" in
+          [A-Za-z_][A-Za-z0-9_]*=*) ;;
+          -i|--ignore-environment|--null) ;;
+          -u|--unset|-C|--chdir)
+            raw_launch_read_word "$raw" || return 2
+            raw=$RAW_LAUNCH_REST
+            ;;
+          -S|--split-string)
+            raw_launch_read_word "$raw" || return 2
+            nested=$RAW_LAUNCH_WORD
+            if raw_launch_starts_codex "$nested"; then return 0; else return $?; fi
+            ;;
+          --unset=*|--chdir=*) ;;
+          --split-string=*)
+            nested=${word#*=}
+            if raw_launch_starts_codex "$nested"; then return 0; else return $?; fi
+            ;;
+          --) state=env-command ;;
+          -*) return 2 ;;
+          *)
+            if raw_launch_starts_codex "$word$raw"; then return 0; else return $?; fi
+            ;;
+        esac
+        ;;
+      command)
+        case "$word" in
+          --) state=command-command ;;
+          -*) ;;
+          *)
+            if raw_launch_starts_codex "$word$raw"; then return 0; else return $?; fi
+            ;;
+        esac
+        ;;
+      env-command|command-command)
+        if raw_launch_starts_codex "$word$raw"; then return 0; else return $?; fi
+        ;;
+      builtin)
+        case "$word" in
+          -p|--) ;;
+          eval|source|.) return 2 ;;
+          command|exec)
+            raw_launch_wrapped_command_status "$word$raw"
+            return $?
+            ;;
+          *) return 1 ;;
+        esac
+        ;;
+      nice)
+        case "$word" in
+          -n|--adjustment)
+            raw_launch_read_word "$raw" || return 2
+            raw=$RAW_LAUNCH_REST
+            ;;
+          --adjustment=*) ;;
+          --) state=prefix ;;
+          -*) ;;
+          *)
+            raw_launch_wrapped_command_status "$word$raw"
+            return $?
+            ;;
+        esac
+        ;;
+      timeout)
+        case "$word" in
+          -k|--kill-after|-s|--signal)
+            raw_launch_read_word "$raw" || return 2
+            raw=$RAW_LAUNCH_REST
+            ;;
+          --kill-after=*|--signal=*|-k*|-s*) ;;
+          --) state='timeout-duration' ;;
+          -*) ;;
+          *)
+            raw_launch_read_word "$raw" || return 2
+            raw_launch_wrapped_command_status "$RAW_LAUNCH_WORD$RAW_LAUNCH_REST"
+            return $?
+            ;;
+        esac
+        ;;
+      timeout-duration)
+        raw_launch_read_word "$raw" || return 2
+        raw_launch_wrapped_command_status "$RAW_LAUNCH_WORD$RAW_LAUNCH_REST"
+        return $?
+        ;;
+      sudo)
+        case "$word" in
+          -C|-D|-g|-h|-p|-r|-t|-T|-u|--close-from|--chdir|--group|--host|--prompt|--role|--type|--command-timeout|--user)
+            raw_launch_read_word "$raw" || return 2
+            raw=$RAW_LAUNCH_REST
+            ;;
+          --close-from=*|--chdir=*|--group=*|--host=*|--prompt=*|--role=*|--type=*|--command-timeout=*|--user=*) ;;
+          --) state=sudo-command ;;
+          -*)
+            raw_launch_mentions_codex "$word$raw"
+            status=$?
+            [ "$status" -ne 0 ] || return 2
+            return "$status"
+            ;;
+          *)
+            raw_launch_wrapped_command_status "$word$raw"
+            return $?
+            ;;
+        esac
+        ;;
+      sudo-command)
+        raw_launch_wrapped_command_status "$word$raw"
+        return $?
+        ;;
+      wrapper)
+        raw_launch_mentions_codex "$word$raw"
+        status=$?
+        [ "$status" -ne 0 ] || return 2
+        return "$status"
+        ;;
+      shell)
+        case "$word" in
+          -c)
+            raw_launch_read_word "$raw"
+            status=$?
+            [ "$status" -eq 0 ] || return 2
+            nested=$RAW_LAUNCH_WORD
+            raw_launch_is_simple "$nested" || return 2
+            raw_launch_starts_codex "$nested"
+            status=$?
+            [ "$status" -eq 1 ] || return 2
+            raw_launch_read_word "$nested" || return 2
+            case "$RAW_LAUNCH_WORD" in
+              ./*|../*|*.sh|*.bash|*.zsh|*.command) return 2 ;;
+            esac
+            return 1
+            ;;
+          *) return 2 ;;
+        esac
+        ;;
+    esac
+  done
+}
+
+raw_launch_is_simple() {
+  local raw=$1
+  case "$raw" in
+    *[\'\"\\\`\$\;\&\|\(\)\<\>\*\?\[\]\{\}\!\~$'\n'$'\r']*) return 1 ;;
+  esac
+}
+
+normalize_raw_codex_launch() {
+  raw_launch_is_simple "$1" || return 1
+  raw_launch_starts_codex "$1"
+}
+
+raw_codex_launch_is_normalizable() {
+  local raw=$1 seen_codex=0
+  while [ -n "$raw" ]; do
+    raw_launch_read_word "$raw" || return 1
+    raw=$RAW_LAUNCH_REST
+    if raw_launch_word_is_codex "$RAW_LAUNCH_WORD"; then
+      [ "$seen_codex" -eq 0 ] || return 1
+      seen_codex=1
+    elif [ "$seen_codex" -eq 0 ] && { raw_launch_word_is "$RAW_LAUNCH_WORD" env || raw_launch_word_is "$RAW_LAUNCH_WORD" command || raw_launch_word_is "$RAW_LAUNCH_WORD" exec; }; then
+      :
+    elif case "$RAW_LAUNCH_WORD" in CODEX_HOME=*) true ;; *) false ;; esac; then
+      :
+    else
+      return 1
+    fi
+  done
+  [ "$seen_codex" -eq 1 ]
+}
+
+refresh_codex_crewmate_home() {
+  local name
+  name=$(python3 "$FM_ROOT/bin/fm-codex-home.py" --data "$DATA" --new-home-name) || return 1
+  CODEX_CREWMATE_HOME="$DATA/codex-crewmate/$name"
+}
+
+wait_for_codex_home_activation() {
+  local home=$1 token=$2 deadline status read_status
+  deadline=$(( $(date +%s) + 10 ))
+  while [ "$(date +%s)" -le "$deadline" ]; do
+    set +e
+    status=$(python3 "$FM_ROOT/bin/fm-codex-home.py" --data "$DATA" --read-activation-result --home "$home" --result-token "$token" 2>&1)
+    read_status=$?
+    set -e
+    if [ "$read_status" -eq 0 ]; then
+      remove_codex_home_activation_result 2>/dev/null || true
+      [ "$status" = ready ] && return 0
+      echo "error: isolated Codex home activation failed" >&2
+      return 1
+    fi
+    if [ "$read_status" -ne 3 ]; then
+      remove_codex_home_activation_result 2>/dev/null || true
+      echo "error: isolated Codex home activation result is unsafe" >&2
+      return 1
+    fi
+    sleep 0.1
+  done
+  remove_codex_home_activation_result 2>/dev/null || true
+  echo "error: isolated Codex home activation did not report ready within 10s" >&2
+  return 1
+}
+
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
-    LAUNCH=$ARG3
-    HARNESS=""
-    for word in $LAUNCH; do
-      case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
-    done
+    set +e
+    raw_launch_starts_codex "$ARG3"
+    raw_codex_status=$?
+    if [ "$raw_codex_status" -eq 1 ]; then
+      raw_launch_has_codex_dispatch_argument "$ARG3"
+      raw_codex_mentions=$?
+      [ "$raw_codex_mentions" -ne 0 ] || raw_codex_status=2
+      if [ "$raw_codex_status" -eq 1 ] && raw_launch_has_dynamic_execution "$ARG3"; then
+        raw_codex_status=2
+      fi
+    fi
+    set -e
+    if [ "$KIND" != secondmate ] && [ "$raw_codex_status" -eq 2 ]; then
+      echo "error: unsafe raw launch command at executable position; use --harness codex for Codex" >&2
+      exit 1
+    fi
+    if [ "$KIND" != secondmate ] && [ "$raw_codex_status" -eq 0 ]; then
+      raw_launch_is_simple "$ARG3" || {
+        echo "error: unsafe raw launch command; quote, escape, and shell syntax are not supported - use --harness codex for Codex" >&2
+        exit 1
+      }
+      normalize_raw_codex_launch "$ARG3" || {
+        echo "error: unsafe raw Codex launch command; use --harness codex for Codex options" >&2
+        exit 1
+      }
+      raw_codex_launch_is_normalizable "$ARG3" || {
+        echo "error: raw Codex launch options are not supported; use --harness codex with --model/--effort" >&2
+        exit 1
+      }
+      HARNESS=codex
+      LAUNCH=$(launch_template "$HARNESS" "$KIND")
+    else
+      LAUNCH=$ARG3
+      HARNESS=""
+      for word in $LAUNCH; do
+        case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
+      done
+    fi
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
@@ -751,9 +1422,27 @@ if [ "$KIND" = secondmate ]; then
 else
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
   WT=""
+  WT_REAL=""
   BRIEF="$DATA/$ID/brief.md"
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
+if [ "$KIND" != secondmate ]; then
+  fm_git_identity_enable_worktree_config "$PROJ_ABS" || {
+    echo "error: failed to enable worktree-specific Git config for $PROJ_ABS" >&2
+    exit 1
+  }
+fi
+
+CODEX_CREWMATE_PROFILE=
+if [ "$HARNESS" = codex ] && [ "$KIND" != secondmate ]; then
+  case "$ID" in
+    ''|*[!A-Za-z0-9_-]*)
+      echo "error: Codex crewmate task id must contain only letters, digits, hyphens, or underscores" >&2
+      exit 1
+      ;;
+  esac
+  CODEX_CREWMATE_PROFILE="fm-crewmate-$ID"
+fi
 
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
 # /private/tmp) when it came from the ship/scout branch's logical `pwd` above.
@@ -776,6 +1465,185 @@ real_path_or_raw() {  # <path>
   fi
 }
 
+git_common_dir_real() {  # <repository-or-worktree>
+  local repo=$1 common
+  common=$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null) || return 1
+  case "$common" in
+    /*) ;;
+    *) common="$repo/$common" ;;
+  esac
+  cd "$common" 2>/dev/null && pwd -P
+}
+
+treehouse_lease_path_validation() {  # <lease-path>
+  local lease_path=$1 lease_real lease_top lease_common project_common
+  case "$lease_path" in
+    /*) ;;
+    *) printf '%s\n' invalid; return 0 ;;
+  esac
+  project_common=$(git_common_dir_real "$PROJ_ABS") || {
+    printf '%s\n' invalid
+    return 0
+  }
+  lease_real=$(real_path_or_raw "$lease_path")
+  lease_top=$(git -C "$lease_path" rev-parse --show-toplevel 2>/dev/null || true)
+  lease_common=$(git_common_dir_real "$lease_path" || true)
+  if [ "$lease_real" = "$PROJ_ABS_REAL" ] || [ -z "$lease_top" ] \
+    || [ "$(real_path_or_raw "$lease_top")" != "$lease_real" ] || [ -z "$lease_common" ]; then
+    printf '%s\n' invalid
+  elif [ "$lease_common" != "$project_common" ]; then
+    printf '%s\n' cross-project
+  else
+    printf '%s\n' valid
+  fi
+}
+
+treehouse_lease_handoff_is_committed() {  # <lease-path>
+  local lease_path=$1 lease_real meta held_project held_worktree
+  lease_real=$(real_path_or_raw "$lease_path")
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    [ "$(fm_meta_get "$meta" treehouse_lease)" = 1 ] || continue
+    held_project=$(fm_meta_get "$meta" project)
+    [ "$(real_path_or_raw "$held_project")" = "$PROJ_ABS_REAL" ] || continue
+    held_worktree=$(fm_meta_get "$meta" worktree)
+    [ "$(real_path_or_raw "$held_worktree")" = "$lease_real" ] || continue
+    return 0
+  done
+  return 1
+}
+
+treehouse_lease_handoff_return() {  # <handoff> <lease-path>
+  local handoff=$1 lease_path=$2
+  fm_treehouse_lease_handoff_write "$handoff" returning "$lease_path" || return 1
+  if ! ( cd "$PROJ_ABS" && treehouse return --force "$lease_path" ); then
+    fm_treehouse_lease_handoff_write "$handoff" leased "$lease_path" || true
+    return 1
+  fi
+  fm_treehouse_lease_handoff_write "$handoff" returned "$lease_path" || return 1
+  if ! rm -f "$handoff"; then
+    echo "warning: returned treehouse lease handoff retained at $handoff" >&2
+  fi
+  return 0
+}
+
+recover_treehouse_lease_handoffs() {
+  local handoff lease_path lease_state lease_validation handoff_record
+  [ -d "$STATE" ] || return 0
+  for handoff in "$STATE"/.*.treehouse-lease.* "$STATE"/.treehouse-handoff-write.*; do
+    [ -f "$handoff" ] || continue
+    if fm_treehouse_lease_handoff_is_writer_temp "$handoff"; then
+      rm -f "$handoff" || {
+        echo "error: stale treehouse lease handoff writer temporary could not be removed: $handoff" >&2
+        return 1
+      }
+      echo "cleared stale treehouse lease handoff writer temporary $handoff" >&2
+      continue
+    fi
+    if [ ! -s "$handoff" ]; then
+      echo "error: refusing to recover empty treehouse lease handoff $handoff; handoff retained" >&2
+      return 1
+    fi
+    handoff_record=$(fm_treehouse_lease_handoff_read "$handoff") || {
+      echo "error: refusing to recover malformed treehouse lease handoff $handoff; handoff retained" >&2
+      return 1
+    }
+    IFS=$'\t' read -r lease_state lease_path <<EOF
+$handoff_record
+EOF
+    case "$lease_path" in
+      '')
+        echo "error: refusing to recover empty treehouse lease handoff $handoff; handoff retained" >&2
+        return 1
+        ;;
+      /*) ;;
+      *)
+        echo "error: refusing to recover invalid treehouse lease path '$lease_path' from $handoff; handoff retained" >&2
+        return 1
+        ;;
+    esac
+    lease_validation=$(treehouse_lease_path_validation "$lease_path")
+    if [ "$lease_validation" = invalid ]; then
+      echo "error: refusing to recover invalid treehouse lease path '$lease_path' from $handoff; handoff retained" >&2
+      return 1
+    fi
+    if [ "$lease_validation" = cross-project ]; then
+      echo "error: refusing to recover treehouse lease path '$lease_path' from $handoff because it belongs to another project; handoff retained" >&2
+      return 1
+    fi
+    if [ "$lease_state" = returning ]; then
+      echo "error: refusing to recover treehouse lease handoff $handoff because its return is indeterminate; handoff retained" >&2
+      return 1
+    fi
+    if [ "$lease_state" = returned ] && treehouse_lease_handoff_is_committed "$lease_path"; then
+      echo "error: refusing to recover returned treehouse lease handoff $handoff while matching task metadata remains; rerun fm-teardown.sh for that task to finalize cleanup" >&2
+      return 1
+    fi
+    if treehouse_lease_handoff_is_committed "$lease_path"; then
+      rm -f "$handoff" || {
+        echo "error: committed treehouse lease $lease_path has a stale handoff that could not be removed: $handoff" >&2
+        return 1
+      }
+      echo "cleared committed treehouse lease handoff $handoff" >&2
+      continue
+    fi
+    if [ "$lease_state" = returned ]; then
+      rm -f "$handoff" || {
+        echo "error: returned treehouse lease $lease_path has a tombstone that could not be removed: $handoff" >&2
+        return 1
+      }
+      echo "cleared returned treehouse lease handoff $handoff" >&2
+      continue
+    fi
+    if ! treehouse_lease_handoff_return "$handoff" "$lease_path"; then
+      echo "error: failed to recover treehouse lease $lease_path from $handoff; handoff retained" >&2
+      return 1
+    fi
+    echo "recovered treehouse lease handoff $handoff" >&2
+  done
+}
+
+begin_treehouse_lease_transaction() {
+  TREEHOUSE_LEASE_LOCK="$STATE/.treehouse-lease.lock"
+  mkdir -p "$STATE" || return 1
+  fm_lock_acquire_wait "$TREEHOUSE_LEASE_LOCK"
+  TREEHOUSE_LEASE_LOCK_HELD=1
+}
+
+# Refuse allocation beside a live task created before treehouse leasing. That
+# meta's worktree is still authoritative, but an older treehouse get may treat
+# its detached pane as idle and reset it for this spawn. New task metas carry
+# treehouse_lease=1, so their durable treehouse reservation safely permits
+# concurrent allocations in the same project pool.
+refuse_unleased_treehouse_hold() {
+  local meta held_id held_project held_worktree held_backend
+  [ -d "$STATE" ] || return 0
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    held_project=$(fm_meta_get "$meta" project)
+    [ -n "$held_project" ] || continue
+    [ "$(real_path_or_raw "$held_project")" = "$PROJ_ABS_REAL" ] || continue
+    held_backend=$(fm_meta_get "$meta" backend)
+    [ "$held_backend" = orca ] && continue
+    held_worktree=$(fm_meta_get "$meta" worktree)
+    [ -n "$held_worktree" ] || continue
+    [ "$(fm_meta_get "$meta" treehouse_lease)" = 1 ] && continue
+    held_id=$(basename "$meta" .meta)
+    echo "error: refusing treehouse allocation for $ID: live task $held_id still holds unleased worktree $held_worktree. Do not spawn into $PROJ_ABS until fm-teardown.sh returns that task's worktree; this preserves detached or uncommitted task state." >&2
+    return 1
+  done
+  return 0
+}
+
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  begin_treehouse_lease_transaction || {
+    echo "error: could not acquire treehouse lease transaction lock" >&2
+    exit 1
+  }
+  recover_treehouse_lease_handoffs || exit 1
+  refuse_unleased_treehouse_hold || exit 1
+fi
+
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
 # a herdr spawn goes through the version-gated, workspace-per-HOME,
@@ -785,7 +1653,7 @@ real_path_or_raw() {  # <path>
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
 validate_spawn_worktree() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
+  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real lease_real
   wt_real=
   if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
     wt_real=
@@ -796,10 +1664,16 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   if ! wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P); then
     wt_top_real=
   fi
-  if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
+  lease_real=
+  if [ -n "${TREEHOUSE_LEASE_PATH:-}" ]; then
+    lease_real=$(real_path_or_raw "$TREEHOUSE_LEASE_PATH")
+  fi
+  if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ] || \
+    { [ -n "$lease_real" ] && [ "$wt_real" != "$lease_real" ]; }; then
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
+  WT_REAL=$wt_real
 }
 
 herdr_projection_meta_field_exact() {  # <meta> <key>
@@ -890,6 +1764,7 @@ case "$BACKEND" in
     # rename-critical worktree-detection steps below; the persisted window= handle
     # stays $T (the name form), which is safe now that rename is disabled.
     WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+    TMUX_WINDOW_ID=$WID
     WT_TARGET="$WID"
     ;;
   herdr)
@@ -1107,6 +1982,13 @@ spawn_current_path() {  # <target>
     cmux) fm_backend_cmux_current_path "$1" "$W" ;;
   esac
 }
+spawn_path_is_worktree_root() {  # <path>
+  local path=$1 path_real top top_real
+  path_real=$(cd "$path" 2>/dev/null && pwd -P) || return 1
+  top=$(git -C "$path" rev-parse --show-toplevel 2>/dev/null) || return 1
+  top_real=$(cd "$top" 2>/dev/null && pwd -P) || return 1
+  [ "$path_real" = "$top_real" ]
+}
 spawn_send_literal() {  # <target> <text>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_literal "$1" "$2" ;;
@@ -1126,9 +2008,42 @@ spawn_send_key() {  # <target> <key>
   esac
 }
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  mkdir -p "$STATE"
+  TREEHOUSE_LEASE_PATH_FILE=$(mktemp "$STATE/.${ID}.treehouse-lease.XXXXXX") || {
+    echo "error: could not create treehouse lease handoff for $ID" >&2
+    exit 1
+  }
+  treehouse_get_status=0
+  ( cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID" > "$TREEHOUSE_LEASE_PATH_FILE" ) \
+    || treehouse_get_status=$?
+  if [ "$treehouse_get_status" -ne 0 ]; then
+    # A nonzero get may still have durably recorded a lease before it could
+    # print the path, so an exit status alone never proves the empty handoff is
+    # lease-free. Discard it only after `treehouse status` reads the pool and
+    # shows no lease held by this task; on any lease hit or unreadable pool the
+    # handoff stays as recovery evidence.
+    if [ "$treehouse_get_status" -lt 128 ] && [ ! -s "$TREEHOUSE_LEASE_PATH_FILE" ] \
+      && treehouse_pool_status=$(cd "$PROJ_ABS" && treehouse status 2>/dev/null) \
+      && ! printf '%s\n' "$treehouse_pool_status" | grep -qF "held by $ID)" \
+      && rm -f "$TREEHOUSE_LEASE_PATH_FILE"; then
+      TREEHOUSE_LEASE_PATH_FILE=
+    fi
+    echo "error: treehouse could not acquire a leased worktree for $ID" >&2
+    exit 1
+  fi
+  IFS= read -r TREEHOUSE_LEASE_PATH < "$TREEHOUSE_LEASE_PATH_FILE" || true
+  if [ "$(treehouse_lease_path_validation "$TREEHOUSE_LEASE_PATH")" != valid ]; then
+    echo "error: treehouse returned an invalid leased worktree path '$TREEHOUSE_LEASE_PATH' for $ID" >&2
+    exit 1
+  fi
+  if ! fm_treehouse_lease_handoff_write "$TREEHOUSE_LEASE_PATH_FILE" leased "$TREEHOUSE_LEASE_PATH"; then
+    echo "error: could not durably record treehouse lease $TREEHOUSE_LEASE_PATH for $ID" >&2
+    exit 1
+  fi
+  sq_treehouse_lease_path=$(shell_quote "$TREEHOUSE_LEASE_PATH")
+  spawn_send_text_line "$WT_TARGET" "cd $sq_treehouse_lease_path"
 
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
+  # Wait for the pane's cwd to move from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
   # automatic-rename slips through), display-message -t <bad-name> falls back to the
   # active client's window, which would misread firstmate's OWN pane path as the
@@ -1136,34 +2051,38 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
   # prefix would otherwise make the pane's OS-level cwd read differ from
   # PROJ_ABS on the very first poll, before the pane has actually moved.
-  #
-  # A single read that already differs from PROJ_ABS_REAL is not proof the pane
-  # settled there: on some tmux/WSL setups a brand-new window's pane_current_path
-  # transiently reports an unrelated stale path (seen live as another real git
-  # checkout entirely) before the shell catches up with treehouse get's cd. That
-  # stale path still passes the PROJ_ABS_REAL comparison and validate_spawn_worktree
-  # below (it resolves to a real, distinct worktree top-level too), so accepting it
-  # on one read alone silently records the wrong worktree= in state/<id>.meta. Require
-  # two consecutive reads to agree on the same non-project path before accepting it;
-  # a mismatch just becomes the new candidate rather than resetting the wait, so a
-  # pane that is already settled by the first real read only costs the one existing
-  # inter-poll sleep as confirmation, not a whole extra cycle on top.
-  candidate=""
+  # A live foreground-cwd read can catch a short-lived child of `treehouse
+  # get` instead of the pane shell itself. In particular, git-upload-pack for
+  # a local-path origin temporarily reports that origin's git directory. A
+  # candidate that is the canonical leased worktree root is safe immediately; every
+  # other candidate needs two consecutive polls before validation may refuse
+  # the spawn, so a child-process cwd cannot strand its pane or lease.
+  cwd_candidate=''
+  cwd_candidate_polls=0
   for _ in $(seq 1 60); do
     p=$(spawn_current_path "$WT_TARGET" || true)
-    if [ -n "$p" ]; then
+    # A just-created terminal can briefly report its uninitialized root cwd.
+    # Every other changed cwd is treehouse's result and must hit the isolation
+    # validator, including invalid destinations, instead of timing out.
+    if [ -n "$p" ] && [ "$p" != / ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
       p_real=$(real_path_or_raw "$p")
-      if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
-        if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
-          WT="$p"
-          break
-        fi
-        candidate="$p_real"
+      if spawn_path_is_worktree_root "$p" && [ "$p_real" = "$(real_path_or_raw "$TREEHOUSE_LEASE_PATH")" ]; then
+        WT="$p"
+        break
+      fi
+      if [ "$p_real" = "$cwd_candidate" ]; then
+        cwd_candidate_polls=$((cwd_candidate_polls + 1))
       else
-        candidate=""
+        cwd_candidate=$p_real
+        cwd_candidate_polls=1
+      fi
+      if [ "$cwd_candidate_polls" -ge 2 ]; then
+        WT="$p"
+        break
       fi
     else
-      candidate=""
+      cwd_candidate=''
+      cwd_candidate_polls=0
     fi
     sleep 1
   done
@@ -1175,13 +2094,50 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   validate_spawn_worktree "treehouse get" "$T"
 fi
 
-# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
+if [ "$KIND" != secondmate ]; then
+  fm_git_identity_pin_worktree "$WT" "$PROJ_ABS" "$PROJECTS" || {
+    echo "error: failed to pin the worktree-local git identity for $WT" >&2
+    exit 1
+  }
+fi
+
+if [ "$HARNESS" = codex ] && [ "$KIND" != secondmate ]; then
+  refresh_codex_crewmate_home || {
+    echo "error: could not prepare isolated Codex crewmate home" >&2
+    exit 1
+  }
+  if [ -f "$WT_REAL/.codex/config.toml" ]; then
+    echo "warning: Codex crewmate ignores project config $WT_REAL/.codex/config.toml to keep MCPs and plugins disabled" >&2
+  fi
+fi
+
+if [ "$HARNESS" = claude ] && [ "$KIND" != secondmate ]; then
+  refresh_claude_crewmate_home || {
+    echo "error: could not prepare isolated Claude crewmate home" >&2
+    exit 1
+  }
+fi
+
+# Per-task temp root is atomically created with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
-# Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
-# later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
+# Nested (not a bare /tmp/fm-<id>.<random>/gotmp) so other per-task temp can live alongside
+# later, and teardown cleans the recorded path. GOTMPDIR (not TMPDIR) is the
 # targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
-TASK_TMP="/tmp/fm-$ID"
-mkdir -p "$TASK_TMP/gotmp"
+if [ "${FM_TEST_FAIL_TASK_TMP:-0}" = 1 ]; then
+  echo "error: could not create private task temporary directory" >&2
+  exit 1
+fi
+if ! TASK_TMP=$(mktemp -d "/tmp/fm-$ID.XXXXXXXX"); then
+  echo "error: could not create private task temporary directory" >&2
+  exit 1
+fi
+mkdir "$TASK_TMP/gotmp" || exit 1
+if [ -n "$CODEX_CREWMATE_HOME" ]; then
+  CODEX_ACTIVATION_TOKEN=$(python3 "$FM_ROOT/bin/fm-codex-home.py" --new-result-token) || {
+    echo "error: could not create isolated Codex home activation token" >&2
+    exit 1
+  }
+fi
 
 # Per-harness turn-end hook: a file that touches state/<id>.turn-ended when the
 # agent finishes a turn. Worktree-resident hooks are kept out of git's view so
@@ -1304,15 +2260,22 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+TASK_META_TMP=$(mktemp "$STATE/.${ID}.meta.XXXXXX") || {
+  echo "error: could not create task metadata for $ID" >&2
+  exit 1
+}
 {
   echo "window=$META_WINDOW"
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
   echo "kind=$KIND"
+  [ "$KIND" = secondmate ] || [ "$BACKEND" = orca ] || echo "treehouse_lease=1"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
   echo "tasktmp=$TASK_TMP"
+  [ -z "$CODEX_CREWMATE_HOME" ] || echo "codex_crewmate_home=$CODEX_CREWMATE_HOME"
+  [ -z "$CLAUDE_CREWMATE_HOME" ] || echo "claude_crewmate_home=$CLAUDE_CREWMATE_HOME"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   # backend= is written only for a non-default (non-tmux) backend, so the
@@ -1342,8 +2305,16 @@ META_WINDOW=$T
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-} > "$STATE/$ID.meta"
-[ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+} > "$TASK_META_TMP"
+mv "$TASK_META_TMP" "$STATE/$ID.meta"
+TASK_META_TMP=
+[ "$BACKEND" = orca ] || TREEHOUSE_LEASE_COMMITTED=1
+if [ -n "$TREEHOUSE_LEASE_PATH_FILE" ] && ! rm -f "$TREEHOUSE_LEASE_PATH_FILE"; then
+  echo "warning: committed treehouse lease handoff retained at $TREEHOUSE_LEASE_PATH_FILE; a later spawn will clear it without returning the committed worktree" >&2
+fi
+TREEHOUSE_LEASE_PATH_FILE=
+treehouse_lease_transaction_release
+SPAWN_META_WRITTEN=1
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
@@ -1361,6 +2332,21 @@ LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
+if [ -n "$CODEX_CREWMATE_HOME" ]; then
+  sq_codex_crewmate_home=$(shell_quote "$CODEX_CREWMATE_HOME")
+  sq_codex_crewmate_profile=$(shell_quote "$CODEX_CREWMATE_PROFILE")
+  LAUNCH=${LAUNCH//__CODEXPROFILE__/$sq_codex_crewmate_profile}
+  sq_codex_home_helper=$(shell_quote "$FM_ROOT/bin/fm-codex-home.py")
+  sq_codex_data=$(shell_quote "$DATA")
+  sq_codex_source=$(shell_quote "${CODEX_HOME:-$HOME/.codex}")
+  sq_codex_worktree=$(shell_quote "$WT_REAL")
+  sq_codex_activation_token=$(shell_quote "$CODEX_ACTIVATION_TOKEN")
+  LAUNCH="exec python3 $sq_codex_home_helper --create-activate --data $sq_codex_data --source $sq_codex_source --profile $sq_codex_crewmate_profile --worktree $sq_codex_worktree --home $sq_codex_crewmate_home --result-token $sq_codex_activation_token -- $LAUNCH"
+fi
+if [ -n "$CLAUDE_CREWMATE_HOME" ]; then
+  sq_claude_crewmate_home=$(shell_quote "$CLAUDE_CREWMATE_HOME")
+  LAUNCH="CLAUDE_CONFIG_DIR=$sq_claude_crewmate_home $LAUNCH"
+fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
@@ -1377,6 +2363,11 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+if [ -n "$CODEX_ACTIVATION_TOKEN" ]; then
+  wait_for_codex_home_activation "$CODEX_CREWMATE_HOME" "$CODEX_ACTIVATION_TOKEN" || exit 1
+  CODEX_ACTIVATION_TOKEN=
+fi
+[ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 if [ "$KIND" = secondmate ]; then
   if ! fm_config_reread_discard_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
     if fm_config_reread_quarantine_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then

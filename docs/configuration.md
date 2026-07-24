@@ -12,16 +12,38 @@ This section is the single owner of the top-level operational-home layout; produ
 The tracked code root contains the shared instruction, skill, documentation, workflow, and `bin/` surfaces, while each effective `FM_HOME` contains private operational directories.
 `data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, and scout reports.
 `state/` holds volatile runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, away-mode state, generated X-mode artifacts, private secondmate config-reread generations with their retry and quarantine state, and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
+`ops-inbox/` holds local operational-failure event files delivered to this home.
 `config/` holds local gitignored operating choices, and `projects/` holds the local project clones that Firstmate reads but changes only through the guarded exceptions in `AGENTS.md`.
 
 `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
 The producing PR and X helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-crew-state.sh` owns current-state reconciliation.
 Wake, watcher, away-mode, and X-specific state mechanics remain with their named scripts and reference sections rather than being duplicated into one exhaustive state tree here.
+`docs/watcher-continuity.md` owns the identity-checked watcher-arm and away-mode daemon lease contract, including its private lock artifacts, its `FM_ARM_LEASE_GRACE`, `FM_ARM_LEASE_TICK`, and `FM_DAEMON_LEASE_GRACE` tunables, and the durable lost-relay wake.
 
 `bin/fm-session-start.sh`'s header is the single owner of session-start ordering, composed commands, digest contents, and the digest's startup mechanism.
 `docs/sessionstart-nudge.md` owns the native session-open adapter mechanics that nudge the digest command.
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
+
+## Operations inbox (ops-inbox/ / config/ops-inbox-cmd)
+
+Each home may receive operational-failure event files directly in its local `ops-inbox/` directory or one source directory below it (`ops-inbox/<source>/<event>`).
+Write each event once or atomically replace it so the watcher can detect the event or source marker without rescanning retained event files.
+Deeper paths are outside the monitored layout.
+`bin/fm-session-start.sh` reports a bounded count and newest full paths from that directory without changing any event or acknowledgement state.
+Set the local, gitignored `config/ops-inbox-cmd` to one list-only shell command when this machine also has a durable machine-level inbox.
+The first non-empty, non-comment line is the command, and firstmate runs it through `bash -c` with combined stdout and stderr.
+The command must be trusted local code and print only its current unhandled critical listing, starting with `unacked_criticals: <count>`; its exit status is displayed but does not suppress its output because some list commands use a non-zero status when criticals exist.
+The command is intentionally operator-owned and generic, so firstmate does not encode a machine-specific inbox path or acknowledgement implementation.
+The watcher fingerprints both sources, wakes immediately for a changed inbox while a regular task is in flight, and checks the same fingerprint on its existing heartbeat cadence otherwise.
+`bin/fm-ops-inbox-lib.sh`'s header owns the discovery and fingerprint mechanics; the tunables below bound them.
+`FM_SESSION_START_OPS_INBOX_LIMIT` bounds both the home-event paths and configured-command output lines in the digest, defaulting to 5.
+`FM_SESSION_START_OPS_INBOX_SCAN_LIMIT` bounds retained home-event records inspected at startup, defaulting to 256, and reports an explicit sampled overflow when reached.
+`FM_OPS_INBOX_TIMEOUT` bounds each configured command invocation to 10 seconds by default.
+`FM_OPS_INBOX_OUTPUT_MAX_BYTES` bounds each configured command capture to 32768 bytes by default.
+`FM_OPS_INBOX_MARKER_LIMIT` bounds home-event records selected for each watcher fingerprint, defaulting to 64.
+`FM_OPS_INBOX_MARKER_SCAN_LIMIT` bounds the home-event records considered before that selection, defaulting to 256.
+When either limit is exceeded, the fingerprint records an overflow sentinel and the inbox must be retained below both limits before individual changes can be surfaced again.
 
 ## Pi Calm preference (config/calm)
 
@@ -195,41 +217,37 @@ Those inherited values are defaults and rules only; `fm-spawn` still permits a c
 `config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
 For Pi secondmate launches, `fm-spawn.sh` starts Pi with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
+### Codex crewmate isolation (data/codex-crewmate/)
+
 For Codex ship and scout launches, `fm-spawn.sh` creates one private task home under `data/codex-crewmate/` and runs the process with that directory as `CODEX_HOME`.
-The helper copies only `auth.json` and `models_cache.json` from the captain's current `CODEX_HOME`, or `~/.codex` when it is unset, then writes an isolated configuration with `model_auto_compact_token_limit = 150000`, disabled plugins, no MCP configuration, and an untrusted task worktree.
-Project-local `.codex/config.toml` is deliberately excluded from those launches, so it cannot re-enable MCP servers or plugins.
-The captain's Codex home is never modified, and Codex secondmate launches intentionally keep their existing home behavior.
-The task metadata records `codex_crewmate_home=`, and normal teardown removes that managed home after endpoint cleanup succeeds.
-If a spawn or teardown cannot confirm endpoint cleanup, firstmate preserves the metadata and managed home for a later safe recovery attempt.
+The helper copies only `auth.json` and `models_cache.json` from the captain's current `CODEX_HOME`, or `~/.codex` when it is unset, then writes an isolated configuration with the task worktree untrusted and plugins and MCP configuration disabled.
+Project-local `.codex/config.toml` is excluded from these launches so it cannot re-enable MCP servers or plugins.
+The captain's Codex home is never modified, and Codex secondmate launches keep their existing home behavior.
+Task metadata records `codex_crewmate_home=`, and normal teardown removes that managed home only after endpoint cleanup succeeds.
+If a spawn or teardown cannot confirm endpoint cleanup, Firstmate preserves the metadata and managed home for a later safe recovery attempt.
 
 ### Claude crewmate second-account isolation (data/claude-crewmate/)
 
-`data/claude-crewmate/profile/` is an optional, local, gitignored directory that lets Claude ship and scout crewmates authenticate as a second Anthropic account instead of sharing the captain's own seat account (`~/.claude`, or `$CLAUDE_CONFIG_DIR` when set).
-It is captain-private, populated exactly once, and never written to by any firstmate script - only by the captain's own login, run directly against that directory:
+`data/claude-crewmate/profile/` is an optional, local, gitignored directory that lets Claude ship and scout crewmates authenticate as a second Anthropic account instead of sharing the captain's seat account.
+It is captain-private, populated by the captain's own login, and never written to by a Firstmate script.
 
+```sh
+mkdir -p data/claude-crewmate/profile \
+  && chmod 700 data/claude-crewmate data/claude-crewmate/profile \
+  && CLAUDE_CONFIG_DIR="$(pwd)/data/claude-crewmate/profile" claude auth login
 ```
-mkdir -p data/claude-crewmate/profile
-CLAUDE_CONFIG_DIR="$(pwd)/data/claude-crewmate/profile" claude auth login
-```
 
-Run that from the firstmate home whose crewmates should use the second account (the primary home or a secondmate home); a secondmate's own `data/claude-crewmate/profile/` is independent of the primary's.
-The feature stays dormant when `data/claude-crewmate/profile/` is absent, leaving every Claude launch and its task metadata byte-identical to the default-account behavior.
-`bin/fm-claude-crew-lib.sh`'s `fm_claude_crew_profile_ready` is the single readiness check, shared by `fm-spawn.sh` and `fm-dispatch-select.sh`: it confirms `claude auth status --json` for both the profile and a disposable task-private copy, then removes that copy before returning.
-A present profile that cannot authenticate its copy is an invalid crew configuration, so `fm-spawn.sh` refuses the Claude launch before it can open an onboarding or login pane.
-
-For Claude ship and scout launches, once the profile is ready, `fm-spawn.sh` creates one private task home under `data/claude-crewmate/` (`bin/fm-claude-home.py`) and runs the process with that directory as `CLAUDE_CONFIG_DIR`.
-The helper copies the profile directory's contents - including `.claude.json`'s completed-onboarding state and any supported `.credentials.json` file - into the fresh task-private home, excluding `settings.json`, `settings.local.json`, `.mcp.json`, `CLAUDE.md`, `commands/`, `agents/`, `hooks/`, `plugins/`, and `skills/`, and stripping every `mcpServers` section (user scope and per-project) from the copied `.claude.json` itself, so a crew launch can never inherit global MCP servers, plugins, or other customization surface even if the persistent profile is someday touched by more than a bare login.
-On macOS, Claude Code 2.1.216 stores OAuth credentials in Keychain service `Claude Code-credentials-<hash>`, where `<hash>` is the first eight hexadecimal characters of SHA-256 over the canonical `CLAUDE_CONFIG_DIR` path, under the local macOS username.
-The helper clones only the firstmate profile's matching entry into the new task-home-derived service and removes that entry during abort cleanup and normal teardown, so no task token accumulates after its managed home is gone.
-When reading the source entry it also accepts an older-format `Claude Code-<hash>` service name, so a profile logged in by a pre-2.1.216 Claude still seeds the isolated task credential; the cloned target is always written in the current `Claude Code-credentials-<hash>` format.
-Both the clone and its removal are non-interactive and confirmed by reading the target entry back, so a credential that is missing, empty, or unequal to its source fails the spawn instead of handing the crewmate an unauthenticated home, and a removal that leaves the entry behind fails loudly instead of silently leaving a task token behind.
-It never reads from or writes to the captain's own `~/.claude` or default `CLAUDE_CONFIG_DIR` - the whole point is account separation, and seat credentials are never copied into the crew profile.
-The task metadata records `claude_crewmate_home=`, and normal teardown removes that managed home after endpoint cleanup succeeds, mirroring the Codex managed-home safety contract above (a spawn or teardown that cannot confirm endpoint cleanup preserves the metadata and managed home for later safe recovery).
-Claude secondmate launches are unaffected and keep their existing `CLAUDE_CONFIG_DIR` behavior.
-
-When `data/claude-crewmate/profile/` is ready, `bin/fm-dispatch-select.sh`'s `quota-balanced` selection (below) also reads the Claude vendor's quota through that profile, so vendor selection compares the account crew tasks will actually burn rather than the captain's seat account; an absent profile reads the default environment exactly as before, and a present but not-ready profile drops the Claude candidates from that scoring - failing loudly and naming the profile when that leaves nothing launchable - because `fm-spawn.sh` would refuse those launches anyway.
-`quota-axi` 0.1.7 has no per-profile flag (`quota-axi --help` lists only `--provider`/`--json`/`--full`/`--allow-keychain-prompt`), so this is done by setting `CLAUDE_CONFIG_DIR` on the `quota-axi` invocation itself, never by forking or patching `quota-axi`.
-Verified 2026-07-20, `quota-axi` 0.1.7: `quota-axi --provider claude --json` under the default environment returns the logged-in seat's live reading (`"source": "oauth"`, fresh windows); the identical command with `CLAUDE_CONFIG_DIR` pointed at an empty, unauthenticated directory returns `"source": "cache"` with `"state": {"status": "stale", "error": "Claude sign-in required", ...}` - it does not silently fall back to reading the seat's live credentials, but it does fall back to a stale global cache rather than failing outright, which is exactly why `fm-dispatch-select.sh` only ever sets `CLAUDE_CONFIG_DIR` for this call after `fm_claude_crew_profile_ready` has already confirmed the profile is logged in, not unconditionally.
+Run that command from the Firstmate home whose crewmates should use the second account.
+The feature stays dormant when the profile is absent, leaving Claude launch behavior unchanged.
+`fm_claude_crew_profile_ready` confirms that both the profile and a disposable task-private copy can authenticate, and a present profile that fails that check blocks the spawn before opening a login pane.
+Once the profile is ready, `fm-spawn.sh` creates one private task home under `data/claude-crewmate/` and runs the process with that directory as `CLAUDE_CONFIG_DIR`.
+The helper excludes settings, MCP configuration, instructions, commands, agents, hooks, plugins, and skills from the copy, and strips every `mcpServers` section from the copied `.claude.json`.
+On macOS, the helper clones only the profile's matching Claude Code Keychain credential into the task-home-derived service and removes that task credential during abort cleanup or normal teardown.
+It never reads from or writes to the captain's default Claude home.
+Task metadata records `claude_crewmate_home=`, and failed endpoint cleanup preserves that metadata and managed home for later safe recovery.
+Claude secondmate launches keep their existing `CLAUDE_CONFIG_DIR` behavior.
+When the profile is ready, quota-balanced dispatch reads Claude quota through that profile so selection measures the account the crew task will use.
+When the profile is present but not ready, dispatch removes Claude candidates and names the invalid profile rather than selecting a launch that `fm-spawn.sh` would refuse.
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
@@ -417,6 +435,8 @@ FM_BACKEND_CMUX_COMPOSER_LINES=20  # cmux-only: tail lines scanned to locate the
 FM_BACKEND_CMUX_IDLE_RE='^Type a message\.\.\.$'  # cmux-only: empty-composer placeholder regex after border/prompt stripping
 CMUX_SOCKET_PASSWORD=   # cmux-only: socket password fallback when config/cmux-socket-password is absent (docs/cmux-backend.md)
 FM_SESSION_START_STATUS_TAIL=5   # state/*.status lines printed per task in the session-start digest
+FM_SESSION_START_OPS_INBOX_LIMIT=5   # home-event paths and external-command output lines printed in the operations-inbox digest
+FM_SESSION_START_OPS_INBOX_SCAN_LIMIT=256   # home-event records inspected for the bounded operations-inbox startup digest
 FM_BOOTSTRAP_DETECT_ONLY=0   # internal/read-only session-start mode: skip bootstrap's mutating sweeps and print advisory TANGLE wording
 FM_GUARD_READ_ONLY=0    # internal/read-only guard mode: keep alarms but suppress drain, supervision repair, and checkout repair commands
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the guarded operation WILL still run.'   # banner continuation line; fm-send.sh overrides it to name the requested message specifically
@@ -425,6 +445,10 @@ FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartb
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
 FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls, custom checks, or X-mode dispatch)
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
+FM_OPS_INBOX_TIMEOUT=10   # seconds allowed for each configured operations-inbox command
+FM_OPS_INBOX_OUTPUT_MAX_BYTES=32768   # byte cap for each configured operations-inbox command capture
+FM_OPS_INBOX_MARKER_LIMIT=64   # home-event records included in each watcher fingerprint
+FM_OPS_INBOX_MARKER_SCAN_LIMIT=256   # home-event records considered before fingerprint selection
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when axi status cannot be attributed to the current code
@@ -439,7 +463,7 @@ FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting X-mode completion follow-ups (7 days)
 FMX_FOLLOWUP_MAX_COUNT=3   # local cap on X-mode completion follow-ups per linked mention
 FM_LOCK_STALE_AFTER=2   # seconds before dead-pid lock records can be reclaimed; mid-acquire locks keep at least 2s grace
-FM_GUARD_GRACE=300      # seconds before guard warnings, arm health checks, and the primary turn-end guard treat a watcher beacon as stale
+FM_GUARD_GRACE=300      # seconds before guard warnings, arm health checks, and the primary turn-end guard treat a watcher beacon, arm-relay lease, or away-mode daemon lease as stale
 FM_ARM_CONFIRM_TIMEOUT=10   # seconds fm-watch-arm waits to confirm a fresh watcher before reporting FAILED
 FM_ARM_ATTACH_POLL=0.5  # seconds between checks while fm-watch-arm is attached to an existing healthy watcher cycle
 FM_OPENCODE_ARM_READY_TIMEOUT_MS=12000   # milliseconds the OpenCode primary watcher plugin waits for an arm attempt to report started, healthy, wake, or failure
@@ -457,6 +481,11 @@ FM_CLASSIFY_PAUSED_VERB=paused     # leading status verb for a declared external
 FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working stale pane escalates; stale panes whose crew is not provably working surface immediately unless they declare the pause verb
 FM_PAUSE_RESURFACE_SECS=3600       # seconds before an idle declared external wait re-surfaces for a recheck in the watcher or away-mode daemon
 FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalations on the same unchanged pane before demand-deep-inspection is added
+FM_STARTUP_ZERO_CONTEXT_SECS=600   # positive seconds a Codex current-footer `Starting MCP servers` spinner may remain at context 0% before a deep-inspection wake; this detector ignores status freshness; invalid or zero uses 600
+FM_BUSY_NO_PROGRESS_SECS=1800      # positive seconds unchanged current-footer context/token counters or a wait-spin signature need before a deep-inspection wake after the status grace period; invalid or zero uses 1800
+FM_BUSY_STATUS_GRACE_SECS=900      # positive seconds a fresh crew status write restarts busy no-progress tracking; invalid or zero uses 900
+FM_STARTUP_SPINNER_RE='Starting MCP servers'   # POSIX ERE matched only in the current footer controls for the Codex zero-context startup detector; an invalid ERE uses the default
+FM_BUSY_WAIT_SPIN_RE='Waiting for agents|No agents completed yet'   # POSIX ERE matched only in the current footer controls for the no-completed-subagent detector; an invalid ERE uses the default
 FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wake debug log
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=     # optional seconds allowed for bootstrap's best-effort clone refresh; unset/blank defaults to max(20, 5 + 3 * origin-backed-project-count)
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
