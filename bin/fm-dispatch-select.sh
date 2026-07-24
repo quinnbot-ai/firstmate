@@ -35,14 +35,22 @@
 # FM_DISPATCH_STALE_CLEAR_MARGIN overrides the default 20 point stale margin.
 # FM_DISPATCH_RANDOM_SOURCE overrides /dev/urandom for deterministic tests only.
 #
-# When this home's captain-populated data/claude-crewmate/profile holds
-# credentials for a second Claude account (bin/fm-claude-crew-lib.sh's
-# fm_claude_crew_profile_ready; docs/configuration.md), the live quota-axi call
-# runs with CLAUDE_CONFIG_DIR pointed at that profile, so the Claude candidate's
-# numbers are the account crew tasks will actually burn, not the captain's own
-# seat account. An absent or not-ready profile reads the default
-# environment exactly as before. The --quota-json fixture path is unaffected -
-# it never shells out to quota-axi at all.
+# Before a live quota selection - and only there, never on the single-profile
+# back-compat path - Claude-harness candidates are checked against this home's
+# captain-populated data/claude-crewmate/profile (bin/fm-claude-crew-lib.sh's
+# fm_claude_crew_profile_ready; docs/configuration.md):
+#   - An absent profile changes nothing: Claude stays selectable and is scored
+#     from the default environment, exactly as before the crew profile existed.
+#   - A present profile that cannot authenticate a task-private copy is an
+#     invalid crew configuration that fm-spawn.sh refuses, so its Claude
+#     candidates are removed before scoring. Emptying the candidate set that way
+#     fails loudly and names the profile rather than returning an unlaunchable
+#     lane.
+#   - A present, ready profile scores Claude routes by running quota-axi with
+#     CLAUDE_CONFIG_DIR set to it, so their numbers are the crew account's
+#     windows rather than the captain's own seat.
+# The --quota-json fixture path is unaffected - it never shells out to quota-axi
+# or probes the crew profile.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -197,6 +205,27 @@ random_profile() {
   clean_profile_at "$index"
 }
 
+has_claude_candidate() {
+  printf '%s\n' "$profiles_json" | jq -e '
+    any(.[]; .harness == "claude")
+  ' >/dev/null 2>&1
+}
+
+drop_claude_candidates() {
+  local profile=$1
+  profiles_json=$(printf '%s\n' "$profiles_json" | jq -ec '
+    map(select(.harness != "claude"))
+  ') || {
+    echo "error: could not remove unavailable Claude dispatch candidates" >&2
+    exit 1
+  }
+  log "dropped Claude candidates: crew profile $profile cannot authenticate a task-private home"
+  if [ "$(printf '%s\n' "$profiles_json" | jq 'length')" -eq 0 ]; then
+    echo "error: no launchable dispatch candidates: Claude crewmate profile $profile cannot authenticate a task-private home" >&2
+    exit 1
+  fi
+}
+
 select_strategy=$SELECT_OVERRIDE
 if [ -z "$select_strategy" ]; then
   select_strategy=$(printf '%s\n' "$SPEC_JSON" | jq -r '
@@ -217,6 +246,18 @@ if [ "$is_array" != true ] && [ -z "$select_strategy" ]; then
   exit 0
 fi
 
+claude_crew_profile=
+if [ -z "$QUOTA_JSON_FILE" ] && has_claude_candidate; then
+  configured_crew_profile=$(fm_claude_crew_profile_dir "$DATA")
+  if [ -d "$configured_crew_profile" ]; then
+    if fm_claude_crew_profile_ready "$configured_crew_profile" "$DATA" "$STATE"; then
+      claude_crew_profile=$configured_crew_profile
+    else
+      drop_claude_candidates "$configured_crew_profile"
+    fi
+  fi
+fi
+
 if [ -n "$QUOTA_JSON_FILE" ]; then
   if ! quota_json=$(cat "$QUOTA_JSON_FILE" 2>/dev/null); then
     random_profile "cannot read quota JSON"
@@ -228,8 +269,7 @@ else
     random_profile "quota-axi missing"
     exit 0
   fi
-  claude_crew_profile=$(fm_claude_crew_profile_dir "$DATA")
-  if fm_claude_crew_profile_ready "$claude_crew_profile" "$DATA" "$STATE"; then
+  if [ -n "$claude_crew_profile" ]; then
     quota_json=$(CLAUDE_CONFIG_DIR="$claude_crew_profile" "$quota_cmd" --json 2>/dev/null)
   else
     quota_json=$("$quota_cmd" --json 2>/dev/null)

@@ -124,11 +124,19 @@ spec = importlib.util.spec_from_file_location("fm_claude_home", helper)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 calls = []
+deleted = False
 
 def fake_security(arguments, input_bytes=None):
+    global deleted
     calls.append((arguments, input_bytes))
     if arguments[0] == "find-generic-password":
+        if deleted:
+            return subprocess.CompletedProcess(arguments, 44, stdout=b"")
+        if arguments[-1] == module.keychain_service(source):
+            return subprocess.CompletedProcess(arguments, 0, stdout=b"test-only-secret\n")
         return subprocess.CompletedProcess(arguments, 0, stdout=b"test-only-secret\n")
+    if arguments[0] == "delete-generic-password":
+        deleted = True
     return subprocess.CompletedProcess(arguments, 0, stdout=b"")
 
 module.is_macos = lambda: True
@@ -141,16 +149,70 @@ expected_source = module.keychain_service(source)
 expected_target = module.keychain_service(home)
 if calls[0][0][-1] != expected_source:
     raise AssertionError("create did not read the profile-derived Keychain service")
-if calls[1][0][-2] != expected_target:
+if calls[1][0][-3] != expected_target:
     raise AssertionError("create did not write the task-home-derived Keychain service")
-if calls[1][1] != b"test-only-secret\n":
-    raise AssertionError("create did not transfer the mocked credential through stdin")
+if calls[1][0][-1] != "test-only-secret":
+    raise AssertionError("create did not transfer the mocked credential through -w")
+if calls[2][0][-1] != expected_target:
+    raise AssertionError("create did not read the task-home Keychain credential back")
 module.remove_home(SimpleNamespace(data=data, state=state, task_id="keychain", home=home))
-if calls[-1][0][0] != "delete-generic-password" or calls[-1][0][-1] != expected_target:
+deletes = [call for call, _ in calls if call[0] == "delete-generic-password"]
+if not deletes or deletes[-1][-1] != expected_target:
     raise AssertionError("remove did not delete the task-home-derived Keychain service")
 PY
   expect_code 0 "$?" "managed Keychain credentials must be cloned and removed without real Keychain access"
   pass "managed Keychain credentials are cloned into and removed with task homes"
+}
+
+test_managed_keychain_short_write_is_rejected() {
+  local case_dir data source
+  case_dir="$TMP_ROOT/keychain-short-write"
+  data="$case_dir/data"
+  source="$data/claude-crewmate/profile"
+  mkdir -p "$source"
+
+  python3 - "$HELPER" "$data" "$source" <<'PY'
+import contextlib
+import importlib.util
+import io
+import subprocess
+import sys
+
+helper, data, source = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("fm_claude_home", helper)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+home = data + "/claude-crewmate/.fm-claude-home.target"
+source_service = module.keychain_service(source)
+target_service = module.keychain_service(home)
+
+def fake_security(arguments, input_bytes=None):
+    if arguments[0] == "find-generic-password":
+        secret = b"source-secret\n" if arguments[-1] == source_service else b"\n"
+        return subprocess.CompletedProcess(arguments, 0, stdout=secret)
+    if arguments[0] == "add-generic-password":
+        if input_bytes is not None:
+            raise AssertionError("credential write must not rely on security stdin")
+        if arguments[-2:] != ["-w", "source-secret"]:
+            raise AssertionError("credential write did not use inline -w data")
+        return subprocess.CompletedProcess(arguments, 0, stdout=b"")
+    raise AssertionError(f"unexpected security call: {arguments[0]}")
+
+module.is_macos = lambda: True
+module.run_security = fake_security
+with contextlib.redirect_stderr(io.StringIO()):
+    try:
+        module.clone_keychain_credential(data, source, home)
+    except SystemExit as error:
+        if error.code != 1:
+            raise
+    else:
+        raise AssertionError("a short successful Keychain write was accepted")
+if target_service == source_service:
+    raise AssertionError("test requires distinct source and target services")
+PY
+  expect_code 0 "$?" "a zero-exit short Keychain write must fail verification"
+  pass "a short Keychain write is rejected even when security exits zero"
 }
 
 test_readiness_requires_a_logged_in_copy() {
@@ -433,11 +495,17 @@ spec = importlib.util.spec_from_file_location("fm_claude_home", helper)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 calls = []
+deleted = False
 
 def fake_security(arguments, input_bytes=None):
+    global deleted
     calls.append(arguments)
     if arguments[0] == "find-generic-password":
+        if deleted:
+            return subprocess.CompletedProcess(arguments, 44, stdout=b"")
         return subprocess.CompletedProcess(arguments, 0, stdout=b"test-only-secret\n")
+    if arguments[0] == "delete-generic-password":
+        deleted = True
     return subprocess.CompletedProcess(arguments, 0, stdout=b"")
 
 module.is_macos = lambda: True
@@ -460,6 +528,7 @@ PY
 test_create_excludes_customization_surface_and_copies_credentials
 test_create_strips_mcp_servers_from_claude_json
 test_managed_keychain_credential_is_cloned_and_removed
+test_managed_keychain_short_write_is_rejected
 test_create_abort_cleanup_survives_keychain_failure
 test_remove_deletes_keychain_entry_for_absent_home
 test_readiness_requires_a_logged_in_copy

@@ -313,15 +313,15 @@ SH
   chmod +x "$fakebin/security"
 }
 
-write_fake_quota_axi_env_sensitive() {  # <fakebin-dir> <ready-config-dir>
-  local fakebin=$1 ready_dir=$2
+write_fake_quota_axi_env_sensitive() {  # <fakebin-dir> <ready-config-dir> [<default-claude-percent>]
+  local fakebin=$1 ready_dir=$2 default_claude_percent=${3:-5}
   cat > "$fakebin/quota-axi" <<SH
 #!/usr/bin/env bash
 set -u
 if [ "\${CLAUDE_CONFIG_DIR:-}" = "$ready_dir" ]; then
   printf '%s\n' '{"providers":[{"provider":"claude","state":{"status":"fresh"},"windows":[{"id":"five_hour","kind":"session","percentRemaining":90},{"id":"seven_day","kind":"weekly","percentRemaining":90}]},{"provider":"codex","state":{"status":"fresh"},"windows":[{"id":"five_hour","kind":"session","percentRemaining":50},{"id":"weekly","kind":"weekly","percentRemaining":50}]}]}'
 else
-  printf '%s\n' '{"providers":[{"provider":"claude","state":{"status":"fresh"},"windows":[{"id":"five_hour","kind":"session","percentRemaining":5},{"id":"seven_day","kind":"weekly","percentRemaining":5}]},{"provider":"codex","state":{"status":"fresh"},"windows":[{"id":"five_hour","kind":"session","percentRemaining":50},{"id":"weekly","kind":"weekly","percentRemaining":50}]}]}'
+  printf '%s\n' '{"providers":[{"provider":"claude","state":{"status":"fresh"},"windows":[{"id":"five_hour","kind":"session","percentRemaining":$default_claude_percent},{"id":"seven_day","kind":"weekly","percentRemaining":$default_claude_percent}]},{"provider":"codex","state":{"status":"fresh"},"windows":[{"id":"five_hour","kind":"session","percentRemaining":50},{"id":"weekly","kind":"weekly","percentRemaining":50}]}]}'
 fi
 SH
   chmod +x "$fakebin/quota-axi"
@@ -361,7 +361,50 @@ test_absent_crew_profile_reads_default_environment() {
   pass "an absent claude crew profile leaves quota-axi reading the default environment"
 }
 
-test_credential_less_crew_profile_reads_default_environment() {
+test_absent_crew_profile_keeps_claude_selectable() {
+  local case_dir home fakebin out
+  case_dir="$TMP_ROOT/profile-absent-claude-wins"
+  home="$case_dir/home"
+  mkdir -p "$home/data"
+  fakebin=$(fm_fakebin "$case_dir/fake")
+  write_fake_claude_crew_cli "$fakebin" "$home/data/claude-crewmate/profile"
+  # No crew profile was ever configured, so the default seat's numbers are the
+  # only ones there are: Claude must still be scored and win on them.
+  write_fake_quota_axi_env_sensitive "$fakebin" "$home/data/claude-crewmate/profile" 90
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-dispatch-select.sh" --select quota-balanced "$profiles")
+  [ "$out" = '{"harness":"claude","model":"claude-sonnet-5","effort":"high"}' ] \
+    || fail "absent crew profile should keep Claude selectable, got: $out"
+  pass "an absent claude crew profile leaves Claude candidates scored from the default account"
+}
+
+test_single_claude_profile_ignores_crew_profile_readiness() {
+  local case_dir home profile fakebin marker out
+  case_dir="$TMP_ROOT/profile-single-claude"
+  home="$case_dir/home"
+  profile="$home/data/claude-crewmate/profile"
+  mkdir -p "$profile"
+  fakebin=$(fm_fakebin "$case_dir/fake")
+  write_fake_claude_crew_cli "$fakebin" "$profile/never-matches"
+  marker="$case_dir/quota-axi-called"
+  cat > "$fakebin/quota-axi" <<SH
+#!/usr/bin/env bash
+printf called > '$marker'
+exit 1
+SH
+  chmod +x "$fakebin/quota-axi"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-dispatch-select.sh" \
+    '{"harness":"claude","model":"claude-sonnet-5","effort":"high"}')
+  [ "$out" = '{"harness":"claude","model":"claude-sonnet-5","effort":"high"}' ] \
+    || fail "single claude profile object should resolve to itself, got: $out"
+  [ ! -e "$marker" ] || fail "single profile object should not invoke quota-axi"
+  pass "a single claude profile object stays on the back-compat path regardless of the crew profile"
+}
+
+test_credential_less_crew_profile_drops_claude_candidates() {
   local case_dir home profile fakebin out
   case_dir="$TMP_ROOT/profile-not-logged-in"
   home="$case_dir/home"
@@ -371,13 +414,52 @@ test_credential_less_crew_profile_reads_default_environment() {
   # A different "ready" dir than the real profile: the fake claude reports
   # loggedIn:false for the real profile, matching an initialized-but-empty dir.
   write_fake_claude_crew_cli "$fakebin" "$profile/never-matches"
-  write_fake_quota_axi_env_sensitive "$fakebin" "$profile"
+  # The default seat makes Claude look better. The selector must still choose
+  # Codex after removing the profile's unauthenticated Claude candidate.
+  write_fake_quota_axi_env_sensitive "$fakebin" "$profile" 90
 
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
     PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-dispatch-select.sh" --select quota-balanced "$profiles")
   [ "$out" = '{"harness":"codex","model":"gpt-5.5","effort":"high"}' ] \
-    || fail "credential-less crew profile should read the default environment, got: $out"
-  pass "a present but credential-less claude crew profile leaves quota-axi reading the default environment"
+    || fail "credential-less crew profile should drop Claude, got: $out"
+  pass "a credential-less claude crew profile is excluded before scoring"
+}
+
+test_unavailable_claude_only_candidates_fail_loudly() {
+  local case_dir home profile fakebin out status
+  case_dir="$TMP_ROOT/profile-only-claude"
+  home="$case_dir/home"
+  profile="$home/data/claude-crewmate/profile"
+  mkdir -p "$profile"
+  fakebin=$(fm_fakebin "$case_dir/fake")
+  write_fake_claude_crew_cli "$fakebin" "$profile/never-matches"
+  write_fake_quota_axi_env_sensitive "$fakebin" "$profile"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-dispatch-select.sh" \
+    '[{"harness":"claude","model":"claude-sonnet-5"}]' 2>&1)
+  status=$?
+  expect_code 1 "$status" "Claude-only unavailable candidate selection must fail"
+  assert_contains "$out" "no launchable dispatch candidates" \
+    "Claude-only unavailable candidate failure was not actionable"
+  pass "an unavailable Claude-only candidate set fails instead of returning an unlaunchable profile"
+}
+
+test_non_claude_harness_keeps_its_anthropic_route() {
+  local case_dir home fakebin out
+  case_dir="$TMP_ROOT/pi-anthropic"
+  home="$case_dir/home"
+  mkdir -p "$home/data"
+  fakebin=$(fm_fakebin "$case_dir/fake")
+  write_fake_claude_crew_cli "$fakebin" "$home/data/claude-crewmate/profile"
+  write_fake_quota_axi_env_sensitive "$fakebin" "$home/data/claude-crewmate/profile" 90
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-dispatch-select.sh" \
+    '[{"harness":"pi","model":"anthropic/claude-sonnet-5"},{"harness":"codex","model":"gpt-5.5"}]')
+  [ "$out" = '{"harness":"pi","model":"anthropic/claude-sonnet-5"}' ] \
+    || fail "non-Claude Anthropic route should remain selectable, got: $out"
+  pass "a non-Claude Anthropic route does not require the Claude crewmate profile"
 }
 
 test_quota_json_fixture_ignores_crew_profile() {
@@ -441,7 +523,11 @@ test_single_profile_and_one_element_array
 test_malformed_profile_arrays_are_validation_errors
 test_ready_crew_profile_is_used_for_claude_quota
 test_absent_crew_profile_reads_default_environment
-test_credential_less_crew_profile_reads_default_environment
+test_absent_crew_profile_keeps_claude_selectable
+test_single_claude_profile_ignores_crew_profile_readiness
+test_credential_less_crew_profile_drops_claude_candidates
+test_unavailable_claude_only_candidates_fail_loudly
+test_non_claude_harness_keeps_its_anthropic_route
 test_quota_json_fixture_ignores_crew_profile
 
 echo "# all fm-dispatch-select tests passed"
