@@ -35,6 +35,14 @@ A fresh leftover beacon blocks when the lock is missing, dead, or identity-misma
 `FM_GUARD_GRACE` controls beacon freshness and defaults to 300 seconds.
 If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot safely read loop-guard fields.
 
+## Relay-health predicate
+
+With work in flight outside away mode, the guard treats supervision as healthy only when the home's watcher has both a fresh identity-checked lock and a fresh identity-matched watch-arm relay lease.
+Codex is the exception because its normal supervision is a bounded foreground checkpoint rather than a relay; its Stop hook carries `FM_TURNEND_HARNESS=codex`, so a recent quiet `state/.last-watcher-checkpoint` marker satisfies the predicate.
+With `state/.afk` present, the guard instead requires that healthy watcher plus a fresh identity-matched sub-supervisor daemon lease.
+It therefore fails closed at the next turn boundary when a harness task manager killed the normal-mode relay or the away-mode daemon and left the watcher PID behind.
+[`watcher-continuity.md`](watcher-continuity.md#relay-leases) owns the lease bindings, heartbeats, durable lost-relay wake, and safe replacement rules.
+
 ## Harness integrations
 
 - Claude registers a `Stop` hook in `.claude/settings.json`, anchored through `CLAUDE_PROJECT_DIR`.
