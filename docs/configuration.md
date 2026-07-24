@@ -196,6 +196,36 @@ Those inherited values are defaults and rules only; `fm-spawn` still permits a c
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
 For Pi secondmate launches, `fm-spawn.sh` starts Pi with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 
+### Codex crewmate isolation (data/codex-crewmate/)
+
+For Codex ship and scout launches, `fm-spawn.sh` creates one private task home under `data/codex-crewmate/` and runs the process with that directory as `CODEX_HOME`.
+The helper copies only `auth.json` and `models_cache.json` from the captain's current `CODEX_HOME`, or `~/.codex` when it is unset, then writes an isolated configuration with the task worktree untrusted and plugins and MCP configuration disabled.
+Project-local `.codex/config.toml` is excluded from these launches so it cannot re-enable MCP servers or plugins.
+The captain's Codex home is never modified, and Codex secondmate launches keep their existing home behavior.
+Task metadata records `codex_crewmate_home=`, and normal teardown removes that managed home only after endpoint cleanup succeeds.
+If a spawn or teardown cannot confirm endpoint cleanup, Firstmate preserves the metadata and managed home for a later safe recovery attempt.
+
+### Claude crewmate second-account isolation (data/claude-crewmate/)
+
+`data/claude-crewmate/profile/` is an optional, local, gitignored directory that lets Claude ship and scout crewmates authenticate as a second Anthropic account instead of sharing the captain's seat account.
+It is captain-private, populated by the captain's own login, and never written to by a Firstmate script.
+
+```sh
+mkdir -p data/claude-crewmate/profile
+CLAUDE_CONFIG_DIR="$(pwd)/data/claude-crewmate/profile" claude auth login
+```
+
+Run that command from the Firstmate home whose crewmates should use the second account.
+The feature stays dormant when the profile is absent, leaving Claude launch behavior unchanged.
+`fm_claude_crew_profile_ready` confirms that both the profile and a disposable task-private copy can authenticate, and a present profile that fails that check blocks the spawn before opening a login pane.
+Once the profile is ready, `fm-spawn.sh` creates one private task home under `data/claude-crewmate/` and runs the process with that directory as `CLAUDE_CONFIG_DIR`.
+The helper excludes settings, MCP configuration, instructions, commands, agents, hooks, plugins, and skills from the copy, and strips every `mcpServers` section from the copied `.claude.json`.
+On macOS, the helper clones only the profile's matching Claude Code Keychain credential into the task-home-derived service and removes that task credential during abort cleanup or normal teardown.
+It never reads from or writes to the captain's default Claude home.
+Task metadata records `claude_crewmate_home=`, and failed endpoint cleanup preserves that metadata and managed home for later safe recovery.
+Claude secondmate launches keep their existing `CLAUDE_CONFIG_DIR` behavior.
+When the profile is ready, quota-balanced dispatch reads Claude quota through that profile so selection measures the account the crew task will use.
+
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
