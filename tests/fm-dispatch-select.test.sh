@@ -361,6 +361,49 @@ test_absent_crew_profile_reads_default_environment() {
   pass "an absent claude crew profile leaves quota-axi reading the default environment"
 }
 
+test_absent_crew_profile_keeps_claude_selectable() {
+  local case_dir home fakebin out
+  case_dir="$TMP_ROOT/profile-absent-claude-wins"
+  home="$case_dir/home"
+  mkdir -p "$home/data"
+  fakebin=$(fm_fakebin "$case_dir/fake")
+  write_fake_claude_crew_cli "$fakebin" "$home/data/claude-crewmate/profile"
+  # No crew profile was ever configured, so the default seat's numbers are the
+  # only ones there are: Claude must still be scored and win on them.
+  write_fake_quota_axi_env_sensitive "$fakebin" "$home/data/claude-crewmate/profile" 90
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-dispatch-select.sh" --select quota-balanced "$profiles")
+  [ "$out" = '{"harness":"claude","model":"claude-sonnet-5","effort":"high"}' ] \
+    || fail "absent crew profile should keep Claude selectable, got: $out"
+  pass "an absent claude crew profile leaves Claude candidates scored from the default account"
+}
+
+test_single_claude_profile_ignores_crew_profile_readiness() {
+  local case_dir home profile fakebin marker out
+  case_dir="$TMP_ROOT/profile-single-claude"
+  home="$case_dir/home"
+  profile="$home/data/claude-crewmate/profile"
+  mkdir -p "$profile"
+  fakebin=$(fm_fakebin "$case_dir/fake")
+  write_fake_claude_crew_cli "$fakebin" "$profile/never-matches"
+  marker="$case_dir/quota-axi-called"
+  cat > "$fakebin/quota-axi" <<SH
+#!/usr/bin/env bash
+printf called > '$marker'
+exit 1
+SH
+  chmod +x "$fakebin/quota-axi"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-dispatch-select.sh" \
+    '{"harness":"claude","model":"claude-sonnet-5","effort":"high"}')
+  [ "$out" = '{"harness":"claude","model":"claude-sonnet-5","effort":"high"}' ] \
+    || fail "single claude profile object should resolve to itself, got: $out"
+  [ ! -e "$marker" ] || fail "single profile object should not invoke quota-axi"
+  pass "a single claude profile object stays on the back-compat path regardless of the crew profile"
+}
+
 test_credential_less_crew_profile_drops_claude_candidates() {
   local case_dir home profile fakebin out
   case_dir="$TMP_ROOT/profile-not-logged-in"
@@ -480,6 +523,8 @@ test_single_profile_and_one_element_array
 test_malformed_profile_arrays_are_validation_errors
 test_ready_crew_profile_is_used_for_claude_quota
 test_absent_crew_profile_reads_default_environment
+test_absent_crew_profile_keeps_claude_selectable
+test_single_claude_profile_ignores_crew_profile_readiness
 test_credential_less_crew_profile_drops_claude_candidates
 test_unavailable_claude_only_candidates_fail_loudly
 test_non_claude_harness_keeps_its_anthropic_route
