@@ -117,13 +117,14 @@ now_ms() {
 # unclassified so new tests are still runnable and visible in summaries.
 family_for_basename() {
   case "$1" in
-    fm-arm-pretool-check.test.sh|fm-brief.test.sh|fm-captain-translation-contract.test.sh|\
-    fm-cd-pretool-check.test.sh|fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
+    fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|fm-brief.test.sh|\
+    fm-calm-pi-extension.test.sh|fm-captain-translation-contract.test.sh|fm-cd-pretool-check.test.sh|\
+    fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
     fm-continuity-pretool-check.test.sh|fm-crew-state.test.sh|fm-decision-hold-lifecycle.test.sh|\
-    fm-dispatch-select.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
+    fm-dispatch-select.test.sh|fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
     fm-herdr-lab.test.sh|fm-instruction-owners.test.sh|fm-lint.test.sh|\
     fm-install-herdr.test.sh|fm-nm-test-contract.test.sh|fm-no-mistakes-ownership.test.sh|\
-    fm-pi-primary-types.test.sh|\
+    fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|fm-stow-contract.test.sh|\
     fm-subagent-pretool-check.test.sh|\
     fm-supervision-instructions.test.sh|fm-tmux-submit-busy.test.sh|fm-transition-lib.test.sh|\
@@ -680,9 +681,12 @@ families_for_changed_path() {
     bin/fm-lint.sh|bin/fm-install-shellcheck.sh|\
     bin/fm-brief.sh|bin/fm-ensure-agents-md.sh|bin/fm-crew-state.sh|\
     bin/fm-decision-hold.sh|bin/fm-supervision*|bin/fm-transition-lib.sh|\
-    bin/fm-tmux-lib.sh|bin/fm-marker-lib.sh|bin/fm-tasks-axi-lib.sh|\
+    bin/fm-tmux-lib.sh|bin/fm-marker-lib.sh|bin/fm-operational-input.sh|bin/fm-tasks-axi-lib.sh|\
     bin/fm-primary-scope-lib.sh|bin/fm-project-mode.sh|bin/fm-promote.sh|\
     bin/fm-ff-lib.sh|bin/fm-gotmp*|bin/*pretool*)
+      printf '%s\n' pure-contract-unit
+      ;;
+    .agents/skills/*/SKILL.md)
       printf '%s\n' pure-contract-unit
       ;;
     .github/workflows/ci.yml|.no-mistakes.yaml)
@@ -1296,10 +1300,14 @@ else
   }
 
   worker_pid_is_running() {
-    local want=$1 running
+    local want=$1 running inventory="$RUN_TMP/running-pids"
+    # Keep `jobs` in this shell. A process substitution runs it in a subshell
+    # without this shell's job table on Bash 3.2/5.x, falsely reporting every
+    # worker complete and making the scheduler wait for the oldest PID.
+    jobs -r -p >"$inventory"
     while IFS= read -r running; do
       [ "$running" = "$want" ] && return 0
-    done < <(jobs -r -p)
+    done <"$inventory"
     return 1
   }
 

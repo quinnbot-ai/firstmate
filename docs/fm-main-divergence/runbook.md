@@ -31,6 +31,28 @@ This PR (`fm/fm-main-divergence`) merges `origin/main` at `5549834` into a branc
 `git merge-base --is-ancestor 5549834 HEAD` confirms that the complete audited upstream tip is present in the resulting branch.
 **Do not run the sequence below until that PR has merged into `fork/main`.**
 
+## Upstream-to-fork resync (2026-07-24)
+
+This fork now names `quinnbot-ai/firstmate` as `origin` and `kunchenguid/firstmate` as `upstream`.
+That is the reverse of the historical `fork` and `origin` names used in the audit above.
+To adopt a new upstream tip, branch from `origin/main`, then merge `upstream/main` with a merge commit.
+
+```sh
+git checkout -b fm/fm-upstream-resync origin/main
+git merge --no-ff upstream/main -m 'merge: sync upstream/main into fork main'
+git merge-base --is-ancestor upstream/main HEAD
+```
+
+Resolve an overlapping implementation in upstream's shape.
+Retain a fork-only safety property only when the upstream rewrite genuinely lacks it, with focused regression coverage.
+Run the full test suite and `bin/fm-lint.sh`, then ship through the normal no-mistakes pipeline.
+The resulting PR must be merged with a **merge commit**.
+Never squash or rebase this PR, because either operation removes the adopted upstream ancestry and makes the fork diverge again.
+
+`/updatefirstmate` remains intentionally origin-only through `base_mode="origin"`.
+In this remote layout that keeps the primary checkout current with the fork after the resync PR lands, but it cannot adopt `upstream/main` into the fork.
+The recurring upstream-sync operation is therefore this reviewed merge PR, not a self-update change.
+
 ## Pre-checks (copy-paste runnable, exercised against a scratch clone)
 
 Run these from *any* clone of the repo (a scratch clone is safest for a first read) to establish that `fork/main`'s current tip fully contains local `main`'s content before touching the primary checkout.

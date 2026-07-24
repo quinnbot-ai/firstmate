@@ -350,31 +350,23 @@ fm_backend_of_meta() {  # <meta-file>
 }
 
 fm_backend_target_of_meta() {  # <meta-file>
-  local meta=$1 backend terminal window tmux_window_id
+  local meta=$1 backend terminal window
   backend=$(fm_backend_of_meta "$meta")
   if [ "$backend" = orca ]; then
     terminal=$(fm_meta_get "$meta" terminal)
     [ -n "$terminal" ] && { printf '%s' "$terminal"; return 0; }
-  fi
-  if [ "$backend" = tmux ]; then
-    tmux_window_id=$(fm_meta_get "$meta" tmux_window_id)
-    [ -n "$tmux_window_id" ] && { printf '%s' "$tmux_window_id"; return 0; }
   fi
   window=$(fm_meta_get "$meta" window)
   [ -n "$window" ] && printf '%s' "$window"
 }
 
 fm_backend_meta_for_window() {  # <target> <state-dir>
-  local target=$1 state=$2 meta window terminal tmux_window_id
+  local target=$1 state=$2 meta window terminal
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue
     window=$(fm_meta_get "$meta" window)
     terminal=$(fm_meta_get "$meta" terminal)
-    tmux_window_id=$(fm_meta_get "$meta" tmux_window_id)
-    { [ -n "$window" ] && [ "$window" = "$target" ]; } \
-      || { [ -n "$terminal" ] && [ "$terminal" = "$target" ]; } \
-      || { [ -n "$tmux_window_id" ] && [ "$tmux_window_id" = "$target" ]; } \
-      || continue
+    { [ -n "$window" ] && [ "$window" = "$target" ]; } || { [ -n "$terminal" ] && [ "$terminal" = "$target" ]; } || continue
     printf '%s' "$meta"
     return 0
   done
@@ -426,41 +418,44 @@ fm_backend_expected_label_of_selector() {  # <raw-target> <state-dir>
 }
 
 # fm_backend_source: source the named backend's adapter file, once per shell.
+# Each adapter is an independently linted canonical root. The /dev/null source
+# boundaries keep runtime dispatch from importing all five adapter ASTs into
+# every dispatcher consumer while preserving the runtime source operations.
 fm_backend_source() {  # <name>
   local name=$1
   fm_backend_validate "$name" || return 1
   case "$name" in
     tmux)
       if [ -z "${_FM_BACKEND_TMUX_SOURCED:-}" ]; then
-        # shellcheck source=bin/backends/tmux.sh
+        # shellcheck source=/dev/null
         . "$FM_BACKEND_LIB_DIR/backends/tmux.sh" || return 1
         _FM_BACKEND_TMUX_SOURCED=1
       fi
       ;;
     herdr)
       if [ -z "${_FM_BACKEND_HERDR_SOURCED:-}" ]; then
-        # shellcheck source=bin/backends/herdr.sh
+        # shellcheck source=/dev/null
         . "$FM_BACKEND_LIB_DIR/backends/herdr.sh" || return 1
         _FM_BACKEND_HERDR_SOURCED=1
       fi
       ;;
     zellij)
       if [ -z "${_FM_BACKEND_ZELLIJ_SOURCED:-}" ]; then
-        # shellcheck source=bin/backends/zellij.sh
+        # shellcheck source=/dev/null
         . "$FM_BACKEND_LIB_DIR/backends/zellij.sh" || return 1
         _FM_BACKEND_ZELLIJ_SOURCED=1
       fi
       ;;
     orca)
       if [ -z "${_FM_BACKEND_ORCA_SOURCED:-}" ]; then
-        # shellcheck source=bin/backends/orca.sh
+        # shellcheck source=/dev/null
         . "$FM_BACKEND_LIB_DIR/backends/orca.sh" || return 1
         _FM_BACKEND_ORCA_SOURCED=1
       fi
       ;;
     cmux)
       if [ -z "${_FM_BACKEND_CMUX_SOURCED:-}" ]; then
-        # shellcheck source=bin/backends/cmux.sh
+        # shellcheck source=/dev/null
         . "$FM_BACKEND_LIB_DIR/backends/cmux.sh" || return 1
         _FM_BACKEND_CMUX_SOURCED=1
       fi
@@ -572,8 +567,9 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
   esac
 }
 
-# fm_backend_kill: remove the task's session endpoint (best-effort by default).
-# Set FM_BACKEND_KILL_STRICT=1 when an allocation failure must be recorded if a backend close fails.
+# fm_backend_kill: remove the task's session endpoint (best-effort; a
+# nonexistent/already-gone target is not an error - callers already swallow
+# failures here exactly as the inline `tmux kill-window ... || true` did).
 fm_backend_kill() {  # <backend> <target>
   local backend=$1
   shift
@@ -666,8 +662,7 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
   local backend=$1 target=$2 expected_label=${3:-} session pane
   case "$backend" in
     tmux)
-      fm_backend_source tmux || return 1
-      fm_backend_tmux_target_ready "$target" "$expected_label"
+      tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1
       ;;
     herdr)
       fm_backend_source herdr || return 1
@@ -702,110 +697,39 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
   esac
 }
 
-fm_backend_target_absent() {  # <backend> <target> [expected-label] -> 0 absent, 1 live, 2 unknown
-  local backend=$1 target=$2 expected_label=${3:-} out status state session pane wsid title
+# fm_backend_agent_state: the single recovery-grade agent/endpoint state
+# contract. It is deliberately richer than fm_backend_target_exists's cheap
+# pane-presence read and prints exactly one of:
+#   alive      - a verified harness agent is running.
+#   dead       - the endpoint exists but confidently has no agent.
+#   missing    - the recorded endpoint is authoritatively absent.
+#   ambiguous  - the endpoint exists but its process cannot be attributed.
+#   unreadable - a target or inventory read failed or contradicted itself.
+#   unverified - this backend has no recovery classifier.
+# Only `dead` and `missing` license recovery. The tmux adapter requires a
+# successful session inventory and returns `missing` only when it omits the
+# exact window; the Herdr adapter reuses its husk
+# classifier. Zellij remains unverified because its secondmate ghost-tab and
+# agent-process recovery path has not been empirically validated. Orca and cmux
+# do not support secondmate spawns.
+fm_backend_agent_state() {  # <backend> <target>
+  local backend=$1 target=$2
+  fm_backend_source "$backend" || { printf 'unverified'; return 0; }
   case "$backend" in
-    tmux)
-      out=$(tmux display-message -p -t "$target" '#{window_name}' 2>&1)
-      status=$?
-      if [ "$status" -eq 0 ]; then
-        case "$target" in
-          @*) [ -z "$expected_label" ] || [ "$out" = "$expected_label" ] || return 2 ;;
-        esac
-        return 1
-      fi
-      case "$out" in
-        "can't find "*|"no server running on "*) return 0 ;;
-        *) return 2 ;;
-      esac
-      ;;
-    herdr)
-      fm_backend_source herdr || return 2
-      session=${target%%:*}
-      pane=${target#*:}
-      [ -n "$session" ] && [ -n "$pane" ] && [ "$pane" != "$target" ] || return 2
-      state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
-      case "$state" in
-        dead) return 0 ;;
-        live|no-agent) return 1 ;;
-        *) return 2 ;;
-      esac
-      ;;
-    zellij)
-      fm_backend_source zellij || return 2
-      fm_backend_zellij_parse_target "$target" || return 2
-      out=$(zellij list-sessions --short --no-formatting 2>/dev/null) || return 2
-      if ! printf '%s\n' "$out" | grep -qxF "$FM_BACKEND_ZELLIJ_SESSION"; then
-        return 0
-      fi
-      out=$(fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action list-panes --json 2>/dev/null) || return 2
-      printf '%s' "$out" | jq -e 'type == "array"' >/dev/null 2>&1 || return 2
-      if printf '%s' "$out" | jq -e --argjson p "$FM_BACKEND_ZELLIJ_PANE" \
-        '[.[]? | select(.id == $p and .is_plugin == false)] | length == 0' >/dev/null 2>&1; then
-        return 0
-      fi
-      return 1
-      ;;
-    cmux)
-      fm_backend_source cmux || return 2
-      fm_backend_cmux_parse_target "$target" || return 2
-      wsid=$FM_BACKEND_CMUX_WORKSPACE
-      if [ -n "$expected_label" ]; then
-        title=$(fm_backend_cmux_scoped_title "$expected_label")
-        fm_backend_cmux_workspace_absent "$wsid" "$title"
-      else
-        fm_backend_cmux_workspace_absent "$wsid"
-      fi
-      return $?
-      ;;
-    orca)
-      fm_backend_source orca || return 2
-      out=$(orca terminal read --terminal "$target" --limit 1 --json 2>&1)
-      status=$?
-      printf '%s' "$out" | node -e '
-const fs = require("fs");
-let data;
-try { data = JSON.parse(fs.readFileSync(0, "utf8")); } catch { process.exit(2); }
-if (data.ok === false) {
-  const code = String((data.error && data.error.code) || "").toLowerCase();
-  process.exit(code === "terminal_not_found" || code === "not_found" ? 0 : 2);
-}
-process.exit(process.argv[1] === "0" ? 1 : 2);
-' "$status"
-      return $?
-      ;;
-    *)
-      return 2
-      ;;
+    tmux) fm_backend_tmux_agent_state "$target" ;;
+    herdr) fm_backend_herdr_agent_state "$target" ;;
+    *) printf 'unverified' ;;
   esac
 }
 
-# fm_backend_agent_alive: CONFIDENT liveness of a live harness-agent PROCESS
-# under <target>, distinct from fm_backend_target_exists's pane-PRESENCE-only
-# check above. A secondmate agent that has exited leaves its backend endpoint
-# alive as a bare shell; fm_backend_target_exists reports that shell as
-# "alive" because the pane itself still exists, which is exactly the gap
-# bin/fm-bootstrap.sh's session-start secondmate-liveness sweep exists to
-# close (AGENTS.md "Session start"). Prints one of:
-#   alive   - a real agent process is confirmed running.
-#   dead    - CONFIDENTLY not an agent: a bare shell (tmux) or a
-#             structurally-gone/no-agent-registered pane (herdr).
-#   unknown - anything ambiguous, unreadable, or unverified for this backend.
-# Tmux and herdr classify their native process state directly.
-# Zellij, Orca, and cmux report unknown until they have an equally reliable
-# native process classifier.
-# Callers must treat unknown exactly like an unreadable target: NEVER license
-# an action from it alone - the secondmate-liveness sweep gates a respawn on
-# `dead` only, precisely so a momentary read glitch can never duplicate a
-# live supervisor.
-fm_backend_agent_alive() {  # <backend> <target> [expected-label]
-  local backend=$1 target=$2 expected_label=${3:-}
-  fm_backend_source "$backend" || { printf 'unknown'; return 0; }
-  case "$backend" in
-    tmux) fm_backend_tmux_agent_alive "$target" "$expected_label" ;;
-    herdr) fm_backend_herdr_agent_alive "$target" ;;
-    zellij|orca|cmux) printf 'unknown'; return 0 ;;
-    *) printf 'unknown'; return 0 ;;
+# Backward-compatible three-state view for existing callers. An
+# authoritatively missing endpoint is confidently not a live agent, while every
+# ambiguous, unreadable, or unverified result stays unknown.
+fm_backend_agent_alive() {  # <backend> <target>
+  case "$(fm_backend_agent_state "$1" "$2")" in
+    alive) printf 'alive' ;;
+    dead|missing) printf 'dead' ;;
+    *) printf 'unknown' ;;
   esac
 }
 

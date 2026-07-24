@@ -8,10 +8,10 @@
 # default (tmux, `backend=` absent) path stays byte-identical. Sourced only
 # through bin/fm-backend.sh's fm_backend_source, never directly.
 #
-# Worktree acquisition (leasing with treehouse, entering the leased path in the
-# pane, and polling its cwd) is unchanged by this extraction: P1 scopes only the
-# session provider, not the worktree provider, so fm-spawn.sh still drives that
-# part inline with these same send/current-path primitives.
+# Worktree acquisition (running `treehouse get` inside the pane, and polling
+# its cwd) is unchanged by this extraction: P1 scopes only the session
+# provider, not the worktree provider, so fm-spawn.sh still drives that part
+# inline with these same send/current-path primitives.
 #
 # The verified composer/busy-detection and verify-and-retry-submit primitives
 # already live in bin/fm-tmux-lib.sh, shared with the away-mode daemon
@@ -34,30 +34,15 @@ fm_backend_tmux_resolve_bare_selector() {  # <name>
 
 # fm_backend_tmux_capture: bounded plain-text pane capture. Mirrors
 # fm-peek.sh's and fm-watch.sh's `tmux capture-pane -p -t "$T" -S -"$N"`.
-fm_backend_tmux_target_ready() {  # <target> [expected-label]
-  local target=$1 expected_label=${2:-} label
-  case "$target" in
-    @*) ;;
-    *) expected_label= ;;
-  esac
-  if [ -z "$expected_label" ]; then
-    tmux display-message -p -t "$target" '#{pane_id}' >/dev/null
-    return
-  fi
-  label=$(tmux display-message -p -t "$target" '#{window_name}') || return 1
-  [ "$label" = "$expected_label" ]
-}
-
-fm_backend_tmux_capture() {  # <target> <lines> [expected-label]
-  [ -z "${3:-}" ] || fm_backend_tmux_target_ready "$1" "$3" || return 1
+fm_backend_tmux_capture() {  # <target> <lines>
   tmux capture-pane -p -t "$1" -S -"$2"
 }
 
 # fm_backend_tmux_send_key: one named key. Mirrors fm-send.sh's --key path:
 # `tmux display-message -p -t "$T" '#{pane_id}' >/dev/null`, then
 # `tmux send-keys -t "$T" "$2"`.
-fm_backend_tmux_send_key() {  # <target> <key> [expected-label]
-  fm_backend_tmux_target_ready "$1" "${3:-}" || return 1
+fm_backend_tmux_send_key() {  # <target> <key>
+  tmux display-message -p -t "$1" '#{pane_id}' >/dev/null
   tmux send-keys -t "$1" "$2"
 }
 
@@ -65,8 +50,7 @@ fm_backend_tmux_send_key() {  # <target> <key> [expected-label]
 # submit with Enter, retried (Enter only, never retyped) until the composer
 # clears. Re-exports fm_tmux_submit_core (bin/fm-tmux-lib.sh) verbatim; see
 # that file for the composer-verification contract and echoed verdicts.
-fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
-  [ -z "${6:-}" ] || fm_backend_tmux_target_ready "$1" "$6" || { printf 'send-failed'; return 0; }
+fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
   fm_tmux_submit_core "$@"
 }
 
@@ -119,7 +103,7 @@ fm_backend_tmux_current_path() {  # <target>
 
 # fm_backend_tmux_send_text_line: send one line of TEXT then Enter, with no
 # composer verification - used for the fixed spawn-time commands
-# (`cd` into the leased worktree, the GOTMPDIR export) that already ran this exact sequence
+# (`treehouse get`, the GOTMPDIR export) that already ran this exact sequence
 # inline in fm-spawn.sh. Mirrors `tmux send-keys -t "$T" "<text>" Enter`.
 fm_backend_tmux_send_text_line() {  # <target> <text>
   tmux send-keys -t "$1" "$2" Enter
@@ -133,10 +117,10 @@ fm_backend_tmux_send_literal() {  # <target> <text>
   tmux send-keys -t "$1" -l "$2"
 }
 
-# fm_backend_tmux_kill: remove the task's window.
-fm_backend_tmux_kill() {  # <target> [unused-tab-id] [expected-label]
-  [ -z "${3:-}" ] || fm_backend_tmux_target_ready "$1" "$3" || return 1
-  tmux kill-window -t "$1" 2>/dev/null || [ "${FM_BACKEND_KILL_STRICT:-0}" != 1 ]
+# fm_backend_tmux_kill: remove the task's window, best-effort. Mirrors
+# fm-teardown.sh's `tmux kill-window -t "$T" 2>/dev/null || true`.
+fm_backend_tmux_kill() {  # <target>
+  tmux kill-window -t "$1" 2>/dev/null || true
 }
 
 # fm_backend_tmux_current_command: <target>'s live foreground process name -
@@ -152,33 +136,64 @@ fm_backend_tmux_current_command() {  # <target>
   tmux display-message -p -t "$1" '#{pane_current_command}' 2>/dev/null
 }
 
-# fm_backend_tmux_agent_alive: CONFIDENT liveness of a live harness-agent
-# PROCESS in <target>'s pane, distinct from fm_backend_target_exists's
-# pane-PRESENCE-only check (a pane that still exists but is sitting at a bare
-# idle shell passes THAT check as "alive" - the secondmate-liveness gap
-# AGENTS.md's session-start guarantee closes). See docs/tmux-backend.md
-# "Agent liveness probe" for the empirical basis. Prints one of:
-#   alive   - the foreground command is one of the verified harness binaries
-#             (claude, codex, opencode, grok - each confirmed to run as its
-#             own process name, never wrapped by a generic interpreter).
-#   dead    - the foreground command is a bare shell: nothing is running in
-#             the pane, so a prior agent process has exited.
-#   unknown - anything else, INCLUDING a bare "node"/"python" interpreter
-#             name (pi's own launcher execs into a generic "node" process
-#             with no reliable way to attribute it back to pi from outside
-#             the pane - docs/tmux-backend.md "Known gaps"), or an unreadable
-#             pane. Callers must never treat unknown as a confirmed-dead
-#             signal (bin/fm-bootstrap.sh's secondmate-liveness sweep gates a
-#             respawn on `dead` only).
-fm_backend_tmux_agent_alive() {  # <target> [expected-label]
-  local target=$1 expected_label=${2:-} comm
-  fm_backend_tmux_target_ready "$target" "$expected_label" || { printf 'unknown'; return 0; }
-  comm=$(fm_backend_tmux_current_command "$target") || { printf 'unknown'; return 0; }
+# fm_backend_tmux_agent_state: recovery-grade harness-agent state for one
+# recorded target. See bin/fm-backend.sh's fm_backend_agent_state for the
+# shared state vocabulary and docs/tmux-backend.md "Agent liveness probe" for
+# the empirical basis. Tmux silently falls back to the active window when a
+# named target is absent, so the exact recorded window must appear in a
+# successful session inventory before its foreground command can be trusted.
+# An omitted window or a definitive missing-session/server response is
+# `missing`; any other inventory or pane read failure is `unreadable`, so a
+# transient tmux problem never licenses a duplicate.
+fm_backend_tmux_agent_state() {  # <target>
+  local target=$1 comm session window windows inventory_status
+  case "$target" in
+    *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
+    *:*) ;;
+    *) printf 'unreadable'; return 0 ;;
+  esac
+  session=${target%%:*}
+  window=${target#*:}
+  if windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>&1); then
+    inventory_status=0
+  else
+    inventory_status=$?
+  fi
+  if [ "$inventory_status" -ne 0 ]; then
+    case "$windows" in
+      *"can't find session:"*|*"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
+        printf 'missing'
+        ;;
+      *)
+        printf 'unreadable'
+        ;;
+    esac
+    return 0
+  fi
+  if ! printf '%s\n' "$windows" | grep -Fqx "$window"; then
+    printf 'missing'
+    return 0
+  fi
+
+  comm=$(fm_backend_tmux_current_command "$target") || {
+    printf 'unreadable'
+    return 0
+  }
   comm=${comm#-}
   case "$comm" in
-    '') printf 'unknown' ;;
     *claude*|*codex*|*opencode*|*grok*) printf 'alive' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'dead' ;;
+    '') printf 'unreadable' ;;
+    *) printf 'ambiguous' ;;
+  esac
+}
+
+# Backward-compatible three-state view for callers that only need a yes/no
+# agent verdict. The detailed state contract is owned by fm_backend_agent_state.
+fm_backend_tmux_agent_alive() {  # <target>
+  case "$(fm_backend_tmux_agent_state "$1")" in
+    alive) printf 'alive' ;;
+    dead|missing) printf 'dead' ;;
     *) printf 'unknown' ;;
   esac
 }
