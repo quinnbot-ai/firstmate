@@ -12,16 +12,38 @@ This section is the single owner of the top-level operational-home layout; produ
 The tracked code root contains the shared instruction, skill, documentation, workflow, and `bin/` surfaces, while each effective `FM_HOME` contains private operational directories.
 `data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, and scout reports.
 `state/` holds volatile runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, away-mode state, generated X-mode artifacts, private secondmate config-reread generations with their retry and quarantine state, and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
+`ops-inbox/` holds local operational-failure event files delivered to this home.
 `config/` holds local gitignored operating choices, and `projects/` holds the local project clones that Firstmate reads but changes only through the guarded exceptions in `AGENTS.md`.
 
 `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
 The producing PR and X helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-crew-state.sh` owns current-state reconciliation.
 Wake, watcher, away-mode, and X-specific state mechanics remain with their named scripts and reference sections rather than being duplicated into one exhaustive state tree here.
+`docs/watcher-continuity.md` owns the identity-checked watcher-arm and away-mode daemon lease contract, including its private lock artifacts, its `FM_ARM_LEASE_GRACE`, `FM_ARM_LEASE_TICK`, and `FM_DAEMON_LEASE_GRACE` tunables, and the durable lost-relay wake.
 
 `bin/fm-session-start.sh`'s header is the single owner of session-start ordering, composed commands, digest contents, and the digest's startup mechanism.
 `docs/sessionstart-nudge.md` owns the native session-open adapter mechanics that nudge the digest command.
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
+
+## Operations inbox (ops-inbox/ / config/ops-inbox-cmd)
+
+Each home may receive operational-failure event files directly in its local `ops-inbox/` directory or one source directory below it (`ops-inbox/<source>/<event>`).
+Write each event once or atomically replace it so the watcher can detect the event or source marker without rescanning retained event files.
+Deeper paths are outside the monitored layout.
+`bin/fm-session-start.sh` reports a bounded count and newest full paths from that directory without changing any event or acknowledgement state.
+Set the local, gitignored `config/ops-inbox-cmd` to one list-only shell command when this machine also has a durable machine-level inbox.
+The first non-empty, non-comment line is the command, and firstmate runs it through `bash -c` with combined stdout and stderr.
+The command must be trusted local code and print only its current unhandled critical listing, starting with `unacked_criticals: <count>`; its exit status is displayed but does not suppress its output because some list commands use a non-zero status when criticals exist.
+The command is intentionally operator-owned and generic, so firstmate does not encode a machine-specific inbox path or acknowledgement implementation.
+The watcher fingerprints both sources, wakes immediately for a changed inbox while a regular task is in flight, and checks the same fingerprint on its existing heartbeat cadence otherwise.
+`bin/fm-ops-inbox-lib.sh`'s header owns the discovery and fingerprint mechanics; the tunables below bound them.
+`FM_SESSION_START_OPS_INBOX_LIMIT` bounds both the home-event paths and configured-command output lines in the digest, defaulting to 5.
+`FM_SESSION_START_OPS_INBOX_SCAN_LIMIT` bounds retained home-event records inspected at startup, defaulting to 256, and reports an explicit sampled overflow when reached.
+`FM_OPS_INBOX_TIMEOUT` bounds each configured command invocation to 10 seconds by default.
+`FM_OPS_INBOX_OUTPUT_MAX_BYTES` bounds each configured command capture to 32768 bytes by default.
+`FM_OPS_INBOX_MARKER_LIMIT` bounds home-event records selected for each watcher fingerprint, defaulting to 64.
+`FM_OPS_INBOX_MARKER_SCAN_LIMIT` bounds the home-event records considered before that selection, defaulting to 256.
+When either limit is exceeded, the fingerprint records an overflow sentinel and the inbox must be retained below both limits before individual changes can be surfaced again.
 
 ## Pi Calm preference (config/calm)
 
@@ -413,6 +435,8 @@ FM_BACKEND_CMUX_COMPOSER_LINES=20  # cmux-only: tail lines scanned to locate the
 FM_BACKEND_CMUX_IDLE_RE='^Type a message\.\.\.$'  # cmux-only: empty-composer placeholder regex after border/prompt stripping
 CMUX_SOCKET_PASSWORD=   # cmux-only: socket password fallback when config/cmux-socket-password is absent (docs/cmux-backend.md)
 FM_SESSION_START_STATUS_TAIL=5   # state/*.status lines printed per task in the session-start digest
+FM_SESSION_START_OPS_INBOX_LIMIT=5   # home-event paths and external-command output lines printed in the operations-inbox digest
+FM_SESSION_START_OPS_INBOX_SCAN_LIMIT=256   # home-event records inspected for the bounded operations-inbox startup digest
 FM_BOOTSTRAP_DETECT_ONLY=0   # internal/read-only session-start mode: skip bootstrap's mutating sweeps and print advisory TANGLE wording
 FM_GUARD_READ_ONLY=0    # internal/read-only guard mode: keep alarms but suppress drain, supervision repair, and checkout repair commands
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the guarded operation WILL still run.'   # banner continuation line; fm-send.sh overrides it to name the requested message specifically
@@ -421,6 +445,10 @@ FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartb
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
 FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls, custom checks, or X-mode dispatch)
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
+FM_OPS_INBOX_TIMEOUT=10   # seconds allowed for each configured operations-inbox command
+FM_OPS_INBOX_OUTPUT_MAX_BYTES=32768   # byte cap for each configured operations-inbox command capture
+FM_OPS_INBOX_MARKER_LIMIT=64   # home-event records included in each watcher fingerprint
+FM_OPS_INBOX_MARKER_SCAN_LIMIT=256   # home-event records considered before fingerprint selection
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when axi status cannot be attributed to the current code
@@ -435,7 +463,7 @@ FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting X-mode completion follow-ups (7 days)
 FMX_FOLLOWUP_MAX_COUNT=3   # local cap on X-mode completion follow-ups per linked mention
 FM_LOCK_STALE_AFTER=2   # seconds before dead-pid lock records can be reclaimed; mid-acquire locks keep at least 2s grace
-FM_GUARD_GRACE=300      # seconds before guard warnings, arm health checks, and the primary turn-end guard treat a watcher beacon as stale
+FM_GUARD_GRACE=300      # seconds before guard warnings, arm health checks, and the primary turn-end guard treat a watcher beacon, arm-relay lease, or away-mode daemon lease as stale
 FM_ARM_CONFIRM_TIMEOUT=10   # seconds fm-watch-arm waits to confirm a fresh watcher before reporting FAILED
 FM_ARM_ATTACH_POLL=0.5  # seconds between checks while fm-watch-arm is attached to an existing healthy watcher cycle
 FM_OPENCODE_ARM_READY_TIMEOUT_MS=12000   # milliseconds the OpenCode primary watcher plugin waits for an arm attempt to report started, healthy, wake, or failure
@@ -453,6 +481,11 @@ FM_CLASSIFY_PAUSED_VERB=paused     # leading status verb for a declared external
 FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working stale pane escalates; stale panes whose crew is not provably working surface immediately unless they declare the pause verb
 FM_PAUSE_RESURFACE_SECS=3600       # seconds before an idle declared external wait re-surfaces for a recheck in the watcher or away-mode daemon
 FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalations on the same unchanged pane before demand-deep-inspection is added
+FM_STARTUP_ZERO_CONTEXT_SECS=600   # positive seconds a Codex current-footer `Starting MCP servers` spinner may remain at context 0% before a deep-inspection wake; this detector ignores status freshness; invalid or zero uses 600
+FM_BUSY_NO_PROGRESS_SECS=1800      # positive seconds unchanged current-footer context/token counters or a wait-spin signature need before a deep-inspection wake after the status grace period; invalid or zero uses 1800
+FM_BUSY_STATUS_GRACE_SECS=900      # positive seconds a fresh crew status write restarts busy no-progress tracking; invalid or zero uses 900
+FM_STARTUP_SPINNER_RE='Starting MCP servers'   # POSIX ERE matched only in the current footer controls for the Codex zero-context startup detector; an invalid ERE uses the default
+FM_BUSY_WAIT_SPIN_RE='Waiting for agents|No agents completed yet'   # POSIX ERE matched only in the current footer controls for the no-completed-subagent detector; an invalid ERE uses the default
 FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wake debug log
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=     # optional seconds allowed for bootstrap's best-effort clone refresh; unset/blank defaults to max(20, 5 + 3 * origin-backed-project-count)
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
