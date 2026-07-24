@@ -697,6 +697,84 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
   esac
 }
 
+fm_backend_target_absent() {  # <backend> <target> [expected-label] -> 0 absent, 1 live, 2 unknown
+  local backend=$1 target=$2 expected_label=${3:-} out status state session pane wsid title
+  case "$backend" in
+    tmux)
+      out=$(tmux display-message -p -t "$target" '#{window_name}' 2>&1)
+      status=$?
+      if [ "$status" -eq 0 ]; then
+        case "$target" in
+          @*) [ -z "$expected_label" ] || [ "$out" = "$expected_label" ] || return 2 ;;
+        esac
+        return 1
+      fi
+      case "$out" in
+        "can't find "*|"no server running on "*) return 0 ;;
+        *) return 2 ;;
+      esac
+      ;;
+    herdr)
+      fm_backend_source herdr || return 2
+      session=${target%%:*}
+      pane=${target#*:}
+      [ -n "$session" ] && [ -n "$pane" ] && [ "$pane" != "$target" ] || return 2
+      state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
+      case "$state" in
+        dead) return 0 ;;
+        live|no-agent) return 1 ;;
+        *) return 2 ;;
+      esac
+      ;;
+    zellij)
+      fm_backend_source zellij || return 2
+      fm_backend_zellij_parse_target "$target" || return 2
+      out=$(zellij list-sessions --short --no-formatting 2>/dev/null) || return 2
+      if ! printf '%s\n' "$out" | grep -qxF "$FM_BACKEND_ZELLIJ_SESSION"; then
+        return 0
+      fi
+      out=$(fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action list-panes --json 2>/dev/null) || return 2
+      printf '%s' "$out" | jq -e 'type == "array"' >/dev/null 2>&1 || return 2
+      if printf '%s' "$out" | jq -e --argjson p "$FM_BACKEND_ZELLIJ_PANE" \
+        '[.[]? | select(.id == $p and .is_plugin == false)] | length == 0' >/dev/null 2>&1; then
+        return 0
+      fi
+      return 1
+      ;;
+    cmux)
+      fm_backend_source cmux || return 2
+      fm_backend_cmux_parse_target "$target" || return 2
+      wsid=$FM_BACKEND_CMUX_WORKSPACE
+      if [ -n "$expected_label" ]; then
+        title=$(fm_backend_cmux_scoped_title "$expected_label")
+        fm_backend_cmux_workspace_absent "$wsid" "$title"
+      else
+        fm_backend_cmux_workspace_absent "$wsid"
+      fi
+      return $?
+      ;;
+    orca)
+      fm_backend_source orca || return 2
+      out=$(orca terminal read --terminal "$target" --limit 1 --json 2>&1)
+      status=$?
+      printf '%s' "$out" | node -e '
+const fs = require("fs");
+let data;
+try { data = JSON.parse(fs.readFileSync(0, "utf8")); } catch { process.exit(2); }
+if (data.ok === false) {
+  const code = String((data.error && data.error.code) || "").toLowerCase();
+  process.exit(code === "terminal_not_found" || code === "not_found" ? 0 : 2);
+}
+process.exit(process.argv[1] === "0" ? 1 : 2);
+' "$status"
+      return $?
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+}
+
 # fm_backend_agent_state: the single recovery-grade agent/endpoint state
 # contract. It is deliberately richer than fm_backend_target_exists's cheap
 # pane-presence read and prints exactly one of:
