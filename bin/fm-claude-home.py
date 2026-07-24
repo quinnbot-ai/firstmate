@@ -94,6 +94,21 @@ def clone_keychain_credential(data, source, home):
         )
         if source_result.returncode != 0:
             continue
+        source_output = source_result.stdout
+        if not source_output.endswith(b"\n"):
+            die("managed Claude Keychain credential read has no terminator")
+        try:
+            source_secret = source_output[:-1].decode()
+        except UnicodeDecodeError:
+            die("managed Claude Keychain credential is not valid text")
+        if not source_secret or "\0" in source_secret:
+            die("managed Claude Keychain credential cannot be passed safely")
+        # security's documented non-interactive form requires the value directly
+        # after -w; stdin instead prompts on the controlling TTY and can write an
+        # empty value while returning zero. find -w appends one display newline,
+        # which must not become part of the value. This briefly exposes the
+        # local-only credential in the child argv because security provides no
+        # stdin form for this subcommand, so never log the arguments or credential.
         target_result = run_security(
             [
                 "add-generic-password",
@@ -103,11 +118,26 @@ def clone_keychain_credential(data, source, home):
                 "-s",
                 keychain_service(home),
                 "-w",
+                source_secret,
             ],
-            source_result.stdout,
         )
         if target_result.returncode != 0:
             die("could not seed isolated Claude Keychain credential")
+        target_result = run_security(
+            [
+                "find-generic-password",
+                "-a",
+                account,
+                "-w",
+                "-s",
+                keychain_service(home),
+            ]
+        )
+        if (
+            target_result.returncode != 0
+            or target_result.stdout != source_output
+        ):
+            die("isolated Claude Keychain credential did not match its source")
         return True
     return False
 
@@ -115,17 +145,30 @@ def clone_keychain_credential(data, source, home):
 def remove_keychain_credential(home):
     if not is_macos():
         return
+    service = keychain_service(home)
     result = run_security(
         [
             "delete-generic-password",
             "-a",
             getpass.getuser(),
             "-s",
-            keychain_service(home),
+            service,
         ]
     )
     if result.returncode not in (0, 44):
         die("could not remove isolated Claude Keychain credential")
+    verification = run_security(
+        [
+            "find-generic-password",
+            "-a",
+            getpass.getuser(),
+            "-w",
+            "-s",
+            service,
+        ]
+    )
+    if verification.returncode != 44:
+        die("could not verify isolated Claude Keychain credential removal")
 
 
 def open_directory(name, directory_fd=None):
