@@ -14,6 +14,9 @@ On macOS it also clones only the managed profile's per-config-dir
 Keychain credential into the new home's derived Keychain service, and
 removes that service entry on abort cleanup and teardown, even when the
 home directory itself is already gone.
+Both the clone and the removal are non-interactive and confirmed by
+reading the target entry back, so an empty, truncated, or leftover
+credential fails instead of producing a home that cannot authenticate.
 It never reads or copies anything from the captain's own ~/.claude or
 CLAUDE_CONFIG_DIR - the persistent profile is populated only by the
 captain's own `claude auth login` run against it directly.
