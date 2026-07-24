@@ -36,11 +36,20 @@ The earlier `fm/fm-main-divergence` PR merged `upstream/main` at `5549834` into 
 ## Upstream-to-fork resync (2026-07-24)
 
 To adopt a new upstream tip, branch from `origin/main`, then merge `upstream/main` with a merge commit.
+This dated resync expects upstream commit `861b1f8a342b819729a1f43a8413f5040c1ce4fb`.
 
 ```sh
+expected_upstream=861b1f8a342b819729a1f43a8413f5040c1ce4fb
+git fetch origin '+refs/heads/main:refs/remotes/origin/main' \
+  || { echo "STOP: could not refresh origin/main"; exit 1; }
+git fetch upstream '+refs/heads/main:refs/remotes/upstream/main' \
+  || { echo "STOP: could not refresh upstream/main"; exit 1; }
+[ "$(git rev-parse upstream/main)" = "$expected_upstream" ] \
+  || { echo "STOP: upstream/main is not the expected dated resync commit"; exit 1; }
 git checkout -b fm/fm-upstream-resync origin/main
 git merge --no-ff upstream/main -m 'merge: sync upstream/main into fork main'
-git merge-base --is-ancestor upstream/main HEAD
+git merge-base --is-ancestor "$expected_upstream" HEAD \
+  || { echo "STOP: expected upstream commit is not an ancestor of HEAD"; exit 1; }
 ```
 
 Resolve an overlapping implementation in upstream's shape.

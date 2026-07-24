@@ -212,6 +212,7 @@ It is captain-private, populated by the captain's own login, and never written t
 
 ```sh
 mkdir -p data/claude-crewmate/profile
+chmod 700 data/claude-crewmate data/claude-crewmate/profile
 CLAUDE_CONFIG_DIR="$(pwd)/data/claude-crewmate/profile" claude auth login
 ```
 
