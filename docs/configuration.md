@@ -211,9 +211,9 @@ If a spawn or teardown cannot confirm endpoint cleanup, Firstmate preserves the 
 It is captain-private, populated by the captain's own login, and never written to by a Firstmate script.
 
 ```sh
-mkdir -p data/claude-crewmate/profile
-chmod 700 data/claude-crewmate data/claude-crewmate/profile
-CLAUDE_CONFIG_DIR="$(pwd)/data/claude-crewmate/profile" claude auth login
+mkdir -p data/claude-crewmate/profile \
+  && chmod 700 data/claude-crewmate data/claude-crewmate/profile \
+  && CLAUDE_CONFIG_DIR="$(pwd)/data/claude-crewmate/profile" claude auth login
 ```
 
 Run that command from the Firstmate home whose crewmates should use the second account.

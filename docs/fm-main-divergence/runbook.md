@@ -46,7 +46,8 @@ git fetch upstream '+refs/heads/main:refs/remotes/upstream/main' \
   || { echo "STOP: could not refresh upstream/main"; exit 1; }
 [ "$(git rev-parse upstream/main)" = "$expected_upstream" ] \
   || { echo "STOP: upstream/main is not the expected dated resync commit"; exit 1; }
-git checkout -b fm/fm-upstream-resync origin/main
+git checkout -b fm/fm-upstream-resync origin/main \
+  || { echo "STOP: could not create and check out fm/fm-upstream-resync"; exit 1; }
 git merge --no-ff upstream/main -m 'merge: sync upstream/main into fork main'
 git merge-base --is-ancestor "$expected_upstream" HEAD \
   || { echo "STOP: expected upstream commit is not an ancestor of HEAD"; exit 1; }
