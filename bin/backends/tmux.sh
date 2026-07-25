@@ -171,9 +171,21 @@ fm_backend_tmux_current_command() {  # <target>
 # `missing`; any other inventory or pane read failure is `unreadable`, so a
 # transient tmux problem never licenses a duplicate.
 # A stable `@<window-id>` target is inventoried across every session instead,
-# and - because tmux reuses window ids - is additionally required to still
-# carry its pinned `fm-<id>` label. An id that now names a DIFFERENT window is
-# `unreadable`, never `missing`, so a reused id can never license a respawn.
+# as `<window-id> <window-name>` pairs. Because tmux RECYCLES window ids, an id
+# alone can neither prove presence nor prove absence, so this path decides on
+# the pinned `fm-<id>` label the caller passes:
+#   id present, label matches   - trusted, the foreground command is read.
+#   id present, label differs   - `unreadable`; the id was reused by another
+#                                 window, so it never licenses a respawn.
+#   id absent, label absent too - `missing`; neither the recorded id nor the
+#                                 task's own pinned window exists anywhere, so
+#                                 the endpoint is authoritatively gone.
+#   id absent, label present    - `unreadable`; the task's window is live under
+#                                 a different id, so the recorded id is stale.
+#   id absent, no label passed  - `unreadable`; absence cannot be proven from a
+#                                 recyclable id alone.
+# An omitted id therefore NEVER authorizes recovery on its own - only the
+# pinned label's own absence does.
 fm_backend_tmux_agent_state() {  # <target> [expected-label]
   local target=$1 expected_label=${2:-} comm session window windows inventory_status
   case "$target" in
@@ -190,7 +202,7 @@ fm_backend_tmux_agent_state() {  # <target> [expected-label]
     *) printf 'unreadable'; return 0 ;;
   esac
   if [ -z "$session" ]; then
-    windows=$(LC_ALL=C tmux list-windows -a -F '#{window_id}' 2>&1)
+    windows=$(LC_ALL=C tmux list-windows -a -F '#{window_id} #{window_name}' 2>&1)
   else
     windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>&1)
   fi
@@ -206,8 +218,25 @@ fm_backend_tmux_agent_state() {  # <target> [expected-label]
     esac
     return 0
   fi
-  if ! printf '%s\n' "$windows" | grep -Fqx "$window"; then
+  if [ -n "$session" ]; then
+    if ! printf '%s\n' "$windows" | grep -Fqx "$window"; then
+      printf 'missing'
+      return 0
+    fi
+  elif printf '%s\n' "$windows" | awk -v id="$window" '$1 == id { found = 1 } END { exit !found }'; then
+    if [ -n "$expected_label" ] \
+      && ! printf '%s\n' "$windows" \
+        | awk -v id="$window" -v n="$expected_label" '$1 == id { $1 = ""; sub(/^ /, ""); if ($0 == n) found = 1 } END { exit !found }'; then
+      printf 'unreadable'
+      return 0
+    fi
+  elif [ -n "$expected_label" ] \
+    && ! printf '%s\n' "$windows" \
+      | awk -v n="$expected_label" '{ $1 = ""; sub(/^ /, ""); if ($0 == n) found = 1 } END { exit !found }'; then
     printf 'missing'
+    return 0
+  else
+    printf 'unreadable'
     return 0
   fi
   if [ -n "$expected_label" ] && ! fm_backend_tmux_target_ready "$target" "$expected_label"; then

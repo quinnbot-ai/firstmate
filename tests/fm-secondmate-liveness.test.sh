@@ -136,6 +136,60 @@ test_tmux_agent_state_classifies() {
   pass "fm_backend_tmux_agent_state: separates live, dead, missing, ambiguous, and unreadable"
 }
 
+test_tmux_window_id_absence_never_authorizes_recovery_alone() {
+  local fakebin out
+  fakebin=$(fm_fakebin "$TMP_ROOT/tmux-window-id-inventory")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  list-windows) printf '%s\n' "${FM_TEST_INVENTORY:-}"; exit 0 ;;
+  display-message)
+    for a in "$@"; do
+      case "$a" in
+        *window_name*) printf '%s\n' "${FM_TEST_WINDOW_NAME:-fm-sm1}"; exit 0 ;;
+        *pane_current_command*) printf '%s\n' claude; exit 0 ;;
+      esac
+    done
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+
+  probe() {  # <inventory> [expected-label]
+    PATH="$fakebin:$BASE_PATH" FM_TEST_INVENTORY="$1" FM_TEST_WINDOW_NAME=fm-sm1 \
+      bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux @42 "$1"' "$ROOT" "${2:-}"
+  }
+
+  out=$(probe '@7 fm-sm1' fm-sm1)
+  [ "$out" = unreadable ] \
+    || fail "a stale window id whose pinned label is still live must stay unreadable, got '$out'"
+  [ "$(PATH="$fakebin:$BASE_PATH" FM_TEST_INVENTORY='@7 fm-sm1' \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive tmux @42 fm-sm1' "$ROOT")" = unknown ] \
+    || fail "the compatibility view must keep a stale window id unknown, never dead"
+
+  out=$(probe '@7 fm-other')
+  [ "$out" = unreadable ] \
+    || fail "an omitted window id with no pinned label to check must stay unreadable, got '$out'"
+
+  out=$(probe '@7 fm-other' fm-sm1)
+  [ "$out" = missing ] \
+    || fail "an omitted window id whose pinned label is also absent should be missing, got '$out'"
+
+  out=$(probe '@42 fm-sm1' fm-sm1)
+  [ "$out" = alive ] \
+    || fail "a present window id still carrying its pinned label should read its command, got '$out'"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_TEST_INVENTORY='@42 fm-other' FM_TEST_WINDOW_NAME=fm-other \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state tmux @42 fm-sm1' "$ROOT")
+  [ "$out" = unreadable ] \
+    || fail "a recycled window id carrying another label must stay unreadable, got '$out'"
+
+  pass "fm_backend_tmux_agent_state: an omitted window id alone never authorizes recovery"
+}
+
 test_tmux_agent_state_rejects_malformed_targets_before_probe() {
   local fakebin marker target out
   fakebin=$(fm_fakebin "$TMP_ROOT/tmux-malformed")
@@ -285,7 +339,7 @@ case "${1:-}" in
       exit 0
     fi
     case "$*" in
-      *window_id*) printf '%s\n' '@42' ;;
+      *window_id*) printf '%s %s\n' "${FM_TEST_WINDOW_ID:-@42}" "${FM_TEST_WINDOW_NAME:-fm-sm1}" ;;
       *) printf '%s\n' fm-sm1 ;;
     esac
     exit 0
@@ -534,7 +588,24 @@ test_sweep_refuses_reused_tmux_window_id() {
   pass "sweep: a recycled tmux window id with another label is never touched"
 }
 
+test_sweep_refuses_stale_tmux_window_id_with_live_label() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-stale-window-id)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  printf 'tmux_window_id=@42\n' >> "$w/home/state/sm1.meta"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" FM_TEST_WINDOW_ID=@7)
+
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: skipped: endpoint probe unreadable" \
+    "an inventory omitting only the recorded window id must not read as a recoverable state"
+  [ ! -s "$log" ] || fail "a stale tmux window id whose pinned label is live must not be killed or respawned: $(cat "$log")"
+  pass "sweep: an omitted tmux window id whose pinned label is still live never authorizes a relaunch"
+}
+
 test_tmux_agent_state_classifies
+test_tmux_window_id_absence_never_authorizes_recovery_alone
 test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier
 test_agent_state_dispatcher_and_compatibility
@@ -549,5 +620,6 @@ test_sweep_converges_no_retouch_once_alive
 test_sweep_skipped_under_detect_only
 test_sweep_noop_with_no_secondmate_meta
 test_sweep_refuses_reused_tmux_window_id
+test_sweep_refuses_stale_tmux_window_id_with_live_label
 
 echo "# all fm-secondmate-liveness tests passed"

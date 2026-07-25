@@ -143,9 +143,9 @@ META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 # A window_detached_* record replaces the live window= record only after the
 # endpoint is gone, so its presence with no window= is recorded proof of
-# endpoint absence (docs/architecture.md#runtime-session-backends). Any target
-# fm_backend_target_of_meta still resolves (terminal= for Orca, otherwise
-# window=) takes precedence and is probed before cleanup.
+# endpoint absence (docs/architecture.md#runtime-session-backends). Any other
+# resolvable target (e.g. a retained tmux_window_id=) takes precedence and is
+# still probed before cleanup.
 recorded_detached_window_confirms_absence() {
   grep -q '^window=' "$META" && return 1
   grep -Eq '^window_detached_[^=]+=' "$META"

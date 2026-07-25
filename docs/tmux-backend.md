@@ -46,6 +46,9 @@ Verify setup by spawning a small task and confirming its `fm-<id>` window appear
 
 A target-existence check proves only that the pane exists.
 The deeper tmux agent-liveness probe first verifies exact window membership, then reads `#{pane_current_command}` to distinguish a running harness process from a bare idle shell.
+A `session:window` target is checked against that session's `tmux list-windows -F '#{window_name}'` inventory.
+A recorded `tmux_window_id=` target (`@<window-id>`) is checked instead against the all-session `tmux list-windows -a -F '#{window_id} #{window_name}'` inventory, and because tmux recycles window ids the verdict is decided on the task's pinned `fm-<id>` label rather than the id alone: a present id whose label no longer matches is a reused window, an absent id whose label is still live means only that the recorded id went stale, and both are `unreadable`.
+An absent id is `missing` only when the pinned label is absent from that same inventory too, so a recycled or stale id never authorizes recovery on its own.
 It classifies recognized Claude, Codex, OpenCode, and Grok process names as `alive`, common shells as `dead`, an authoritatively absent window as `missing`, unreadable state as `unreadable`, and every other process as `ambiguous`.
 Only `dead` and `missing` authorize recovery because a false dead result could launch a duplicate agent.
 

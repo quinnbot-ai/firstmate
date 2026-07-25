@@ -1743,7 +1743,7 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
         ;;
     esac
   fi
-  old_state=$(fm_backend_agent_alive "$old_backend" "$old_target")
+  old_state=$(fm_backend_agent_alive "$old_backend" "$old_target" "fm-$ID")
   case "$old_state" in
     dead) return 0 ;;
     alive|unknown)
