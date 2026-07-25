@@ -39,6 +39,10 @@
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
 # blocked when firstmate must act.
+# Every scaffold's status protocol also carries the durable-artifact decision
+# attribution rule: a firstmate steer is a firstmate decision, the captain is
+# named only when the steer explicitly says he decided or said it, and relayed
+# standing rules are cited as captain context.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
