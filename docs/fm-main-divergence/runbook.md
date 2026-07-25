@@ -58,6 +58,11 @@ Retain a fork-only safety property only when the upstream rewrite genuinely lack
 Run the full test suite and `bin/fm-lint.sh`, then ship through the normal no-mistakes pipeline.
 The resulting PR must be merged with a **merge commit**.
 Never squash or rebase this PR, because either operation removes the adopted upstream ancestry and makes the fork diverge again.
+`bin/fm-pr-merge.sh` defaults to `--squash` when the caller passes no merge method, so a resync PR merged through the fleet helper must pass an explicit `--merge`; merging it from the forge UI must likewise select the merge-commit option.
+
+```sh
+bin/fm-pr-merge.sh <id> https://github.com/quinnbot-ai/firstmate/pull/<n> -- --merge
+```
 
 `/updatefirstmate` remains intentionally origin-only through `base_mode="origin"`.
 In this remote layout that keeps the primary checkout current with the fork after the resync PR lands, but it cannot adopt `upstream/main` into the fork.

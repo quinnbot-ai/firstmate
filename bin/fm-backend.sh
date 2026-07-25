@@ -793,10 +793,14 @@ process.exit(process.argv[1] === "0" ? 1 : 2);
 #   unreadable - a target or inventory read failed or contradicted itself.
 #   unverified - this backend has no recovery classifier.
 # Only `dead` and `missing` license recovery. The tmux adapter requires a
-# successful session inventory and returns `missing` only when it omits the
-# exact window; when the recorded target is a reusable `@<window-id>` the
-# optional expected label must also still be pinned to it. The Herdr adapter
-# reuses its husk
+# successful inventory: a `session:window` target is `missing` only when that
+# session's inventory omits the exact window, while a recyclable `@<window-id>`
+# target is `missing` only when the task's pinned `fm-<id>` label is absent from
+# the all-session inventory too - a reused id, or a stale id whose pinned label
+# is still live, reads `unreadable` instead, and a caller-supplied label must
+# still be pinned to that id before its `alive`/`dead` process read is trusted
+# (bin/backends/tmux.sh's own comment owns the per-verdict table).
+# The Herdr adapter reuses its husk
 # classifier. Zellij remains unverified because its secondmate ghost-tab and
 # agent-process recovery path has not been empirically validated. Orca and cmux
 # do not support secondmate spawns.
