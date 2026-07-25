@@ -699,6 +699,52 @@ test_send_conformance_old_vs_new() {
   pass "fm-send.sh: explicit tmux targets are verified, --key stays old-compatible, and plain/slash keep the send-keys -l then Enter shape"
 }
 
+# make_dead_send_fakebin: a tmux whose target still RESOLVES (display-message
+# answers with a pane id) but whose send-keys always fails - what tmux does
+# once the endpoint's harness process is gone by the time the send lands.
+make_dead_send_fakebin() {  # <dir> -> echoes fakebin dir; logs every tmux call to $FM_TMUX_LOG
+  local fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+{ printf 'tmux'; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "${FM_TMUX_LOG:?}"
+case "${1:-}" in
+  send-keys) exit 1 ;;
+  display-message) printf 'fakepane\n'; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/tmux"
+  printf '%s\n' "$fb"
+}
+
+# fm-send.sh runs no passive liveness preflight - active send paths own backend
+# readiness ("Do not add a separate passive liveness preflight here" in
+# bin/fm-send.sh). The property that must survive that removal is the one the
+# same comment promises: a send to an endpoint with no live agent still fails
+# LOUDLY, naming how the target was resolved, instead of reporting success for
+# text nobody received.
+test_send_to_dead_endpoint_fails_loudly_with_resolution() {
+  local fb home log err rc
+  fb=$(make_dead_send_fakebin "$TMP_ROOT/send-dead")
+  home="$TMP_ROOT/send-dead-home"; mkdir -p "$home/state"
+  log="$TMP_ROOT/send-dead.log"; err="$TMP_ROOT/send-dead.err"
+  : > "$log"
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_TMUX_LOG="$log" \
+    FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 \
+    "$ROOT/bin/fm-send.sh" "sess:win" hello captain >/dev/null 2>"$err"
+  rc=$?
+  expect_code 1 "$rc" "fm-send to an endpoint whose send fails must not report success"
+  assert_contains "$(cat "$err")" "error: text not sent to sess:win" \
+    "a failed backend send must be surfaced as a hard error naming the target"
+  assert_contains "$(cat "$err")" "tried meta=$home/state/sess:win.meta" \
+    "a failed backend send must attach the attempted resolution"
+  assert_contains "$(cat "$err")" "backend=tmux; endpoint=verified" \
+    "a failed backend send must name the backend it resolved to"
+  pass "fm-send.sh: a send to an endpoint with no live agent fails loudly with the attempted resolution attached"
+}
+
 # --- old vs new: fm-peek.sh --------------------------------------------------
 
 make_peek_fakebin() {  # <dir> <capture-output> -> echoes fakebin dir
@@ -1161,6 +1207,7 @@ test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms
 test_backend_of_selector_matches_explicit_target_meta
 test_send_conformance_old_vs_new
+test_send_to_dead_endpoint_fails_loudly_with_resolution
 test_peek_conformance_old_vs_new
 test_spawn_symlinked_project_prefix_avoids_false_refusal
 test_spawn_ignores_unready_pane_cwd_before_worktree
