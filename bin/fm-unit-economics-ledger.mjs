@@ -4,19 +4,28 @@
 //
 // The private config defaults to $FM_HOME/config/unit-economics-ledger.json and
 // contains optional lane definitions for weho, content_accounts, trading, and
-// kdp. A lane's `sources` are trusted private command arrays. Each command is
-// run fresh and must print one JSON object:
+// kdp, plus an optional `maxAgeSeconds` freshness window (default 900). A
+// lane's `sources` are trusted private command arrays, each with an optional
+// `timeoutMs` (default 30000). Each command is run fresh and must print one
+// JSON object:
 //   {"observedAt":"<ISO-8601>","currency":"USD","metrics":{
 //     "metric_name":{"amount":12.3,"unit":"USD","status":"measured"}}}
-// Financial facts are published only when two fresh sources agree exactly on
-// amount and unit. A source can mark a value `estimated`; it remains estimated
-// even when corroborated. Missing, stale, malformed, or disagreeing inputs are
-// rendered unavailable, never as zero. The fixed fleet_operations lane reads
-// quota-axi --json fresh at invocation time; quota windows are measurements,
-// not financial facts, and attributable crew/session cost stays unavailable
-// unless `fleet_operations.cost_sources` supplies two corroborating private
-// helpers. The command writes a durable
-// JSON artifact and prints JSON or a captain-readable Markdown rendering.
+// A financial fact is published only when every source configured for its lane
+// returned a fresh reading, at least two of them ran distinct commands
+// (identical command arrays collapse to one and corroborate nothing), and they
+// agree exactly on amount, unit, and top-level currency. Freshness is judged
+// against the artifact's own publication timestamp, so an `observedAt` in the
+// future or older than the window is refused. A source can mark a value
+// `estimated`; it remains estimated even when corroborated. Missing, stale,
+// malformed, or disagreeing inputs are rendered unavailable, never as zero.
+// The fixed fleet_operations lane reads quota-axi --json fresh at invocation
+// time and publishes the lowest in-range (0-100) percentRemaining of a provider
+// whose own reported state is fresh; quota windows are measurements, not
+// financial facts, and attributable crew/session cost stays unavailable unless
+// `fleet_operations.cost_sources` supplies two corroborating private helpers.
+// The command writes two durable owner-only (0600) ledgers - the JSON artifact
+// at --output and the captain-readable Markdown rendering beside it under a
+// .md extension - and prints whichever one --format selects (default markdown).
 
 import { closeSync, fchmodSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';

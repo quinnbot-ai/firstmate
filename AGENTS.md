@@ -74,6 +74,7 @@ config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitig
 config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
 config/ops-inbox-cmd  optional local list-only command for a machine-level operations inbox; absent leaves only this home's `ops-inbox/` directory; see docs/configuration.md
 config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
+config/unit-economics-ledger.json  optional private unit-economics lane sources; LOCAL, gitignored; absent leaves every financial lane unavailable; see docs/configuration.md "Unit-economics ledger"
 ops-inbox/           local operational-failure event files; the bounded read-only digest and monitored layout are owned by docs/configuration.md
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
@@ -86,6 +87,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
   codex-crewmate/    task-private Codex homes for ship and scout launches; LOCAL, gitignored, owned by fm-codex-home.py and removed by teardown (docs/configuration.md)
   claude-crewmate/   optional second-account Claude isolation: captain-populated profile/ plus task-private homes for ship and scout launches; LOCAL, gitignored, dormant while profile/ is absent (docs/configuration.md)
+  unit-economics-ledger/  generated owner-only JSON and Markdown unit-economics ledgers; LOCAL, gitignored, written by bin/fm-unit-economics-ledger.mjs (docs/configuration.md)
 projects/            cloned repos; gitignored; READ-ONLY for you
 state/               volatile runtime signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
