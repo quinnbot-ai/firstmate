@@ -246,7 +246,7 @@ python3 bin/fm-claude-auth.py --attest \
   --worktree "$(pwd -P)"
 ```
 
-Run that command from the Firstmate home whose crewmates should use the second account.
+Run that sequence from the Firstmate home whose crewmates should use the second account.
 The login helper pins `CLAUDE_CONFIG_DIR` to the canonical managed profile and scrubs ambient API keys, OAuth tokens, provider switches, and alternate profile variables before it starts Claude's interactive login.
 Choose the intended organization account during that login and run the attestation only after it succeeds.
 The attestation command applies the same environment scrub before it checks `claude auth status --json`.
