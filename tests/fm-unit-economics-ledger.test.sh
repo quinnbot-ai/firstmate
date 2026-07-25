@@ -8,10 +8,37 @@ TMP_ROOT=$(fm_test_tmproot fm-unit-economics-ledger)
 BIN="$ROOT/bin/fm-unit-economics-ledger.mjs"
 NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
+file_mode() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %Lp "$1"
+  else
+    stat -c %a "$1"
+  fi
+}
+
 write_source() {
   local path=$1 payload=$2
   mkdir -p "$(dirname "$path")"
   printf '%s\n' '#!/usr/bin/env bash' "printf '%s\\n' '$payload'" > "$path"
+  chmod +x "$path"
+}
+
+write_live_source() {
+  local path=$1
+  mkdir -p "$(dirname "$path")"
+  cat > "$path" <<'JS'
+#!/usr/bin/env node
+setTimeout(() => {
+  process.stdout.write(`${JSON.stringify({
+    observedAt: new Date().toISOString(),
+    currency: 'USD',
+    metrics: {
+      pipeline_cost: { amount: 4, unit: 'USD', status: 'measured' },
+      realized_revenue: { amount: 8, unit: 'USD', status: 'measured' },
+    },
+  })}\n`);
+}, 25);
+JS
   chmod +x "$path"
 }
 
@@ -24,7 +51,7 @@ JSON
 
 write_quota() {
   local path=$1 generated=$2
-  write_source "$path" "{\"generatedAt\":\"$generated\",\"providers\":[{\"provider\":\"claude\",\"windows\":[{\"percentRemaining\":80}]},{\"provider\":\"codex\",\"windows\":[{\"percentRemaining\":60}]}]}"
+  write_source "$path" "{\"generatedAt\":\"$generated\",\"providers\":[{\"provider\":\"claude\",\"state\":{\"status\":\"fresh\",\"stale\":false,\"refreshedAt\":\"$generated\"},\"windows\":[{\"percentRemaining\":80}]},{\"provider\":\"codex\",\"state\":{\"status\":\"fresh\",\"stale\":false,\"refreshedAt\":\"$generated\"},\"windows\":[{\"percentRemaining\":60}]}]}"
 }
 
 run_ledger() {
@@ -43,21 +70,22 @@ test_zero_revenue_is_explicit_and_cross_checked() {
 
 test_unavailable_and_partial_lanes_render() {
   local config="$TMP_ROOT/unavailable/config.json" out="$TMP_ROOT/unavailable/out.json" quota="$TMP_ROOT/unavailable/quota"
-  mkdir -p "$(dirname "$config")"; printf '{}\n' > "$config"; write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
+  mkdir -p "$(dirname "$config")"; printf '{}\n' > "$config"; printf 'old\n' > "$out"; printf 'old\n' > "${out%.json}.md"; chmod 0644 "$out" "${out%.json}.md"; write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
   jq -e '[.lanes[].id] | length == 5 and index("weho") and index("fleet_operations")' "$out" >/dev/null || fail "all lanes did not render"
   jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .status=="unavailable")' "$out" >/dev/null || fail "unavailable lane was not honest"
   jq -e '.lanes[] | select(.id=="fleet_operations") | .metrics[] | select(.name=="claude_quota_window" and .amount==80 and .unit=="percent")' "$out" >/dev/null || fail "available lane did not render beside unavailable lanes"
   [ -f "${out%.json}.md" ] || fail "captain-readable companion artifact was not written"
+  [ "$(file_mode "$out")" = 600 ] && [ "$(file_mode "${out%.json}.md")" = 600 ] || fail "existing ledger artifacts were not made private"
   pass "unavailable sources and partial lane rendering stay honest"
 }
 
 test_stale_and_failed_cross_check_are_refused() {
   local old='2000-01-01T00:00:00Z' one="$TMP_ROOT/refusal/one" two="$TMP_ROOT/refusal/two" config="$TMP_ROOT/refusal/config.json" out="$TMP_ROOT/refusal/out.json" quota="$TMP_ROOT/refusal/quota"
-  write_source "$one" "{\"observedAt\":\"$old\",\"currency\":\"USD\",\"metrics\":{\"pipeline_cost\":{\"amount\":1,\"unit\":\"USD\"},\"realized_revenue\":{\"amount\":2,\"unit\":\"USD\"}}}"
-  write_source "$two" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"pipeline_cost\":{\"amount\":1,\"unit\":\"USD\"},\"realized_revenue\":{\"amount\":3,\"unit\":\"USD\"}}}"
+  write_source "$one" "{\"observedAt\":\"$old\",\"currency\":\"USD\",\"metrics\":{\"pipeline_cost\":{\"amount\":1,\"unit\":\"USD\",\"status\":\"measured\"},\"realized_revenue\":{\"amount\":2,\"unit\":\"USD\",\"status\":\"measured\"}}}"
+  write_source "$two" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"pipeline_cost\":{\"amount\":1,\"unit\":\"USD\",\"status\":\"measured\"},\"realized_revenue\":{\"amount\":3,\"unit\":\"USD\",\"status\":\"measured\"}}}"
   write_config "$config" weho "$one" "$two"; write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
   jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .source_freshness=="stale source refused")' "$out" >/dev/null || fail "stale financial source was not refused"
-  write_source "$one" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"pipeline_cost\":{\"amount\":1,\"unit\":\"USD\"},\"realized_revenue\":{\"amount\":2,\"unit\":\"USD\"}}}"
+  write_source "$one" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"pipeline_cost\":{\"amount\":1,\"unit\":\"USD\",\"status\":\"measured\"},\"realized_revenue\":{\"amount\":2,\"unit\":\"USD\",\"status\":\"measured\"}}}"
   run_ledger "$config" "$out" "$quota"
   jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .cross_check=="failed")' "$out" >/dev/null || fail "failed cross-check was presented as fact"
   pass "stale and disagreeing financial sources are refused"
@@ -65,8 +93,8 @@ test_stale_and_failed_cross_check_are_refused() {
 
 test_currency_and_units_are_preserved() {
   local one="$TMP_ROOT/units/one" two="$TMP_ROOT/units/two" config="$TMP_ROOT/units/config.json" out="$TMP_ROOT/units/out.json" quota="$TMP_ROOT/units/quota"
-  write_source "$one" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"cost_per_post\":{\"amount\":2.5,\"unit\":\"USD\"},\"posts_per_day\":{\"amount\":3,\"unit\":\"posts/day\"},\"adsense_revenue\":{\"amount\":0,\"unit\":\"USD\"},\"performance_bonus_revenue\":{\"amount\":0,\"unit\":\"USD\"}}}"
-  write_source "$two" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"cost_per_post\":{\"amount\":2.5,\"unit\":\"USD\"},\"posts_per_day\":{\"amount\":3,\"unit\":\"posts/day\"},\"adsense_revenue\":{\"amount\":0,\"unit\":\"USD\"},\"performance_bonus_revenue\":{\"amount\":0,\"unit\":\"USD\"}}}"
+  write_source "$one" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"cost_per_post\":{\"amount\":2.5,\"unit\":\"USD\",\"status\":\"measured\"},\"posts_per_day\":{\"amount\":3,\"unit\":\"posts/day\",\"status\":\"measured\"},\"adsense_revenue\":{\"amount\":0,\"unit\":\"USD\",\"status\":\"measured\"},\"performance_bonus_revenue\":{\"amount\":0,\"unit\":\"USD\",\"status\":\"measured\"}}}"
+  write_source "$two" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"cost_per_post\":{\"amount\":2.5,\"unit\":\"USD\",\"status\":\"measured\"},\"posts_per_day\":{\"amount\":3,\"unit\":\"posts/day\",\"status\":\"measured\"},\"adsense_revenue\":{\"amount\":0,\"unit\":\"USD\",\"status\":\"measured\"},\"performance_bonus_revenue\":{\"amount\":0,\"unit\":\"USD\",\"status\":\"measured\"}}}"
   write_config "$config" content_accounts "$one" "$two"; write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
   jq -e '.lanes[] | select(.id=="content_accounts") | .metrics[] | select(.name=="posts_per_day" and .unit=="posts/day" and .currency==null)' "$out" >/dev/null || fail "non-currency unit was lost"
   jq -e '.lanes[] | select(.id=="content_accounts") | .metrics[] | select(.name=="cost_per_post" and .currency=="USD")' "$out" >/dev/null || fail "currency was lost"
@@ -86,8 +114,50 @@ JSON
   pass "fleet cost requires independent sources"
 }
 
+test_live_helper_timestamps_are_fresh() {
+  local one="$TMP_ROOT/live/one" two="$TMP_ROOT/live/two" config="$TMP_ROOT/live/config.json" out="$TMP_ROOT/live/out.json" quota="$TMP_ROOT/live/quota"
+  write_live_source "$one"; write_live_source "$two"; write_config "$config" weho "$one" "$two"; write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==8 and .source_freshness=="fresh")' "$out" >/dev/null || fail "live helper timestamp was rejected as future"
+  pass "live helper timestamps are compared after invocation"
+}
+
+test_untrusted_metric_states_and_duplicate_sources_are_refused() {
+  local one="$TMP_ROOT/source-integrity/one" two="$TMP_ROOT/source-integrity/two" config="$TMP_ROOT/source-integrity/config.json" out="$TMP_ROOT/source-integrity/out.json" quota="$TMP_ROOT/source-integrity/quota"
+  write_source "$one" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"pipeline_cost\":{\"amount\":4,\"unit\":\"USD\",\"status\":\"unavailable\"},\"realized_revenue\":{\"amount\":8,\"unit\":\"USD\",\"status\":\"unavailable\"}}}"
+  write_source "$two" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"pipeline_cost\":{\"amount\":4,\"unit\":\"USD\",\"status\":\"stale\"},\"realized_revenue\":{\"amount\":8,\"unit\":\"USD\",\"status\":\"stale\"}}}"
+  write_config "$config" weho "$one" "$two"; write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .status=="unavailable")' "$out" >/dev/null || fail "untrusted metric statuses were published"
+  write_source "$one" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"pipeline_cost\":{\"amount\":4,\"unit\":\"USD\",\"status\":\"measured\"},\"realized_revenue\":{\"amount\":8,\"unit\":\"USD\",\"status\":\"measured\"}}}"
+  write_config "$config" weho "$one" "$one"; run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .cross_check=="unavailable")' "$out" >/dev/null || fail "duplicate command arrays satisfied independent corroboration"
+  pass "metric states and source identity gate corroboration"
+}
+
+test_stale_quota_provider_state_is_refused() {
+  local old='2000-01-01T00:00:00Z' config="$TMP_ROOT/quota-state/config.json" out="$TMP_ROOT/quota-state/out.json" quota="$TMP_ROOT/quota-state/quota"
+  mkdir -p "$(dirname "$config")"; printf '{}\n' > "$config"
+  write_source "$quota" "{\"generatedAt\":\"$NOW\",\"providers\":[{\"provider\":\"claude\",\"state\":{\"status\":\"stale\",\"stale\":true,\"refreshedAt\":\"$NOW\"},\"windows\":[{\"percentRemaining\":80}]},{\"provider\":\"codex\",\"state\":{\"status\":\"fresh\",\"stale\":false,\"refreshedAt\":\"$old\"},\"windows\":[{\"percentRemaining\":60}]}]}"
+  run_ledger "$config" "$out" "$quota"
+  jq -e '[.lanes[] | select(.id=="fleet_operations") | .metrics[] | select((.name=="claude_quota_window" or .name=="codex_quota_window") and .amount==null and .source_freshness=="stale source refused")] | length==2' "$out" >/dev/null || fail "stale provider state or refresh time was published"
+  pass "quota provider state and refresh time must be fresh"
+}
+
+test_malformed_source_containers_render_unavailable() {
+  local config="$TMP_ROOT/malformed/config.json" out="$TMP_ROOT/malformed/out.json" quota="$TMP_ROOT/malformed/quota"
+  mkdir -p "$(dirname "$config")"
+  printf '%s\n' '{"lanes":{"weho":{"sources":{}},"fleet_operations":{"cost_sources":"invalid"}}}' > "$config"
+  write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null)' "$out" >/dev/null || fail "malformed lane sources prevented unavailable rendering"
+  jq -e '.lanes[] | select(.id=="fleet_operations") | .metrics[] | select(.name=="attributable_crew_session_cost" and .amount==null)' "$out" >/dev/null || fail "malformed cost sources prevented unavailable rendering"
+  pass "malformed source containers render unavailable"
+}
+
 test_zero_revenue_is_explicit_and_cross_checked
 test_unavailable_and_partial_lanes_render
 test_stale_and_failed_cross_check_are_refused
 test_currency_and_units_are_preserved
 test_fleet_cost_requires_independent_sources
+test_live_helper_timestamps_are_fresh
+test_untrusted_metric_states_and_duplicate_sources_are_refused
+test_stale_quota_provider_state_is_refused
+test_malformed_source_containers_render_unavailable

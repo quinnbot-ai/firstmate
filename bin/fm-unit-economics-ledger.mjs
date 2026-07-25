@@ -18,7 +18,7 @@
 // helpers. The command writes a durable
 // JSON artifact and prints JSON or a captain-readable Markdown rendering.
 
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { closeSync, fchmodSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
@@ -57,7 +57,8 @@ function args() {
 function parseJson(text, context) { try { return JSON.parse(text); } catch { return null; } }
 function isoFresh(value, maxAgeSeconds) {
   const parsed = Date.parse(value || '');
-  return Number.isFinite(parsed) && parsed <= now.getTime() && now.getTime() - parsed <= maxAgeSeconds * 1000;
+  const referenceTime = Date.now();
+  return Number.isFinite(parsed) && parsed <= referenceTime && referenceTime - parsed <= maxAgeSeconds * 1000;
 }
 function unavailable(name, unit, reason = 'source unavailable') {
   return { name, amount: null, unit, currency: unit === 'USD' ? 'USD' : null, status: 'unavailable', source_freshness: reason, cross_check: 'unavailable' };
@@ -70,9 +71,19 @@ function runSource(source, maxAgeSeconds) {
   if (!body || typeof body !== 'object' || !body.metrics || !isoFresh(body.observedAt, maxAgeSeconds)) return { ok: false, reason: body?.observedAt ? 'stale source refused' : 'source unavailable' };
   return { ok: true, body };
 }
+function runSources(definitions, maxAgeSeconds) {
+  if (!Array.isArray(definitions)) return [];
+  const commands = new Set();
+  return definitions.flatMap((source) => {
+    const identity = Array.isArray(source?.command) ? JSON.stringify(source.command) : null;
+    if (identity && commands.has(identity)) return [];
+    if (identity) commands.add(identity);
+    return [runSource(source, maxAgeSeconds)];
+  });
+}
 function sourceMetric(source, metric) {
   const value = source.body.metrics?.[metric];
-  if (!value || !Number.isFinite(value.amount) || typeof value.unit !== 'string') return null;
+  if (!value || !['measured', 'estimated'].includes(value.status) || !Number.isFinite(value.amount) || typeof value.unit !== 'string') return null;
   return value;
 }
 function corroboratedMetric(name, unit, sources) {
@@ -93,7 +104,7 @@ function corroboratedMetric(name, unit, sources) {
 }
 function financialLane(id, config, maxAgeSeconds) {
   const spec = laneSpecs[id];
-  const sources = (config?.sources || []).map((source) => runSource(source, maxAgeSeconds));
+  const sources = runSources(config?.sources, maxAgeSeconds);
   const metrics = spec.metrics.map(([name, unit]) => corroboratedMetric(name, unit, sources));
   const sourceFreshness = metrics.find((metric) => metric.source_freshness === 'stale source refused')?.source_freshness
     || metrics.find((metric) => metric.source_freshness === 'source unavailable')?.source_freshness
@@ -112,7 +123,13 @@ function findProvider(value, wanted) {
   return null;
 }
 function quotaMetric(name, provider, generatedAt, maxAgeSeconds) {
-  if (!provider || !isoFresh(generatedAt, maxAgeSeconds)) return unavailable(name, 'percent', generatedAt ? 'stale source refused' : 'source unavailable');
+  if (!provider || !generatedAt) return unavailable(name, 'percent');
+  if (!isoFresh(generatedAt, maxAgeSeconds)) return unavailable(name, 'percent', 'stale source refused');
+  const state = provider.state;
+  if (!state || state.status !== 'fresh' || state.stale === true) {
+    return unavailable(name, 'percent', state?.status === 'stale' || state?.stale === true ? 'stale source refused' : 'source unavailable');
+  }
+  if (state.refreshedAt && !isoFresh(state.refreshedAt, maxAgeSeconds)) return unavailable(name, 'percent', 'stale source refused');
   const windows = provider.windows.filter((window) => Number.isFinite(window?.percentRemaining));
   if (!windows.length) return unavailable(name, 'percent');
   const amount = Math.min(...windows.map((window) => window.percentRemaining));
@@ -124,18 +141,33 @@ function fleetLane(config, maxAgeSeconds) {
   const generatedAt = body?.generatedAt;
   const claude = findProvider(body?.providers, ['claude', 'anthropic']);
   const codex = findProvider(body?.providers, ['codex', 'openai']);
-  const costSources = (config?.cost_sources || []).map((source) => runSource(source, maxAgeSeconds));
-  const metrics = [
+  const costSources = runSources(config?.cost_sources, maxAgeSeconds);
+  const quotaMetrics = [
     quotaMetric('claude_quota_window', claude, generatedAt, maxAgeSeconds),
     quotaMetric('codex_quota_window', codex, generatedAt, maxAgeSeconds),
+  ];
+  const metrics = [
+    ...quotaMetrics,
     corroboratedMetric('attributable_crew_session_cost', 'USD', costSources),
   ];
-  return { id: 'fleet_operations', label: laneSpecs.fleet_operations.label, source_freshness: body && isoFresh(generatedAt, maxAgeSeconds) ? 'fresh' : (body ? 'stale source refused' : 'source unavailable'), metrics };
+  const sourceFreshness = quotaMetrics.find((metric) => metric.source_freshness === 'stale source refused')?.source_freshness
+    || quotaMetrics.find((metric) => metric.source_freshness === 'source unavailable')?.source_freshness
+    || 'fresh';
+  return { id: 'fleet_operations', label: laneSpecs.fleet_operations.label, source_freshness: sourceFreshness, metrics };
 }
 function markdown(artifact) {
   const lines = [`# Fleet unit-economics ledger`, '', `Generated: ${artifact.generated_at}`, '', '| Lane | Metric | Value | Unit | Status | Freshness | Cross-check |', '| --- | --- | ---: | --- | --- | --- | --- |'];
   for (const lane of artifact.lanes) for (const metric of lane.metrics) lines.push(`| ${lane.label} | ${metric.name} | ${metric.amount === null ? 'unavailable' : metric.amount} | ${metric.unit} | ${metric.status} | ${metric.source_freshness} | ${metric.cross_check} |`);
   return `${lines.join('\n')}\n`;
+}
+function writePrivateFile(path, contents) {
+  const file = openSync(path, 'w', 0o600);
+  try {
+    fchmodSync(file, 0o600);
+    writeFileSync(file, contents);
+  } finally {
+    closeSync(file);
+  }
 }
 const options = args();
 let config = {};
@@ -144,8 +176,8 @@ const maxAgeSeconds = Number.isFinite(config.maxAgeSeconds) && config.maxAgeSeco
 const artifact = { schema: 'fleet-unit-economics-ledger.v1', generated_at: now.toISOString(), max_age_seconds: maxAgeSeconds, lanes: [] };
 for (const id of Object.keys(laneSpecs)) artifact.lanes.push(id === 'fleet_operations' ? fleetLane(config.lanes?.[id], maxAgeSeconds) : financialLane(id, config.lanes?.[id], maxAgeSeconds));
 mkdirSync(dirname(options.output), { recursive: true });
-writeFileSync(options.output, `${JSON.stringify(artifact, null, 2)}\n`, { mode: 0o600 });
+writePrivateFile(options.output, `${JSON.stringify(artifact, null, 2)}\n`);
 const rendered = markdown(artifact);
 const markdownOutput = options.output.endsWith('.json') ? `${options.output.slice(0, -5)}.md` : `${options.output}.md`;
-writeFileSync(markdownOutput, rendered, { mode: 0o600 });
+writePrivateFile(markdownOutput, rendered);
 process.stdout.write(options.format === 'json' ? `${JSON.stringify(artifact, null, 2)}\n` : rendered);
