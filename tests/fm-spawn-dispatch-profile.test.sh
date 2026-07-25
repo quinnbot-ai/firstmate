@@ -170,7 +170,7 @@ run_spawn() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_TEST_CLAUDE_KEYCHAIN=disabled \
-    FM_CLAUDE_CREW_CLI="$fakebin/claude" FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_BACKEND_LOG="$(dirname "$launchlog")/backend.log" \
     FM_FAKE_TREEHOUSE_RETURN_STATUS="${FM_FAKE_TREEHOUSE_RETURN_STATUS:-0}" \
     FM_FAKE_BACKEND_KILL_STATUS="${FM_FAKE_BACKEND_KILL_STATUS:-0}" \
@@ -1805,7 +1805,7 @@ make_claude_crew_profile() {  # <home-dir> [ready=1]
     printf '{"claudeAiOauth":{"accessToken":"test-access","refreshToken":"test-refresh"}}\n' > "$crew_profile/.credentials.json"
   }
   if [ "$ready" -ne 0 ]; then
-    FM_CLAUDE_CREW_CLI="${FAKEBIN_DIR:-$home/fakebin}/claude" \
+    PATH="${FAKEBIN_DIR:-$home/fakebin}:$PATH" \
       python3 "$ROOT/bin/fm-claude-auth.py" --attest --profile "$crew_profile" \
       --worktree "$home" >/dev/null
   fi

@@ -7,8 +7,11 @@ attestation.
 Verification runs `claude auth status --json` with the exact config directory
 and with ambient authentication and alternate-provider environment variables
 removed.
-The Claude CLI is resolved to one absolute path per process, and that same path
-runs every identity check and every exec of the CLI itself.
+The Claude CLI is the `claude` program on the launching PATH, resolved to one
+absolute path per process, and that same path runs every identity check and
+every exec of the CLI itself.
+No environment variable can name a different program: a status program that a
+caller could substitute would make attestation prove nothing.
 Status output is read with a hard in-memory cap, parsed in memory, and never
 relayed; an overlong or slow status program is killed instead of buffered.
 The login action starts the operator's explicit profile provisioning flow under
@@ -40,14 +43,6 @@ AUTH_TIMEOUT_SECONDS = 15
 ENVIRONMENT_NAME_CHARS = (
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"
 )
-
-# FM_CLAUDE_CREW_CLI points every identity check at a different status program,
-# so honoring it in a real launch would make attestation prove nothing. It is
-# accepted only when firstmate's own test harness declares itself through
-# FM_CLAUDE_CREW_FAKE_CLI, which tests/lib.sh exports and no spawn, dispatch,
-# login, or launch path sets.
-TEST_CLI_VARIABLE = "FM_CLAUDE_CREW_CLI"
-TEST_CLI_DECLARATION = "FM_CLAUDE_CREW_FAKE_CLI"
 
 # Claude authentication may be supplied by any of these ambient variables
 # without using the task-private configuration directory.
@@ -107,11 +102,6 @@ AMBIENT_AUTH_VARIABLES = {
     "CLAUDE_CODE_WEBSOCKET_AUTH_FILE_DESCRIPTOR",
 }
 
-SCRUBBED_VARIABLES = AMBIENT_AUTH_VARIABLES | {
-    TEST_CLI_VARIABLE,
-    TEST_CLI_DECLARATION,
-}
-
 
 def die(message):
     print(f"error: {message}", file=sys.stderr)
@@ -134,7 +124,7 @@ def open_directory(path, label):
 
 def scrubbed_environment(home):
     environment = os.environ.copy()
-    for name in SCRUBBED_VARIABLES:
+    for name in AMBIENT_AUTH_VARIABLES:
         environment.pop(name, None)
     environment["CLAUDE_CONFIG_DIR"] = os.path.realpath(home)
     return environment
@@ -153,17 +143,7 @@ RESOLVED_CLAUDE_CLI = []
 def claude_cli():
     if RESOLVED_CLAUDE_CLI:
         return RESOLVED_CLAUDE_CLI[0]
-    override = os.environ.get(TEST_CLI_VARIABLE)
-    if override is None:
-        candidate = "claude"
-    elif os.environ.get(TEST_CLI_DECLARATION) == "1":
-        candidate = override
-    else:
-        die(
-            f"{TEST_CLI_VARIABLE} redirects Claude account attestation and is "
-            "accepted only inside firstmate's own test harness"
-        )
-    resolved = resolved_program(candidate)
+    resolved = resolved_program("claude")
     if resolved is None:
         die("Claude account identity could not be attested")
     RESOLVED_CLAUDE_CLI.append(resolved)
@@ -453,7 +433,7 @@ def main():
         if assignment is None:
             break
         name, value = assignment
-        if name in SCRUBBED_VARIABLES or name == "CLAUDE_CONFIG_DIR":
+        if name in AMBIENT_AUTH_VARIABLES or name == "CLAUDE_CONFIG_DIR":
             die("the verified Claude command cannot set authentication variables")
         environment[name] = value
         command = command[1:]

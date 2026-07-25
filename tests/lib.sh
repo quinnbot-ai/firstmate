@@ -34,12 +34,6 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
-# Declare firstmate's own test suite to bin/fm-claude-auth.py, which otherwise
-# refuses the FM_CLAUDE_CREW_CLI fake-binary override so no spawn, dispatch, or
-# launch path can point Claude account attestation at a program that lies. Only
-# this library sets the declaration; production paths never do.
-export FM_CLAUDE_CREW_FAKE_CLI=1
-
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034

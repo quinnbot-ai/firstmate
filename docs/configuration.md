@@ -273,7 +273,8 @@ It never reads from or writes to the captain's default Claude home.
 
 Before spawn records metadata or sends a launch command, it verifies the actual task home against the profile attestation.
 The launch command repeats that verification immediately before exec and gives the worker an environment with ambient Anthropic credentials, alternate profiles, and Bedrock, Vertex, or Foundry provider switches removed.
-It resolves the Claude binary once, attests that exact path, and refuses to start any other program, so the worker cannot run a Claude that was never checked.
+It resolves the `claude` program on the launching PATH once, attests that exact path, and refuses to start any other program, so the worker cannot run a Claude that was never checked.
+No environment variable can name a different program for that check.
 It also applies the launch command's own leading environment assignments itself and refuses any assignment that would restore a scrubbed authentication variable.
 This wrapper is part of the shared launch command used by tmux, Herdr, zellij, Orca, and cmux, so every supported runtime backend applies the same proof.
 While the managed profile exists, every raw ship or scout launch command is refused, because only a verified adapter carries that exec boundary; use `--harness claude` or another adapter.

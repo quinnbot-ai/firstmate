@@ -63,10 +63,7 @@ def die(message):
 def is_macos():
     test_mode = os.environ.get("FM_TEST_CLAUDE_KEYCHAIN")
     if test_mode:
-        if (
-            test_mode != "disabled"
-            or os.environ.get("FM_SPAWN_NO_GUARD") != "1"
-        ):
+        if test_mode != "disabled" or os.environ.get("FM_SPAWN_NO_GUARD") != "1":
             die("invalid isolated Claude Keychain test mode")
         return False
     return platform.system() == "Darwin"
@@ -83,9 +80,9 @@ class MacOSKeychain:
 
     Credential bytes stay in this process. They are never encoded as text or
     passed through a child process's argv, environment, stdin, or output.
-    Every lookup, update, and removal of an existing item disables
-    authentication UI, so an item that would need authorization fails the
-    unattended task instead of raising a Keychain prompt or blocking on one.
+    Every lookup, creation, update, and removal disables authentication UI, so
+    an operation that would need authorization fails the unattended task
+    instead of raising a Keychain prompt or blocking on one.
     """
 
     SUCCESS = 0
@@ -124,10 +121,6 @@ class MacOSKeychain:
         self.core.CFDictionaryCreateMutable.restype = ctypes.c_void_p
         self.core.CFDictionarySetValue.argtypes = [
             ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-        ]
-        self.core.CFDictionaryRemoveValue.argtypes = [
             ctypes.c_void_p,
             ctypes.c_void_p,
         ]
@@ -170,9 +163,7 @@ class MacOSKeychain:
             self.core.CFRelease(value)
 
     def string(self, value):
-        result = self.core.CFStringCreateWithCString(
-            None, value.encode(), self.UTF8
-        )
+        result = self.core.CFStringCreateWithCString(None, value.encode(), self.UTF8)
         if not result:
             die("could not encode isolated Claude Keychain attributes")
         return result
@@ -251,16 +242,11 @@ class MacOSKeychain:
     def write(self, service, value):
         query, account, service_value = self.attributes(service)
         secret = self.data(value)
-        additions = self.dictionary(
-            [(self.constants["kSecValueData"], secret)]
-        )
+        additions = self.dictionary([(self.constants["kSecValueData"], secret)])
         try:
             status = self.security.SecItemUpdate(query, additions)
             self.require_unattended(status)
             if status == self.ITEM_NOT_FOUND:
-                self.core.CFDictionaryRemoveValue(
-                    query, self.constants["kSecUseAuthenticationUI"]
-                )
                 self.core.CFDictionarySetValue(
                     query, self.constants["kSecValueData"], secret
                 )
@@ -296,9 +282,7 @@ def macos_keychain():
 
 
 def clone_keychain_credential(data, source, home):
-    managed_profile = os.path.join(
-        os.path.realpath(data), "claude-crewmate", "profile"
-    )
+    managed_profile = os.path.join(os.path.realpath(data), "claude-crewmate", "profile")
     if not is_macos() or os.path.realpath(source) != managed_profile:
         return False
     keychain = macos_keychain()
@@ -442,8 +426,7 @@ def copy_regular_file(source_dir_fd, name, target_dir_fd):
 def copy_tree(source_dir_fd, target_dir_fd, top_level):
     for entry in os.listdir(source_dir_fd):
         if top_level and (
-            entry in EXCLUDED_ENTRIES
-            or (entry == ".credentials.json" and is_macos())
+            entry in EXCLUDED_ENTRIES or (entry == ".credentials.json" and is_macos())
         ):
             continue
         entry_stat = os.stat(entry, dir_fd=source_dir_fd, follow_symlinks=False)
@@ -584,7 +567,9 @@ def create_home(args):
                         home_path = os.path.join(
                             directory_path(
                                 base_fd,
-                                os.path.join(os.path.abspath(args.data), "claude-crewmate"),
+                                os.path.join(
+                                    os.path.abspath(args.data), "claude-crewmate"
+                                ),
                             ),
                             name,
                         )
@@ -635,7 +620,9 @@ def require_unreferenced_home(state, task_id, expected):
             if entry.name == f"{task_id}.meta" or not entry.name.endswith(".meta"):
                 continue
             try:
-                meta_fd = os.open(entry.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=state_fd)
+                meta_fd = os.open(
+                    entry.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=state_fd
+                )
             except OSError as error:
                 die(
                     "could not inspect task metadata before isolated Claude home removal: "
@@ -655,9 +642,10 @@ def require_unreferenced_home(state, task_id, expected):
             except UnicodeDecodeError:
                 die("task metadata is unsafe before isolated Claude home removal")
             for line in lines:
-                if line.startswith("claude_crewmate_home=") and os.path.realpath(
-                    line.partition("=")[2]
-                ) == expected:
+                if (
+                    line.startswith("claude_crewmate_home=")
+                    and os.path.realpath(line.partition("=")[2]) == expected
+                ):
                     die("isolated Claude home is referenced by another active task")
     finally:
         os.close(state_fd)

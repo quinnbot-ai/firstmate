@@ -312,10 +312,10 @@ printf '%s\n' '{"loggedIn":false}'
 exit 1
 SH
   chmod 700 "$fakebin/claude"
-  FM_CLAUDE_CREW_CLI="$fakebin/claude" python3 "$ROOT/bin/fm-claude-auth.py" \
+  PATH="$fakebin:$PATH" python3 "$ROOT/bin/fm-claude-auth.py" \
     --attest --profile "$profile" --worktree "$case_dir" >/dev/null
 
-  out=$(PATH="$fakebin:$PATH" FM_CLAUDE_CREW_CLI="$fakebin/claude" bash -c '
+  out=$(PATH="$fakebin:$PATH" bash -c '
     source "$1"
     fm_claude_crew_profile_ready "$2" "$3" "$4"
   ' _ "$ROOT/bin/fm-claude-crew-lib.sh" "$profile" "$data" "$state" 2>&1)
@@ -336,7 +336,7 @@ printf '%s\\n' '{"loggedIn":false}'
 exit 1
 SH
   chmod 700 "$fakebin/claude"
-  PATH="$fakebin:$PATH" FM_CLAUDE_CREW_CLI="$fakebin/claude" bash -c '
+  PATH="$fakebin:$PATH" bash -c '
     source "$1"
     fm_claude_crew_profile_ready "$2" "$3" "$4"
   ' _ "$ROOT/bin/fm-claude-crew-lib.sh" "$profile" "$data" "$state"

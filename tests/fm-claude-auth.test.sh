@@ -25,7 +25,7 @@ if [ "${1:-} ${2:-}" = "auth login" ]; then
     printf 'profile=%s\n' "${ANTHROPIC_PROFILE:-}"
     printf 'provider=%s\n' "${CLAUDE_CODE_USE_BEDROCK:-}"
     printf 'gateway=%s\n' "${CLAUDE_CODE_USE_GATEWAY:-}"
-    printf 'override=%s\n' "${FM_CLAUDE_CREW_CLI:-}"
+    printf 'program=%s\n' "$0"
     printf 'cwd=%s\n' "$PWD"
   } > "${FM_FAKE_LOGIN_RESULT:?}"
   exit 0
@@ -69,11 +69,18 @@ set -u
   printf 'profile=%s\n' "${ANTHROPIC_PROFILE:-}"
   printf 'provider=%s\n' "${CLAUDE_CODE_USE_BEDROCK:-}"
   printf 'gateway=%s\n' "${CLAUDE_CODE_USE_GATEWAY:-}"
-  printf 'override=%s\n' "${FM_CLAUDE_CREW_CLI:-}"
+  printf 'program=%s\n' "$0"
   printf 'cwd=%s\n' "$PWD"
 } > "${FM_FAKE_WORKER_RESULT:?}"
 SH
-cat > "$FAKEBIN/noisy-claude" <<'SH'
+# The helper execs the path it resolved from PATH, and that resolution
+# collapses the duplicate slash TMPDIR leaves in TMP_ROOT.
+FAKEBIN_EXEC=$(printf '%s' "$FAKEBIN" | sed 's://*:/:g')
+NOISYBIN="$TMP_ROOT/noisybin"
+LIARBIN="$TMP_ROOT/liarbin"
+mkdir -p "$NOISYBIN" "$LIARBIN"
+
+cat > "$NOISYBIN/claude" <<'SH'
 #!/usr/bin/env bash
 set -u
 if [ "${1:-} ${2:-} ${3:-}" = "auth status --json" ]; then
@@ -82,15 +89,22 @@ if [ "${1:-} ${2:-} ${3:-}" = "auth status --json" ]; then
 fi
 exit 2
 SH
-chmod 700 "$FAKEBIN/claude" "$FAKEBIN/worker" "$FAKEBIN/noisy-claude"
+
+cat > "$LIARBIN/claude" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","email":"crew@example.invalid","orgId":"org-test"}'
+exit 0
+SH
+chmod 700 "$FAKEBIN/claude" "$FAKEBIN/worker" "$NOISYBIN/claude" "$LIARBIN/claude"
 
 attest() {
-  FM_CLAUDE_CREW_CLI="$FAKEBIN/claude" python3 "$HELPER" \
+  PATH="$FAKEBIN:$PATH" python3 "$HELPER" \
     --attest --profile "$1" --worktree "$2"
 }
 
 verify() {
-  FM_CLAUDE_CREW_CLI="$FAKEBIN/claude" python3 "$HELPER" \
+  PATH="$FAKEBIN:$PATH" python3 "$HELPER" \
     --verify --profile "$1" --home "$2" --worktree "$3"
 }
 
@@ -103,7 +117,7 @@ test_login_pins_profile_and_scrubs_ambient_auth() {
   real_profile=$(cd "$profile" && pwd -P)
   real_case=$(cd "$case_dir" && pwd -P)
 
-  out=$(FM_CLAUDE_CREW_CLI="$FAKEBIN/claude" FM_FAKE_LOGIN_RESULT="$result" \
+  out=$(PATH="$FAKEBIN:$PATH" FM_FAKE_LOGIN_RESULT="$result" \
     ANTHROPIC_IDENTITY_TOKEN=ambient-identity \
     CLAUDE_CODE_SESSION_ACCESS_TOKEN=ambient-session \
     CLAUDE_CODE_HOST_CREDS_FILE=/tmp/ambient-host-creds \
@@ -122,7 +136,8 @@ test_login_pins_profile_and_scrubs_ambient_auth() {
   grep -Fx 'profile=' "$result" >/dev/null || fail "login inherited an alternate profile"
   grep -Fx 'provider=' "$result" >/dev/null || fail "login inherited an alternate provider"
   grep -Fx 'gateway=' "$result" >/dev/null || fail "login inherited gateway mode"
-  grep -Fx 'override=' "$result" >/dev/null || fail "login inherited the test CLI override"
+  assert_grep "program=$FAKEBIN_EXEC/claude" "$result" \
+    "login did not exec the exact Claude program resolved from PATH"
   assert_grep "cwd=$real_case" "$result" "login did not pin the Firstmate worktree"
   pass "profile login pins the managed path and scrubs ambient authentication"
 }
@@ -228,7 +243,7 @@ test_verified_exec_rechecks_and_scrubs_worker_environment() {
   real_home=$(cd "$home" && pwd -P)
   real_case=$(cd "$case_dir" && pwd -P)
 
-  out=$(FM_CLAUDE_CREW_CLI="$FAKEBIN/claude" FM_FAKE_WORKER_RESULT="$result" \
+  out=$(FM_FAKE_WORKER_RESULT="$result" \
     ANTHROPIC_API_KEY=ambient-key ANTHROPIC_AUTH_TOKEN=ambient-token \
     ANTHROPIC_IDENTITY_TOKEN=ambient-identity \
     CLAUDE_CODE_OAUTH_TOKEN=ambient-oauth \
@@ -252,37 +267,37 @@ test_verified_exec_rechecks_and_scrubs_worker_environment() {
   grep -Fx 'profile=' "$result" >/dev/null || fail "worker inherited ANTHROPIC_PROFILE"
   grep -Fx 'provider=' "$result" >/dev/null || fail "worker inherited an alternate provider"
   grep -Fx 'gateway=' "$result" >/dev/null || fail "worker inherited gateway mode"
-  grep -Fx 'override=' "$result" >/dev/null || fail "worker inherited the test CLI override"
+  assert_grep "program=$FAKEBIN_EXEC/worker" "$result" \
+    "verified exec did not start the exact program it resolved"
   assert_grep "cwd=$real_case" "$result" "verified exec did not pin the task worktree"
   pass "verified exec rechecks identity and scrubs ambient auth before the worker"
 }
 
-test_cli_override_requires_the_test_harness_declaration() {
-  local case_dir profile home out status
-  case_dir="$TMP_ROOT/override"
+test_environment_cannot_redirect_the_attested_cli() {
+  local case_dir profile logged_out out status
+  case_dir="$TMP_ROOT/redirect"
   profile="$case_dir/profile"
-  home="$case_dir/home"
-  mkdir -p "$profile" "$home"
+  logged_out="$case_dir/logged-out"
+  mkdir -p "$profile" "$logged_out"
   printf '%s\n' intended > "$profile/.fake-account"
-  printf '%s\n' intended > "$home/.fake-account"
   attest "$profile" "$case_dir" >/dev/null
 
-  out=$(env -u FM_CLAUDE_CREW_FAKE_CLI FM_CLAUDE_CREW_CLI="$FAKEBIN/claude" \
-    python3 "$HELPER" --verify --profile "$profile" --home "$home" \
+  out=$(PATH="$LIARBIN:$PATH" python3 "$HELPER" --verify --profile "$profile" \
+    --home "$logged_out" --worktree "$case_dir" 2>&1)
+  status=$?
+  expect_code 0 "$status" \
+    "the always-attesting fixture must be able to satisfy verification from PATH"
+
+  out=$(PATH="$FAKEBIN:$PATH" FM_CLAUDE_CREW_CLI="$LIARBIN/claude" \
+    FM_CLAUDE_CREW_FAKE_CLI=1 CLAUDE_CLI="$LIARBIN/claude" \
+    python3 "$HELPER" --verify --profile "$profile" --home "$logged_out" \
     --worktree "$case_dir" 2>&1)
   status=$?
-  expect_code 1 "$status" "an undeclared CLI override must not satisfy verification"
-  assert_contains "$out" "accepted only inside firstmate's own test harness" \
-    "undeclared CLI override refusal was not actionable"
-
-  out=$(env -u FM_CLAUDE_CREW_FAKE_CLI FM_CLAUDE_CREW_CLI="$FAKEBIN/claude" \
-    FM_FAKE_WORKER_RESULT="$case_dir/never.env" PATH="$FAKEBIN:$PATH" \
-    python3 "$HELPER" --verify-exec --profile "$profile" --home "$home" \
-    --worktree "$case_dir" -- worker 2>&1)
-  status=$?
-  expect_code 1 "$status" "an undeclared CLI override must not reach verified exec"
-  assert_absent "$case_dir/never.env" "undeclared CLI override still started a worker"
-  pass "the fake CLI override is refused outside the declared test harness"
+  expect_code 1 "$status" \
+    "no environment variable may point account attestation at another program"
+  assert_contains "$out" "could not be attested" \
+    "redirected-attestation refusal was not actionable"
+  pass "account attestation always runs the claude program on the launching PATH"
 }
 
 test_oversized_status_output_is_rejected() {
@@ -295,7 +310,7 @@ test_oversized_status_output_is_rejected() {
   printf '%s\n' intended > "$home/.fake-account"
   attest "$profile" "$case_dir" >/dev/null
 
-  out=$(FM_CLAUDE_CREW_CLI="$FAKEBIN/noisy-claude" python3 "$HELPER" \
+  out=$(PATH="$NOISYBIN:$PATH" python3 "$HELPER" \
     --verify --profile "$profile" --home "$home" --worktree "$case_dir" 2>&1)
   status=$?
   expect_code 1 "$status" "unbounded status output must fail closed"
@@ -315,7 +330,7 @@ test_verified_exec_bounds_environment_assignments_and_pins_the_cli() {
   printf '%s\n' intended > "$home/.fake-account"
   attest "$profile" "$case_dir" >/dev/null
 
-  out=$(FM_CLAUDE_CREW_CLI="$FAKEBIN/claude" PATH="$FAKEBIN:$PATH" \
+  out=$(PATH="$FAKEBIN:$PATH" \
     python3 "$HELPER" --verify-exec --profile "$profile" --home "$home" \
     --worktree "$case_dir" -- ANTHROPIC_API_KEY=injected \
     FM_FAKE_WORKER_RESULT="$result" worker 2>&1)
@@ -325,14 +340,14 @@ test_verified_exec_bounds_environment_assignments_and_pins_the_cli() {
     "authentication-assignment refusal was not actionable"
   assert_absent "$result" "a rejected assignment still started a worker"
 
-  out=$(FM_CLAUDE_CREW_CLI="$FAKEBIN/claude" PATH="$FAKEBIN:$PATH" \
+  out=$(PATH="$FAKEBIN:$PATH" \
     python3 "$HELPER" --verify-exec --profile "$profile" --home "$home" \
     --worktree "$case_dir" -- FM_FAKE_WORKER_RESULT="$result" worker 2>&1)
   status=$?
   expect_code 0 "$status" "verified exec should apply a safe leading assignment itself"
   assert_present "$result" "verified exec did not apply the command's own assignment"
 
-  out=$(FM_CLAUDE_CREW_CLI="$FAKEBIN/claude" FM_FAKE_WORKER_RESULT="$case_dir/pinned.env" \
+  out=$(FM_FAKE_WORKER_RESULT="$case_dir/pinned.env" \
     PATH="$FAKEBIN:$PATH" python3 "$HELPER" --verify-exec --require-verified-cli \
     --profile "$profile" --home "$home" --worktree "$case_dir" -- worker 2>&1)
   status=$?
@@ -341,7 +356,7 @@ test_verified_exec_bounds_environment_assignments_and_pins_the_cli() {
     "unattested exec-target refusal was not actionable"
   assert_absent "$case_dir/pinned.env" "unattested exec target still started"
 
-  out=$(FM_CLAUDE_CREW_CLI="$FAKEBIN/claude" FM_FAKE_LOGIN_RESULT="$case_dir/pinned.env" \
+  out=$(FM_FAKE_LOGIN_RESULT="$case_dir/pinned.env" \
     PATH="$FAKEBIN:$PATH" python3 "$HELPER" --verify-exec --require-verified-cli \
     --profile "$profile" --home "$home" --worktree "$case_dir" -- claude auth login 2>&1)
   status=$?
@@ -355,7 +370,7 @@ test_intended_account_attests_and_verifies_without_identity_output
 test_missing_auth_and_wrong_account_are_rejected
 test_unavailable_attestation_is_rejected
 test_verified_exec_rechecks_and_scrubs_worker_environment
-test_cli_override_requires_the_test_harness_declaration
+test_environment_cannot_redirect_the_attested_cli
 test_oversized_status_output_is_rejected
 test_verified_exec_bounds_environment_assignments_and_pins_the_cli
 

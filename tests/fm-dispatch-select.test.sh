@@ -315,7 +315,7 @@ SH
 }
 
 attest_fake_claude_profile() {  # <fakebin-dir> <profile-dir> <worktree>
-  FM_CLAUDE_CREW_CLI="$1/claude" python3 "$ROOT/bin/fm-claude-auth.py" \
+  PATH="$1:$PATH" python3 "$ROOT/bin/fm-claude-auth.py" \
     --attest --profile "$2" --worktree "$3" >/dev/null
 }
 
