@@ -673,11 +673,26 @@ make_routine_bootstrap_fixture() {
   } > "$home/state/sm.meta"
   fakebin=$(make_fake_toolchain "$case_dir")
   add_real_jq "$fakebin"
-  cat > "$fakebin/tmux" <<'SH'
+cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
-  display-message) printf '%s\n' codex ;;
+  display-message)
+    for arg in "$@"; do
+      case "$arg" in
+        *'#{pane_current_command}'*) printf '%s\n' codex; exit 0 ;;
+        *'#{window_name}'*) printf '%s\n' fm-sm; exit 0 ;;
+        *'#{cursor_y}'*) printf '%s\n' 0; exit 0 ;;
+      esac
+    done
+    printf '%s\n' '%1'
+    exit 0
+    ;;
+  capture-pane)
+    printf '\xe2\x94\x82 \xe2\x94\x82\n'
+    exit 0
+    ;;
   list-windows) printf '%s\n' fm-sm ;;
+  send-keys) exit 0 ;;
 esac
 exit 0
 SH
