@@ -1,0 +1,23 @@
+{
+  "maxAgeSeconds": 900,
+  "lanes": {
+    "kdp": {
+      "sources": [
+        {
+          "command": [
+            "node",
+            "bin/fm-unit-economics-kdp-source.mjs",
+            "artifact"
+          ]
+        },
+        {
+          "command": [
+            "node",
+            "bin/fm-unit-economics-kdp-source.mjs",
+            "finance-reports"
+          ]
+        }
+      ]
+    }
+  }
+}
