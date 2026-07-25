@@ -27,8 +27,8 @@ set -u
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-dispatch-select-tests)
 export FM_SPAWN_NO_GUARD=1
-export FM_TEST_CLAUDE_KEYCHAIN=disabled
 mkdir -p "$TMP_ROOT"
+BASE_PATH="$(fm_fake_claude_keychain "$TMP_ROOT/fake-host"):$BASE_PATH"
 RANDOM_ZERO="$TMP_ROOT/random-zero"
 RANDOM_ONE="$TMP_ROOT/random-one"
 printf '\000\000\000\000' > "$RANDOM_ZERO"

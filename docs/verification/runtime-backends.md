@@ -54,6 +54,9 @@ The macOS credential bridge is exercised through an in-memory Security.framework
 The fake proves distinct source and target path services, exact byte transfer, read-back mismatch refusal, missing-source refusal, creation-abort cleanup, normal teardown cleanup, and cleanup when the task-home base is already absent.
 No regression test calls the `security` command, opens the live Keychain, starts OAuth, or launches a real Claude worker.
 
+The tools under test carry no test mode of their own, so neither the Keychain surface nor the identity check can be redirected by anything a real spawn inherits.
+The suites inject their fakes only from outside: `tests/lib.sh`'s `fm_fake_claude_keychain` puts a `python3` shim on PATH that loads `bin/fm-claude-home.py` and replaces its platform predicate before `main`, the in-process Keychain fake is monkeypatched onto the imported module, and a fake `claude` binary is supplied by prepending its directory to PATH exactly as a real launch resolves that program.
+
 ```sh
 tests/fm-claude-auth.test.sh
 tests/fm-claude-home.test.sh

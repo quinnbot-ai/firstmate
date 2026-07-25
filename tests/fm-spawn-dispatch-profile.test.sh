@@ -14,7 +14,8 @@ SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
 export FM_SPAWN_NO_GUARD=1
-export FM_TEST_CLAUDE_KEYCHAIN=disabled
+PATH="$(fm_fake_claude_keychain "$TMP_ROOT/fake-host"):$PATH"
+export PATH
 
 make_spawn_fakebin() {
   local dir=$1 fakebin
@@ -169,7 +170,7 @@ run_spawn() {
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_TEST_CLAUDE_KEYCHAIN=disabled \
+    FM_SPAWN_NO_GUARD=1 \
     FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_BACKEND_LOG="$(dirname "$launchlog")/backend.log" \
     FM_FAKE_TREEHOUSE_RETURN_STATUS="${FM_FAKE_TREEHOUSE_RETURN_STATUS:-0}" \

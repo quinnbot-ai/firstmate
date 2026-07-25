@@ -13,7 +13,8 @@ set -u
 HELPER="$ROOT/bin/fm-claude-home.py"
 TMP_ROOT=$(fm_test_tmproot fm-claude-home-tests)
 export FM_SPAWN_NO_GUARD=1
-export FM_TEST_CLAUDE_KEYCHAIN=disabled
+PATH="$(fm_fake_claude_keychain "$TMP_ROOT/fake-host"):$PATH"
+export PATH
 
 make_profile() {  # <dir>
   mkdir -p "$1"

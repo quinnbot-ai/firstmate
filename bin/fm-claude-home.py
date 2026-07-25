@@ -19,6 +19,10 @@ are confirmed by reading the target entry back, so an empty, truncated,
 or leftover credential, or an item that would need interactive
 authorization, fails instead of producing a home that cannot
 authenticate or an unattended task that waits on a prompt.
+The credential surface follows the host platform alone and has no test
+mode: a macOS host always uses Keychain and never copies a plaintext
+credential file, so no environment variable a spawn could inherit can
+turn that off.
 It never reads or copies anything from the captain's own ~/.claude or
 CLAUDE_CONFIG_DIR - the persistent profile is populated only by the
 captain's explicit provisioning flow in docs/configuration.md.
@@ -61,11 +65,6 @@ def die(message):
 
 
 def is_macos():
-    test_mode = os.environ.get("FM_TEST_CLAUDE_KEYCHAIN")
-    if test_mode:
-        if test_mode != "disabled" or os.environ.get("FM_SPAWN_NO_GUARD") != "1":
-            die("invalid isolated Claude Keychain test mode")
-        return False
     return platform.system() == "Darwin"
 
 

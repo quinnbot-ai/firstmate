@@ -88,6 +88,44 @@ fm_fakebin() {
   printf '%s\n' "$fakebin"
 }
 
+# fm_fake_claude_keychain <dir> prepares <dir> as a PATH shim that runs
+# bin/fm-claude-home.py against a fake host without a Keychain, and echoes it.
+# That helper carries no test mode of its own - its credential surface follows
+# the real platform - so this injection is the only way a test can exercise the
+# file-credential path on a macOS host without touching the real Keychain, and
+# nothing a real spawn inherits can select it.
+fm_fake_claude_keychain() {
+  local dir=$1 real_python3
+  real_python3=$(command -v python3) || return 1
+  mkdir -p "$dir"
+  cat > "$dir/fm-claude-home-fake-host.py" <<'PY'
+import importlib.util
+import sys
+
+target = sys.argv[1]
+sys.argv = [target] + sys.argv[2:]
+spec = importlib.util.spec_from_file_location("fm_claude_home_fake_host", target)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.is_macos = lambda: False
+module.main()
+PY
+  cat > "$dir/python3" <<SH
+#!/usr/bin/env bash
+set -u
+case "\${1:-}" in
+  */fm-claude-home.py)
+    fm_target=\$1
+    shift
+    exec "$real_python3" "$dir/fm-claude-home-fake-host.py" "\$fm_target" "\$@"
+    ;;
+esac
+exec "$real_python3" "\$@"
+SH
+  chmod 700 "$dir/python3"
+  printf '%s\n' "$dir"
+}
+
 fm_fake_exit0() {
   local fakebin=$1 tool
   shift
