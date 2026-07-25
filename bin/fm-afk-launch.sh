@@ -82,10 +82,11 @@ fm_afk_launch_lock_owned() {
 }
 
 fm_afk_launch_lock_acquire() {
-  local i identity owner gate
+  local attempt=0 identity owner gate
   gate="$FM_AFK_LAUNCH_LOCK.reclaim"
   mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
-  for i in $(seq 1 200); do
+  while [ "$attempt" -lt 200 ]; do
+    attempt=$((attempt + 1))
     if ! fm_lock_try_acquire "$gate"; then
       sleep 0.05
       continue
@@ -295,12 +296,13 @@ fm_afk_launch_terminal_alive() {  # <backend> <target>
 }
 
 fm_afk_launch_wait_ready() {  # <backend> <target>
-  local backend=$1 target=$2 i
+  local backend=$1 target=$2 attempt=0
   if [ -n "${FM_AFK_LAUNCH_ENTRY:-}" ]; then
     fm_afk_launch_terminal_alive "$backend" "$target"
     return
   fi
-  for i in $(seq 1 100); do
+  while [ "$attempt" -lt 100 ]; do
+    attempt=$((attempt + 1))
     fm_afk_launch_terminal_alive "$backend" "$target" || return 1
     fm_daemon_lease_healthy "$FM_AFK_STATE" "$FM_AFK_DAEMON" "$FM_HOME" && return 0
     sleep 0.05
@@ -325,8 +327,9 @@ fm_afk_launch_commit_terminal() {  # <backend> <target> <extra> [already-recorde
 }
 
 fm_afk_launch_herdr_recover_created() {  # <session> <label>
-  local session=$1 label=$2 workspaces ws_count wsid panes pane_count pane i
-  for i in $(seq 1 20); do
+  local session=$1 label=$2 workspaces ws_count wsid panes pane_count pane attempt=0
+  while [ "$attempt" -lt 20 ]; do
+    attempt=$((attempt + 1))
     workspaces=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || { sleep 0.05; continue; }
     ws_count=$(printf '%s' "$workspaces" | jq --arg want "$label" \
       '[.result.workspaces[]? | select(.label == $want)] | length' 2>/dev/null) || { sleep 0.05; continue; }

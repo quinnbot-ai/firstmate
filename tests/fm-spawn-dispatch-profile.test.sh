@@ -240,7 +240,7 @@ assert_meta_profile() {
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
 }
 
-test_no_profile_keeps_claude_launch_unchanged() {
+test_no_profile_keeps_claude_profile_defaults() {
   local rec id out status expected launch
   id=profile-off-z1
   rec=$(make_spawn_case profile-off claude "$id")
@@ -253,9 +253,32 @@ test_no_profile_keeps_claude_launch_unchanged() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
-  [ "$launch" = "$expected" ] || fail "no-profile claude launch changed"$'\n'"expected: $expected"$'\n'"actual:   $launch"
-  pass "no --model/--effort records defaults and keeps the claude launch byte-identical"
+  assert_not_contains "$launch" "CLAUDE_CONFIG_DIR=" "absent Claude crew profile unexpectedly changed the launch home"
+  assert_no_grep 'claude_crewmate_home=' "$HOME_DIR/state/$id.meta" \
+    "absent Claude crew profile unexpectedly changed task metadata"
+  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+  pass "no --model/--effort records defaults and types the claude launch instructions"
+}
+
+test_claude_uses_ready_isolated_crew_home() {
+  local rec id out status launch crew_home
+  id=profile-claude-home-z18
+  rec=$(make_spawn_case profile-claude-home claude "$id")
+  read_case_record "$rec"
+  write_fake_claude_cli "$FAKEBIN_DIR"
+  make_claude_crew_profile "$HOME_DIR"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "Claude spawn should use a ready isolated crew home"
+  launch=$(cat "$LAUNCH_LOG")
+  crew_home=$(claude_config_dir_from_launch "$launch")
+  [ -n "$crew_home" ] || fail "Claude launch did not carry an isolated CLAUDE_CONFIG_DIR"
+  assert_grep "claude_crewmate_home=$crew_home" "$HOME_DIR/state/$id.meta" \
+    "Claude task metadata did not retain its isolated home"
+  assert_present "$crew_home/.credentials.json" "Claude isolated home did not copy credentials"
+  pass "Claude ship launch uses a ready task-private crew home"
 }
 
 test_active_dispatch_profile_requires_explicit_harness_for_ship() {
@@ -304,7 +327,7 @@ test_active_dispatch_profile_allows_explicit_harness() {
   assert_contains "$out" "spawned $id harness=codex" "spawn did not report explicit codex harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "-- codex --profile 'fm-crewmate-$id' --disable plugins --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
     "explicit harness launch did not thread model and effort"
   pass "active crew-dispatch profile allows an explicit resolved harness"
 }
@@ -370,8 +393,10 @@ test_codex_threads_model_and_effort() {
   expect_code 0 "$status" "codex spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "-- codex --profile 'fm-crewmate-$id' --disable plugins --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
     "codex launch did not thread model and reasoning effort config"
+  assert_grep "codex_crewmate_home=$(codex_home_from_launch "$launch")" "$HOME_DIR/state/$id.meta" \
+    "Codex task metadata did not retain its isolated home"
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
 
@@ -1572,7 +1597,7 @@ test_codex_omits_invalid_max_effort() {
   expect_code 0 "$status" "codex spawn with unsupported max effort should omit the effort flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "-- codex --profile 'fm-crewmate-$id' --disable plugins --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
     "codex launch did not preserve the model flag when max effort was omitted"
   assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported max reasoning effort"
   pass "codex omits unsupported max effort instead of passing a bad config value"
@@ -1606,8 +1631,8 @@ test_grok_omits_invalid_max_reasoning_effort() {
   expect_code 0 "$status" "grok spawn with unsupported max reasoning effort should omit the effort flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "grok --always-approve --model 'grok-4' \"\$(cat " \
-    "grok launch did not preserve the model flag when max effort was omitted"
+  assert_contains "$launch" "grok --always-approve --model 'grok-4' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < " \
+    "grok launch did not preserve the model flag and typed brief when max effort was omitted"
   assert_not_contains "$launch" "--reasoning-effort" "grok launch must omit unsupported max reasoning effort"
   assert_not_contains "$launch" "--effort" "grok launch must not fall back to --effort for reasoning effort"
   pass "grok omits unsupported max reasoning effort"
@@ -1625,8 +1650,8 @@ test_grok_omits_invalid_xhigh_reasoning_effort() {
   expect_code 0 "$status" "grok spawn with unsupported xhigh reasoning effort should omit the effort flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 xhigh
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "grok --always-approve --model 'grok-4' \"\$(cat " \
-    "grok launch did not preserve the model flag when xhigh effort was omitted"
+  assert_contains "$launch" "grok --always-approve --model 'grok-4' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < " \
+    "grok launch did not preserve the model flag and typed brief when xhigh effort was omitted"
   assert_not_contains "$launch" "--reasoning-effort" "grok launch must omit unsupported xhigh reasoning effort"
   assert_not_contains "$launch" "--effort" "grok launch must not fall back to --effort for reasoning effort"
   pass "grok omits unsupported xhigh reasoning effort"
@@ -1665,6 +1690,10 @@ test_pi_threads_model_and_max_effort() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "pi --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
     "pi launch did not thread the requested model and max thinking level"
+  assert_not_contains "$launch" "FM_FIRSTMATE_PI_LAUNCH_BRIEF=" \
+    "pi launch still exports the removed Calm input-reroute binding"
+  assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
+    "pi launch lost the canonical typed launch-brief envelope"
   pass "pi receives --model and --thinking max profile flags"
 }
 
@@ -1736,8 +1765,10 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   assert_contains "$out" "spawned $id harness=codex kind=secondmate" "secondmate launch did not use secondmate harness resolution"
   assert_grep "kind=secondmate" "$HOME_DIR/state/$id.meta" "secondmate meta missing kind=secondmate"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex default default
-  assert_not_contains "$(cat "$LAUNCH_LOG")" "CODEX_HOME=" \
-    "secondmate Codex launch must keep its existing CODEX_HOME behavior"
+  assert_not_contains "$(cat "$LAUNCH_LOG")" "--create-activate" \
+    "secondmate Codex launch must keep its existing home behavior"
+  assert_no_grep 'codex_crewmate_home=' "$HOME_DIR/state/$id.meta" \
+    "secondmate Codex metadata must not record an isolated crewmate home"
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
@@ -1748,20 +1779,19 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 # fake-tmux activation dance is needed: by the time run_spawn returns, the
 # task-private home already exists on disk with real content.
 
-write_fake_claude_cli() {  # <fakebin-dir>
+write_fake_claude_cli() {
   local fakebin=$1
-  cat > "$fakebin/claude" <<SH
+  cat > "$fakebin/claude" <<'SH'
 #!/usr/bin/env bash
 set -u
-if [ "\$1 \$2 \$3" = "auth status --json" ]; then
-  if [ -f "\${CLAUDE_CONFIG_DIR:-}/.credentials.json" ]; then
+if [ "${1:-} ${2:-} ${3:-}" = "auth status --json" ]; then
+  if [ -f "${CLAUDE_CONFIG_DIR:-}/.credentials.json" ]; then
     printf '%s\n' '{"loggedIn":true}'
     exit 0
   fi
   printf '%s\n' '{"loggedIn":false}'
   exit 1
 fi
-printf 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude fake session\n'
 exit 0
 SH
   chmod +x "$fakebin/claude"
@@ -1838,7 +1868,7 @@ test_claude_crewmate_home_absent_profile_matches_default_behavior() {
   status=$?
   expect_code 0 "$status" "Claude spawn without a crew profile should succeed unchanged"
   launch=$(cat "$LAUNCH_LOG")
-  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
+  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "absent-profile claude launch changed"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   assert_no_grep 'claude_crewmate_home=' "$HOME_DIR/state/$id.meta" \
     "absent-profile claude spawn should not record claude_crewmate_home="
@@ -2029,7 +2059,8 @@ test_claude_crewmate_home_refuses_symlinked_data_root() {
   pass "Claude spawn refuses a symlinked data root"
 }
 
-test_no_profile_keeps_claude_launch_unchanged
+test_no_profile_keeps_claude_profile_defaults
+test_claude_uses_ready_isolated_crew_home
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness

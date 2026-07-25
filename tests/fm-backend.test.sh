@@ -30,7 +30,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
-# shellcheck source=bin/fm-backend.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-tests)
@@ -98,9 +98,9 @@ BASE_REF=$(resolve_base_ref) \
 # --- shared: a pre-refactor bin/ shim --------------------------------------
 #
 # build_old_bin echoes a directory whose bin/ subdir holds the PRE-REFACTOR
-# fm-send.sh, fm-peek.sh, fm-watch.sh, fm-spawn.sh, and fm-teardown.sh
-# (extracted from BASE_REF), plus copies of every OTHER sibling script those
-# five source - all unchanged by this task, so the copied files are exactly
+# fm-send.sh, fm-peek.sh, fm-watch.sh, fm-spawn.sh, fm-teardown.sh, and any
+# changed source-library dependency (all extracted from BASE_REF), plus copies
+# of every OTHER sibling script those five entrypoints source, so those copies are exactly
 # what BASE_REF would have used too. Copies keep BASH_SOURCE-based sibling
 # resolution inside the synthetic tree on both macOS and Linux; symlinks make
 # that resolution shell/platform-dependent. FM_ROOT_OVERRIDE pointed at this dir's
@@ -112,10 +112,10 @@ BASE_REF=$(resolve_base_ref) \
 # tmux-only conformance run the tmux adapter's behavior is what is under test,
 # and that is unchanged by any later (e.g. non-tmux backend) addition to
 # fm-backend.sh's own dispatch surface.
-OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tasks-axi-lib.sh fm-pr-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-marker-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-supervision-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-decision-hold.sh fm-treehouse-lease-lib.sh fm-backend.sh"
+OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tasks-axi-lib.sh fm-pr-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-wake-lib.sh fm-classify-lib.sh fm-supervision-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-decision-hold.sh fm-treehouse-lease-lib.sh fm-backend.sh fm-operational-input.sh"
 # A pull-request merge may add a new main-only dependency that the branch's older baseline does not have yet.
 OLD_BIN_OPTIONAL_SIBLINGS="fm-pending-reply-lib.sh"
-OLD_BIN_REFACTORED="fm-send.sh fm-peek.sh fm-watch.sh fm-spawn.sh fm-teardown.sh"
+OLD_BIN_REFACTORED="fm-send.sh fm-peek.sh fm-watch.sh fm-spawn.sh fm-teardown.sh fm-marker-lib.sh"
 
 build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry point)
   local name=$1 root bin f
@@ -518,52 +518,6 @@ test_meta_get_and_backend_of_meta() {
   pass "fm_meta_get / fm_backend_of_meta: read key=value, default backend to tmux"
 }
 
-test_tmux_meta_prefers_stable_window_id() {
-  local meta=$TMP_ROOT/tmux-window-id.meta
-  fm_write_meta "$meta" "window=firstmate:fm-old-label" "tmux_window_id=@42"
-  [ "$(fm_backend_target_of_meta "$meta")" = '@42' ] \
-    || fail "tmux metadata did not prefer its captured stable window id"
-  [ "$(fm_backend_meta_for_window '@42' "$TMP_ROOT")" = "$meta" ] \
-    || fail "stable tmux window id did not resolve back to its task metadata"
-  pass "tmux metadata uses a stable window id instead of the recyclable label"
-}
-
-test_tmux_window_id_requires_pinned_label() {
-  local fakebin="$TMP_ROOT/tmux-window-id-label" status
-  mkdir -p "$fakebin"
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-case "${1:-}" in
-  display-message) printf '%s\n' "${FM_FAKE_TMUX_WINDOW_NAME:-fm-task-x1}" ;;
-  kill-window) printf '%s\n' "$*" >> "${FM_FAKE_TMUX_LOG:?}" ;;
-esac
-SH
-  chmod +x "$fakebin/tmux"
-
-  PATH="$fakebin:$PATH" fm_backend_target_exists tmux @42 fm-task-x1 \
-    || fail "matching tmux window id and label should be live"
-  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW_NAME=unrelated fm_backend_target_exists tmux @42 fm-task-x1; then
-    fail "reused tmux window id with a different label must not be live"
-  fi
-  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW_NAME=unrelated fm_backend_target_absent tmux @42 fm-task-x1; then
-    status=0
-  else
-    status=$?
-  fi
-  [ "$status" -eq 2 ] || fail "reused tmux window id must be unknown, got $status"
-  : > "$TMP_ROOT/tmux-window-id-kill.log"
-  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW_NAME=unrelated FM_FAKE_TMUX_LOG="$TMP_ROOT/tmux-window-id-kill.log" \
-    FM_BACKEND_KILL_STRICT=1 fm_backend_kill tmux @42 '' fm-task-x1; then
-    fail "strict cleanup must refuse a reused tmux window id"
-  fi
-  [ ! -s "$TMP_ROOT/tmux-window-id-kill.log" ] || fail "strict cleanup killed a reused tmux window id"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$TMP_ROOT/tmux-window-id-kill.log" \
-    FM_BACKEND_KILL_STRICT=1 fm_backend_kill tmux @42 '' fm-task-x1 \
-    || fail "strict cleanup should kill the matching task window"
-  [ -s "$TMP_ROOT/tmux-window-id-kill.log" ] || fail "matching task window was not killed"
-  pass "tmux window IDs require their pinned task label before liveness or cleanup"
-}
-
 test_resolve_selector_three_forms() {
   local state=$TMP_ROOT/resolve-state fakebin out
   mkdir -p "$state"
@@ -664,10 +618,7 @@ set -u
 case "${1:-}" in
   send-keys) exit 0 ;;
   display-message)
-    for a in "$@"; do case "$a" in
-      *cursor_y*) printf '0\n'; exit 0 ;;
-      *pane_current_command*) printf 'codex\n'; exit 0 ;;
-    esac; done
+    for a in "$@"; do case "$a" in *cursor_y*) printf '0\n'; exit 0 ;; esac; done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '\xe2\x94\x82 \xe2\x94\x82\n'; exit 0 ;;
   list-windows) exit 0 ;;
@@ -688,11 +639,9 @@ run_send_case() {  # <bin-root> <fakebin> <log> <home> -- <send args...>
 }
 
 strip_send_preflight() {  # <log>
-  local endpoint_preflight agent_preflight
-  endpoint_preflight=$'tmux\x1fdisplay-message\x1f-p\x1f-t\x1fsess:win\x1f#{pane_id}'
-  agent_preflight=$'tmux\x1fdisplay-message\x1f-p\x1f-t\x1fsess:win\x1f#{pane_current_command}'
-  awk -v endpoint_preflight="$endpoint_preflight" -v agent_preflight="$agent_preflight" \
-    '$0 != endpoint_preflight && $0 != agent_preflight { print }' "$1"
+  local preflight
+  preflight=$'tmux\x1fdisplay-message\x1f-p\x1f-t\x1fsess:win\x1f#{pane_id}'
+  awk -v preflight="$preflight" '$0 != preflight { print }' "$1"
 }
 
 test_send_conformance_old_vs_new() {
@@ -717,16 +666,22 @@ test_send_conformance_old_vs_new() {
     || fail "fm-send --key: tmux command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/send-diff-key.txt")"
   assert_contains "$(cat "$log_new")" $'\x1f''Escape' "fm-send --key did not send the named key"
 
+  # Cases 2 and 3 pin the TEXT send shape directly instead of diffing it against
+  # the baseline. The --key path above is still comparable, but the baseline
+  # fm-send.sh guarded every non---key send with a passive agent-liveness
+  # preflight that this tree deliberately dropped for upstream's shape ("Do not
+  # add a separate passive liveness preflight here" in bin/fm-send.sh - active
+  # send paths own backend readiness). That baseline therefore refuses before it
+  # types anything, so an old-vs-new equivalence check on the text paths would
+  # only re-assert the preflight this tree removed on purpose. The command shape
+  # those diffs existed to protect is asserted verbatim below.
+
   # Case 2: plain text (0.3s settle, no popup).
-  run_send_case "$old_bin" "$fb" "$log_old" "$home" -- "sess:win" hello captain
-  rc_old=$?
   run_send_case "$ROOT" "$fb" "$log_new" "$home" -- "sess:win" hello captain
   rc_new=$?
-  expect_code "$rc_old" "$rc_new" "fm-send plain text: old vs new exit code"
-  strip_send_preflight "$log_old" > "$filtered_old"
-  strip_send_preflight "$log_new" > "$filtered_new"
-  diff -u "$filtered_old" "$filtered_new" > "$TMP_ROOT/send-diff-plain.txt" 2>&1 \
-    || fail "fm-send plain text: tmux command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/send-diff-plain.txt")"
+  expect_code 0 "$rc_new" "fm-send plain text: explicit tmux target should send"
+  assert_contains "$(cat "$log_new")" $'\x1f''display-message'$'\x1f''-p'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''#{pane_id}' \
+    "fm-send plain text did not verify the explicit tmux target before sending"
   assert_contains "$(cat "$log_new")" $'\x1f''send-keys'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''-l'$'\x1f''hello captain' \
     "fm-send did not send the literal text with send-keys -l"
   assert_contains "$(cat "$log_new")" $'\x1f''Enter' "fm-send did not submit with Enter"
@@ -734,17 +689,60 @@ test_send_conformance_old_vs_new() {
   # Case 3: a slash command still opens the popup-settle path (verified
   # elsewhere in tests/fm-send-popup-settle.test.sh) and still ends in the
   # same tmux command shape: send-keys -l, then a retried Enter.
-  run_send_case "$old_bin" "$fb" "$log_old" "$home" -- "sess:win" /some-skill
-  rc_old=$?
   run_send_case "$ROOT" "$fb" "$log_new" "$home" -- "sess:win" /some-skill
   rc_new=$?
-  expect_code "$rc_old" "$rc_new" "fm-send /skill: old vs new exit code"
-  strip_send_preflight "$log_old" > "$filtered_old"
-  strip_send_preflight "$log_new" > "$filtered_new"
-  diff -u "$filtered_old" "$filtered_new" > "$TMP_ROOT/send-diff-slash.txt" 2>&1 \
-    || fail "fm-send /skill: tmux command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/send-diff-slash.txt")"
+  expect_code 0 "$rc_new" "fm-send /skill: explicit tmux target should send"
+  assert_contains "$(cat "$log_new")" $'\x1f''send-keys'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''-l'$'\x1f''/some-skill' \
+    "fm-send /skill did not send the literal text with send-keys -l"
+  assert_contains "$(cat "$log_new")" $'\x1f''Enter' "fm-send /skill did not submit with Enter"
 
-  pass "fm-send.sh: explicit tmux targets are verified, while --key/plain/slash send command shape stays old-compatible"
+  pass "fm-send.sh: explicit tmux targets are verified, --key stays old-compatible, and plain/slash keep the send-keys -l then Enter shape"
+}
+
+# make_dead_send_fakebin: a tmux whose target still RESOLVES (display-message
+# answers with a pane id) but whose send-keys always fails - what tmux does
+# once the endpoint's harness process is gone by the time the send lands.
+make_dead_send_fakebin() {  # <dir> -> echoes fakebin dir; logs every tmux call to $FM_TMUX_LOG
+  local fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+{ printf 'tmux'; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "${FM_TMUX_LOG:?}"
+case "${1:-}" in
+  send-keys) exit 1 ;;
+  display-message) printf 'fakepane\n'; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/tmux"
+  printf '%s\n' "$fb"
+}
+
+# fm-send.sh runs no passive liveness preflight - active send paths own backend
+# readiness ("Do not add a separate passive liveness preflight here" in
+# bin/fm-send.sh). The property that must survive that removal is the one the
+# same comment promises: a send to an endpoint with no live agent still fails
+# LOUDLY, naming how the target was resolved, instead of reporting success for
+# text nobody received.
+test_send_to_dead_endpoint_fails_loudly_with_resolution() {
+  local fb home log err rc
+  fb=$(make_dead_send_fakebin "$TMP_ROOT/send-dead")
+  home="$TMP_ROOT/send-dead-home"; mkdir -p "$home/state"
+  log="$TMP_ROOT/send-dead.log"; err="$TMP_ROOT/send-dead.err"
+  : > "$log"
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_TMUX_LOG="$log" \
+    FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 \
+    "$ROOT/bin/fm-send.sh" "sess:win" hello captain >/dev/null 2>"$err"
+  rc=$?
+  expect_code 1 "$rc" "fm-send to an endpoint whose send fails must not report success"
+  assert_contains "$(cat "$err")" "error: text not sent to sess:win" \
+    "a failed backend send must be surfaced as a hard error naming the target"
+  assert_contains "$(cat "$err")" "tried meta=$home/state/sess:win.meta" \
+    "a failed backend send must attach the attempted resolution"
+  assert_contains "$(cat "$err")" "backend=tmux; endpoint=verified" \
+    "a failed backend send must name the backend it resolved to"
+  pass "fm-send.sh: a send to an endpoint with no live agent fails loudly with the attempted resolution attached"
 }
 
 # --- old vs new: fm-peek.sh --------------------------------------------------
@@ -813,6 +811,8 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
+  # fm-spawn.sh leases the worktree with `treehouse get --lease` and refuses a
+  # blank reply, so this stub must print the leased path a real treehouse would.
   cat > "$fb/treehouse" <<SH
 #!/usr/bin/env bash
 case "\${1:-}" in
@@ -860,10 +860,10 @@ run_spawn_case() {  # <bin-root> <fakebin> <log> <state> <data> <config> <proj> 
 # worktree-discovery poll used to mistake an UNMOVED pane for one that had
 # already left the project, handing validate_spawn_worktree the project's own
 # directory as "the worktree" and tripping its false isolation refusal.
-# make_spawn_symlink_fakebin's tmux stub returns a supplied first pane cwd, then
-# the real worktree path from the second poll onward, so these tests fail loudly
-# if the PROJ_ABS/PROJ_ABS_REAL canonicalization or unready-cwd handling in
-# bin/fm-spawn.sh regresses.
+# make_spawn_symlink_fakebin's tmux stub returns an unmoved project path on the
+# first pane_current_path poll, then the real worktree path from the second poll
+# onward, so this test fails loudly if the PROJ_ABS/PROJ_ABS_REAL
+# canonicalization in bin/fm-spawn.sh ever regresses.
 make_spawn_symlink_fakebin() {  # <dir> <initial-project-path> <worktree-path> -> echoes fakebin dir
   local dir=$1 initial_path=$2 wt=$3 fb="$1/fakebin" counter="$1/poll-count"
   mkdir -p "$fb"
@@ -889,6 +889,8 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
+  # fm-spawn.sh leases the worktree with `treehouse get --lease` and refuses a
+  # blank reply, so this stub must print the leased path a real treehouse would.
   cat > "$fb/treehouse" <<SH
 #!/usr/bin/env bash
 case "\${1:-}" in
@@ -946,6 +948,52 @@ test_spawn_symlinked_project_prefix_avoids_false_refusal() {
 test_spawn_ignores_unready_pane_cwd_before_worktree() {
   run_spawn_symlink_case unready unready
   pass "fm-spawn.sh: ignores an unready non-worktree cwd before treehouse enters the worktree"
+}
+
+test_tmux_meta_prefers_stable_window_id() {
+  local meta=$TMP_ROOT/tmux-window-id.meta
+  fm_write_meta "$meta" "window=firstmate:fm-old-label" "tmux_window_id=@42"
+  [ "$(fm_backend_target_of_meta "$meta")" = '@42' ] \
+    || fail "tmux metadata did not prefer its captured stable window id"
+  [ "$(fm_backend_meta_for_window '@42' "$TMP_ROOT")" = "$meta" ] \
+    || fail "stable tmux window id did not resolve back to its task metadata"
+  pass "tmux metadata uses a stable window id instead of the recyclable label"
+}
+
+test_tmux_window_id_requires_pinned_label() {
+  local fakebin="$TMP_ROOT/tmux-window-id-label" status
+  mkdir -p "$fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  display-message) printf '%s\n' "${FM_FAKE_TMUX_WINDOW_NAME:-fm-task-x1}" ;;
+  kill-window) printf '%s\n' "$*" >> "${FM_FAKE_TMUX_LOG:?}" ;;
+esac
+SH
+  chmod +x "$fakebin/tmux"
+
+  PATH="$fakebin:$PATH" fm_backend_target_exists tmux @42 fm-task-x1 \
+    || fail "matching tmux window id and label should be live"
+  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW_NAME=unrelated fm_backend_target_exists tmux @42 fm-task-x1; then
+    fail "reused tmux window id with a different label must not be live"
+  fi
+  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW_NAME=unrelated fm_backend_target_absent tmux @42 fm-task-x1; then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -eq 2 ] || fail "reused tmux window id must be unknown, got $status"
+  : > "$TMP_ROOT/tmux-window-id-kill.log"
+  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW_NAME=unrelated FM_FAKE_TMUX_LOG="$TMP_ROOT/tmux-window-id-kill.log" \
+    FM_BACKEND_KILL_STRICT=1 fm_backend_kill tmux @42 '' fm-task-x1; then
+    fail "strict cleanup must refuse a reused tmux window id"
+  fi
+  [ ! -s "$TMP_ROOT/tmux-window-id-kill.log" ] || fail "strict cleanup killed a reused tmux window id"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$TMP_ROOT/tmux-window-id-kill.log" \
+    FM_BACKEND_KILL_STRICT=1 fm_backend_kill tmux @42 '' fm-task-x1 \
+    || fail "strict cleanup should kill the matching task window"
+  [ -s "$TMP_ROOT/tmux-window-id-kill.log" ] || fail "matching task window was not killed"
+  pass "tmux window IDs require their pinned task label before liveness or cleanup"
 }
 
 # --- old vs new: fm-teardown.sh ----------------------------------------------
@@ -1156,14 +1204,15 @@ test_backend_validate_refuses_unknown
 test_backend_source_shell_portable
 test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta
-test_tmux_meta_prefers_stable_window_id
-test_tmux_window_id_requires_pinned_label
 test_resolve_selector_three_forms
 test_backend_of_selector_matches_explicit_target_meta
 test_send_conformance_old_vs_new
+test_send_to_dead_endpoint_fails_loudly_with_resolution
 test_peek_conformance_old_vs_new
 test_spawn_symlinked_project_prefix_avoids_false_refusal
 test_spawn_ignores_unready_pane_cwd_before_worktree
+test_tmux_meta_prefers_stable_window_id
+test_tmux_window_id_requires_pinned_label
 test_teardown_conformance_old_vs_new
 test_spawn_refuses_unknown_backend_flag
 test_spawn_refuses_codex_app_backend_flag

@@ -23,11 +23,12 @@
 # meta, get a longer pre-Enter settle so completion popups do not swallow Enter.
 #
 # From-firstmate marker: when the resolved target is a task selector whose meta
-# records kind=secondmate, the text is prefixed with the from-firstmate marker
-# (bin/fm-marker-lib.sh) so the secondmate routes its reply via its status file
-# or a status-pointed doc instead of stranding it in chat the main firstmate
-# never reads. A crewmate/scout target, an explicit backend-target escape-hatch
-# target, and the --key path are never marked - their behavior is unchanged.
+# records kind=secondmate, the text uses the live-charter-compatible
+# from-firstmate carrier owned by bin/fm-operational-input.sh so the secondmate
+# routes its reply via its status file or a status-pointed doc instead of
+# stranding it in chat the main firstmate never reads. A crewmate/scout target,
+# an explicit backend-target escape-hatch target, and the --key path are never
+# marked - their behavior is unchanged.
 #
 # Parent-owned pending-reply expectation: every newly marked secondmate request
 # also receives a privacy-safe correlation id and a durable parent record under
@@ -213,13 +214,11 @@ fi
 # unknown and treated as non-codex (the safe default that keeps the fast path).
 # The target's BACKEND comes from selector meta, from matching an explicit target
 # back to recorded meta, or from strict explicit-target shape validation.
-if [ "${1:-}" != "--key" ]; then
-  agent_liveness=$(fm_backend_agent_alive "$TARGET_BACKEND" "$T" 2>/dev/null || printf unknown)
-  if [ "$agent_liveness" != alive ]; then
-    echo "error: refusing to send to $T ($TARGET_BACKEND harness agent is $agent_liveness; tried $RESOLUTION_TRIED)" >&2
-    exit 1
-  fi
-fi
+# Do not add a separate passive liveness preflight here. Active send paths own
+# backend readiness: herdr, for example, must route through its session-aware
+# target_ready path before sending, while zellij verifies pane labels in its
+# send implementation. A failed backend send is still surfaced below as a hard
+# error with the attempted resolution attached.
 
 if [ "${1:-}" = "--key" ]; then
   if ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$2" "$EXPECTED_LABEL"; then

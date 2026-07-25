@@ -426,41 +426,44 @@ fm_backend_expected_label_of_selector() {  # <raw-target> <state-dir>
 }
 
 # fm_backend_source: source the named backend's adapter file, once per shell.
+# Each adapter is an independently linted canonical root. The /dev/null source
+# boundaries keep runtime dispatch from importing all five adapter ASTs into
+# every dispatcher consumer while preserving the runtime source operations.
 fm_backend_source() {  # <name>
   local name=$1
   fm_backend_validate "$name" || return 1
   case "$name" in
     tmux)
       if [ -z "${_FM_BACKEND_TMUX_SOURCED:-}" ]; then
-        # shellcheck source=bin/backends/tmux.sh
+        # shellcheck source=/dev/null
         . "$FM_BACKEND_LIB_DIR/backends/tmux.sh" || return 1
         _FM_BACKEND_TMUX_SOURCED=1
       fi
       ;;
     herdr)
       if [ -z "${_FM_BACKEND_HERDR_SOURCED:-}" ]; then
-        # shellcheck source=bin/backends/herdr.sh
+        # shellcheck source=/dev/null
         . "$FM_BACKEND_LIB_DIR/backends/herdr.sh" || return 1
         _FM_BACKEND_HERDR_SOURCED=1
       fi
       ;;
     zellij)
       if [ -z "${_FM_BACKEND_ZELLIJ_SOURCED:-}" ]; then
-        # shellcheck source=bin/backends/zellij.sh
+        # shellcheck source=/dev/null
         . "$FM_BACKEND_LIB_DIR/backends/zellij.sh" || return 1
         _FM_BACKEND_ZELLIJ_SOURCED=1
       fi
       ;;
     orca)
       if [ -z "${_FM_BACKEND_ORCA_SOURCED:-}" ]; then
-        # shellcheck source=bin/backends/orca.sh
+        # shellcheck source=/dev/null
         . "$FM_BACKEND_LIB_DIR/backends/orca.sh" || return 1
         _FM_BACKEND_ORCA_SOURCED=1
       fi
       ;;
     cmux)
       if [ -z "${_FM_BACKEND_CMUX_SOURCED:-}" ]; then
-        # shellcheck source=bin/backends/cmux.sh
+        # shellcheck source=/dev/null
         . "$FM_BACKEND_LIB_DIR/backends/cmux.sh" || return 1
         _FM_BACKEND_CMUX_SOURCED=1
       fi
@@ -667,7 +670,7 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
   case "$backend" in
     tmux)
       fm_backend_source tmux || return 1
-      fm_backend_tmux_target_ready "$target" "$expected_label"
+      fm_backend_tmux_target_ready "$target" "$expected_label" 2>/dev/null
       ;;
     herdr)
       fm_backend_source herdr || return 1
@@ -780,32 +783,45 @@ process.exit(process.argv[1] === "0" ? 1 : 2);
   esac
 }
 
-# fm_backend_agent_alive: CONFIDENT liveness of a live harness-agent PROCESS
-# under <target>, distinct from fm_backend_target_exists's pane-PRESENCE-only
-# check above. A secondmate agent that has exited leaves its backend endpoint
-# alive as a bare shell; fm_backend_target_exists reports that shell as
-# "alive" because the pane itself still exists, which is exactly the gap
-# bin/fm-bootstrap.sh's session-start secondmate-liveness sweep exists to
-# close (AGENTS.md "Session start"). Prints one of:
-#   alive   - a real agent process is confirmed running.
-#   dead    - CONFIDENTLY not an agent: a bare shell (tmux) or a
-#             structurally-gone/no-agent-registered pane (herdr).
-#   unknown - anything ambiguous, unreadable, or unverified for this backend.
-# Tmux and herdr classify their native process state directly.
-# Zellij, Orca, and cmux report unknown until they have an equally reliable
-# native process classifier.
-# Callers must treat unknown exactly like an unreadable target: NEVER license
-# an action from it alone - the secondmate-liveness sweep gates a respawn on
-# `dead` only, precisely so a momentary read glitch can never duplicate a
-# live supervisor.
-fm_backend_agent_alive() {  # <backend> <target> [expected-label]
+# fm_backend_agent_state: the single recovery-grade agent/endpoint state
+# contract. It is deliberately richer than fm_backend_target_exists's cheap
+# pane-presence read and prints exactly one of:
+#   alive      - a verified harness agent is running.
+#   dead       - the endpoint exists but confidently has no agent.
+#   missing    - the recorded endpoint is authoritatively absent.
+#   ambiguous  - the endpoint exists but its process cannot be attributed.
+#   unreadable - a target or inventory read failed or contradicted itself.
+#   unverified - this backend has no recovery classifier.
+# Only `dead` and `missing` license recovery. The tmux adapter requires a
+# successful inventory: a `session:window` target is `missing` only when that
+# session's inventory omits the exact window, while a recyclable `@<window-id>`
+# target is `missing` only when the task's pinned `fm-<id>` label is absent from
+# the all-session inventory too - a reused id, or a stale id whose pinned label
+# is still live, reads `unreadable` instead, and a caller-supplied label must
+# still be pinned to that id before its `alive`/`dead` process read is trusted
+# (bin/backends/tmux.sh's own comment owns the per-verdict table).
+# The Herdr adapter reuses its husk
+# classifier. Zellij remains unverified because its secondmate ghost-tab and
+# agent-process recovery path has not been empirically validated. Orca and cmux
+# do not support secondmate spawns.
+fm_backend_agent_state() {  # <backend> <target> [expected-label]
   local backend=$1 target=$2 expected_label=${3:-}
-  fm_backend_source "$backend" || { printf 'unknown'; return 0; }
+  fm_backend_source "$backend" || { printf 'unverified'; return 0; }
   case "$backend" in
-    tmux) fm_backend_tmux_agent_alive "$target" "$expected_label" ;;
-    herdr) fm_backend_herdr_agent_alive "$target" ;;
-    zellij|orca|cmux) printf 'unknown'; return 0 ;;
-    *) printf 'unknown'; return 0 ;;
+    tmux) fm_backend_tmux_agent_state "$target" "$expected_label" ;;
+    herdr) fm_backend_herdr_agent_state "$target" ;;
+    *) printf 'unverified' ;;
+  esac
+}
+
+# Backward-compatible three-state view for existing callers. An
+# authoritatively missing endpoint is confidently not a live agent, while every
+# ambiguous, unreadable, or unverified result stays unknown.
+fm_backend_agent_alive() {  # <backend> <target> [expected-label]
+  case "$(fm_backend_agent_state "$1" "$2" "${3:-}")" in
+    alive) printf 'alive' ;;
+    dead|missing) printf 'dead' ;;
+    *) printf 'unknown' ;;
   esac
 }
 

@@ -18,7 +18,7 @@ The tracked code root contains the shared instruction, skill, documentation, wor
 `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
 The producing PR and X helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-crew-state.sh` owns current-state reconciliation.
 Wake, watcher, away-mode, and X-specific state mechanics remain with their named scripts and reference sections rather than being duplicated into one exhaustive state tree here.
-`docs/watcher-continuity.md` owns the identity-checked watcher-arm and away-mode daemon lease contract, including its private lock artifacts and durable lost-relay wake.
+`docs/watcher-continuity.md` owns the identity-checked watcher-arm and away-mode daemon lease contract, including its private lock artifacts, its `FM_ARM_LEASE_GRACE`, `FM_ARM_LEASE_TICK`, and `FM_DAEMON_LEASE_GRACE` tunables, and the durable lost-relay wake.
 
 `bin/fm-session-start.sh`'s header is the single owner of session-start ordering, composed commands, digest contents, and the digest's startup mechanism.
 `docs/sessionstart-nudge.md` owns the native session-open adapter mechanics that nudge the digest command.
@@ -36,6 +36,7 @@ The first non-empty, non-comment line is the command, and firstmate runs it thro
 The command must be trusted local code and print only its current unhandled critical listing, starting with `unacked_criticals: <count>`; its exit status is displayed but does not suppress its output because some list commands use a non-zero status when criticals exist.
 The command is intentionally operator-owned and generic, so firstmate does not encode a machine-specific inbox path or acknowledgement implementation.
 The watcher fingerprints both sources, wakes immediately for a changed inbox while a regular task is in flight, and checks the same fingerprint on its existing heartbeat cadence otherwise.
+`bin/fm-ops-inbox-lib.sh`'s header owns the discovery and fingerprint mechanics; the tunables below bound them.
 `FM_SESSION_START_OPS_INBOX_LIMIT` bounds both the home-event paths and configured-command output lines in the digest, defaulting to 5.
 `FM_SESSION_START_OPS_INBOX_SCAN_LIMIT` bounds retained home-event records inspected at startup, defaulting to 256, and reports an explicit sampled overflow when reached.
 `FM_OPS_INBOX_TIMEOUT` bounds each configured command invocation to 10 seconds by default.
@@ -43,6 +44,14 @@ The watcher fingerprints both sources, wakes immediately for a changed inbox whi
 `FM_OPS_INBOX_MARKER_LIMIT` bounds home-event records selected for each watcher fingerprint, defaulting to 64.
 `FM_OPS_INBOX_MARKER_SCAN_LIMIT` bounds the home-event records considered before that selection, defaulting to 256.
 When either limit is exceeded, the fingerprint records an overflow sentinel and the inbox must be retained below both limits before individual changes can be surfaced again.
+
+## Pi Calm preference (config/calm)
+
+The Pi Calm extension stores the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root derived from the extension path, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.
+The only values it writes are `on` and `off`, each followed by one newline; an absent, unreadable, or unrecognized value defaults to off.
+The `/calm` command replaces the file atomically before changing live presentation, so a failed write leaves the current choice unchanged rather than claiming persistence.
+The extension reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons.
+This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
@@ -66,19 +75,20 @@ For spawn-capable adapters, the runtime session-provider backend controls where 
 Treehouse remains the worktree provider for tmux, herdr, zellij, and cmux, since herdr, zellij, and cmux are session providers only; Orca provides both the task worktree and terminal endpoint.
 New spawns choose the backend in this order: an explicit `--backend` flag firstmate passes when it spawns a task, then `FM_BACKEND`, then the first non-empty line of local gitignored `config/backend`, then runtime auto-detection from `$TMUX`, `HERDR_ENV=1`, or cmux runtime signals, then default `tmux`.
 If more than one runtime marker is present, detection resolves innermost-first: `$TMUX` is checked before `HERDR_ENV=1`, which is checked before cmux's primary `CMUX_WORKSPACE_ID` marker and its documented fallback signals - tmux or herdr started from inside a cmux terminal is the innermost, currently-executing layer, while cmux itself (a terminal application, not a nestable multiplexer) is always checked last.
-See [`docs/cmux-backend.md`](cmux-backend.md#runtime-auto-detection) for why cmux can be selected when `CMUX_WORKSPACE_ID` is absent.
+See [`docs/cmux-backend.md`](cmux-backend.md#runtime-detection) for why cmux can be selected when `CMUX_WORKSPACE_ID` is absent.
 Auto-detected herdr or cmux prints a stderr notice naming `config/backend` and `--backend tmux` as opt-outs; auto-detected tmux stays silent to preserve existing default behavior.
 Zellij and Orca are never auto-detected; select them by putting the name in a local `config/backend` file, by exporting `FM_BACKEND=<name>`, or by telling the first mate in chat.
 Any value other than `tmux`, `herdr`, `zellij`, `orca`, or `cmux` is rejected until another adapter is implemented and verified.
 `fm-spawn.sh` accepts `tmux`, `herdr`, `zellij`, `orca`, and `cmux` for ship and scout tasks; `backend=orca` and `backend=cmux` both still refuse `--secondmate` until secondmate launch semantics are designed for each.
 `codex-app` is not an accepted runtime backend yet; [`docs/codex-app-backend.md`](codex-app-backend.md) owns the Codex App boundary.
-The session-start secondmate liveness sweep uses a deeper `fm_backend_agent_alive` probe where verified.
-Today that probe can classify tmux and herdr secondmate endpoints as `alive`, `dead`, or `unknown`; zellij, Orca, and cmux report `unknown` until their own agent-process classifiers are verified.
+The session-start secondmate liveness sweep uses the recovery-grade `fm_backend_agent_state` classifier where verified.
+The comment above that function in `bin/fm-backend.sh` is the single owner of its detailed state contract and recovery authorization.
+The compatibility helper `fm_backend_agent_alive` continues to collapse those detailed results to `alive`, `dead`, or `unknown` for older callers.
 A herdr spawn additionally version-gates against the installed `herdr` binary's protocol and requires `jq`, refusing loudly on an incompatible or missing installation.
 A zellij spawn additionally version-gates against the installed `zellij` binary's version and requires `jq`, refusing loudly when either is missing or the version is older than 0.44.
 A cmux spawn additionally version-gates against the installed `cmux` binary's version, requires `jq`, and requires the control socket to be reachable and accessible (see [`docs/cmux-backend.md`](cmux-backend.md) "Setup" for the one-time socket-access configuration this needs; Automation mode is the recommended socket control mode, with Password mode supported via `config/cmux-socket-password`), refusing loudly and non-retryably on a `cmuxOnly`/unauthenticated socket.
 A backend spawn refusal from a missing dependency, version gate, or unauthenticated socket is terminal for that selected backend; firstmate surfaces it as a blocker instead of silently retrying another backend.
-Task meta records `backend=` only for a non-default backend; an absent `backend=` means `tmux`.
+Task meta records `backend=` only for a non-default backend; an absent `backend=` means `tmux`, preserving existing default-path meta files.
 A tmux task additionally records `tmux_window_id=`, the stable tmux window id captured at spawn, with `window=fm-<id>` kept as the shared firstmate alias.
 A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
 A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
@@ -93,7 +103,7 @@ These five sentences are the single owner of the task-selector vocabulary; backe
 `fm-teardown.sh <id>` takes a task id directly and uses the same recorded backend target fields after loading `state/<id>.meta`.
 By default, Herdr workspaces are derived from `FM_HOME`: the primary home uses `firstmate`, and a secondmate home marked by `.fm-secondmate-home` uses `2ndmate-<secondmate-id>`.
 The default-container spawn, list-live, and recovery paths read that label from the active home, so a secondmate's own crewmates stay inside that secondmate home's herdr space.
-The optional local `config/herdr-presentation-spaces` presence flag instead enables Herdr's default-off disposable single-task visual projection; [`docs/herdr-backend.md`](herdr-backend.md#optional-disposable-single-task-presentation-spaces) owns its behavior, safety limits, and recovery contract.
+The optional local `config/herdr-presentation-spaces` presence flag instead enables Herdr's default-off disposable single-task visual projection; [Optional presentation spaces](herdr-backend.md#optional-presentation-spaces) owns its behavior, safety limits, and recovery contract.
 The flag is default-off and inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
 For normal herdr operations, `HERDR_SESSION` selects the named session, but destructive test cleanup must not rely on `HERDR_SESSION` alone.
 Use the explicit guarded cleanup path described in [`docs/herdr-backend.md`](herdr-backend.md) instead of `herdr server stop`.
@@ -102,7 +112,7 @@ Zellij has no per-home workspace split: primary and secondmate tasks share that 
 Use the guarded cleanup path described in [`docs/zellij-backend.md`](zellij-backend.md) instead of `kill-all-sessions` or `delete-all-sessions`.
 cmux has no session layer at all - one workspace per task, in whatever cmux window is open - and its socket password (when configured) is read from local, gitignored `config/cmux-socket-password` under the effective config directory, never committed.
 The caller-facing label remains `fm-<id>`, but the actual cmux workspace title is scoped by the active `FM_HOME` readable label plus a short hash of the resolved `FM_ROOT` path as `fm-<home-label>-<id>`.
-Test cleanup must use the guarded path described in [`docs/cmux-backend.md`](cmux-backend.md)'s "Test safety" section, never enumerate-and-close every workspace.
+Test cleanup must use the guarded path in [`docs/cmux-backend.md`](cmux-backend.md#current-operation-and-safety), never enumerate-and-close every workspace.
 The `config/backend` file is not inherited by secondmate homes.
 
 ## Away-mode supervisor backend (FM_SUPERVISOR_BACKEND / FM_SUPERVISOR_TARGET)
@@ -124,7 +134,7 @@ Beyond the durable `state/.subsuper-inject-wedged` marker and the tmux status-li
 Directives are `off` (a position-independent kill switch that disables every active alert), `auto`/`default`, `osascript` (macOS Notification Center banner), `herdr` (herdr UI notification), and `command:<cmd>` (run `<cmd>` via `sh -c`, summary on `$1` and stdin).
 An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisely so a wedged away-mode primary is never silent, and it fires at most once per max-defer window after a genuine wedge.
 A missing or failing channel logs and falls through to the next, never crashing the daemon.
-See [`wedge-alarm.md`](wedge-alarm.md) for the channel reference and macOS verification evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
+See [`wedge-alarm.md`](wedge-alarm.md) for the current channel reference, [`verification/supervision.md`](verification/supervision.md#wedge-alarm-channels) for active evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
 ## Gate defaults (.no-mistakes.yaml)
 
@@ -132,7 +142,7 @@ The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and pins `c
 That evidence policy is specific to the firstmate repo: target projects may legitimately commit `.no-mistakes/evidence/` from their own no-mistakes pipeline, but firstmate keeps `.no-mistakes/` local and CI rejects tracked entries under that path.
 It does not set `commands.test` to a complete `tests/*.test.sh` walk.
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for the firstmate-specific local test policy and entry points.
-Portable shard evidence and coverage rules are in [fm-test-portable-shards.md](fm-test-portable-shards.md), and [herdr-backend.md](herdr-backend.md) owns the real-Herdr lane's verification and isolation rationale.
+Portable shard evidence and coverage rules are in [fm-test-portable-shards.md](fm-test-portable-shards.md); [herdr-backend.md](herdr-backend.md#destructive-lab-safety) owns the real-Herdr lane's isolation boundary, and [runtime-backends.md](verification/runtime-backends.md#herdr) owns active evidence.
 
 ## Captain Preferences (data/captain.md / data/captain-shared.md)
 
@@ -208,41 +218,38 @@ Those inherited values are defaults and rules only; `fm-spawn` still permits a c
 `config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
 For Pi secondmate launches, `fm-spawn.sh` starts Pi with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
+
+### Codex crewmate isolation (data/codex-crewmate/)
+
 For Codex ship and scout launches, `fm-spawn.sh` creates one private task home under `data/codex-crewmate/` and runs the process with that directory as `CODEX_HOME`.
-The helper copies only `auth.json` and `models_cache.json` from the captain's current `CODEX_HOME`, or `~/.codex` when it is unset, then writes an isolated configuration with `model_auto_compact_token_limit = 150000`, disabled plugins, no MCP configuration, and an untrusted task worktree.
-Project-local `.codex/config.toml` is deliberately excluded from those launches, so it cannot re-enable MCP servers or plugins.
-The captain's Codex home is never modified, and Codex secondmate launches intentionally keep their existing home behavior.
-The task metadata records `codex_crewmate_home=`, and normal teardown removes that managed home after endpoint cleanup succeeds.
-If a spawn or teardown cannot confirm endpoint cleanup, firstmate preserves the metadata and managed home for a later safe recovery attempt.
+The helper copies only `auth.json` and `models_cache.json` from the captain's current `CODEX_HOME`, or `~/.codex` when it is unset, then writes an isolated configuration with the task worktree untrusted and plugins and MCP configuration disabled.
+Project-local `.codex/config.toml` is excluded from these launches so it cannot re-enable MCP servers or plugins.
+The captain's Codex home is never modified, and Codex secondmate launches keep their existing home behavior.
+Task metadata records `codex_crewmate_home=`, and normal teardown removes that managed home only after endpoint cleanup succeeds.
+If a spawn or teardown cannot confirm endpoint cleanup, Firstmate preserves the metadata and managed home for a later safe recovery attempt.
 
 ### Claude crewmate second-account isolation (data/claude-crewmate/)
 
-`data/claude-crewmate/profile/` is an optional, local, gitignored directory that lets Claude ship and scout crewmates authenticate as a second Anthropic account instead of sharing the captain's own seat account (`~/.claude`, or `$CLAUDE_CONFIG_DIR` when set).
-It is captain-private, populated exactly once, and never written to by any firstmate script - only by the captain's own login, run directly against that directory:
+`data/claude-crewmate/profile/` is an optional, local, gitignored directory that lets Claude ship and scout crewmates authenticate as a second Anthropic account instead of sharing the captain's seat account.
+It is captain-private, populated by the captain's own login, and never written to by a Firstmate script.
 
+```sh
+mkdir -p data/claude-crewmate/profile \
+  && chmod 700 data/claude-crewmate data/claude-crewmate/profile \
+  && CLAUDE_CONFIG_DIR="$(pwd)/data/claude-crewmate/profile" claude auth login
 ```
-mkdir -p data/claude-crewmate/profile
-CLAUDE_CONFIG_DIR="$(pwd)/data/claude-crewmate/profile" claude auth login
-```
 
-Run that from the firstmate home whose crewmates should use the second account (the primary home or a secondmate home); a secondmate's own `data/claude-crewmate/profile/` is independent of the primary's.
-The feature stays dormant when `data/claude-crewmate/profile/` is absent, leaving every Claude launch and its task metadata byte-identical to the default-account behavior.
-`bin/fm-claude-crew-lib.sh`'s `fm_claude_crew_profile_ready` is the single readiness check, shared by `fm-spawn.sh` and `fm-dispatch-select.sh`: it confirms `claude auth status --json` for both the profile and a disposable task-private copy, then removes that copy before returning.
-A present profile that cannot authenticate its copy is an invalid crew configuration, so `fm-spawn.sh` refuses the Claude launch before it can open an onboarding or login pane.
-
-For Claude ship and scout launches, once the profile is ready, `fm-spawn.sh` creates one private task home under `data/claude-crewmate/` (`bin/fm-claude-home.py`) and runs the process with that directory as `CLAUDE_CONFIG_DIR`.
-The helper copies the profile directory's contents - including `.claude.json`'s completed-onboarding state and any supported `.credentials.json` file - into the fresh task-private home, excluding `settings.json`, `settings.local.json`, `.mcp.json`, `CLAUDE.md`, `commands/`, `agents/`, `hooks/`, `plugins/`, and `skills/`, and stripping every `mcpServers` section (user scope and per-project) from the copied `.claude.json` itself, so a crew launch can never inherit global MCP servers, plugins, or other customization surface even if the persistent profile is someday touched by more than a bare login.
-On macOS, Claude Code 2.1.216 stores OAuth credentials in Keychain service `Claude Code-credentials-<hash>`, where `<hash>` is the first eight hexadecimal characters of SHA-256 over the canonical `CLAUDE_CONFIG_DIR` path, under the local macOS username.
-The helper clones only the firstmate profile's matching entry into the new task-home-derived service and removes that entry during abort cleanup and normal teardown, so no task token accumulates after its managed home is gone.
-When reading the source entry it also accepts an older-format `Claude Code-<hash>` service name, so a profile logged in by a pre-2.1.216 Claude still seeds the isolated task credential; the cloned target is always written in the current `Claude Code-credentials-<hash>` format.
-Both the clone and its removal are non-interactive and confirmed by reading the target entry back, so a credential that is missing, empty, or unequal to its source fails the spawn instead of handing the crewmate an unauthenticated home, and a removal that leaves the entry behind fails loudly instead of silently leaving a task token behind.
-It never reads from or writes to the captain's own `~/.claude` or default `CLAUDE_CONFIG_DIR` - the whole point is account separation, and seat credentials are never copied into the crew profile.
-The task metadata records `claude_crewmate_home=`, and normal teardown removes that managed home after endpoint cleanup succeeds, mirroring the Codex managed-home safety contract above (a spawn or teardown that cannot confirm endpoint cleanup preserves the metadata and managed home for later safe recovery).
-Claude secondmate launches are unaffected and keep their existing `CLAUDE_CONFIG_DIR` behavior.
-
-When `data/claude-crewmate/profile/` is ready, `bin/fm-dispatch-select.sh`'s `quota-balanced` selection (below) also reads the Claude vendor's quota through that profile, so vendor selection compares the account crew tasks will actually burn rather than the captain's seat account; an absent profile reads the default environment exactly as before, and a present but not-ready profile drops the Claude candidates from that scoring - failing loudly and naming the profile when that leaves nothing launchable - because `fm-spawn.sh` would refuse those launches anyway.
-`quota-axi` 0.1.7 has no per-profile flag (`quota-axi --help` lists only `--provider`/`--json`/`--full`/`--allow-keychain-prompt`), so this is done by setting `CLAUDE_CONFIG_DIR` on the `quota-axi` invocation itself, never by forking or patching `quota-axi`.
-Verified 2026-07-20, `quota-axi` 0.1.7: `quota-axi --provider claude --json` under the default environment returns the logged-in seat's live reading (`"source": "oauth"`, fresh windows); the identical command with `CLAUDE_CONFIG_DIR` pointed at an empty, unauthenticated directory returns `"source": "cache"` with `"state": {"status": "stale", "error": "Claude sign-in required", ...}` - it does not silently fall back to reading the seat's live credentials, but it does fall back to a stale global cache rather than failing outright, which is exactly why `fm-dispatch-select.sh` only ever sets `CLAUDE_CONFIG_DIR` for this call after `fm_claude_crew_profile_ready` has already confirmed the profile is logged in, not unconditionally.
+Run that command from the Firstmate home whose crewmates should use the second account.
+The feature stays dormant when the profile is absent, leaving Claude launch behavior unchanged.
+`fm_claude_crew_profile_ready` confirms that both the profile and a disposable task-private copy can authenticate, and a present profile that fails that check blocks the spawn before opening a login pane.
+Once the profile is ready, `fm-spawn.sh` creates one private task home under `data/claude-crewmate/` and runs the process with that directory as `CLAUDE_CONFIG_DIR`.
+The helper excludes settings, MCP configuration, instructions, commands, agents, hooks, plugins, and skills from the copy, and strips every `mcpServers` section from the copied `.claude.json`.
+On macOS, the helper clones only the profile's matching Claude Code Keychain credential into the task-home-derived service and removes that task credential during abort cleanup or normal teardown.
+It never reads from or writes to the captain's default Claude home.
+Task metadata records `claude_crewmate_home=`, and failed endpoint cleanup preserves that metadata and managed home for later safe recovery.
+Claude secondmate launches keep their existing `CLAUDE_CONFIG_DIR` behavior.
+When the profile is ready, quota-balanced dispatch reads Claude quota through that profile so selection measures the account the crew task will use.
+When the profile is present but not ready, dispatch removes Claude candidates and names the invalid profile rather than selecting a launch that `fm-spawn.sh` would refuse.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
@@ -300,7 +307,6 @@ This section is the single owner of that universal toolchain list; backend guide
 In that list, no-mistakes runs the validation pipeline, gh-axi, chrome-devtools-axi, and lavish-axi cover GitHub, browser, and rich-review operations, and tasks-axi plus quota-axi back backlog mutations and quota-aware array dispatch.
 The per-backend delta is required only for the backend resolved from `FM_BACKEND`, then `config/backend`, then runtime auto-detection, then default `tmux`, so a home is never told to install a tool an inactive backend or feature would need.
 That delta is owned in code by `fm_backend_required_tools` in `bin/fm-backend.sh`: the resolved backend's own session-provider CLI (`tmux`, `herdr`, `zellij`, `orca`, or `cmux`), `jq` for the JSON-emitting experimental adapters (`herdr`, `zellij`, `cmux`) whose spawn and liveness paths parse the backend's JSON output, and the `treehouse` worktree provider for every session-provider-only backend (`tmux`, `herdr`, `zellij`, `cmux`).
-For those treehouse-backed backends, bootstrap also requires `treehouse get --lease` support and reports an older installation as missing.
 Backend tool availability uses the adapter's own executable resolver, so bootstrap and spawn agree on supported non-`PATH` locations such as cmux's bundled CLI.
 An unknown resolved backend emits `BACKEND_INVALID` and blocks dispatch instead of silently dropping its dependency delta or falling back to tmux.
 Orca provides both the task worktree and terminal endpoint (see "Runtime backend" above), so `backend=orca` requires only `orca` on top of the universal toolchain and skips both `treehouse` and every other backend's session CLI.
@@ -323,7 +329,7 @@ The locked session-start bootstrap step also runs the guarded local secondmate s
 It emits `SECONDMATE_SYNC:` only when a home was skipped for an actionable sync reason, inheritance failed, or a divergent shared captain-preference copy was quarantined.
 When a running home advances and its loaded instruction surface (`AGENTS.md`, `bin/`, or `.agents/skills/`) changed, bootstrap sends the re-read nudge itself through the stable `fm-<id>` selector and reports the exact completed send as `BOOTSTRAP_INFO:`.
 If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
-The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a live secondmate endpoint is skipped or respawn fails; already-live and successfully respawned endpoints are handled silently.
+The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a registered secondmate is skipped or its relaunch fails; already-live and successfully relaunched secondmates are handled silently.
 For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.
 It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `herdr-presentation-spaces`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
 When an allowlisted config item changes for an already-running home, it sends the literal-content reread pointer described in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); unchanged allowlisted config sends no pointer unless a previous delivery is pending.
@@ -421,9 +427,9 @@ FM_BACKEND=             # optional runtime backend override for new spawns; tmux
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)
 FM_BACKEND_HERDR_COMPOSER_LINES=20  # herdr-only: tail lines scanned by composer-state guard/fallback paths; idle-baseline submit confirmation uses agent-state
 FM_BACKEND_HERDR_IDLE_RE='^Type a message\.\.\.$'  # herdr-only: empty-composer placeholder regex after shared ghost extraction plus border and prompt stripping
-FM_BACKEND_HERDR_BARE_PROMPT_RE='^(❯|›)'  # herdr-only: verified agent glyphs recognized as an UNBORDERED (bare) composer row, e.g. claude's ❯ or codex's ›; alternation prevents a non-UTF-8 locale from byte-wise matching a box corner with the same leading byte; shell glyphs remain unknown rather than empty, and de-emphasised ghost/placeholder text (dim or dark-truecolor) after an agent prompt reads empty via the shared fm_composer_strip_ghost (docs/herdr-backend.md "Incident (2026-07-08)", "Incident (2026-07-10)")
-FM_BACKEND_HERDR_PI_COMPOSER_MAX_LINES=8  # herdr-only: maximum rows admitted between Pi's native-identity-corroborated separator pair; taller or ambiguous candidates stay unknown (docs/herdr-backend.md "Incident (2026-07-14)")
-FM_BACKEND_HERDR_SUBMIT_POLLS=6  # herdr-only: agent-state samples spread across each Enter attempt's budget when confirming a submit (docs/herdr-backend.md "Native agent-state submit confirmation")
+FM_BACKEND_HERDR_BARE_PROMPT_RE='^[❯›]'  # herdr-only: verified agent glyphs recognized as an UNBORDERED (bare) composer row, e.g. Claude's ❯ or Codex's ›; shell glyphs remain unknown rather than empty, and de-emphasised ghost/placeholder text reads empty through shared fm_composer_strip_ghost (docs/herdr-backend.md "Composer and injection safety")
+FM_BACKEND_HERDR_PI_COMPOSER_MAX_LINES=8  # herdr-only: maximum rows admitted between Pi's native-identity-corroborated separator pair; taller or ambiguous candidates stay unknown (docs/herdr-backend.md "Composer and injection safety")
+FM_BACKEND_HERDR_SUBMIT_POLLS=6  # herdr-only: agent-state samples spread across each Enter attempt's budget when confirming a submit (docs/herdr-backend.md "Current transport behavior")
 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0.6  # herdr-only: minimum per-Enter confirmation budget before polling agent-state after an idle baseline
 FM_BACKEND_ORCA_COMPOSER_LINES=200  # orca-only: terminal-read lines scanned to locate the composer row for submit verification
 FM_BACKEND_ORCA_IDLE_RE='^Type a message\.\.\.$'  # orca-only: empty-composer placeholder regex after border/prompt stripping
@@ -460,12 +466,9 @@ FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting X-mode completion follow-ups (7 days)
 FMX_FOLLOWUP_MAX_COUNT=3   # local cap on X-mode completion follow-ups per linked mention
 FM_LOCK_STALE_AFTER=2   # seconds before dead-pid lock records can be reclaimed; mid-acquire locks keep at least 2s grace
-FM_GUARD_GRACE=300      # seconds before guard warnings and the primary turn-end guard treat watcher-beacon or relay/daemon-lease health as stale
+FM_GUARD_GRACE=300      # seconds before guard warnings, arm health checks, and the primary turn-end guard treat a watcher beacon, arm-relay lease, or away-mode daemon lease as stale
 FM_ARM_CONFIRM_TIMEOUT=10   # seconds fm-watch-arm waits to confirm a fresh watcher before reporting FAILED
 FM_ARM_ATTACH_POLL=0.5  # seconds between checks while fm-watch-arm is attached to an existing healthy watcher cycle
-FM_ARM_LEASE_GRACE=45   # seconds an identity-checked watch-arm relay heartbeat may be stale before a bound watcher fails closed
-FM_ARM_LEASE_TICK=5     # seconds between watch-arm relay lease heartbeats while the relay waits
-FM_DAEMON_LEASE_GRACE=45   # seconds an identity-checked away-mode daemon heartbeat may be stale before AFK start/recovery reclaims its lease
 FM_OPENCODE_ARM_READY_TIMEOUT_MS=12000   # milliseconds the OpenCode primary watcher plugin waits for an arm attempt to report started, healthy, wake, or failure
 FM_PI_ARM_READY_TIMEOUT_MS=12000   # milliseconds the Pi watcher extension waits for a successor arm to report started or attached
 FM_WATCH_ARM_RETIRE_TIMEOUT_MS=1000   # milliseconds Pi/OpenCode wait for an unready successor arm to exit before abandoning retries

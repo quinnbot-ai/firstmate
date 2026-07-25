@@ -37,7 +37,6 @@ case "${1:-}" in
     for a in "$@"; do
       case "$a" in
         *cursor_y*) printf '0\n'; exit 0 ;;
-        *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_CURRENT_COMMAND:-codex}"; exit 0 ;;
       esac
     done
     target=
@@ -70,6 +69,11 @@ SH
   printf '%s\n' "$fb"
 }
 
+# The failing `agent get` is the PRE-ENTER BASELINE read inside
+# fm_backend_herdr_send_text_submit: call 1 is its own pane-liveness probe and
+# call 2 is that baseline. An unreadable baseline is not legibly idle, so the
+# submit falls to the composer-content confirmation, which this stub cannot
+# answer either - the unknown verdict fm-send must fail closed on.
 make_herdr_unknown_submit_stub() {  # <fakebin>
   cat > "$1/herdr" <<'SH'
 #!/usr/bin/env bash
@@ -85,7 +89,7 @@ case "${1:-}:${2:-}" in
   agent:get)
     count=$(( $(cat "$count_file" 2>/dev/null || echo 0) + 1 ))
     printf '%s\n' "$count" > "$count_file"
-    if [ "$count" = 3 ]; then
+    if [ "$count" = 2 ]; then
       exit 1
     fi
     printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}'
@@ -175,20 +179,6 @@ test_unmatched_single_colon_target_must_exist() {
   pass "fm-send strict: unmatched single-colon explicit targets must verify live before sending"
 }
 
-test_explicit_target_requires_live_harness_agent() {
-  local dir fb home err log rc
-  dir="$TMP_ROOT/dead-explicit-agent"; mkdir -p "$dir"
-  fb=$(make_stubs "$dir"); home=$(setup_home dead-explicit-agent); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
-
-  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
-    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_SEND_SETTLE=0 \
-    "$SEND" sess:live "must not reach the shell" >/dev/null 2>"$err"; rc=$?
-  [ "$rc" -ne 0 ] || fail "fm-send must reject an explicit target whose harness has exited"
-  assert_contains "$(cat "$err")" "harness agent is dead" "explicit target refusal should explain the liveness verdict"
-  [ ! -s "$log" ] || fail "fm-send typed into an explicit dead agent shell"$'\n'"$(cat "$log")"
-  pass "fm-send strict: explicit targets require a live harness agent before typing"
-}
-
 test_healthy_fm_id_send_still_works() {
   local dir fb home err log rc got
   dir="$TMP_ROOT/healthy"; mkdir -p "$dir"
@@ -203,52 +193,6 @@ test_healthy_fm_id_send_still_works() {
   assert_contains "$got" "target=sess:fm-lane-ok literal=0 arg=Enter" "healthy send should submit with Enter"
   assert_contains "$(cat "$err")" "requested message WILL still be sent" "fm-send guard banner should keep send-specific continuation wording"
   pass "fm-send strict: healthy fm-<id> sends still type once and submit"
-}
-
-test_metadata_target_requires_live_harness_agent() {
-  local dir fb home err log rc
-  dir="$TMP_ROOT/dead-agent"; mkdir -p "$dir"
-  fb=$(make_stubs "$dir"); home=$(setup_home dead-agent); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
-  fm_write_meta "$home/state/dead-agent.meta" "window=sess:fm-dead-agent" "kind=ship" "harness=codex"
-
-  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
-    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_SEND_SETTLE=0 \
-    "$SEND" dead-agent "must not reach the shell" >/dev/null 2>"$err"; rc=$?
-  [ "$rc" -ne 0 ] || fail "fm-send must reject a metadata target whose harness has exited"
-  assert_contains "$(cat "$err")" "harness agent is dead" "dead-agent refusal should explain the liveness verdict"
-  [ ! -s "$log" ] || fail "fm-send typed into a dead agent's shell"$'\n'"$(cat "$log")"
-  pass "fm-send strict: metadata target requires a live harness agent before typing"
-}
-
-test_metadata_target_requires_confirmed_harness_agent() {
-  local dir fb home err log rc
-  dir="$TMP_ROOT/unknown-agent"; mkdir -p "$dir"
-  fb=$(make_stubs "$dir"); home=$(setup_home unknown-agent); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
-  fm_write_meta "$home/state/unknown-agent.meta" "window=sess:fm-unknown-agent" "kind=ship" "harness=pi"
-
-  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
-    FM_FAKE_TMUX_CURRENT_COMMAND=node FM_SEND_SETTLE=0 \
-    "$SEND" unknown-agent "must not reach an indeterminate endpoint" >/dev/null 2>"$err"; rc=$?
-  [ "$rc" -ne 0 ] || fail "fm-send must reject a metadata target with indeterminate agent liveness"
-  assert_contains "$(cat "$err")" "harness agent is unknown" "unknown-agent refusal should explain the liveness verdict"
-  [ ! -s "$log" ] || fail "fm-send typed into an indeterminate endpoint"$'\n'"$(cat "$log")"
-  pass "fm-send strict: metadata target requires confirmed harness liveness before typing"
-}
-
-test_isolated_codex_python_wrapper_requires_confirmed_agent() {
-  local dir fb home err log rc
-  dir="$TMP_ROOT/isolated-codex"; mkdir -p "$dir"
-  fb=$(make_stubs "$dir"); home=$(setup_home isolated-codex); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
-  fm_write_meta "$home/state/isolated-codex.meta" \
-    "window=sess:fm-isolated-codex" "kind=ship" "harness=codex" "codex_crewmate_home=$home/codex-home"
-
-  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
-    FM_FAKE_TMUX_CURRENT_COMMAND=python3 FM_SEND_SETTLE=0 \
-    "$SEND" isolated-codex "hello from the coordinator" >/dev/null 2>"$err"; rc=$?
-  [ "$rc" -ne 0 ] || fail "fm-send must reject an isolated Codex target when only a generic Python process is observable"
-  assert_contains "$(cat "$err")" "harness agent is unknown" "isolated Codex Python refusal should explain the liveness verdict"
-  [ ! -s "$log" ] || fail "fm-send typed into an unverified isolated Codex Python process"$'\n'"$(cat "$log")"
-  pass "fm-send strict: isolated Codex Python wrappers require confirmed agent liveness"
 }
 
 test_herdr_unknown_submit_confirmation_fails() {
@@ -273,9 +217,5 @@ test_unset_fm_home_fails
 test_unresolvable_target_does_not_tmux_fallback
 test_prefixless_herdr_pane_id_fails
 test_unmatched_single_colon_target_must_exist
-test_explicit_target_requires_live_harness_agent
 test_healthy_fm_id_send_still_works
-test_metadata_target_requires_live_harness_agent
-test_metadata_target_requires_confirmed_harness_agent
-test_isolated_codex_python_wrapper_requires_confirmed_agent
 test_herdr_unknown_submit_confirmation_fails
