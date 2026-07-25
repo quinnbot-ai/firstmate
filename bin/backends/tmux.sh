@@ -202,11 +202,18 @@ fm_backend_tmux_agent_state() {  # <target> [expected-label]
     *) printf 'unreadable'; return 0 ;;
   esac
   if [ -z "$session" ]; then
-    windows=$(LC_ALL=C tmux list-windows -a -F '#{window_id} #{window_name}' 2>&1)
+    if windows=$(LC_ALL=C tmux list-windows -a -F '#{window_id} #{window_name}' 2>&1); then
+      inventory_status=0
+    else
+      inventory_status=$?
+    fi
   else
-    windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>&1)
+    if windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>&1); then
+      inventory_status=0
+    else
+      inventory_status=$?
+    fi
   fi
-  inventory_status=$?
   if [ "$inventory_status" -ne 0 ]; then
     case "$windows" in
       *"can't find session:"*|*"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
