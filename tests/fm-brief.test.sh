@@ -343,6 +343,37 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
 }
 
+test_decision_attribution_renders_all_status_protocols() {
+  local home kind id brief
+  home="$TMP_ROOT/decision-attribution-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout secondmate; do
+    id="brief-decision-attribution-$kind"
+    case "$kind" in
+      ship)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate >/dev/null 2>&1
+        ;;
+      scout)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+        ;;
+      secondmate)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1
+        ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_grep "Attribute every decision in a durable artifact" "$brief" \
+      "$kind brief omitted durable-decision attribution"
+    assert_grep "A decision received from a firstmate steer is a firstmate decision" "$brief" \
+      "$kind brief omitted firstmate-steer attribution"
+    assert_grep "Name the captain only when the steer explicitly says the captain himself decided or said it" "$brief" \
+      "$kind brief omitted the captain-only attribution boundary"
+    assert_grep 'cite relayed rules as "per the captain' "$brief" \
+      "$kind brief omitted relayed-context attribution"
+  done
+  pass "fm-brief.sh: every status protocol attributes decisions faithfully"
+}
+
 test_scout_and_secondmate_load_decision_hold_policy() {
   local home scout charter
   home="$TMP_ROOT/decision-policy-home"
@@ -395,5 +426,6 @@ test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
 test_pause_verb_override_renders_all_brief_scaffolds
+test_decision_attribution_renders_all_status_protocols
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
