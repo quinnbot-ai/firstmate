@@ -297,6 +297,12 @@ Malformed JSON, an empty or malformed rule/default array, an unverified harness,
 Because the spawn backstop is gated by file presence, any fallback path after a missing match, validation error, or missing `jq` still passes a resolved harness explicitly until the file is fixed or removed.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+## Unit-economics ledger (config/unit-economics-ledger.json)
+
+`bin/fm-unit-economics-ledger.mjs` reads this optional gitignored configuration and writes its generated artifact under the active home's ignored `data/unit-economics-ledger/` directory.
+Each financial lane names two or more trusted local read-only helper command arrays under `sources`, while `fleet_operations.cost_sources` optionally supplies the same corroboration for attributable crew/session cost.
+The script header owns the source schema, freshness, corroboration, output, and status contract so this setup reference does not duplicate it.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
