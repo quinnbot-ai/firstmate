@@ -424,7 +424,7 @@ secondmate_liveness_sweep() {
   # primary-only no-op there. Mid-session liveness remains explicitly out of
   # scope and requires a separate periodic signal.
   [ -d "$STATE" ] || return 0
-  local meta id window harness backend target agent_state out cause
+  local meta id window harness backend target expected_label agent_state out cause
   SECONDMATE_RESPAWNED_IDS=""
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
@@ -436,7 +436,8 @@ secondmate_liveness_sweep() {
     backend=$(fm_backend_of_meta "$meta")
     target=$(fm_backend_target_of_meta "$meta")
     [ -n "$target" ] || target="$window"
-    agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
+    expected_label="fm-$id"
+    agent_state=$(fm_backend_agent_state "$backend" "$target" "$expected_label" 2>/dev/null) || agent_state=unreadable
     case "$harness" in
       claude|codex|opencode|pi|grok) ;;
       *)
@@ -452,7 +453,7 @@ secondmate_liveness_sweep() {
       dead|missing)
         if [ "$agent_state" = dead ]; then
           cause="confirmed agent absence on existing endpoint"
-          fm_backend_kill "$backend" "$target" 2>/dev/null || true
+          fm_backend_kill "$backend" "$target" '' "$expected_label" 2>/dev/null || true
         else
           cause="recorded endpoint confidently missing"
         fi

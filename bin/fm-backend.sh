@@ -350,23 +350,31 @@ fm_backend_of_meta() {  # <meta-file>
 }
 
 fm_backend_target_of_meta() {  # <meta-file>
-  local meta=$1 backend terminal window
+  local meta=$1 backend terminal window tmux_window_id
   backend=$(fm_backend_of_meta "$meta")
   if [ "$backend" = orca ]; then
     terminal=$(fm_meta_get "$meta" terminal)
     [ -n "$terminal" ] && { printf '%s' "$terminal"; return 0; }
+  fi
+  if [ "$backend" = tmux ]; then
+    tmux_window_id=$(fm_meta_get "$meta" tmux_window_id)
+    [ -n "$tmux_window_id" ] && { printf '%s' "$tmux_window_id"; return 0; }
   fi
   window=$(fm_meta_get "$meta" window)
   [ -n "$window" ] && printf '%s' "$window"
 }
 
 fm_backend_meta_for_window() {  # <target> <state-dir>
-  local target=$1 state=$2 meta window terminal
+  local target=$1 state=$2 meta window terminal tmux_window_id
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue
     window=$(fm_meta_get "$meta" window)
     terminal=$(fm_meta_get "$meta" terminal)
-    { [ -n "$window" ] && [ "$window" = "$target" ]; } || { [ -n "$terminal" ] && [ "$terminal" = "$target" ]; } || continue
+    tmux_window_id=$(fm_meta_get "$meta" tmux_window_id)
+    { [ -n "$window" ] && [ "$window" = "$target" ]; } \
+      || { [ -n "$terminal" ] && [ "$terminal" = "$target" ]; } \
+      || { [ -n "$tmux_window_id" ] && [ "$tmux_window_id" = "$target" ]; } \
+      || continue
     printf '%s' "$meta"
     return 0
   done
@@ -567,9 +575,8 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
   esac
 }
 
-# fm_backend_kill: remove the task's session endpoint (best-effort; a
-# nonexistent/already-gone target is not an error - callers already swallow
-# failures here exactly as the inline `tmux kill-window ... || true` did).
+# fm_backend_kill: remove the task's session endpoint (best-effort by default).
+# Set FM_BACKEND_KILL_STRICT=1 when an allocation failure must be recorded if a backend close fails.
 fm_backend_kill() {  # <backend> <target>
   local backend=$1
   shift
@@ -662,7 +669,8 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
   local backend=$1 target=$2 expected_label=${3:-} session pane
   case "$backend" in
     tmux)
-      tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1
+      fm_backend_source tmux || return 1
+      fm_backend_tmux_target_ready "$target" "$expected_label" 2>/dev/null
       ;;
     herdr)
       fm_backend_source herdr || return 1
@@ -786,15 +794,17 @@ process.exit(process.argv[1] === "0" ? 1 : 2);
 #   unverified - this backend has no recovery classifier.
 # Only `dead` and `missing` license recovery. The tmux adapter requires a
 # successful session inventory and returns `missing` only when it omits the
-# exact window; the Herdr adapter reuses its husk
+# exact window; when the recorded target is a reusable `@<window-id>` the
+# optional expected label must also still be pinned to it. The Herdr adapter
+# reuses its husk
 # classifier. Zellij remains unverified because its secondmate ghost-tab and
 # agent-process recovery path has not been empirically validated. Orca and cmux
 # do not support secondmate spawns.
-fm_backend_agent_state() {  # <backend> <target>
-  local backend=$1 target=$2
+fm_backend_agent_state() {  # <backend> <target> [expected-label]
+  local backend=$1 target=$2 expected_label=${3:-}
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }
   case "$backend" in
-    tmux) fm_backend_tmux_agent_state "$target" ;;
+    tmux) fm_backend_tmux_agent_state "$target" "$expected_label" ;;
     herdr) fm_backend_herdr_agent_state "$target" ;;
     *) printf 'unverified' ;;
   esac
@@ -803,8 +813,8 @@ fm_backend_agent_state() {  # <backend> <target>
 # Backward-compatible three-state view for existing callers. An
 # authoritatively missing endpoint is confidently not a live agent, while every
 # ambiguous, unreadable, or unverified result stays unknown.
-fm_backend_agent_alive() {  # <backend> <target>
-  case "$(fm_backend_agent_state "$1" "$2")" in
+fm_backend_agent_alive() {  # <backend> <target> [expected-label]
+  case "$(fm_backend_agent_state "$1" "$2" "${3:-}")" in
     alive) printf 'alive' ;;
     dead|missing) printf 'dead' ;;
     *) printf 'unknown' ;;

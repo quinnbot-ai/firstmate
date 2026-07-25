@@ -854,6 +854,7 @@ run_spawn_symlink_case() {  # <label> <physical|logical>
   case "$first_reply" in
     physical) initial_path=$proj_phys ;;
     logical) initial_path=$proj ;;
+    unready) initial_path=/ ;;
     *) fail "unknown symlink first-reply mode: $first_reply" ;;
   esac
   fb=$(make_spawn_symlink_fakebin "$TMP_ROOT/symlink-fake-$label" "$initial_path" "$wt")
@@ -877,6 +878,57 @@ test_spawn_symlinked_project_prefix_avoids_false_refusal() {
   run_spawn_symlink_case physical physical
   run_spawn_symlink_case logical logical
   pass "fm-spawn.sh: a project reached through a symlinked prefix (e.g. macOS /tmp -> /private/tmp) does not trip the isolation guard's false refusal"
+}
+
+test_spawn_ignores_unready_pane_cwd_before_worktree() {
+  run_spawn_symlink_case unready unready
+  pass "fm-spawn.sh: ignores an unready non-worktree cwd before treehouse enters the worktree"
+}
+
+test_tmux_meta_prefers_stable_window_id() {
+  local meta=$TMP_ROOT/tmux-window-id.meta
+  fm_write_meta "$meta" "window=firstmate:fm-old-label" "tmux_window_id=@42"
+  [ "$(fm_backend_target_of_meta "$meta")" = '@42' ] \
+    || fail "tmux metadata did not prefer its captured stable window id"
+  [ "$(fm_backend_meta_for_window '@42' "$TMP_ROOT")" = "$meta" ] \
+    || fail "stable tmux window id did not resolve back to its task metadata"
+  pass "tmux metadata uses a stable window id instead of the recyclable label"
+}
+
+test_tmux_window_id_requires_pinned_label() {
+  local fakebin="$TMP_ROOT/tmux-window-id-label" status
+  mkdir -p "$fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  display-message) printf '%s\n' "${FM_FAKE_TMUX_WINDOW_NAME:-fm-task-x1}" ;;
+  kill-window) printf '%s\n' "$*" >> "${FM_FAKE_TMUX_LOG:?}" ;;
+esac
+SH
+  chmod +x "$fakebin/tmux"
+
+  PATH="$fakebin:$PATH" fm_backend_target_exists tmux @42 fm-task-x1 \
+    || fail "matching tmux window id and label should be live"
+  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW_NAME=unrelated fm_backend_target_exists tmux @42 fm-task-x1; then
+    fail "reused tmux window id with a different label must not be live"
+  fi
+  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW_NAME=unrelated fm_backend_target_absent tmux @42 fm-task-x1; then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -eq 2 ] || fail "reused tmux window id must be unknown, got $status"
+  : > "$TMP_ROOT/tmux-window-id-kill.log"
+  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW_NAME=unrelated FM_FAKE_TMUX_LOG="$TMP_ROOT/tmux-window-id-kill.log" \
+    FM_BACKEND_KILL_STRICT=1 fm_backend_kill tmux @42 '' fm-task-x1; then
+    fail "strict cleanup must refuse a reused tmux window id"
+  fi
+  [ ! -s "$TMP_ROOT/tmux-window-id-kill.log" ] || fail "strict cleanup killed a reused tmux window id"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$TMP_ROOT/tmux-window-id-kill.log" \
+    FM_BACKEND_KILL_STRICT=1 fm_backend_kill tmux @42 '' fm-task-x1 \
+    || fail "strict cleanup should kill the matching task window"
+  [ -s "$TMP_ROOT/tmux-window-id-kill.log" ] || fail "matching task window was not killed"
+  pass "tmux window IDs require their pinned task label before liveness or cleanup"
 }
 
 # --- old vs new: fm-teardown.sh ----------------------------------------------
@@ -1092,6 +1144,9 @@ test_backend_of_selector_matches_explicit_target_meta
 test_send_conformance_old_vs_new
 test_peek_conformance_old_vs_new
 test_spawn_symlinked_project_prefix_avoids_false_refusal
+test_spawn_ignores_unready_pane_cwd_before_worktree
+test_tmux_meta_prefers_stable_window_id
+test_tmux_window_id_requires_pinned_label
 test_teardown_conformance_old_vs_new
 test_spawn_refuses_unknown_backend_flag
 test_spawn_refuses_codex_app_backend_flag

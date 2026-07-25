@@ -32,17 +32,38 @@ fm_backend_tmux_resolve_bare_selector() {  # <name>
     || { echo "error: no window named $name" >&2; return 1; }
 }
 
+# fm_backend_tmux_target_ready: the shared pre-op guard. A `session:window`
+# target is only checked for readability, but a stable `@<window-id>` target is
+# additionally checked against its expected `fm-<id>` window label: tmux reuses
+# window ids after a window is closed, so an id alone can silently resolve to a
+# DIFFERENT task's window. The label pin (automatic-rename/allow-rename off at
+# create time) makes that comparison authoritative.
+fm_backend_tmux_target_ready() {  # <target> [expected-label]
+  local target=$1 expected_label=${2:-} label
+  case "$target" in
+    @*) ;;
+    *) expected_label= ;;
+  esac
+  if [ -z "$expected_label" ]; then
+    tmux display-message -p -t "$target" '#{pane_id}' >/dev/null
+    return
+  fi
+  label=$(tmux display-message -p -t "$target" '#{window_name}') || return 1
+  [ "$label" = "$expected_label" ]
+}
+
 # fm_backend_tmux_capture: bounded plain-text pane capture. Mirrors
 # fm-peek.sh's and fm-watch.sh's `tmux capture-pane -p -t "$T" -S -"$N"`.
-fm_backend_tmux_capture() {  # <target> <lines>
+fm_backend_tmux_capture() {  # <target> <lines> [expected-label]
+  [ -z "${3:-}" ] || fm_backend_tmux_target_ready "$1" "$3" || return 1
   tmux capture-pane -p -t "$1" -S -"$2"
 }
 
 # fm_backend_tmux_send_key: one named key. Mirrors fm-send.sh's --key path:
 # `tmux display-message -p -t "$T" '#{pane_id}' >/dev/null`, then
 # `tmux send-keys -t "$T" "$2"`.
-fm_backend_tmux_send_key() {  # <target> <key>
-  tmux display-message -p -t "$1" '#{pane_id}' >/dev/null
+fm_backend_tmux_send_key() {  # <target> <key> [expected-label]
+  fm_backend_tmux_target_ready "$1" "${3:-}" || return 1
   tmux send-keys -t "$1" "$2"
 }
 
@@ -50,7 +71,8 @@ fm_backend_tmux_send_key() {  # <target> <key>
 # submit with Enter, retried (Enter only, never retyped) until the composer
 # clears. Re-exports fm_tmux_submit_core (bin/fm-tmux-lib.sh) verbatim; see
 # that file for the composer-verification contract and echoed verdicts.
-fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
+fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
+  [ -z "${6:-}" ] || fm_backend_tmux_target_ready "$1" "$6" || { printf 'send-failed'; return 0; }
   fm_tmux_submit_core "$@"
 }
 
@@ -117,10 +139,13 @@ fm_backend_tmux_send_literal() {  # <target> <text>
   tmux send-keys -t "$1" -l "$2"
 }
 
-# fm_backend_tmux_kill: remove the task's window, best-effort. Mirrors
-# fm-teardown.sh's `tmux kill-window -t "$T" 2>/dev/null || true`.
-fm_backend_tmux_kill() {  # <target>
-  tmux kill-window -t "$1" 2>/dev/null || true
+# fm_backend_tmux_kill: remove the task's window. Best-effort by default
+# (mirroring fm-teardown.sh's `tmux kill-window -t "$T" 2>/dev/null || true`),
+# but fails when FM_BACKEND_KILL_STRICT=1 so a caller that must record an
+# allocation failure sees the close that did not happen.
+fm_backend_tmux_kill() {  # <target> [unused-tab-id] [expected-label]
+  [ -z "${3:-}" ] || fm_backend_tmux_target_ready "$1" "$3" || return 1
+  tmux kill-window -t "$1" 2>/dev/null || [ "${FM_BACKEND_KILL_STRICT:-0}" != 1 ]
 }
 
 # fm_backend_tmux_current_command: <target>'s live foreground process name -
@@ -145,20 +170,31 @@ fm_backend_tmux_current_command() {  # <target>
 # An omitted window or a definitive missing-session/server response is
 # `missing`; any other inventory or pane read failure is `unreadable`, so a
 # transient tmux problem never licenses a duplicate.
-fm_backend_tmux_agent_state() {  # <target>
-  local target=$1 comm session window windows inventory_status
+# A stable `@<window-id>` target is inventoried across every session instead,
+# and - because tmux reuses window ids - is additionally required to still
+# carry its pinned `fm-<id>` label. An id that now names a DIFFERENT window is
+# `unreadable`, never `missing`, so a reused id can never license a respawn.
+fm_backend_tmux_agent_state() {  # <target> [expected-label]
+  local target=$1 expected_label=${2:-} comm session window windows inventory_status
   case "$target" in
+    @*)
+      session=
+      window=$target
+      ;;
     *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
-    *:*) ;;
+    *:*)
+      session=${target%%:*}
+      window=${target#*:}
+      expected_label=
+      ;;
     *) printf 'unreadable'; return 0 ;;
   esac
-  session=${target%%:*}
-  window=${target#*:}
-  if windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>&1); then
-    inventory_status=0
+  if [ -z "$session" ]; then
+    windows=$(LC_ALL=C tmux list-windows -a -F '#{window_id}' 2>&1)
   else
-    inventory_status=$?
+    windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>&1)
   fi
+  inventory_status=$?
   if [ "$inventory_status" -ne 0 ]; then
     case "$windows" in
       *"can't find session:"*|*"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
@@ -172,6 +208,10 @@ fm_backend_tmux_agent_state() {  # <target>
   fi
   if ! printf '%s\n' "$windows" | grep -Fqx "$window"; then
     printf 'missing'
+    return 0
+  fi
+  if [ -n "$expected_label" ] && ! fm_backend_tmux_target_ready "$target" "$expected_label"; then
+    printf 'unreadable'
     return 0
   fi
 
@@ -190,8 +230,8 @@ fm_backend_tmux_agent_state() {  # <target>
 
 # Backward-compatible three-state view for callers that only need a yes/no
 # agent verdict. The detailed state contract is owned by fm_backend_agent_state.
-fm_backend_tmux_agent_alive() {  # <target>
-  case "$(fm_backend_tmux_agent_state "$1")" in
+fm_backend_tmux_agent_alive() {  # <target> [expected-label]
+  case "$(fm_backend_tmux_agent_state "$1" "${2:-}")" in
     alive) printf 'alive' ;;
     dead|missing) printf 'dead' ;;
     *) printf 'unknown' ;;

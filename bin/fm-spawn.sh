@@ -359,6 +359,7 @@ write_failed_treehouse_spawn_meta() {
       echo "window=$W"
     else
       echo "window=${T:-}"
+      [ -z "$TMUX_WINDOW_ID" ] || echo "tmux_window_id=$TMUX_WINDOW_ID"
     fi
     echo "worktree=$WT"
     echo "project=$PROJ_ABS"
@@ -2266,6 +2267,7 @@ TASK_META_TMP=$(mktemp "$STATE/.${ID}.meta.XXXXXX") || {
 }
 {
   echo "window=$META_WINDOW"
+  [ "$BACKEND" != tmux ] || echo "tmux_window_id=$TMUX_WINDOW_ID"
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"

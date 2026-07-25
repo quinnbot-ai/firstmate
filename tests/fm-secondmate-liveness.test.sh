@@ -268,6 +268,10 @@ case "${1:-}" in
             *) printf '%s\n' "$mode"; exit 0 ;;
           esac
           ;;
+        *window_name*)
+          printf '%s\n' "${FM_TEST_WINDOW_NAME:-fm-sm1}"
+          exit 0
+          ;;
       esac
     done
     exit 0
@@ -276,8 +280,15 @@ case "${1:-}" in
     case "$mode" in
       missing) printf '%s\n' main; exit 0 ;;
       unreadable) exit 1 ;;
-      *) [ -e "${FM_TMUX_CALL_LOG:?}.killed" ] || printf '%s\n' fm-sm1; exit 0 ;;
     esac
+    if [ -e "${FM_TMUX_CALL_LOG:?}.killed" ]; then
+      exit 0
+    fi
+    case "$*" in
+      *window_id*) printf '%s\n' '@42' ;;
+      *) printf '%s\n' fm-sm1 ;;
+    esac
+    exit 0
     ;;
   new-window|kill-window)
     printf '%s\n' "$*" >> "${FM_TMUX_CALL_LOG:?}"
@@ -507,6 +518,22 @@ test_sweep_noop_with_no_secondmate_meta() {
   pass "sweep: a silent no-op with no kind=secondmate meta present (a secondmate home's own natural scoping)"
 }
 
+test_sweep_refuses_reused_tmux_window_id() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-reused-window-id)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  printf 'tmux_window_id=@42\n' >> "$w/home/state/sm1.meta"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" FM_TEST_WINDOW_NAME=unrelated)
+
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: skipped: endpoint probe unreadable" \
+    "a recycled tmux window id with the wrong label must never read as a recoverable state"
+  [ ! -s "$log" ] || fail "a recycled tmux window id must not be killed or respawned: $(cat "$log")"
+  pass "sweep: a recycled tmux window id with another label is never touched"
+}
+
 test_tmux_agent_state_classifies
 test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier
@@ -521,5 +548,6 @@ test_sweep_never_acts_on_unverified_harness_dead_reading
 test_sweep_converges_no_retouch_once_alive
 test_sweep_skipped_under_detect_only
 test_sweep_noop_with_no_secondmate_meta
+test_sweep_refuses_reused_tmux_window_id
 
 echo "# all fm-secondmate-liveness tests passed"

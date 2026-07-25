@@ -52,6 +52,8 @@ FM_AFK_LAUNCH_STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 FM_AFK_LAUNCH_RECORD="$FM_AFK_LAUNCH_STATE/.afk-daemon-terminal"
 FM_AFK_LAUNCH_LOCK="$FM_AFK_LAUNCH_STATE/.afk-launch.lock"
 FM_AFK_LAUNCH_WS_LABEL="firstmate-afk-daemon"
+FM_AFK_LAUNCH_LOCK_OWNER=
+FM_AFK_LAUNCH_LOCK_NONCE="${BASHPID:-$$}.${RANDOM}.${RANDOM}"
 
 # shellcheck source=bin/fm-backend.sh
 . "$FM_AFK_LAUNCH_DIR/fm-backend.sh"
@@ -68,48 +70,69 @@ set +e
 fm_afk_launch_log() { printf 'fm-afk-launch: %s\n' "$*" >&2; }
 
 fm_afk_launch_lock_owned() {
-  local pid expected actual
-  [ -d "$FM_AFK_LAUNCH_LOCK" ] || return 1
-  pid=$(cat "$FM_AFK_LAUNCH_LOCK/pid" 2>/dev/null) || return 1
-  expected=$(cat "$FM_AFK_LAUNCH_LOCK/pid-identity" 2>/dev/null) || return 1
+  local pid expected actual nonce owner
+  [ -L "$FM_AFK_LAUNCH_LOCK" ] || return 1
+  owner=$(readlink "$FM_AFK_LAUNCH_LOCK" 2>/dev/null) || return 1
+  [ -n "$owner" ] && [ -d "$owner" ] || return 1
+  pid=$(cat "$owner/pid" 2>/dev/null) || return 1
+  expected=$(cat "$owner/pid-identity" 2>/dev/null) || return 1
+  nonce=$(cat "$owner/nonce" 2>/dev/null) || return 1
   actual=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
-  [ -n "$expected" ] && [ "$actual" = "$expected" ]
+  [ -n "$expected" ] && [ -n "$nonce" ] && [ "$actual" = "$expected" ]
 }
 
 fm_afk_launch_lock_acquire() {
-  local attempt=0 incomplete=0 identity
+  local attempt=0 identity owner gate
+  gate="$FM_AFK_LAUNCH_LOCK.reclaim"
   mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
   while [ "$attempt" -lt 200 ]; do
     attempt=$((attempt + 1))
-    if mkdir "$FM_AFK_LAUNCH_LOCK" 2>/dev/null; then
-      if ! printf '%s' "$$" > "$FM_AFK_LAUNCH_LOCK/pid"; then
-        rm -rf "$FM_AFK_LAUNCH_LOCK"
+    if ! fm_lock_try_acquire "$gate"; then
+      sleep 0.05
+      continue
+    fi
+    if fm_afk_launch_lock_owned; then
+      fm_lock_release "$gate"
+      sleep 0.05
+      continue
+    fi
+    if [ -e "$FM_AFK_LAUNCH_LOCK" ] || [ -L "$FM_AFK_LAUNCH_LOCK" ]; then
+      rm -rf "$FM_AFK_LAUNCH_LOCK" 2>/dev/null || {
+        fm_lock_release "$gate"
+        return 1
+      }
+    fi
+    owner="$FM_AFK_LAUNCH_LOCK.owner.$$.$FM_AFK_LAUNCH_LOCK_NONCE"
+    if mkdir "$owner" 2>/dev/null; then
+      FM_AFK_LAUNCH_LOCK_OWNER=$owner
+      if ! printf '%s' "$$" > "$owner/pid"; then
+        rm -rf "$owner"
+        FM_AFK_LAUNCH_LOCK_OWNER=
+        fm_lock_release "$gate"
         return 1
       fi
       identity=$(fm_pid_identity "$$" 2>/dev/null) || {
-        rm -rf "$FM_AFK_LAUNCH_LOCK"
+        rm -rf "$owner"
+        FM_AFK_LAUNCH_LOCK_OWNER=
+        fm_lock_release "$gate"
         return 1
       }
-      if [ -z "$identity" ] || ! printf '%s' "$identity" > "$FM_AFK_LAUNCH_LOCK/pid-identity"; then
-        rm -rf "$FM_AFK_LAUNCH_LOCK"
+      if [ -z "$identity" ] \
+        || ! printf '%s' "$identity" > "$owner/pid-identity" \
+        || ! printf '%s' "$FM_AFK_LAUNCH_LOCK_NONCE" > "$owner/nonce"; then
+        rm -rf "$owner"
+        FM_AFK_LAUNCH_LOCK_OWNER=
+        fm_lock_release "$gate"
         return 1
       fi
-      return 0
-    fi
-    if [ ! -s "$FM_AFK_LAUNCH_LOCK/pid" ] || [ ! -s "$FM_AFK_LAUNCH_LOCK/pid-identity" ]; then
-      incomplete=$((incomplete + 1))
-      if [ "$incomplete" -lt 20 ]; then
-        sleep 0.05
-        continue
+      if ln -s "$owner" "$FM_AFK_LAUNCH_LOCK" 2>/dev/null; then
+        fm_lock_release "$gate"
+        return 0
       fi
-    else
-      incomplete=0
+      rm -rf "$owner"
+      FM_AFK_LAUNCH_LOCK_OWNER=
     fi
-    if ! fm_afk_launch_lock_owned; then
-      rm -rf "$FM_AFK_LAUNCH_LOCK" 2>/dev/null || return 1
-      incomplete=0
-      continue
-    fi
+    fm_lock_release "$gate"
     sleep 0.05
   done
   fm_afk_launch_log "timed out waiting for launcher lock"
@@ -117,10 +140,25 @@ fm_afk_launch_lock_acquire() {
 }
 
 fm_afk_launch_lock_release() {
-  local pid
-  pid=$(cat "$FM_AFK_LAUNCH_LOCK/pid" 2>/dev/null || true)
-  [ "$pid" = "$$" ] || return 0
-  rm -rf "$FM_AFK_LAUNCH_LOCK"
+  local owner
+  owner=$FM_AFK_LAUNCH_LOCK_OWNER
+  if [ -z "$owner" ]; then
+    fm_lock_release "$FM_AFK_LAUNCH_LOCK.reclaim"
+    return 0
+  fi
+  if [ ! -L "$FM_AFK_LAUNCH_LOCK" ] || [ "$(readlink "$FM_AFK_LAUNCH_LOCK" 2>/dev/null || true)" != "$owner" ]; then
+    rm -rf "$owner"
+    FM_AFK_LAUNCH_LOCK_OWNER=
+    fm_lock_release "$FM_AFK_LAUNCH_LOCK.reclaim"
+    return 0
+  fi
+  rm -f "$FM_AFK_LAUNCH_LOCK" || {
+    fm_lock_release "$FM_AFK_LAUNCH_LOCK.reclaim"
+    return 1
+  }
+  rm -rf "$owner"
+  FM_AFK_LAUNCH_LOCK_OWNER=
+  fm_lock_release "$FM_AFK_LAUNCH_LOCK.reclaim"
 }
 
 fm_afk_launch_usage() {
@@ -265,8 +303,8 @@ fm_afk_launch_wait_ready() {  # <backend> <target>
   fi
   while [ "$attempt" -lt 100 ]; do
     attempt=$((attempt + 1))
-    daemon_lock_held_by_live_daemon && return 0
     fm_afk_launch_terminal_alive "$backend" "$target" || return 1
+    fm_daemon_lease_healthy "$FM_AFK_STATE" "$FM_AFK_DAEMON" "$FM_HOME" && return 0
     sleep 0.05
   done
   return 1
@@ -322,7 +360,7 @@ fm_afk_launch_herdr_recover_created() {  # <session> <label>
 # owns it, close the leaked terminal by exact id and drop the record.
 fm_afk_launch_reconcile() {
   local read_result
-  if daemon_lock_held_by_live_daemon; then
+  if fm_daemon_lease_healthy "$FM_AFK_STATE" "$FM_AFK_DAEMON" "$FM_HOME"; then
     return 0
   fi
   fm_afk_launch_record_read
@@ -452,7 +490,7 @@ fm_afk_launch_start() {
 
   mkdir -p "$FM_AFK_LAUNCH_STATE"
 
-  if daemon_lock_held_by_live_daemon; then
+  if fm_daemon_lease_healthy "$FM_AFK_STATE" "$FM_AFK_DAEMON" "$FM_HOME"; then
     fm_afk_launch_record_validate_if_present || return 1
     if ! fm_afk_launch_flag_write; then
       fm_afk_launch_log "failed to refresh away-mode flag"
@@ -514,7 +552,7 @@ fm_afk_launch_start_native() {
     fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering away mode"
     return 1
   fi
-  if daemon_lock_held_by_live_daemon; then
+  if fm_daemon_lease_healthy "$FM_AFK_STATE" "$FM_AFK_DAEMON" "$FM_HOME"; then
     fm_afk_launch_record_validate_if_present || return 1
     fm_afk_launch_flag_write || return 1
     fm_afk_launch_log "daemon already running; refreshed away-mode flag"
@@ -606,10 +644,13 @@ fm_afk_launch_stop() {
 
 fm_afk_launch_main() {
   local result
-  fm_afk_launch_lock_acquire || return 1
   trap fm_afk_launch_lock_release EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
+  fm_afk_launch_lock_acquire || {
+    trap - EXIT INT TERM
+    return 1
+  }
   case "${1:-start}" in
     start) fm_afk_launch_start ;;
     start-native) fm_afk_launch_start_native ;;

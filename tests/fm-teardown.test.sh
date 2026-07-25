@@ -1699,11 +1699,10 @@ test_detached_window_with_retained_target_still_probes() {
   local case_dir out rc
   case_dir=$(make_case detached-window-retained-target)
   write_meta "$case_dir" local-only ship
-  # The live window= record survives alongside the detached record, so
-  # fm_backend_target_of_meta still resolves a target and it takes precedence
-  # over the detached record's proof of absence.
-  printf '%s\n' 'window_detached_2026-07-19=fm-task-x1' 'endpoint_cleanup_pending=1' \
-    >> "$case_dir/state/task-x1.meta"
+  sed -i.bak '/^window=/c\
+window_detached_2026-07-19=fm-task-x1' "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak"
+  printf '%s\n' 'tmux_window_id=@7' 'endpoint_cleanup_pending=1' >> "$case_dir/state/task-x1.meta"
   cat > "$case_dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 echo 'unexpected tmux failure' >&2
@@ -1721,7 +1720,7 @@ SH
     "detached-window-retained-target: teardown discarded recovery metadata"
   assert_contains "$out" "could not be confirmed absent" \
     "detached-window-retained-target: teardown skipped the endpoint absence probe"
-  pass "a detached record with a still-resolvable window= still probes endpoint absence"
+  pass "a detached record with a retained window id still probes endpoint absence"
 }
 
 test_live_window_with_unknown_endpoint_preserves_metadata() {
