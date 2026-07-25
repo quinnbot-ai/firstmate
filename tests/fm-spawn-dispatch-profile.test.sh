@@ -14,7 +14,8 @@ SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
 export FM_SPAWN_NO_GUARD=1
-PATH="$(fm_fake_claude_keychain "$TMP_ROOT/fake-host"):$PATH"
+FAKE_KEYCHAIN=$(fm_fake_claude_keychain "$TMP_ROOT/fake-keychain")
+PATH="$FAKE_KEYCHAIN:$PATH"
 export PATH
 
 make_spawn_fakebin() {
@@ -273,7 +274,9 @@ test_claude_uses_ready_isolated_crew_home() {
   [ -n "$crew_home" ] || fail "Claude launch did not carry an isolated CLAUDE_CONFIG_DIR"
   assert_grep "claude_crewmate_home=$crew_home" "$HOME_DIR/state/$id.meta" \
     "Claude task metadata did not retain its isolated home"
-  assert_present "$crew_home/.credentials.json" "Claude isolated home did not copy credentials"
+  assert_present "$crew_home/.claude.json" "Claude isolated home did not copy the profile configuration"
+  assert_absent "$crew_home/.credentials.json" \
+    "Claude isolated home copied a plaintext credential file"
   pass "Claude ship launch uses a ready task-private crew home"
 }
 
@@ -1781,7 +1784,7 @@ write_fake_claude_cli() {
 #!/usr/bin/env bash
 set -u
 if [ "${1:-} ${2:-} ${3:-}" = "auth status --json" ]; then
-  if [ -f "${CLAUDE_CONFIG_DIR:-}/.credentials.json" ]; then
+  if [ -f "${CLAUDE_CONFIG_DIR:-}/.claude.json" ]; then
     printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","email":"crew@example.invalid","orgId":"org-test"}'
     exit 0
   fi
@@ -1803,7 +1806,7 @@ make_claude_crew_profile() {  # <home-dir> [ready=1]
   mkdir -p "$crew_profile"
   [ "$ready" -eq 0 ] || {
     printf '{"hasCompletedOnboarding":true,"oauthAccount":{"emailAddress":"crew@example.invalid"}}\n' > "$crew_profile/.claude.json"
-    printf '{"claudeAiOauth":{"accessToken":"test-access","refreshToken":"test-refresh"}}\n' > "$crew_profile/.credentials.json"
+    fm_fake_claude_keychain_seed "$FAKE_KEYCHAIN" "$crew_profile"
   }
   if [ "$ready" -ne 0 ]; then
     PATH="${FAKEBIN_DIR:-$home/fakebin}:$PATH" \
@@ -1849,7 +1852,8 @@ EOF
   assert_present "$home_dir/.claude.json" "isolated Claude home did not copy the profile's credential file"
   assert_grep '"hasCompletedOnboarding":true' "$home_dir/.claude.json" \
     "isolated Claude home did not retain completed onboarding state"
-  assert_present "$home_dir/.credentials.json" "isolated Claude home did not copy the file credential fixture"
+  assert_absent "$home_dir/.credentials.json" \
+    "isolated Claude home copied a plaintext credential file"
   assert_present "$home_dir/backups/entry.json" "isolated Claude home did not copy nested profile content"
   [ ! -e "$home_dir/settings.json" ] || fail "isolated Claude home retained the profile's settings.json"
   [ ! -e "$home_dir/hooks" ] || fail "isolated Claude home retained the profile's hooks directory"

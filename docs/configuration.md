@@ -265,7 +265,8 @@ Claude Code on macOS names its generic-password Keychain service `Claude Code-cr
 Copying the profile files to a new task path therefore does not copy authentication and can send the copy into first-run OAuth or let an ambient account satisfy a shallow login check.
 Firstmate repairs that path binding by reading the managed profile service and writing the exact task-home service through Security.framework inside one process.
 Credential bytes never enter a child process, argv, environment variable, stdin, stdout, stderr, log, or disk file.
-On macOS the task-home copy excludes `.credentials.json`, so Keychain remains the only credential transfer surface.
+The task-home copy skips `.credentials.json` and every name derived from it at any depth of the profile tree, so Keychain is the only credential transfer surface and no run can leave plaintext credentials in a task home.
+That makes the macOS Keychain a requirement rather than a preference: on a host without it, isolated Claude homes refuse with the missing requirement named instead of falling back to a credential file, so Claude ship and scout crewmates are unavailable there while every other harness is unaffected.
 The helper reads the target item back in process, refuses an empty or mismatched result, and removes the exact task service during abort cleanup or normal teardown.
 Every read, write, and removal disables Keychain authentication UI, so an item that would need interactive authorization fails the unattended task instead of raising a prompt or blocking on one.
 If Security.framework is unavailable, an item requires interactive authorization, or the managed profile has no matching Keychain item, provisioning fails with an operator error and no worker starts.

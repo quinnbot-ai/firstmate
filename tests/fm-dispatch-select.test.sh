@@ -28,7 +28,8 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-dispatch-select-tests)
 export FM_SPAWN_NO_GUARD=1
 mkdir -p "$TMP_ROOT"
-BASE_PATH="$(fm_fake_claude_keychain "$TMP_ROOT/fake-host"):$BASE_PATH"
+FAKE_KEYCHAIN=$(fm_fake_claude_keychain "$TMP_ROOT/fake-keychain")
+BASE_PATH="$FAKE_KEYCHAIN:$BASE_PATH"
 RANDOM_ZERO="$TMP_ROOT/random-zero"
 RANDOM_ONE="$TMP_ROOT/random-one"
 printf '\000\000\000\000' > "$RANDOM_ZERO"
@@ -298,7 +299,7 @@ write_fake_claude_crew_cli() {  # <fakebin-dir>
 #!/usr/bin/env bash
 set -u
 if [ "\$1 \$2 \$3" = "auth status --json" ]; then
-  if [ -f "\${CLAUDE_CONFIG_DIR:-}/.credentials.json" ]; then
+  if [ -f "\${CLAUDE_CONFIG_DIR:-}/.claude.json" ]; then
     if [ "\$(cat "\${CLAUDE_CONFIG_DIR:-}/.fake-account" 2>/dev/null)" = wrong ]; then
       printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","email":"other@example.invalid","orgId":"org-other"}'
     else
@@ -343,7 +344,8 @@ test_ready_crew_profile_is_used_for_claude_quota() {
   home="$case_dir/home"
   profile="$home/data/claude-crewmate/profile"
   mkdir -p "$profile" "$home/state"
-  printf '{"claudeAiOauth":{"accessToken":"test-access"}}\n' > "$profile/.credentials.json"
+  printf '{"hasCompletedOnboarding":true}\n' > "$profile/.claude.json"
+  fm_fake_claude_keychain_seed "$FAKE_KEYCHAIN" "$profile"
   fakebin=$(fm_fakebin "$case_dir/fake")
   write_fake_claude_crew_cli "$fakebin" "$profile"
   attest_fake_claude_profile "$fakebin" "$profile" "$case_dir"
@@ -444,7 +446,8 @@ test_wrong_account_crew_profile_drops_claude_candidates() {
   home="$case_dir/home"
   profile="$home/data/claude-crewmate/profile"
   mkdir -p "$profile"
-  printf '{"claudeAiOauth":{"accessToken":"test-access"}}\n' > "$profile/.credentials.json"
+  printf '{"hasCompletedOnboarding":true}\n' > "$profile/.claude.json"
+  fm_fake_claude_keychain_seed "$FAKE_KEYCHAIN" "$profile"
   fakebin=$(fm_fakebin "$case_dir/fake")
   write_fake_claude_crew_cli "$fakebin"
   attest_fake_claude_profile "$fakebin" "$profile" "$case_dir"
@@ -464,7 +467,8 @@ test_account_change_during_quota_lookup_drops_claude_before_fallback() {
   home="$case_dir/home"
   profile="$home/data/claude-crewmate/profile"
   mkdir -p "$profile"
-  printf '{"claudeAiOauth":{"accessToken":"test-access"}}\n' > "$profile/.credentials.json"
+  printf '{"hasCompletedOnboarding":true}\n' > "$profile/.claude.json"
+  fm_fake_claude_keychain_seed "$FAKE_KEYCHAIN" "$profile"
   fakebin=$(fm_fakebin "$case_dir/fake")
   write_fake_claude_crew_cli "$fakebin"
   attest_fake_claude_profile "$fakebin" "$profile" "$case_dir"

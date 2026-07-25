@@ -13,7 +13,8 @@ set -u
 HELPER="$ROOT/bin/fm-claude-home.py"
 TMP_ROOT=$(fm_test_tmproot fm-claude-home-tests)
 export FM_SPAWN_NO_GUARD=1
-PATH="$(fm_fake_claude_keychain "$TMP_ROOT/fake-host"):$PATH"
+FAKE_KEYCHAIN=$(fm_fake_claude_keychain "$TMP_ROOT/fake-keychain")
+PATH="$FAKE_KEYCHAIN:$PATH"
 export PATH
 
 make_profile() {  # <dir>
@@ -27,24 +28,33 @@ file_mode() {
   if [ "$(uname)" = Darwin ]; then stat -f '%Lp' "$1" 2>/dev/null; else stat -c '%a' "$1" 2>/dev/null; fi
 }
 
-test_create_excludes_customization_surface_and_copies_credentials() {
+test_create_excludes_customization_surface_and_every_credential_file() {
   local case_dir data source home
   case_dir="$TMP_ROOT/create-excludes"
   data="$case_dir/data"
   source="$data/claude-crewmate/profile"
   mkdir -p "$data"
   make_profile "$source"
+  fm_fake_claude_keychain_seed "$FAKE_KEYCHAIN" "$source"
   mkdir -p "$source/backups" "$source/hooks" "$source/commands"
   printf '%s\n' 'b' > "$source/backups/entry.json"
   printf '%s\n' 'h' > "$source/hooks/x.sh"
   printf '{}' > "$source/settings.json"
   printf '{}' > "$source/.mcp.json"
   printf '%s\n' '{"version":1,"account_sha256":"test-only"}' > "$source/.firstmate-account.json"
+  printf '{"claudeAiOauth":{"accessToken":"must-not-copy"}}\n' > "$source/.credentials.json"
+  printf '{"claudeAiOauth":{"accessToken":"must-not-copy"}}\n' > "$source/.credentials.json.backup"
+  printf '{"claudeAiOauth":{"accessToken":"must-not-copy"}}\n' > "$source/backups/.credentials.json"
 
   home=$(python3 "$HELPER" --data "$data" --source "$source" --task-id t1 --create)
   [ -d "$home" ] || fail "create did not print a directory path"
-  assert_present "$home/.claude.json" "isolated home did not copy the credential file"
+  assert_present "$home/.claude.json" "isolated home did not copy the profile configuration"
   assert_present "$home/backups/entry.json" "isolated home did not copy nested profile content"
+  assert_absent "$home/.credentials.json" "isolated home copied a plaintext credential file"
+  assert_absent "$home/.credentials.json.backup" \
+    "isolated home copied a derived plaintext credential file"
+  assert_absent "$home/backups/.credentials.json" \
+    "isolated home copied a nested plaintext credential file"
   [ ! -e "$home/hooks" ] || fail "isolated home retained the profile's hooks directory"
   [ ! -e "$home/commands" ] || fail "isolated home retained the profile's commands directory"
   [ ! -e "$home/settings.json" ] || fail "isolated home retained the profile's settings.json"
@@ -53,7 +63,7 @@ test_create_excludes_customization_surface_and_copies_credentials() {
     || fail "isolated home copied the profile-local account attestation"
   [ "$(file_mode "$home")" = 700 ] \
     || fail "isolated home directory must be mode 0700"
-  pass "create copies credentials and nested content while excluding customization surface"
+  pass "create copies nested content while excluding customization surface and every credential file"
 }
 
 test_create_strips_mcp_servers_from_claude_json() {
@@ -139,7 +149,7 @@ class FakeKeychain:
         self.calls.append(("delete", service))
         self.values.pop(service, None)
 
-module.is_macos = lambda: True
+module.require_macos = lambda: None
 keychain = FakeKeychain()
 module.macos_keychain = lambda: keychain
 with open(os.path.join(source, ".credentials.json"), "w", encoding="utf-8") as file:
@@ -208,7 +218,7 @@ class ShortWriteKeychain:
     def delete(self, service):
         raise AssertionError("clone must not delete during verification")
 
-module.is_macos = lambda: True
+module.require_macos = lambda: None
 module.macos_keychain = ShortWriteKeychain
 with contextlib.redirect_stderr(io.StringIO()):
     try:
@@ -259,7 +269,7 @@ class EmptyKeychain:
     def delete(self, service):
         self.deleted.append(service)
 
-module.is_macos = lambda: True
+module.require_macos = lambda: None
 keychain = EmptyKeychain()
 module.macos_keychain = lambda: keychain
 error_output = io.StringIO()
@@ -302,10 +312,10 @@ test_readiness_requires_a_logged_in_copy() {
   fakebin="$case_dir/fakebin"
   mkdir -p "$profile" "$state" "$fakebin"
   printf '{"hasCompletedOnboarding":true}\n' > "$profile/.claude.json"
-  printf '{"claudeAiOauth":{"accessToken":"test-access"}}\n' > "$profile/.credentials.json"
+  fm_fake_claude_keychain_seed "$FAKE_KEYCHAIN" "$profile"
   cat > "$fakebin/claude" <<'SH'
 #!/usr/bin/env bash
-if [ -f "${CLAUDE_CONFIG_DIR:-}/.credentials.json" ]; then
+if [ -f "${CLAUDE_CONFIG_DIR:-}/.claude.json" ]; then
   printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","email":"crew@example.invalid","orgId":"org-test"}'
   exit 0
 fi
@@ -326,7 +336,6 @@ SH
   find "$data/claude-crewmate" -maxdepth 1 -name '.fm-claude-home.*' | grep -q . \
     && fail "readiness probe left a managed home behind"
 
-  rm "$profile/.credentials.json"
   cat > "$fakebin/claude" <<SH
 #!/usr/bin/env bash
 if [ "\${CLAUDE_CONFIG_DIR:-}" = "$profile" ]; then
@@ -534,7 +543,7 @@ class FailingCleanupKeychain:
 def failing_write_file(*a, **kw):
     raise OSError(28, "No space left on device")
 
-module.is_macos = lambda: True
+module.require_macos = lambda: None
 module.macos_keychain = FailingCleanupKeychain
 module.write_file = failing_write_file
 try:
@@ -594,7 +603,7 @@ class FakeKeychain:
         self.deleted.append(service)
         self.values.pop(service, None)
 
-module.is_macos = lambda: True
+module.require_macos = lambda: None
 keychain = FakeKeychain()
 module.macos_keychain = lambda: keychain
 out = io.StringIO()
@@ -611,7 +620,7 @@ PY
   pass "remove deletes the task Keychain entry even when the entire home base is gone"
 }
 
-test_create_excludes_customization_surface_and_copies_credentials
+test_create_excludes_customization_surface_and_every_credential_file
 test_create_strips_mcp_servers_from_claude_json
 test_managed_keychain_credential_is_cloned_and_removed
 test_managed_keychain_short_write_is_rejected

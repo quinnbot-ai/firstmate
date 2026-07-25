@@ -55,7 +55,8 @@ The fake proves distinct source and target path services, exact byte transfer, r
 No regression test calls the `security` command, opens the live Keychain, starts OAuth, or launches a real Claude worker.
 
 The tools under test carry no test mode of their own, so neither the Keychain surface nor the identity check can be redirected by anything a real spawn inherits.
-The suites inject their fakes only from outside: `tests/lib.sh`'s `fm_fake_claude_keychain` puts a `python3` shim on PATH that loads `bin/fm-claude-home.py` and replaces its platform predicate before `main`, the in-process Keychain fake is monkeypatched onto the imported module, and a fake `claude` binary is supplied by prepending its directory to PATH exactly as a real launch resolves that program.
+The suites inject their fakes only from outside: `tests/lib.sh`'s `fm_fake_claude_keychain` puts a `python3` shim on PATH that loads `bin/fm-claude-home.py` and replaces `macos_keychain` on the imported module with a synthetic file-backed store before `main`, the in-process Keychain fake is monkeypatched the same way, and a fake `claude` binary is supplied by prepending its directory to PATH exactly as a real launch resolves that program.
+Because the fake replaces the Keychain rather than the platform, the suites exercise the single supported credential path on any host, and they assert that no credential file reaches a task home.
 
 ```sh
 tests/fm-claude-auth.test.sh

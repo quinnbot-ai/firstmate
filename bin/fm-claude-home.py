@@ -8,21 +8,27 @@ It copies the captain-populated persistent profile at
 data/claude-crewmate/profile, skipping any customization-surface entries
 (settings, hooks, MCP config, plugins, skills, commands, agents) and
 stripping every mcpServers section (user scope and per-project) from the
-copied .claude.json so the task-private copy carries auth and completed
+copied .claude.json so the task-private copy carries completed
 onboarding and nothing else.
-On macOS it also clones only the managed profile's per-config-dir
-Keychain credential into the new home's derived Keychain service, and
-removes that service entry on abort cleanup and teardown, even when the
-home directory itself is already gone.
+No credential file is ever copied: an entry named .credentials.json, or
+anything derived from that name, is skipped at every depth of the tree,
+so the only credential transfer surface is the Keychain.
+The macOS Keychain is therefore a hard requirement rather than a
+platform branch. Any other host refuses with the missing requirement
+named, because degrading to a credential file on disk is exactly the
+exposure this helper exists to remove.
+It clones only the managed profile's per-config-dir Keychain credential
+into the new home's derived Keychain service, and removes that service
+entry on abort cleanup and teardown, even when the home directory itself
+is already gone.
 Both the clone and the removal disable Keychain authentication UI and
 are confirmed by reading the target entry back, so an empty, truncated,
 or leftover credential, or an item that would need interactive
 authorization, fails instead of producing a home that cannot
 authenticate or an unattended task that waits on a prompt.
-The credential surface follows the host platform alone and has no test
-mode: a macOS host always uses Keychain and never copies a plaintext
-credential file, so no environment variable a spawn could inherit can
-turn that off.
+Nothing here reads a runtime flag, environment variable, or argument
+that could select a fake, relax a check, or reach a disk fallback; a
+test injects its fakes into an imported module instead.
 It never reads or copies anything from the captain's own ~/.claude or
 CLAUDE_CONFIG_DIR - the persistent profile is populated only by the
 captain's explicit provisioning flow in docs/configuration.md.
@@ -58,14 +64,25 @@ EXCLUDED_ENTRIES = {
     "skills",
 }
 
+# Claude Code's own credential file and anything it derives from that name.
+# Never copied at any depth: the Keychain is the only credential surface, so a
+# task home that cannot get its credential there must fail rather than fall
+# back to plaintext on disk.
+CREDENTIAL_ENTRY_PREFIX = ".credentials.json"
+
 
 def die(message):
     print(f"error: {message}", file=sys.stderr)
     raise SystemExit(1)
 
 
-def is_macos():
-    return platform.system() == "Darwin"
+def require_macos():
+    if platform.system() != "Darwin":
+        die(
+            "isolated Claude homes require the macOS Keychain; this host has no "
+            "supported credential store and firstmate will not write Claude "
+            "credentials to disk"
+        )
 
 
 def keychain_service(home, legacy=False):
@@ -282,7 +299,7 @@ def macos_keychain():
 
 def clone_keychain_credential(data, source, home):
     managed_profile = os.path.join(os.path.realpath(data), "claude-crewmate", "profile")
-    if not is_macos() or os.path.realpath(source) != managed_profile:
+    if os.path.realpath(source) != managed_profile:
         return False
     keychain = macos_keychain()
     for legacy in (False, True):
@@ -301,8 +318,6 @@ def clone_keychain_credential(data, source, home):
 
 
 def remove_keychain_credential(home):
-    if not is_macos():
-        return
     service = keychain_service(home)
     keychain = macos_keychain()
     keychain.delete(service)
@@ -424,9 +439,9 @@ def copy_regular_file(source_dir_fd, name, target_dir_fd):
 
 def copy_tree(source_dir_fd, target_dir_fd, top_level):
     for entry in os.listdir(source_dir_fd):
-        if top_level and (
-            entry in EXCLUDED_ENTRIES or (entry == ".credentials.json" and is_macos())
-        ):
+        if entry.startswith(CREDENTIAL_ENTRY_PREFIX):
+            continue
+        if top_level and entry in EXCLUDED_ENTRIES:
             continue
         entry_stat = os.stat(entry, dir_fd=source_dir_fd, follow_symlinks=False)
         if stat.S_ISDIR(entry_stat.st_mode):
@@ -720,6 +735,7 @@ def remove_home(args):
 
 def main():
     args = parse_args()
+    require_macos()
     if args.create and args.remove:
         die("Claude home management accepts exactly one action")
     if args.create:
