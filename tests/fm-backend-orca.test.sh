@@ -1045,8 +1045,8 @@ SH
   pass "fm-spawn.sh --backend orca: releases terminal and worktree on later aborts"
 }
 
-test_peek_and_crew_state_route_through_orca_meta_while_send_refuses() {
-  local wt state id out neutral status
+test_peek_send_and_crew_state_route_through_orca_meta() {
+  local wt state id out neutral
   id="orcaiopathz2"
   wt="$TMP_ROOT/io-wt"
   fm_git_init_commit "$wt"
@@ -1061,16 +1061,13 @@ test_peek_and_crew_state_route_through_orca_meta_while_send_refuses() {
     FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_SEND_SETTLE=0 \
     "$ROOT/bin/fm-peek.sh" "fm-$id" 10 )
   [ "$out" = ready ] || fail "fm-peek should read through Orca metadata, got '$out'"
-  if out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+  printf '{"ok":true,"result":{"send":{"handle":"term-io","accepted":true}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"send":{"handle":"term-io","accepted":true}}}\n' > "$RESP/3.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["│ > │"]}}}\n' > "$RESP/4.out"
+  PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$neutral" FM_HOME="$neutral" FM_STATE_OVERRIDE="$state" FM_SEND_SETTLE=0 \
-    "$ROOT/bin/fm-send.sh" "fm-$id" "hello orca" 2>&1 ); then
-    status=0
-  else
-    status=$?
-  fi
-  [ "$status" -ne 0 ] || fail "fm-send must refuse an Orca target without a native process liveness signal"
-  assert_contains "$out" "harness agent is unknown" "fm-send did not explain the Orca liveness refusal"
-  printf '{"ok":true,"result":{"terminal":{"tail":["idle prompt"]}}}\n' > "$RESP/2.out"
+    "$ROOT/bin/fm-send.sh" "fm-$id" "hello orca"
+  printf '{"ok":true,"result":{"terminal":{"tail":["idle prompt"]}}}\n' > "$RESP/5.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-crew-state.sh" "$id" )
   assert_contains "$out" "state: unknown" "crew-state should fall back cleanly for an idle Orca scout"
@@ -1078,9 +1075,11 @@ test_peek_and_crew_state_route_through_orca_meta_while_send_refuses() {
     "peek/crew-state did not read the recorded Orca terminal"
   assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''read'$'\x1f''--terminal'$'\x1f'"fm-$id" \
     "crew-state should not read the stable Orca alias as a terminal handle"
-  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-io' \
-    "fm-send must not type into an Orca terminal without native liveness confirmation"
-  pass "fm-peek/fm-crew-state use Orca metadata while fm-send fails closed"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-io'$'\x1f''--text'$'\x1f''hello orca'$'\x1f''--json' \
+    "send did not type through the recorded Orca terminal"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-io'$'\x1f''--text'$'\x1f\x1f''--enter'$'\x1f''--json' \
+    "send did not submit Enter through the recorded Orca terminal"
+  pass "fm-peek/fm-send/fm-crew-state route through backend=orca metadata"
 }
 
 test_peek_and_crew_state_fail_closed_on_orca_error_json() {
@@ -1779,7 +1778,7 @@ test_spawn_preserves_orca_metadata_when_abort_cleanup_fails
 test_orca_spawn_uses_strict_terminal_cleanup
 test_orca_partial_cleanup_without_terminal_preserves_codex_home
 test_spawn_releases_orca_resources_when_metadata_write_fails
-test_peek_and_crew_state_route_through_orca_meta_while_send_refuses
+test_peek_send_and_crew_state_route_through_orca_meta
 test_peek_and_crew_state_fail_closed_on_orca_error_json
 test_target_exists_rejects_orca_error_json
 test_target_absent_confirms_orca_not_found

@@ -214,13 +214,11 @@ fi
 # unknown and treated as non-codex (the safe default that keeps the fast path).
 # The target's BACKEND comes from selector meta, from matching an explicit target
 # back to recorded meta, or from strict explicit-target shape validation.
-if [ "${1:-}" != "--key" ]; then
-  agent_liveness=$(fm_backend_agent_alive "$TARGET_BACKEND" "$T" 2>/dev/null || printf unknown)
-  if [ "$agent_liveness" != alive ]; then
-    echo "error: refusing to send to $T ($TARGET_BACKEND harness agent is $agent_liveness; tried $RESOLUTION_TRIED)" >&2
-    exit 1
-  fi
-fi
+# Do not add a separate passive liveness preflight here. Active send paths own
+# backend readiness: herdr, for example, must route through its session-aware
+# target_ready path before sending, while zellij verifies pane labels in its
+# send implementation. A failed backend send is still surfaced below as a hard
+# error with the attempted resolution attached.
 
 if [ "${1:-}" = "--key" ]; then
   if ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$2" "$EXPECTED_LABEL"; then
