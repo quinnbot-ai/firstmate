@@ -218,6 +218,7 @@ Those inherited values are defaults and rules only; `fm-spawn` still permits a c
 `config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
 For Pi secondmate launches, `fm-spawn.sh` starts Pi with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
+
 ### Codex crewmate isolation (data/codex-crewmate/)
 
 For Codex ship and scout launches, `fm-spawn.sh` creates one private task home under `data/codex-crewmate/` and runs the process with that directory as `CODEX_HOME`.
@@ -249,6 +250,7 @@ Task metadata records `claude_crewmate_home=`, and failed endpoint cleanup prese
 Claude secondmate launches keep their existing `CLAUDE_CONFIG_DIR` behavior.
 When the profile is ready, quota-balanced dispatch reads Claude quota through that profile so selection measures the account the crew task will use.
 When the profile is present but not ready, dispatch removes Claude candidates and names the invalid profile rather than selecting a launch that `fm-spawn.sh` would refuse.
+
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
