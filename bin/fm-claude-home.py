@@ -14,9 +14,11 @@ On macOS it also clones only the managed profile's per-config-dir
 Keychain credential into the new home's derived Keychain service, and
 removes that service entry on abort cleanup and teardown, even when the
 home directory itself is already gone.
-Both the clone and the removal are non-interactive and confirmed by
-reading the target entry back, so an empty, truncated, or leftover
-credential fails instead of producing a home that cannot authenticate.
+Both the clone and the removal disable Keychain authentication UI and
+are confirmed by reading the target entry back, so an empty, truncated,
+or leftover credential, or an item that would need interactive
+authorization, fails instead of producing a home that cannot
+authenticate or an unattended task that waits on a prompt.
 It never reads or copies anything from the captain's own ~/.claude or
 CLAUDE_CONFIG_DIR - the persistent profile is populated only by the
 captain's explicit provisioning flow in docs/configuration.md.
@@ -81,11 +83,15 @@ class MacOSKeychain:
 
     Credential bytes stay in this process. They are never encoded as text or
     passed through a child process's argv, environment, stdin, or output.
+    Every lookup, update, and removal of an existing item disables
+    authentication UI, so an item that would need authorization fails the
+    unattended task instead of raising a Keychain prompt or blocking on one.
     """
 
     SUCCESS = 0
     DUPLICATE_ITEM = -25299
     ITEM_NOT_FOUND = -25300
+    INTERACTION_NOT_ALLOWED = -25308
     UTF8 = 0x08000100
 
     def __init__(self):
@@ -121,6 +127,10 @@ class MacOSKeychain:
             ctypes.c_void_p,
             ctypes.c_void_p,
         ]
+        self.core.CFDictionaryRemoveValue.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
         self.core.CFStringCreateWithCString.argtypes = [
             ctypes.c_void_p,
             ctypes.c_char_p,
@@ -149,6 +159,8 @@ class MacOSKeychain:
                 "kSecMatchLimit",
                 "kSecMatchLimitOne",
                 "kSecValueData",
+                "kSecUseAuthenticationUI",
+                "kSecUseAuthenticationUIFail",
             )
         }
         self.true = ctypes.c_void_p.in_dll(self.core, "kCFBooleanTrue").value
@@ -189,6 +201,10 @@ class MacOSKeychain:
             (self.constants["kSecClass"], self.constants["kSecClassGenericPassword"]),
             (self.constants["kSecAttrAccount"], account),
             (self.constants["kSecAttrService"], service_value),
+            (
+                self.constants["kSecUseAuthenticationUI"],
+                self.constants["kSecUseAuthenticationUIFail"],
+            ),
         ]
         if include_data:
             values.extend(
@@ -202,11 +218,19 @@ class MacOSKeychain:
             )
         return self.dictionary(values), account, service_value
 
+    def require_unattended(self, status):
+        if status == self.INTERACTION_NOT_ALLOWED:
+            die(
+                "managed Claude Keychain item requires interactive authorization; "
+                "run the documented profile provisioning flow"
+            )
+
     def read(self, service):
         query, account, service_value = self.attributes(service, include_data=True)
         result = ctypes.c_void_p()
         try:
             status = self.security.SecItemCopyMatching(query, ctypes.byref(result))
+            self.require_unattended(status)
             if status == self.ITEM_NOT_FOUND:
                 return None
             if status != self.SUCCESS or not result.value:
@@ -232,11 +256,16 @@ class MacOSKeychain:
         )
         try:
             status = self.security.SecItemUpdate(query, additions)
+            self.require_unattended(status)
             if status == self.ITEM_NOT_FOUND:
+                self.core.CFDictionaryRemoveValue(
+                    query, self.constants["kSecUseAuthenticationUI"]
+                )
                 self.core.CFDictionarySetValue(
                     query, self.constants["kSecValueData"], secret
                 )
                 status = self.security.SecItemAdd(query, None)
+                self.require_unattended(status)
             if status not in (self.SUCCESS, self.DUPLICATE_ITEM):
                 die("could not seed isolated Claude Keychain credential")
         finally:
@@ -250,6 +279,7 @@ class MacOSKeychain:
         query, account, service_value = self.attributes(service)
         try:
             status = self.security.SecItemDelete(query)
+            self.require_unattended(status)
             if status not in (self.SUCCESS, self.ITEM_NOT_FOUND):
                 die("could not remove isolated Claude Keychain credential")
         finally:

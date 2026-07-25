@@ -267,13 +267,16 @@ Firstmate repairs that path binding by reading the managed profile service and w
 Credential bytes never enter a child process, argv, environment variable, stdin, stdout, stderr, log, or disk file.
 On macOS the task-home copy excludes `.credentials.json`, so Keychain remains the only credential transfer surface.
 The helper reads the target item back in process, refuses an empty or mismatched result, and removes the exact task service during abort cleanup or normal teardown.
-If Security.framework is unavailable or the managed profile has no matching Keychain item, provisioning fails with an operator error and no worker starts.
+Every read, write, and removal disables Keychain authentication UI, so an item that would need interactive authorization fails the unattended task instead of raising a prompt or blocking on one.
+If Security.framework is unavailable, an item requires interactive authorization, or the managed profile has no matching Keychain item, provisioning fails with an operator error and no worker starts.
 It never reads from or writes to the captain's default Claude home.
 
 Before spawn records metadata or sends a launch command, it verifies the actual task home against the profile attestation.
 The launch command repeats that verification immediately before exec and gives the worker an environment with ambient Anthropic credentials, alternate profiles, and Bedrock, Vertex, or Foundry provider switches removed.
+It resolves the Claude binary once, attests that exact path, and refuses to start any other program, so the worker cannot run a Claude that was never checked.
+It also applies the launch command's own leading environment assignments itself and refuses any assignment that would restore a scrubbed authentication variable.
 This wrapper is part of the shared launch command used by tmux, Herdr, zellij, Orca, and cmux, so every supported runtime backend applies the same proof.
-While the managed profile exists, raw ship or scout commands that name Claude or contain dynamic execution are refused because they cannot carry the verified exec boundary; use `--harness claude`.
+While the managed profile exists, every raw ship or scout launch command is refused, because only a verified adapter carries that exec boundary; use `--harness claude` or another adapter.
 Task metadata records `claude_crewmate_home=`, and failed endpoint cleanup preserves that metadata and managed home for later safe recovery.
 Claude secondmate launches keep their existing `CLAUDE_CONFIG_DIR` behavior.
 When the profile is ready, quota-balanced dispatch reverifies it and reads Claude quota with the same ambient-auth scrub so selection measures the attested crew account.

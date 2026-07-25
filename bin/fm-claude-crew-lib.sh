@@ -23,7 +23,10 @@
 # configuration that fm-spawn.sh refuses.
 # fm_claude_crew_home_ready <profile-dir> <home-dir> <worktree> verifies the
 # actual task home after creation and before its launch command is constructed.
-# FM_CLAUDE_CREW_CLI overrides the claude binary (tests only).
+# FM_CLAUDE_CREW_CLI names a fake claude binary and is honored by
+# bin/fm-claude-auth.py only under the FM_CLAUDE_CREW_FAKE_CLI declaration that
+# tests/lib.sh exports, so these functions pass it through the environment
+# rather than asserting it.
 
 fm_claude_crew_profile_dir() {
   printf '%s/claude-crewmate/profile' "$1"
@@ -38,7 +41,7 @@ fm_claude_crew_profile_ready() {
   probe=$(python3 "$script_dir/fm-claude-home.py" \
     --data "$data" --source "$profile" --task-id "$probe_id" --create) || return 1
   readiness_status=0
-  FM_CLAUDE_CREW_CLI="$cli" python3 "$script_dir/fm-claude-auth.py" \
+  python3 "$script_dir/fm-claude-auth.py" \
     --verify --profile "$profile" --home "$probe" --worktree "$PWD" >/dev/null 2>&1 \
     || readiness_status=$?
   cleanup_status=0
@@ -54,6 +57,6 @@ fm_claude_crew_home_ready() {
   [ -n "$profile" ] && [ -n "$home" ] && [ -n "$worktree" ] || return 1
   command -v "$cli" >/dev/null 2>&1 || return 1
   script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-  FM_CLAUDE_CREW_CLI="$cli" python3 "$script_dir/fm-claude-auth.py" \
+  python3 "$script_dir/fm-claude-auth.py" \
     --verify --profile "$profile" --home "$home" --worktree "$worktree" >/dev/null 2>&1
 }

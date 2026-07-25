@@ -7,11 +7,16 @@ attestation.
 Verification runs `claude auth status --json` with the exact config directory
 and with ambient authentication and alternate-provider environment variables
 removed.
-Status output is bounded, parsed in memory, and never relayed.
+The Claude CLI is resolved to one absolute path per process, and that same path
+runs every identity check and every exec of the CLI itself.
+Status output is read with a hard in-memory cap, parsed in memory, and never
+relayed; an overlong or slow status program is killed instead of buffered.
 The login action starts the operator's explicit profile provisioning flow under
 that same scrubbed environment.
 The exec action repeats verification immediately before replacing itself with
-the worker or quota command.
+the worker or quota command, applies the command's own leading environment
+assignments itself rather than through a re-resolving `env` process, and
+refuses any assignment that would restore a scrubbed authentication variable.
 """
 
 import argparse
@@ -19,15 +24,30 @@ import hashlib
 import json
 import os
 import secrets
+import selectors
+import shutil
 import stat
 import subprocess
 import sys
+import time
 
 MANIFEST = ".firstmate-account.json"
 MANIFEST_VERSION = 1
 MAX_STATUS_BYTES = 64 * 1024
+STATUS_CHUNK_BYTES = 8192
 MAX_MANIFEST_BYTES = 4096
 AUTH_TIMEOUT_SECONDS = 15
+ENVIRONMENT_NAME_CHARS = (
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"
+)
+
+# FM_CLAUDE_CREW_CLI points every identity check at a different status program,
+# so honoring it in a real launch would make attestation prove nothing. It is
+# accepted only when firstmate's own test harness declares itself through
+# FM_CLAUDE_CREW_FAKE_CLI, which tests/lib.sh exports and no spawn, dispatch,
+# login, or launch path sets.
+TEST_CLI_VARIABLE = "FM_CLAUDE_CREW_CLI"
+TEST_CLI_DECLARATION = "FM_CLAUDE_CREW_FAKE_CLI"
 
 # Claude authentication may be supplied by any of these ambient variables
 # without using the task-private configuration directory.
@@ -87,6 +107,11 @@ AMBIENT_AUTH_VARIABLES = {
     "CLAUDE_CODE_WEBSOCKET_AUTH_FILE_DESCRIPTOR",
 }
 
+SCRUBBED_VARIABLES = AMBIENT_AUTH_VARIABLES | {
+    TEST_CLI_VARIABLE,
+    TEST_CLI_DECLARATION,
+}
+
 
 def die(message):
     print(f"error: {message}", file=sys.stderr)
@@ -109,14 +134,40 @@ def open_directory(path, label):
 
 def scrubbed_environment(home):
     environment = os.environ.copy()
-    for name in AMBIENT_AUTH_VARIABLES:
+    for name in SCRUBBED_VARIABLES:
         environment.pop(name, None)
     environment["CLAUDE_CONFIG_DIR"] = os.path.realpath(home)
     return environment
 
 
+def resolved_program(name, search_path=None):
+    located = shutil.which(name, path=search_path)
+    if located is None:
+        return None
+    return os.path.abspath(located)
+
+
+RESOLVED_CLAUDE_CLI = []
+
+
 def claude_cli():
-    return os.environ.get("FM_CLAUDE_CREW_CLI", "claude")
+    if RESOLVED_CLAUDE_CLI:
+        return RESOLVED_CLAUDE_CLI[0]
+    override = os.environ.get(TEST_CLI_VARIABLE)
+    if override is None:
+        candidate = "claude"
+    elif os.environ.get(TEST_CLI_DECLARATION) == "1":
+        candidate = override
+    else:
+        die(
+            f"{TEST_CLI_VARIABLE} redirects Claude account attestation and is "
+            "accepted only inside firstmate's own test harness"
+        )
+    resolved = resolved_program(candidate)
+    if resolved is None:
+        die("Claude account identity could not be attested")
+    RESOLVED_CLAUDE_CLI.append(resolved)
+    return resolved
 
 
 def account_digest(status):
@@ -145,29 +196,66 @@ def account_digest(status):
     return hashlib.sha256(identity).hexdigest()
 
 
-def authenticated_account(home, worktree):
-    environment = scrubbed_environment(home)
+def read_bounded(stream, deadline):
+    chunks = []
+    total = 0
+    selector = selectors.DefaultSelector()
+    selector.register(stream, selectors.EVENT_READ)
     try:
-        result = subprocess.run(
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not selector.select(remaining):
+                return None
+            try:
+                chunk = os.read(stream.fileno(), STATUS_CHUNK_BYTES)
+            except OSError:
+                return None
+            if not chunk:
+                return b"".join(chunks)
+            total += len(chunk)
+            if total > MAX_STATUS_BYTES:
+                return None
+            chunks.append(chunk)
+    finally:
+        selector.close()
+
+
+def status_output(home, worktree):
+    try:
+        process = subprocess.Popen(
             [claude_cli(), "auth", "status", "--json"],
             cwd=os.path.realpath(worktree),
-            env=environment,
+            env=scrubbed_environment(home),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-            timeout=AUTH_TIMEOUT_SECONDS,
+            stderr=subprocess.DEVNULL,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        die("Claude account identity could not be attested")
-    if (
-        result.returncode != 0
-        or len(result.stdout) > MAX_STATUS_BYTES
-        or len(result.stderr) > MAX_STATUS_BYTES
-    ):
+    except OSError:
+        return None
+    deadline = time.monotonic() + AUTH_TIMEOUT_SECONDS
+    try:
+        output = read_bounded(process.stdout, deadline)
+        if output is None:
+            return None
+        try:
+            if process.wait(timeout=max(deadline - time.monotonic(), 0.5)) != 0:
+                return None
+        except subprocess.TimeoutExpired:
+            return None
+        return output
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        process.stdout.close()
+
+
+def authenticated_account(home, worktree):
+    output = status_output(home, worktree)
+    if output is None:
         die("Claude account identity could not be attested")
     try:
-        status = json.loads(result.stdout.decode())
+        status = json.loads(output.decode())
     except (UnicodeDecodeError, ValueError):
         die("Claude account identity could not be attested")
     digest = account_digest(status)
@@ -278,6 +366,15 @@ def verify(profile, home, worktree):
     return expected
 
 
+def environment_assignment(word):
+    name, separator, value = word.partition("=")
+    if not separator or not name or name[0] in "0123456789":
+        return None
+    if any(character not in ENVIRONMENT_NAME_CHARS for character in name):
+        return None
+    return name, value
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     actions = parser.add_mutually_exclusive_group(required=True)
@@ -289,6 +386,7 @@ def parse_args():
     parser.add_argument("--home")
     parser.add_argument("--worktree", required=True)
     parser.add_argument("--replace-attestation", action="store_true")
+    parser.add_argument("--require-verified-cli", action="store_true")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     return parser.parse_args()
 
@@ -302,14 +400,18 @@ def main():
     if args.login:
         profile_fd = open_directory(profile, "Claude crewmate profile")
         os.close(profile_fd)
-        if args.home or args.replace_attestation or args.command:
+        if (
+            args.home
+            or args.replace_attestation
+            or args.require_verified_cli
+            or args.command
+        ):
             die("Claude profile login accepts only --profile and --worktree")
         environment = scrubbed_environment(profile)
         login_command = claude_cli()
-        environment.pop("FM_CLAUDE_CREW_CLI", None)
         os.chdir(worktree)
         try:
-            os.execvpe(
+            os.execve(
                 login_command,
                 [login_command, "auth", "login"],
                 environment,
@@ -330,6 +432,8 @@ def main():
         return
     if args.replace_attestation:
         die("--replace-attestation requires --attest")
+    if args.require_verified_cli and not args.verify_exec:
+        die("--require-verified-cli requires --verify-exec")
     if not args.home:
         die("Claude verification requires --home")
     home = os.path.realpath(args.home)
@@ -344,10 +448,25 @@ def main():
     if not command:
         die("Claude verified exec requires a command")
     environment = scrubbed_environment(home)
-    environment.pop("FM_CLAUDE_CREW_CLI", None)
+    while len(command) > 1:
+        assignment = environment_assignment(command[0])
+        if assignment is None:
+            break
+        name, value = assignment
+        if name in SCRUBBED_VARIABLES or name == "CLAUDE_CONFIG_DIR":
+            die("the verified Claude command cannot set authentication variables")
+        environment[name] = value
+        command = command[1:]
+    program = resolved_program(command[0], environment.get("PATH"))
+    if program is None:
+        die("could not start the verified Claude command")
+    if args.require_verified_cli and os.path.realpath(program) != os.path.realpath(
+        claude_cli()
+    ):
+        die("the verified Claude command is not the attested Claude CLI")
     os.chdir(worktree)
     try:
-        os.execvpe(command[0], command, environment)
+        os.execve(program, command, environment)
     except OSError:
         die("could not start the verified Claude command")
 

@@ -1837,7 +1837,9 @@ EOF
   [ -n "$home_dir" ] || fail "Claude ship launch did not carry an isolated CLAUDE_CONFIG_DIR"
   assert_contains "$launch" "fm-claude-auth.py' --verify-exec" \
     "Claude ship launch did not reverify account identity at worker exec"
-  assert_contains "$launch" "-- /usr/bin/env CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
+  assert_contains "$launch" "--verify-exec --require-verified-cli" \
+    "Claude ship launch did not pin the worker to the attested Claude binary"
+  assert_contains "$launch" "-- CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
     "Claude ship launch did not preserve its worker environment assignment"
   case "${home_dir##*/}" in .fm-claude-home.*) : ;; *) fail "Claude launch did not use a private per-task home: $home_dir" ;; esac
   [ -d "$home_dir" ] || fail "Claude ship spawn did not materialize the private home synchronously"
@@ -1903,22 +1905,29 @@ test_claude_crewmate_home_credential_less_profile_refuses_spawn() {
 }
 
 test_claude_crewmate_profile_refuses_raw_bypass() {
-  local rec id out status
-  id=claude-crew-home-raw-z101
-  rec=$(make_spawn_case claude-crew-home-raw claude "$id")
-  read_case_record "$rec"
-  write_fake_claude_cli "$FAKEBIN_DIR"
-  make_claude_crew_profile "$HOME_DIR" >/dev/null
+  local rec id out status raw index
+  index=0
+  for raw in \
+    "env CLAUDE_CONFIG_DIR=/tmp/personal claude --dangerously-skip-permissions" \
+    "company-claude-wrapper --foo" \
+    "custom-agent --flag"; do
+    index=$((index + 1))
+    id="claude-crew-home-raw-z10$index"
+    rec=$(make_spawn_case "claude-crew-home-raw$index" claude "$id")
+    read_case_record "$rec"
+    write_fake_claude_cli "$FAKEBIN_DIR"
+    make_claude_crew_profile "$HOME_DIR" >/dev/null
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" \
-    "$PROJ_DIR" "env CLAUDE_CONFIG_DIR=/tmp/personal claude --dangerously-skip-permissions" 2>&1)
-  status=$?
-  expect_code 1 "$status" "a raw Claude launch must not bypass the managed account gate"
-  assert_contains "$out" "raw commands that could reach Claude cannot prove" \
-    "raw Claude bypass refusal was not actionable"
-  [ ! -s "$LAUNCH_LOG" ] || fail "raw Claude bypass opened a worker pane"
-  assert_absent "$HOME_DIR/state/$id.meta" "raw Claude bypass wrote task metadata"
-  pass "a configured Claude crew profile refuses raw commands that could bypass attestation"
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" \
+      "$PROJ_DIR" "$raw" 2>&1)
+    status=$?
+    expect_code 1 "$status" "a raw launch must not bypass the managed account gate: $raw"
+    assert_contains "$out" "raw commands cannot prove task-private account identity" \
+      "raw bypass refusal was not actionable: $raw"
+    [ ! -s "$LAUNCH_LOG" ] || fail "raw bypass opened a worker pane: $raw"
+    assert_absent "$HOME_DIR/state/$id.meta" "raw bypass wrote task metadata: $raw"
+  done
+  pass "a configured Claude crew profile refuses every raw ship or scout command"
 }
 
 test_claude_crewmate_home_uses_fresh_private_directory() {

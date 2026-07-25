@@ -117,10 +117,12 @@
 # never the captain's own ~/.claude), only when that profile, a disposable
 # copy, and the actual task home all resolve to the profile-local attested
 # identity (bin/fm-claude-crew-lib.sh). The final worker exec repeats that
-# check under an ambient-auth-scrubbed environment. An absent profile leaves
-# the launch and meta byte-identical to today's default-account behavior,
-# while a present but unusable profile refuses the Claude spawn before a pane
-# can reach onboarding.
+# check under an ambient-auth-scrubbed environment and starts the exact Claude
+# binary that check attested. An absent profile leaves the launch and meta
+# byte-identical to today's default-account behavior, while a present but
+# unusable profile refuses the Claude spawn before a pane can reach onboarding.
+# While that profile exists, every raw ship or scout launch command is refused,
+# because only a verified adapter can carry the attested exec boundary.
 # Claude secondmate launches are not changed here.
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
@@ -717,10 +719,6 @@ raw_launch_word_is_codex() {
   raw_launch_word_is "$1" codex
 }
 
-raw_launch_word_is_claude() {
-  raw_launch_word_is "$1" claude
-}
-
 raw_launch_word_is_dynamic_dispatcher() {
   local word=$1
   raw_launch_word_is "$word" find || raw_launch_word_is "$word" xargs || raw_launch_word_is "$word" parallel
@@ -763,21 +761,6 @@ raw_launch_has_codex_dispatch_argument() {
     status=$?
     [ "$status" -eq 0 ] || return "$status"
     if raw_launch_word_is_codex "$RAW_LAUNCH_WORD" && [[ "$previous" != -* ]]; then
-      return 0
-    fi
-    previous=$RAW_LAUNCH_WORD
-    raw=$RAW_LAUNCH_REST
-  done
-  return 1
-}
-
-raw_launch_has_claude_dispatch_argument() {
-  local raw=$1 previous='' status
-  while [ -n "$raw" ]; do
-    raw_launch_read_word "$raw"
-    status=$?
-    [ "$status" -eq 0 ] || return "$status"
-    if raw_launch_word_is_claude "$RAW_LAUNCH_WORD" && [[ "$previous" != -* ]]; then
       return 0
     fi
     previous=$RAW_LAUNCH_WORD
@@ -1195,16 +1178,8 @@ esac
 
 if [ "$KIND" != secondmate ] && [ "$RAW_LAUNCH_USED" -eq 1 ] \
   && [ -d "$(fm_claude_crew_profile_dir "$DATA")" ]; then
-  set +e
-  raw_launch_has_claude_dispatch_argument "$ARG3"
-  raw_claude_status=$?
-  raw_launch_has_dynamic_execution "$ARG3"
-  raw_dynamic_status=$?
-  set -e
-  if [ "$raw_claude_status" -ne 1 ] || [ "$raw_dynamic_status" -eq 0 ]; then
-    echo "error: a configured Claude crewmate profile requires --harness claude; raw commands that could reach Claude cannot prove task-private account identity" >&2
-    exit 1
-  fi
+  echo "error: a configured Claude crewmate profile requires a verified adapter such as --harness claude; raw commands cannot prove task-private account identity" >&2
+  exit 1
 fi
 
 # config/secondmate-harness may carry optional model/effort tokens alongside the
@@ -2398,7 +2373,7 @@ if [ -n "$CLAUDE_CREWMATE_HOME" ]; then
   sq_claude_crewmate_profile=$(shell_quote "$CLAUDE_CREWMATE_PROFILE")
   sq_claude_auth_helper=$(shell_quote "$FM_ROOT/bin/fm-claude-auth.py")
   sq_claude_worktree=$(shell_quote "$WT_REAL")
-  LAUNCH="exec python3 $sq_claude_auth_helper --verify-exec --profile $sq_claude_crewmate_profile --home $sq_claude_crewmate_home --worktree $sq_claude_worktree -- /usr/bin/env $LAUNCH"
+  LAUNCH="exec python3 $sq_claude_auth_helper --verify-exec --require-verified-cli --profile $sq_claude_crewmate_profile --home $sq_claude_crewmate_home --worktree $sq_claude_worktree -- $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
