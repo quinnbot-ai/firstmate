@@ -63,7 +63,12 @@ function unavailable(name, unit, reason = 'source unavailable') {
 }
 function runSource(source) {
   if (!source || !Array.isArray(source.command) || source.command.length === 0 || source.command.some((item) => typeof item !== 'string')) return { ok: false, reason: 'source unavailable' };
-  const result = spawnSync(source.command[0], source.command.slice(1), { encoding: 'utf8', timeout: source.timeoutMs || 30000, env: process.env });
+  let result;
+  try {
+    result = spawnSync(source.command[0], source.command.slice(1), { encoding: 'utf8', timeout: source.timeoutMs || 30000, env: process.env });
+  } catch {
+    return { ok: false, reason: 'source unavailable' };
+  }
   if (result.status !== 0 || result.error) return { ok: false, reason: 'source unavailable' };
   const body = parseJson(result.stdout, 'source');
   if (!body || typeof body !== 'object' || !body.metrics) return { ok: false, reason: 'source unavailable' };

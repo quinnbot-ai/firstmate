@@ -192,6 +192,21 @@ test_quota_percentages_must_be_in_range() {
   pass "quota percentages must be between zero and one hundred"
 }
 
+test_malformed_source_timeouts_render_unavailable() {
+  local one="$TMP_ROOT/timeout/one" two="$TMP_ROOT/timeout/two" config="$TMP_ROOT/timeout/config.json" out="$TMP_ROOT/timeout/out.json" quota="$TMP_ROOT/timeout/quota"
+  write_source "$one" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"pipeline_cost\":{\"amount\":4,\"unit\":\"USD\",\"status\":\"measured\"},\"realized_revenue\":{\"amount\":8,\"unit\":\"USD\",\"status\":\"measured\"}}}"
+  write_source "$two" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"pipeline_cost\":{\"amount\":4,\"unit\":\"USD\",\"status\":\"measured\"},\"realized_revenue\":{\"amount\":8,\"unit\":\"USD\",\"status\":\"measured\"}}}"
+  mkdir -p "$(dirname "$config")"
+  cat > "$config" <<JSON
+{"lanes":{"weho":{"sources":[{"command":["$one"],"timeoutMs":"invalid"},{"command":["$two"],"timeoutMs":-1}]}}}
+JSON
+  write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .status=="unavailable")' "$out" >/dev/null || fail "malformed source timeouts were not rendered unavailable"
+  jq -e '.lanes[] | select(.id=="fleet_operations") | .metrics[] | select(.name=="claude_quota_window" and .amount==80 and .status=="measured")' "$out" >/dev/null || fail "malformed source timeout prevented partial rendering"
+  [ -f "${out%.json}.md" ] || fail "malformed source timeout prevented artifact publication"
+  pass "malformed source timeouts render unavailable"
+}
+
 test_zero_revenue_is_explicit_and_cross_checked
 test_unavailable_and_partial_lanes_render
 test_stale_and_failed_cross_check_are_refused
@@ -203,3 +218,4 @@ test_stale_quota_provider_state_is_refused
 test_malformed_source_containers_render_unavailable
 test_observations_are_rechecked_at_publication
 test_quota_percentages_must_be_in_range
+test_malformed_source_timeouts_render_unavailable
