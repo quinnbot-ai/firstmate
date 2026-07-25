@@ -22,7 +22,6 @@ import { closeSync, fchmodSync, mkdirSync, openSync, readFileSync, writeFileSync
 import { dirname, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
-const now = new Date();
 const fmHome = process.env.FM_HOME || process.cwd();
 const defaults = {
   config: resolve(fmHome, 'config/unit-economics-ledger.json'),
@@ -55,30 +54,35 @@ function args() {
   return result;
 }
 function parseJson(text, context) { try { return JSON.parse(text); } catch { return null; } }
-function isoFresh(value, maxAgeSeconds) {
+function isoFresh(value, maxAgeSeconds, referenceTime) {
   const parsed = Date.parse(value || '');
-  const referenceTime = Date.now();
   return Number.isFinite(parsed) && parsed <= referenceTime && referenceTime - parsed <= maxAgeSeconds * 1000;
 }
 function unavailable(name, unit, reason = 'source unavailable') {
   return { name, amount: null, unit, currency: unit === 'USD' ? 'USD' : null, status: 'unavailable', source_freshness: reason, cross_check: 'unavailable' };
 }
-function runSource(source, maxAgeSeconds) {
+function runSource(source) {
   if (!source || !Array.isArray(source.command) || source.command.length === 0 || source.command.some((item) => typeof item !== 'string')) return { ok: false, reason: 'source unavailable' };
   const result = spawnSync(source.command[0], source.command.slice(1), { encoding: 'utf8', timeout: source.timeoutMs || 30000, env: process.env });
   if (result.status !== 0 || result.error) return { ok: false, reason: 'source unavailable' };
   const body = parseJson(result.stdout, 'source');
-  if (!body || typeof body !== 'object' || !body.metrics || !isoFresh(body.observedAt, maxAgeSeconds)) return { ok: false, reason: body?.observedAt ? 'stale source refused' : 'source unavailable' };
+  if (!body || typeof body !== 'object' || !body.metrics) return { ok: false, reason: 'source unavailable' };
   return { ok: true, body };
 }
-function runSources(definitions, maxAgeSeconds) {
+function runSources(definitions) {
   if (!Array.isArray(definitions)) return [];
   const commands = new Set();
   return definitions.flatMap((source) => {
     const identity = Array.isArray(source?.command) ? JSON.stringify(source.command) : null;
     if (identity && commands.has(identity)) return [];
     if (identity) commands.add(identity);
-    return [runSource(source, maxAgeSeconds)];
+    return [runSource(source)];
+  });
+}
+function sourcesAtPublication(sources, maxAgeSeconds, publicationTime) {
+  return sources.map((source) => {
+    if (!source.ok || isoFresh(source.body.observedAt, maxAgeSeconds, publicationTime)) return source;
+    return { ok: false, reason: source.body.observedAt ? 'stale source refused' : 'source unavailable' };
   });
 }
 function sourceMetric(source, metric) {
@@ -102,9 +106,13 @@ function corroboratedMetric(name, unit, sources) {
     status: estimated ? 'estimated' : 'independently_cross_checked', source_freshness: 'fresh', cross_check: 'passed',
   };
 }
-function financialLane(id, config, maxAgeSeconds) {
+function collectFinancialLane(id, config) {
+  return { id, sources: runSources(config?.sources) };
+}
+function financialLane(input, maxAgeSeconds, publicationTime) {
+  const { id } = input;
   const spec = laneSpecs[id];
-  const sources = runSources(config?.sources, maxAgeSeconds);
+  const sources = sourcesAtPublication(input.sources, maxAgeSeconds, publicationTime);
   const metrics = spec.metrics.map(([name, unit]) => corroboratedMetric(name, unit, sources));
   const sourceFreshness = metrics.find((metric) => metric.source_freshness === 'stale source refused')?.source_freshness
     || metrics.find((metric) => metric.source_freshness === 'source unavailable')?.source_freshness
@@ -122,29 +130,33 @@ function findProvider(value, wanted) {
   }
   return null;
 }
-function quotaMetric(name, provider, generatedAt, maxAgeSeconds) {
+function quotaMetric(name, provider, generatedAt, maxAgeSeconds, publicationTime) {
   if (!provider || !generatedAt) return unavailable(name, 'percent');
-  if (!isoFresh(generatedAt, maxAgeSeconds)) return unavailable(name, 'percent', 'stale source refused');
+  if (!isoFresh(generatedAt, maxAgeSeconds, publicationTime)) return unavailable(name, 'percent', 'stale source refused');
   const state = provider.state;
   if (!state || state.status !== 'fresh' || state.stale === true) {
     return unavailable(name, 'percent', state?.status === 'stale' || state?.stale === true ? 'stale source refused' : 'source unavailable');
   }
-  if (state.refreshedAt && !isoFresh(state.refreshedAt, maxAgeSeconds)) return unavailable(name, 'percent', 'stale source refused');
-  const windows = provider.windows.filter((window) => Number.isFinite(window?.percentRemaining));
+  if (state.refreshedAt && !isoFresh(state.refreshedAt, maxAgeSeconds, publicationTime)) return unavailable(name, 'percent', 'stale source refused');
+  const windows = provider.windows.filter((window) => Number.isFinite(window?.percentRemaining) && window.percentRemaining >= 0 && window.percentRemaining <= 100);
   if (!windows.length) return unavailable(name, 'percent');
   const amount = Math.min(...windows.map((window) => window.percentRemaining));
   return { name, amount, unit: 'percent', currency: null, status: 'measured', source_freshness: 'fresh', cross_check: 'not-required' };
 }
-function fleetLane(config, maxAgeSeconds) {
+function collectFleetLane(config) {
   const quota = spawnSync(process.env.FM_UNIT_ECONOMICS_QUOTA_AXI || 'quota-axi', ['--json'], { encoding: 'utf8', timeout: 30000, env: process.env });
   const body = quota.status === 0 ? parseJson(quota.stdout, 'quota') : null;
+  return { id: 'fleet_operations', body, costSources: runSources(config?.cost_sources) };
+}
+function fleetLane(input, maxAgeSeconds, publicationTime) {
+  const { body } = input;
   const generatedAt = body?.generatedAt;
   const claude = findProvider(body?.providers, ['claude', 'anthropic']);
   const codex = findProvider(body?.providers, ['codex', 'openai']);
-  const costSources = runSources(config?.cost_sources, maxAgeSeconds);
+  const costSources = sourcesAtPublication(input.costSources, maxAgeSeconds, publicationTime);
   const quotaMetrics = [
-    quotaMetric('claude_quota_window', claude, generatedAt, maxAgeSeconds),
-    quotaMetric('codex_quota_window', codex, generatedAt, maxAgeSeconds),
+    quotaMetric('claude_quota_window', claude, generatedAt, maxAgeSeconds, publicationTime),
+    quotaMetric('codex_quota_window', codex, generatedAt, maxAgeSeconds, publicationTime),
   ];
   const metrics = [
     ...quotaMetrics,
@@ -173,8 +185,20 @@ const options = args();
 let config = {};
 try { config = parseJson(readFileSync(options.config, 'utf8'), 'config') || {}; } catch { config = {}; }
 const maxAgeSeconds = Number.isFinite(config.maxAgeSeconds) && config.maxAgeSeconds >= 0 ? config.maxAgeSeconds : 900;
-const artifact = { schema: 'fleet-unit-economics-ledger.v1', generated_at: now.toISOString(), max_age_seconds: maxAgeSeconds, lanes: [] };
-for (const id of Object.keys(laneSpecs)) artifact.lanes.push(id === 'fleet_operations' ? fleetLane(config.lanes?.[id], maxAgeSeconds) : financialLane(id, config.lanes?.[id], maxAgeSeconds));
+const inputs = Object.keys(laneSpecs).map((id) => (
+  id === 'fleet_operations' ? collectFleetLane(config.lanes?.[id]) : collectFinancialLane(id, config.lanes?.[id])
+));
+const publicationTime = new Date();
+const artifact = {
+  schema: 'fleet-unit-economics-ledger.v1',
+  generated_at: publicationTime.toISOString(),
+  max_age_seconds: maxAgeSeconds,
+  lanes: inputs.map((input) => (
+    input.id === 'fleet_operations'
+      ? fleetLane(input, maxAgeSeconds, publicationTime.getTime())
+      : financialLane(input, maxAgeSeconds, publicationTime.getTime())
+  )),
+};
 mkdirSync(dirname(options.output), { recursive: true });
 writePrivateFile(options.output, `${JSON.stringify(artifact, null, 2)}\n`);
 const rendered = markdown(artifact);

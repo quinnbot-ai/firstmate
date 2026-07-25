@@ -42,6 +42,22 @@ JS
   chmod +x "$path"
 }
 
+write_delayed_source() {
+  local path=$1 delay_ms=$2
+  mkdir -p "$(dirname "$path")"
+  cat > "$path" <<JS
+#!/usr/bin/env node
+setTimeout(() => {
+  process.stdout.write(JSON.stringify({
+    observedAt: new Date().toISOString(),
+    currency: 'USD',
+    metrics: {},
+  }) + '\\n');
+}, $delay_ms);
+JS
+  chmod +x "$path"
+}
+
 write_config() {
   local path=$1 lane=$2 first=$3 second=$4
   cat > "$path" <<JSON
@@ -152,6 +168,30 @@ test_malformed_source_containers_render_unavailable() {
   pass "malformed source containers render unavailable"
 }
 
+test_observations_are_rechecked_at_publication() {
+  local one="$TMP_ROOT/publication/one" two="$TMP_ROOT/publication/two" slow_one="$TMP_ROOT/publication/slow-one" slow_two="$TMP_ROOT/publication/slow-two"
+  local config="$TMP_ROOT/publication/config.json" out="$TMP_ROOT/publication/out.json" quota="$TMP_ROOT/publication/quota" started_ms generated_at
+  write_live_source "$one"; write_live_source "$two"; write_delayed_source "$slow_one" 150; write_delayed_source "$slow_two" 150
+  mkdir -p "$(dirname "$config")"
+  cat > "$config" <<JSON
+{"maxAgeSeconds":0.2,"lanes":{"weho":{"sources":[{"command":["$one"]},{"command":["$two"]}]},"content_accounts":{"sources":[{"command":["$slow_one"]},{"command":["$slow_two"]}]}}}
+JSON
+  write_quota "$quota" "$NOW"; started_ms=$(node -p 'Date.now()'); run_ledger "$config" "$out" "$quota"; generated_at=$(jq -r .generated_at "$out")
+  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .source_freshness=="stale source refused")' "$out" >/dev/null || fail "early observation remained fresh at publication"
+  node -e 'if (Date.parse(process.argv[1]) - Number(process.argv[2]) < 250) process.exit(1)' "$generated_at" "$started_ms" || fail "generated_at was captured before source collection completed"
+  pass "observations are rechecked at publication time"
+}
+
+test_quota_percentages_must_be_in_range() {
+  local config="$TMP_ROOT/quota-range/config.json" out="$TMP_ROOT/quota-range/out.json" quota="$TMP_ROOT/quota-range/quota"
+  mkdir -p "$(dirname "$config")"; printf '{}\n' > "$config"
+  write_source "$quota" "{\"generatedAt\":\"$NOW\",\"providers\":[{\"provider\":\"claude\",\"state\":{\"status\":\"fresh\",\"stale\":false,\"refreshedAt\":\"$NOW\"},\"windows\":[{\"percentRemaining\":-1},{\"percentRemaining\":101}]},{\"provider\":\"codex\",\"state\":{\"status\":\"fresh\",\"stale\":false,\"refreshedAt\":\"$NOW\"},\"windows\":[{\"percentRemaining\":-1},{\"percentRemaining\":75},{\"percentRemaining\":101}]}]}"
+  run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="fleet_operations") | .metrics[] | select(.name=="claude_quota_window" and .amount==null and .status=="unavailable")' "$out" >/dev/null || fail "out-of-range quota percentages were published"
+  jq -e '.lanes[] | select(.id=="fleet_operations") | .metrics[] | select(.name=="codex_quota_window" and .amount==75 and .status=="measured")' "$out" >/dev/null || fail "valid quota percentage was lost beside invalid windows"
+  pass "quota percentages must be between zero and one hundred"
+}
+
 test_zero_revenue_is_explicit_and_cross_checked
 test_unavailable_and_partial_lanes_render
 test_stale_and_failed_cross_check_are_refused
@@ -161,3 +201,5 @@ test_live_helper_timestamps_are_fresh
 test_untrusted_metric_states_and_duplicate_sources_are_refused
 test_stale_quota_provider_state_is_refused
 test_malformed_source_containers_render_unavailable
+test_observations_are_rechecked_at_publication
+test_quota_percentages_must_be_in_range
