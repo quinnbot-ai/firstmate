@@ -19,20 +19,20 @@ reading the target entry back, so an empty, truncated, or leftover
 credential fails instead of producing a home that cannot authenticate.
 It never reads or copies anything from the captain's own ~/.claude or
 CLAUDE_CONFIG_DIR - the persistent profile is populated only by the
-captain's own `claude auth login` run against it directly.
+captain's explicit provisioning flow in docs/configuration.md.
 It removes only a validated managed home during abort cleanup or teardown.
 Secondmate Claude launches do not use this helper.
 """
 
 import argparse
-import getpass
+import ctypes
 import hashlib
 import json
 import os
 import platform
+import pwd
 import secrets
 import stat
-import subprocess
 import sys
 
 # Profile entries that carry customization surface (global MCP servers,
@@ -40,6 +40,7 @@ import sys
 # every task-private copy so a crew launch can never inherit them, even if
 # the persistent profile is someday touched by more than a bare login.
 EXCLUDED_ENTRIES = {
+    ".firstmate-account.json",
     "settings.json",
     "settings.local.json",
     ".mcp.json",
@@ -58,6 +59,14 @@ def die(message):
 
 
 def is_macos():
+    test_mode = os.environ.get("FM_TEST_CLAUDE_KEYCHAIN")
+    if test_mode:
+        if (
+            test_mode != "disabled"
+            or os.environ.get("FM_SPAWN_NO_GUARD") != "1"
+        ):
+            die("invalid isolated Claude Keychain test mode")
+        return False
     return platform.system() == "Darwin"
 
 
@@ -67,14 +76,193 @@ def keychain_service(home, legacy=False):
     return f"{prefix}-{digest}"
 
 
-def run_security(arguments, input_bytes=None):
-    return subprocess.run(
-        ["security", *arguments],
-        input=input_bytes,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
+class MacOSKeychain:
+    """Minimal generic-password access through Security.framework.
+
+    Credential bytes stay in this process. They are never encoded as text or
+    passed through a child process's argv, environment, stdin, or output.
+    """
+
+    SUCCESS = 0
+    DUPLICATE_ITEM = -25299
+    ITEM_NOT_FOUND = -25300
+    UTF8 = 0x08000100
+
+    def __init__(self):
+        self.security = ctypes.CDLL(
+            "/System/Library/Frameworks/Security.framework/Security"
+        )
+        self.core = ctypes.CDLL(
+            "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+        )
+        self.security.SecItemCopyMatching.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        self.security.SecItemCopyMatching.restype = ctypes.c_int32
+        self.security.SecItemAdd.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        self.security.SecItemAdd.restype = ctypes.c_int32
+        self.security.SecItemUpdate.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        self.security.SecItemUpdate.restype = ctypes.c_int32
+        self.security.SecItemDelete.argtypes = [ctypes.c_void_p]
+        self.security.SecItemDelete.restype = ctypes.c_int32
+        self.core.CFDictionaryCreateMutable.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_long,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        self.core.CFDictionaryCreateMutable.restype = ctypes.c_void_p
+        self.core.CFDictionarySetValue.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        self.core.CFStringCreateWithCString.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_char_p,
+            ctypes.c_uint32,
+        ]
+        self.core.CFStringCreateWithCString.restype = ctypes.c_void_p
+        self.core.CFDataCreate.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_ubyte),
+            ctypes.c_long,
+        ]
+        self.core.CFDataCreate.restype = ctypes.c_void_p
+        self.core.CFDataGetLength.argtypes = [ctypes.c_void_p]
+        self.core.CFDataGetLength.restype = ctypes.c_long
+        self.core.CFDataGetBytePtr.argtypes = [ctypes.c_void_p]
+        self.core.CFDataGetBytePtr.restype = ctypes.POINTER(ctypes.c_ubyte)
+        self.core.CFRelease.argtypes = [ctypes.c_void_p]
+        self.constants = {
+            name: ctypes.c_void_p.in_dll(self.security, name).value
+            for name in (
+                "kSecClass",
+                "kSecClassGenericPassword",
+                "kSecAttrAccount",
+                "kSecAttrService",
+                "kSecReturnData",
+                "kSecMatchLimit",
+                "kSecMatchLimitOne",
+                "kSecValueData",
+            )
+        }
+        self.true = ctypes.c_void_p.in_dll(self.core, "kCFBooleanTrue").value
+
+    def release(self, value):
+        if value:
+            self.core.CFRelease(value)
+
+    def string(self, value):
+        result = self.core.CFStringCreateWithCString(
+            None, value.encode(), self.UTF8
+        )
+        if not result:
+            die("could not encode isolated Claude Keychain attributes")
+        return result
+
+    def data(self, value):
+        if not value:
+            die("managed Claude Keychain credential is empty")
+        buffer = (ctypes.c_ubyte * len(value)).from_buffer_copy(value)
+        result = self.core.CFDataCreate(None, buffer, len(value))
+        if not result:
+            die("could not prepare isolated Claude Keychain credential")
+        return result
+
+    def dictionary(self, values):
+        result = self.core.CFDictionaryCreateMutable(None, 0, None, None)
+        if not result:
+            die("could not prepare isolated Claude Keychain request")
+        for key, value in values:
+            self.core.CFDictionarySetValue(result, key, value)
+        return result
+
+    def attributes(self, service, include_data=False):
+        account = self.string(pwd.getpwuid(os.getuid()).pw_name)
+        service_value = self.string(service)
+        values = [
+            (self.constants["kSecClass"], self.constants["kSecClassGenericPassword"]),
+            (self.constants["kSecAttrAccount"], account),
+            (self.constants["kSecAttrService"], service_value),
+        ]
+        if include_data:
+            values.extend(
+                (
+                    (self.constants["kSecReturnData"], self.true),
+                    (
+                        self.constants["kSecMatchLimit"],
+                        self.constants["kSecMatchLimitOne"],
+                    ),
+                )
+            )
+        return self.dictionary(values), account, service_value
+
+    def read(self, service):
+        query, account, service_value = self.attributes(service, include_data=True)
+        result = ctypes.c_void_p()
+        try:
+            status = self.security.SecItemCopyMatching(query, ctypes.byref(result))
+            if status == self.ITEM_NOT_FOUND:
+                return None
+            if status != self.SUCCESS or not result.value:
+                die("could not read managed Claude Keychain credential")
+            length = self.core.CFDataGetLength(result)
+            if length <= 0:
+                die("managed Claude Keychain credential is empty")
+            pointer = self.core.CFDataGetBytePtr(result)
+            if not pointer:
+                die("could not read managed Claude Keychain credential")
+            return ctypes.string_at(pointer, length)
+        finally:
+            self.release(result.value)
+            self.release(query)
+            self.release(account)
+            self.release(service_value)
+
+    def write(self, service, value):
+        query, account, service_value = self.attributes(service)
+        secret = self.data(value)
+        additions = self.dictionary(
+            [(self.constants["kSecValueData"], secret)]
+        )
+        try:
+            status = self.security.SecItemUpdate(query, additions)
+            if status == self.ITEM_NOT_FOUND:
+                self.core.CFDictionarySetValue(
+                    query, self.constants["kSecValueData"], secret
+                )
+                status = self.security.SecItemAdd(query, None)
+            if status not in (self.SUCCESS, self.DUPLICATE_ITEM):
+                die("could not seed isolated Claude Keychain credential")
+        finally:
+            self.release(additions)
+            self.release(secret)
+            self.release(query)
+            self.release(account)
+            self.release(service_value)
+
+    def delete(self, service):
+        query, account, service_value = self.attributes(service)
+        try:
+            status = self.security.SecItemDelete(query)
+            if status not in (self.SUCCESS, self.ITEM_NOT_FOUND):
+                die("could not remove isolated Claude Keychain credential")
+        finally:
+            self.release(query)
+            self.release(account)
+            self.release(service_value)
+
+
+def macos_keychain():
+    try:
+        return MacOSKeychain()
+    except (AttributeError, OSError, ValueError):
+        die("macOS Security.framework is unavailable for isolated Claude auth")
 
 
 def clone_keychain_credential(data, source, home):
@@ -83,94 +271,29 @@ def clone_keychain_credential(data, source, home):
     )
     if not is_macos() or os.path.realpath(source) != managed_profile:
         return False
-    account = getpass.getuser()
+    keychain = macos_keychain()
     for legacy in (False, True):
-        source_result = run_security(
-            [
-                "find-generic-password",
-                "-a",
-                account,
-                "-w",
-                "-s",
-                keychain_service(source, legacy),
-            ]
-        )
-        if source_result.returncode != 0:
+        source_secret = keychain.read(keychain_service(source, legacy))
+        if source_secret is None:
             continue
-        source_output = source_result.stdout
-        if not source_output.endswith(b"\n"):
-            die("managed Claude Keychain credential read has no terminator")
-        try:
-            source_secret = source_output[:-1].decode()
-        except UnicodeDecodeError:
-            die("managed Claude Keychain credential is not valid text")
-        if not source_secret or "\0" in source_secret:
-            die("managed Claude Keychain credential cannot be passed safely")
-        # security's documented non-interactive form requires the value directly
-        # after -w; stdin instead prompts on the controlling TTY and can write an
-        # empty value while returning zero. find -w appends one display newline,
-        # which must not become part of the value. This briefly exposes the
-        # local-only credential in the child argv because security provides no
-        # stdin form for this subcommand, so never log the arguments or credential.
-        target_result = run_security(
-            [
-                "add-generic-password",
-                "-U",
-                "-a",
-                account,
-                "-s",
-                keychain_service(home),
-                "-w",
-                source_secret,
-            ],
-        )
-        if target_result.returncode != 0:
-            die("could not seed isolated Claude Keychain credential")
-        target_result = run_security(
-            [
-                "find-generic-password",
-                "-a",
-                account,
-                "-w",
-                "-s",
-                keychain_service(home),
-            ]
-        )
-        if (
-            target_result.returncode != 0
-            or target_result.stdout != source_output
-        ):
+        target_service = keychain_service(home)
+        keychain.write(target_service, source_secret)
+        if keychain.read(target_service) != source_secret:
             die("isolated Claude Keychain credential did not match its source")
         return True
-    return False
+    die(
+        "managed Claude profile has no path-bound Keychain credential; "
+        "run the documented profile provisioning flow"
+    )
 
 
 def remove_keychain_credential(home):
     if not is_macos():
         return
     service = keychain_service(home)
-    result = run_security(
-        [
-            "delete-generic-password",
-            "-a",
-            getpass.getuser(),
-            "-s",
-            service,
-        ]
-    )
-    if result.returncode not in (0, 44):
-        die("could not remove isolated Claude Keychain credential")
-    verification = run_security(
-        [
-            "find-generic-password",
-            "-a",
-            getpass.getuser(),
-            "-w",
-            "-s",
-            service,
-        ]
-    )
-    if verification.returncode != 44:
+    keychain = macos_keychain()
+    keychain.delete(service)
+    if keychain.read(service) is not None:
         die("could not verify isolated Claude Keychain credential removal")
 
 
@@ -288,7 +411,10 @@ def copy_regular_file(source_dir_fd, name, target_dir_fd):
 
 def copy_tree(source_dir_fd, target_dir_fd, top_level):
     for entry in os.listdir(source_dir_fd):
-        if top_level and entry in EXCLUDED_ENTRIES:
+        if top_level and (
+            entry in EXCLUDED_ENTRIES
+            or (entry == ".credentials.json" and is_macos())
+        ):
             continue
         entry_stat = os.stat(entry, dir_fd=source_dir_fd, follow_symlinks=False)
         if stat.S_ISDIR(entry_stat.st_mode):
@@ -519,6 +645,16 @@ def remove_home(args):
     except OSError as error:
         die(f"could not prepare isolated Claude home removal: {error.strerror}")
     if base_fd is None:
+        expected = os.path.realpath(
+            os.path.join(
+                os.path.abspath(args.data),
+                "claude-crewmate",
+                name,
+            )
+        )
+        if os.path.realpath(args.home) != expected:
+            die("isolated Claude home path is unsafe")
+        remove_keychain_credential(expected)
         return
     try:
         require_directory(base_fd, "isolated Claude home")

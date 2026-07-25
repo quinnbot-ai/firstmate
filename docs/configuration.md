@@ -231,25 +231,53 @@ If a spawn or teardown cannot confirm endpoint cleanup, Firstmate preserves the 
 ### Claude crewmate second-account isolation (data/claude-crewmate/)
 
 `data/claude-crewmate/profile/` is an optional, local, gitignored directory that lets Claude ship and scout crewmates authenticate as a second Anthropic account instead of sharing the captain's seat account.
-It is captain-private, populated by the captain's own login, and never written to by a Firstmate script.
+It is captain-private and populated by the captain's own login.
+Firstmate writes only `.firstmate-account.json`, a mode-0600 digest attestation that contains no email address, organization identifier, token, or credential.
 
 ```sh
-mkdir -p data/claude-crewmate/profile \
-  && chmod 700 data/claude-crewmate data/claude-crewmate/profile \
-  && CLAUDE_CONFIG_DIR="$(pwd)/data/claude-crewmate/profile" claude auth login
+crew_profile="$(pwd -P)/data/claude-crewmate/profile"
+mkdir -p "$crew_profile"
+chmod 700 "$(dirname "$crew_profile")" "$crew_profile"
+python3 bin/fm-claude-auth.py --login \
+  --profile "$crew_profile" \
+  --worktree "$(pwd -P)"
+python3 bin/fm-claude-auth.py --attest \
+  --profile "$crew_profile" \
+  --worktree "$(pwd -P)"
 ```
 
 Run that command from the Firstmate home whose crewmates should use the second account.
+The login helper pins `CLAUDE_CONFIG_DIR` to the canonical managed profile and scrubs ambient API keys, OAuth tokens, provider switches, and alternate profile variables before it starts Claude's interactive login.
+Choose the intended organization account during that login and run the attestation only after it succeeds.
+The attestation command applies the same environment scrub before it checks `claude auth status --json`.
+Its only success output is a generic confirmation, and it stores a SHA-256 digest of the reported Claude.ai email and organization identifier rather than either identity value.
+Running the same login and attestation sequence again is the bounded repair path when the profile loses authentication.
+If the intended crew account itself changes, rerun the attestation with `--replace-attestation`; without that explicit flag a different account cannot overwrite the established identity.
+Do not copy Keychain items manually or copy `.firstmate-account.json` to another profile.
+
 The feature stays dormant when the profile is absent, leaving Claude launch behavior unchanged.
-`fm_claude_crew_profile_ready` confirms that both the profile and a disposable task-private copy can authenticate, and a present profile that fails that check blocks the spawn before opening a login pane.
+`fm_claude_crew_profile_ready` confirms that both the profile and a disposable task-private copy resolve to the attested Claude.ai account, and a present profile that fails that check blocks the spawn before opening a login pane.
 Once the profile is ready, `fm-spawn.sh` creates one private task home under `data/claude-crewmate/` and runs the process with that directory as `CLAUDE_CONFIG_DIR`.
 The helper excludes settings, MCP configuration, instructions, commands, agents, hooks, plugins, and skills from the copy, and strips every `mcpServers` section from the copied `.claude.json`.
-On macOS, the helper clones only the profile's matching Claude Code Keychain credential into the task-home-derived service and removes that task credential during abort cleanup or normal teardown.
+It also excludes the profile-local account attestation, which is read only from the persistent profile.
+
+Claude Code on macOS names its generic-password Keychain service `Claude Code-credentials-` plus the first eight lowercase hexadecimal characters of the SHA-256 digest of the canonical `CLAUDE_CONFIG_DIR` path.
+Copying the profile files to a new task path therefore does not copy authentication and can send the copy into first-run OAuth or let an ambient account satisfy a shallow login check.
+Firstmate repairs that path binding by reading the managed profile service and writing the exact task-home service through Security.framework inside one process.
+Credential bytes never enter a child process, argv, environment variable, stdin, stdout, stderr, log, or disk file.
+On macOS the task-home copy excludes `.credentials.json`, so Keychain remains the only credential transfer surface.
+The helper reads the target item back in process, refuses an empty or mismatched result, and removes the exact task service during abort cleanup or normal teardown.
+If Security.framework is unavailable or the managed profile has no matching Keychain item, provisioning fails with an operator error and no worker starts.
 It never reads from or writes to the captain's default Claude home.
+
+Before spawn records metadata or sends a launch command, it verifies the actual task home against the profile attestation.
+The launch command repeats that verification immediately before exec and gives the worker an environment with ambient Anthropic credentials, alternate profiles, and Bedrock, Vertex, or Foundry provider switches removed.
+This wrapper is part of the shared launch command used by tmux, Herdr, zellij, Orca, and cmux, so every supported runtime backend applies the same proof.
+While the managed profile exists, raw ship or scout commands that name Claude or contain dynamic execution are refused because they cannot carry the verified exec boundary; use `--harness claude`.
 Task metadata records `claude_crewmate_home=`, and failed endpoint cleanup preserves that metadata and managed home for later safe recovery.
 Claude secondmate launches keep their existing `CLAUDE_CONFIG_DIR` behavior.
-When the profile is ready, quota-balanced dispatch reads Claude quota through that profile so selection measures the account the crew task will use.
-When the profile is present but not ready, dispatch removes Claude candidates and names the invalid profile rather than selecting a launch that `fm-spawn.sh` would refuse.
+When the profile is ready, quota-balanced dispatch reverifies it and reads Claude quota with the same ambient-auth scrub so selection measures the attested crew account.
+When the profile is present but unauthenticated, path-bound credential provisioning fails, identity cannot be attested, or the account differs, dispatch removes Claude candidates before scoring and names the invalid profile rather than selecting a launch that `fm-spawn.sh` would refuse.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 

@@ -46,9 +46,9 @@
 #     candidates are removed before scoring. Emptying the candidate set that way
 #     fails loudly and names the profile rather than returning an unlaunchable
 #     lane.
-#   - A present, ready profile scores Claude routes by running quota-axi with
-#     CLAUDE_CONFIG_DIR set to it, so their numbers are the crew account's
-#     windows rather than the captain's own seat.
+#   - A present, ready profile scores Claude routes by running quota-axi only
+#     after the profile identity is reverified and with ambient Claude auth
+#     removed, so its numbers cannot silently come from the captain's own seat.
 # The --quota-json fixture path is unaffected - it never shells out to quota-axi
 # or probes the crew profile.
 set -u
@@ -270,11 +270,23 @@ else
     exit 0
   fi
   if [ -n "$claude_crew_profile" ]; then
-    quota_json=$(CLAUDE_CONFIG_DIR="$claude_crew_profile" "$quota_cmd" --json 2>/dev/null)
+    quota_json=$(python3 "$SCRIPT_DIR/fm-claude-auth.py" --verify-exec \
+      --profile "$claude_crew_profile" --home "$claude_crew_profile" \
+      --worktree "$PWD" -- "$quota_cmd" --json 2>/dev/null)
+    quota_status=$?
+    if [ "$quota_status" -ne 0 ] \
+      && ! python3 "$SCRIPT_DIR/fm-claude-auth.py" --verify \
+        --profile "$claude_crew_profile" --home "$claude_crew_profile" \
+        --worktree "$PWD" >/dev/null 2>&1; then
+      drop_claude_candidates "$claude_crew_profile"
+      claude_crew_profile=
+      quota_json=$("$quota_cmd" --json 2>/dev/null)
+      quota_status=$?
+    fi
   else
     quota_json=$("$quota_cmd" --json 2>/dev/null)
+    quota_status=$?
   fi
-  quota_status=$?
   if [ "$quota_status" -ne 0 ]; then
     random_profile "quota-axi exited $quota_status"
     exit 0

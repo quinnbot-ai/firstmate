@@ -39,6 +39,32 @@ tests/fm-tmux-submit-busy.test.sh
 
 Expected matrix: pending plus busy is accepted as queued; pending plus idle remains pending; a cleared composer succeeds in either state.
 
+## Claude crew account isolation
+
+The active account-isolation verification uses Claude Code 2.1.220 on macOS and synthetic account fixtures for every mutation path.
+Read-only inspection confirmed that Claude Code derives its generic-password service from the canonical configuration-directory path.
+A managed profile service was present while services for distinct task-private paths were absent before provisioning, which reproduces why a file copy alone loses authentication.
+No credential value was read into command output or retained as evidence.
+
+`claude auth status --help` confirms a machine-readable JSON status surface.
+Version-scoped binary inspection established that a Claude.ai session reports `loggedIn`, `authMethod`, `apiProvider`, `email`, and `orgId`.
+The implementation requires the Claude.ai and first-party values plus non-empty email and organization identifiers, then compares only a profile-local SHA-256 digest.
+
+The macOS credential bridge is exercised through an in-memory Security.framework fake.
+The fake proves distinct source and target path services, exact byte transfer, read-back mismatch refusal, missing-source refusal, creation-abort cleanup, normal teardown cleanup, and cleanup when the task-home base is already absent.
+No regression test calls the `security` command, opens the live Keychain, starts OAuth, or launches a real Claude worker.
+
+```sh
+tests/fm-claude-auth.test.sh
+tests/fm-claude-home.test.sh
+tests/fm-dispatch-select.test.sh
+tests/fm-spawn-dispatch-profile.test.sh
+```
+
+The auth suite proves intended-account success, missing authentication, wrong-account fallback, unavailable attestation, ambient-auth removal, and final verified exec.
+The selector suite proves that an unauthenticated or wrong-account managed profile removes Claude before quota scoring, that a late identity change cannot reenter generic fallback, and that a ready profile runs quota lookup under the scrubbed attested environment.
+The spawn suite proves that ship and scout homes are synchronously created and verified before the shared launch command is handed to the backend, while an absent profile and Claude secondmates keep their existing behavior.
+
 ## Herdr
 
 The compatibility floor is protocol 14.
