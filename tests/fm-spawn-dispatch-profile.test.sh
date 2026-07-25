@@ -13,14 +13,10 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
-TEST_SECURITY_BIN="$TMP_ROOT/security-bin"
-mkdir -p "$TEST_SECURITY_BIN"
-cat > "$TEST_SECURITY_BIN/security" <<'SH'
-#!/usr/bin/env bash
-exit 44
-SH
-chmod 700 "$TEST_SECURITY_BIN/security"
-PATH="$TEST_SECURITY_BIN:$PATH"
+export FM_SPAWN_NO_GUARD=1
+FAKE_KEYCHAIN=$(fm_fake_claude_keychain "$TMP_ROOT/fake-keychain")
+PATH="$FAKE_KEYCHAIN:$PATH"
+export PATH
 
 make_spawn_fakebin() {
   local dir=$1 fakebin
@@ -175,7 +171,8 @@ run_spawn() {
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 \
+    FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_BACKEND_LOG="$(dirname "$launchlog")/backend.log" \
     FM_FAKE_TREEHOUSE_RETURN_STATUS="${FM_FAKE_TREEHOUSE_RETURN_STATUS:-0}" \
     FM_FAKE_BACKEND_KILL_STATUS="${FM_FAKE_BACKEND_KILL_STATUS:-0}" \
@@ -267,7 +264,7 @@ test_claude_uses_ready_isolated_crew_home() {
   rec=$(make_spawn_case profile-claude-home claude "$id")
   read_case_record "$rec"
   write_fake_claude_cli "$FAKEBIN_DIR"
-  make_claude_crew_profile "$HOME_DIR"
+  make_claude_crew_profile "$HOME_DIR" >/dev/null
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
@@ -277,7 +274,9 @@ test_claude_uses_ready_isolated_crew_home() {
   [ -n "$crew_home" ] || fail "Claude launch did not carry an isolated CLAUDE_CONFIG_DIR"
   assert_grep "claude_crewmate_home=$crew_home" "$HOME_DIR/state/$id.meta" \
     "Claude task metadata did not retain its isolated home"
-  assert_present "$crew_home/.credentials.json" "Claude isolated home did not copy credentials"
+  assert_present "$crew_home/.claude.json" "Claude isolated home did not copy the profile configuration"
+  assert_absent "$crew_home/.credentials.json" \
+    "Claude isolated home copied a plaintext credential file"
   pass "Claude ship launch uses a ready task-private crew home"
 }
 
@@ -1785,8 +1784,8 @@ write_fake_claude_cli() {
 #!/usr/bin/env bash
 set -u
 if [ "${1:-} ${2:-} ${3:-}" = "auth status --json" ]; then
-  if [ -f "${CLAUDE_CONFIG_DIR:-}/.credentials.json" ]; then
-    printf '%s\n' '{"loggedIn":true}'
+  if [ -f "${CLAUDE_CONFIG_DIR:-}/.claude.json" ]; then
+    printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","email":"crew@example.invalid","orgId":"org-test"}'
     exit 0
   fi
   printf '%s\n' '{"loggedIn":false}'
@@ -1798,7 +1797,7 @@ SH
 }
 
 claude_config_dir_from_launch() {
-  printf '%s\n' "$1" | sed -n "s/^CLAUDE_CONFIG_DIR='\\([^']*\\)'.*/\\1/p"
+  printf '%s\n' "$1" | sed -n "s/.*--home '\\([^']*\\)'.*/\\1/p"
 }
 
 make_claude_crew_profile() {  # <home-dir> [ready=1]
@@ -1807,8 +1806,13 @@ make_claude_crew_profile() {  # <home-dir> [ready=1]
   mkdir -p "$crew_profile"
   [ "$ready" -eq 0 ] || {
     printf '{"hasCompletedOnboarding":true,"oauthAccount":{"emailAddress":"crew@example.invalid"}}\n' > "$crew_profile/.claude.json"
-    printf '{"claudeAiOauth":{"accessToken":"test-access","refreshToken":"test-refresh"}}\n' > "$crew_profile/.credentials.json"
+    fm_fake_claude_keychain_seed "$FAKE_KEYCHAIN" "$crew_profile"
   }
+  if [ "$ready" -ne 0 ]; then
+    PATH="${FAKEBIN_DIR:-$home/fakebin}:$PATH" \
+      python3 "$ROOT/bin/fm-claude-auth.py" --attest --profile "$crew_profile" \
+      --worktree "$home" >/dev/null
+  fi
   printf '%s\n' "$crew_profile"
 }
 
@@ -1835,6 +1839,12 @@ EOF
   launch=$(cat "$LAUNCH_LOG")
   home_dir=$(claude_config_dir_from_launch "$launch")
   [ -n "$home_dir" ] || fail "Claude ship launch did not carry an isolated CLAUDE_CONFIG_DIR"
+  assert_contains "$launch" "fm-claude-auth.py' --verify-exec" \
+    "Claude ship launch did not reverify account identity at worker exec"
+  assert_contains "$launch" "--verify-exec --require-verified-cli" \
+    "Claude ship launch did not pin the worker to the attested Claude binary"
+  assert_contains "$launch" "-- CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
+    "Claude ship launch did not preserve its worker environment assignment"
   case "${home_dir##*/}" in .fm-claude-home.*) : ;; *) fail "Claude launch did not use a private per-task home: $home_dir" ;; esac
   [ -d "$home_dir" ] || fail "Claude ship spawn did not materialize the private home synchronously"
   assert_grep "claude_crewmate_home=$home_dir" "$HOME_DIR/state/$ship.meta" \
@@ -1842,7 +1852,8 @@ EOF
   assert_present "$home_dir/.claude.json" "isolated Claude home did not copy the profile's credential file"
   assert_grep '"hasCompletedOnboarding":true' "$home_dir/.claude.json" \
     "isolated Claude home did not retain completed onboarding state"
-  assert_present "$home_dir/.credentials.json" "isolated Claude home did not copy the file credential fixture"
+  assert_absent "$home_dir/.credentials.json" \
+    "isolated Claude home copied a plaintext credential file"
   assert_present "$home_dir/backups/entry.json" "isolated Claude home did not copy nested profile content"
   [ ! -e "$home_dir/settings.json" ] || fail "isolated Claude home retained the profile's settings.json"
   [ ! -e "$home_dir/hooks" ] || fail "isolated Claude home retained the profile's hooks directory"
@@ -1896,6 +1907,32 @@ test_claude_crewmate_home_credential_less_profile_refuses_spawn() {
   fi
   [ -d "$crew_profile" ] || fail "test setup lost the credential-less profile directory"
   pass "a present but credential-less claude crew profile refuses before launching a pane"
+}
+
+test_claude_crewmate_profile_refuses_raw_bypass() {
+  local rec id out status raw index
+  index=0
+  for raw in \
+    "env CLAUDE_CONFIG_DIR=/tmp/personal claude --dangerously-skip-permissions" \
+    "company-claude-wrapper --foo" \
+    "custom-agent --flag"; do
+    index=$((index + 1))
+    id="claude-crew-home-raw-z10$index"
+    rec=$(make_spawn_case "claude-crew-home-raw$index" claude "$id")
+    read_case_record "$rec"
+    write_fake_claude_cli "$FAKEBIN_DIR"
+    make_claude_crew_profile "$HOME_DIR" >/dev/null
+
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" \
+      "$PROJ_DIR" "$raw" 2>&1)
+    status=$?
+    expect_code 1 "$status" "a raw launch must not bypass the managed account gate: $raw"
+    assert_contains "$out" "raw commands cannot prove task-private account identity" \
+      "raw bypass refusal was not actionable: $raw"
+    [ ! -s "$LAUNCH_LOG" ] || fail "raw bypass opened a worker pane: $raw"
+    assert_absent "$HOME_DIR/state/$id.meta" "raw bypass wrote task metadata: $raw"
+  done
+  pass "a configured Claude crew profile refuses every raw ship or scout command"
 }
 
 test_claude_crewmate_home_uses_fresh_private_directory() {
@@ -2122,6 +2159,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch
 test_claude_crewmate_home_used_when_profile_ready
 test_claude_crewmate_home_absent_profile_matches_default_behavior
 test_claude_crewmate_home_credential_less_profile_refuses_spawn
+test_claude_crewmate_profile_refuses_raw_bypass
 test_claude_crewmate_home_uses_fresh_private_directory
 test_claude_crewmate_home_is_removed_at_teardown
 test_claude_crewmate_home_preserved_when_referenced_by_another_task

@@ -26,7 +26,10 @@ set -u
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-dispatch-select-tests)
+export FM_SPAWN_NO_GUARD=1
 mkdir -p "$TMP_ROOT"
+FAKE_KEYCHAIN=$(fm_fake_claude_keychain "$TMP_ROOT/fake-keychain")
+BASE_PATH="$FAKE_KEYCHAIN:$BASE_PATH"
 RANDOM_ZERO="$TMP_ROOT/random-zero"
 RANDOM_ONE="$TMP_ROOT/random-one"
 printf '\000\000\000\000' > "$RANDOM_ZERO"
@@ -296,8 +299,12 @@ write_fake_claude_crew_cli() {  # <fakebin-dir>
 #!/usr/bin/env bash
 set -u
 if [ "\$1 \$2 \$3" = "auth status --json" ]; then
-  if [ -f "\${CLAUDE_CONFIG_DIR:-}/.credentials.json" ]; then
-    printf '%s\n' '{"loggedIn":true}'
+  if [ -f "\${CLAUDE_CONFIG_DIR:-}/.claude.json" ]; then
+    if [ "\$(cat "\${CLAUDE_CONFIG_DIR:-}/.fake-account" 2>/dev/null)" = wrong ]; then
+      printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","email":"other@example.invalid","orgId":"org-other"}'
+    else
+      printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","email":"crew@example.invalid","orgId":"org-test"}'
+    fi
     exit 0
   fi
   printf '%s\n' '{"loggedIn":false}'
@@ -306,19 +313,23 @@ fi
 exit 1
 SH
   chmod +x "$fakebin/claude"
-  cat > "$fakebin/security" <<'SH'
-#!/usr/bin/env bash
-exit 44
-SH
-  chmod +x "$fakebin/security"
+}
+
+attest_fake_claude_profile() {  # <fakebin-dir> <profile-dir> <worktree>
+  PATH="$1:$PATH" python3 "$ROOT/bin/fm-claude-auth.py" \
+    --attest --profile "$2" --worktree "$3" >/dev/null
 }
 
 write_fake_quota_axi_env_sensitive() {  # <fakebin-dir> <ready-config-dir> [<default-claude-percent>]
   local fakebin=$1 ready_dir=$2 default_claude_percent=${3:-5}
+  if [ -d "$ready_dir" ]; then
+    ready_dir=$(cd "$ready_dir" && pwd -P)
+  fi
   cat > "$fakebin/quota-axi" <<SH
 #!/usr/bin/env bash
 set -u
-if [ "\${CLAUDE_CONFIG_DIR:-}" = "$ready_dir" ]; then
+if [ "\${CLAUDE_CONFIG_DIR:-}" = "$ready_dir" ] \
+  && [ -z "\${ANTHROPIC_API_KEY:-}\${ANTHROPIC_AUTH_TOKEN:-}\${CLAUDE_CODE_OAUTH_TOKEN:-}\${ANTHROPIC_PROFILE:-}" ]; then
   printf '%s\n' '{"providers":[{"provider":"claude","state":{"status":"fresh"},"windows":[{"id":"five_hour","kind":"session","percentRemaining":90},{"id":"seven_day","kind":"weekly","percentRemaining":90}]},{"provider":"codex","state":{"status":"fresh"},"windows":[{"id":"five_hour","kind":"session","percentRemaining":50},{"id":"weekly","kind":"weekly","percentRemaining":50}]}]}'
 else
   printf '%s\n' '{"providers":[{"provider":"claude","state":{"status":"fresh"},"windows":[{"id":"five_hour","kind":"session","percentRemaining":$default_claude_percent},{"id":"seven_day","kind":"weekly","percentRemaining":$default_claude_percent}]},{"provider":"codex","state":{"status":"fresh"},"windows":[{"id":"five_hour","kind":"session","percentRemaining":50},{"id":"weekly","kind":"weekly","percentRemaining":50}]}]}'
@@ -333,12 +344,16 @@ test_ready_crew_profile_is_used_for_claude_quota() {
   home="$case_dir/home"
   profile="$home/data/claude-crewmate/profile"
   mkdir -p "$profile" "$home/state"
-  printf '{"claudeAiOauth":{"accessToken":"test-access"}}\n' > "$profile/.credentials.json"
+  printf '{"hasCompletedOnboarding":true}\n' > "$profile/.claude.json"
+  fm_fake_claude_keychain_seed "$FAKE_KEYCHAIN" "$profile"
   fakebin=$(fm_fakebin "$case_dir/fake")
   write_fake_claude_crew_cli "$fakebin" "$profile"
+  attest_fake_claude_profile "$fakebin" "$profile" "$case_dir"
   write_fake_quota_axi_env_sensitive "$fakebin" "$profile"
 
   out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    ANTHROPIC_API_KEY=ambient-key ANTHROPIC_AUTH_TOKEN=ambient-token \
+    CLAUDE_CODE_OAUTH_TOKEN=ambient-oauth ANTHROPIC_PROFILE=personal \
     PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-dispatch-select.sh" --select quota-balanced "$profiles")
   [ "$out" = '{"harness":"claude","model":"claude-sonnet-5","effort":"high"}' ] \
     || fail "ready crew profile should give Claude the higher-quota win, got: $out"
@@ -423,6 +438,56 @@ test_credential_less_crew_profile_drops_claude_candidates() {
   [ "$out" = '{"harness":"codex","model":"gpt-5.5","effort":"high"}' ] \
     || fail "credential-less crew profile should drop Claude, got: $out"
   pass "a credential-less claude crew profile is excluded before scoring"
+}
+
+test_wrong_account_crew_profile_drops_claude_candidates() {
+  local case_dir home profile fakebin out
+  case_dir="$TMP_ROOT/profile-wrong-account"
+  home="$case_dir/home"
+  profile="$home/data/claude-crewmate/profile"
+  mkdir -p "$profile"
+  printf '{"hasCompletedOnboarding":true}\n' > "$profile/.claude.json"
+  fm_fake_claude_keychain_seed "$FAKE_KEYCHAIN" "$profile"
+  fakebin=$(fm_fakebin "$case_dir/fake")
+  write_fake_claude_crew_cli "$fakebin"
+  attest_fake_claude_profile "$fakebin" "$profile" "$case_dir"
+  printf '%s\n' wrong > "$profile/.fake-account"
+  write_fake_quota_axi_env_sensitive "$fakebin" "$profile" 90
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-dispatch-select.sh" --select quota-balanced "$profiles")
+  [ "$out" = '{"harness":"codex","model":"gpt-5.5","effort":"high"}' ] \
+    || fail "wrong-account crew profile should drop Claude, got: $out"
+  pass "a wrong-account claude crew profile is excluded before quota scoring"
+}
+
+test_account_change_during_quota_lookup_drops_claude_before_fallback() {
+  local case_dir home profile fakebin out
+  case_dir="$TMP_ROOT/profile-changes-during-quota"
+  home="$case_dir/home"
+  profile="$home/data/claude-crewmate/profile"
+  mkdir -p "$profile"
+  printf '{"hasCompletedOnboarding":true}\n' > "$profile/.claude.json"
+  fm_fake_claude_keychain_seed "$FAKE_KEYCHAIN" "$profile"
+  fakebin=$(fm_fakebin "$case_dir/fake")
+  write_fake_claude_crew_cli "$fakebin"
+  attest_fake_claude_profile "$fakebin" "$profile" "$case_dir"
+  cat > "$fakebin/quota-axi" <<SH
+#!/usr/bin/env bash
+set -u
+if [ "\${CLAUDE_CONFIG_DIR:-}" = "$(cd "$profile" && pwd -P)" ]; then
+  printf '%s\n' wrong > "$profile/.fake-account"
+  exit 1
+fi
+printf '%s\n' '{"providers":[{"provider":"claude","state":{"status":"fresh"},"windows":[{"id":"five_hour","kind":"session","percentRemaining":90},{"id":"seven_day","kind":"weekly","percentRemaining":90}]},{"provider":"codex","state":{"status":"fresh"},"windows":[{"id":"five_hour","kind":"session","percentRemaining":50},{"id":"weekly","kind":"weekly","percentRemaining":50}]}]}'
+SH
+  chmod +x "$fakebin/quota-axi"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-dispatch-select.sh" --select quota-balanced "$profiles")
+  [ "$out" = '{"harness":"codex","model":"gpt-5.5","effort":"high"}' ] \
+    || fail "late account change should remove Claude before fallback, got: $out"
+  pass "an account change during quota lookup removes Claude before fallback selection"
 }
 
 test_unavailable_claude_only_candidates_fail_loudly() {
@@ -526,6 +591,8 @@ test_absent_crew_profile_reads_default_environment
 test_absent_crew_profile_keeps_claude_selectable
 test_single_claude_profile_ignores_crew_profile_readiness
 test_credential_less_crew_profile_drops_claude_candidates
+test_wrong_account_crew_profile_drops_claude_candidates
+test_account_change_during_quota_lookup_drops_claude_before_fallback
 test_unavailable_claude_only_candidates_fail_loudly
 test_non_claude_harness_keeps_its_anthropic_route
 test_quota_json_fixture_ignores_crew_profile

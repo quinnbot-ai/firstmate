@@ -114,11 +114,15 @@
 # Claude ship and scout launches receive a firstmate-managed CLAUDE_CONFIG_DIR
 # under data/claude-crewmate, each in a fresh private directory copied from the
 # captain-populated data/claude-crewmate/profile (a second Anthropic account,
-# never the captain's own ~/.claude), only when that profile and a disposable
-# copy both authenticate (bin/fm-claude-crew-lib.sh's
-# fm_claude_crew_profile_ready). An absent profile leaves the launch and meta
+# never the captain's own ~/.claude), only when that profile, a disposable
+# copy, and the actual task home all resolve to the profile-local attested
+# identity (bin/fm-claude-crew-lib.sh). The final worker exec repeats that
+# check under an ambient-auth-scrubbed environment and starts the exact Claude
+# binary that check attested. An absent profile leaves the launch and meta
 # byte-identical to today's default-account behavior, while a present but
 # unusable profile refuses the Claude spawn before a pane can reach onboarding.
+# While that profile exists, every raw ship or scout launch command is refused,
+# because only a verified adapter can carry the attested exec boundary.
 # Claude secondmate launches are not changed here.
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
@@ -271,6 +275,7 @@ TASK_TMP=
 CODEX_CREWMATE_HOME=
 CODEX_ACTIVATION_TOKEN=
 CLAUDE_CREWMATE_HOME=
+CLAUDE_CREWMATE_PROFILE=
 SPAWN_META_WRITTEN=0
 TMUX_WINDOW_ID=
 
@@ -415,6 +420,16 @@ refresh_claude_crewmate_home() {
     return 1
   fi
   home=$(python3 "$FM_ROOT/bin/fm-claude-home.py" --data "$DATA" --source "$profile" --task-id "$ID" --create) || return 1
+  if ! fm_claude_crew_home_ready "$profile" "$home" "$WT_REAL"; then
+    python3 "$FM_ROOT/bin/fm-claude-home.py" --remove --data "$DATA" --state "$STATE" \
+      --task-id "$ID" --home "$home" >/dev/null 2>&1 || {
+        echo "error: could not clean up rejected isolated Claude crewmate home" >&2
+        return 1
+      }
+    echo "error: task-private Claude home failed account attestation" >&2
+    return 1
+  fi
+  CLAUDE_CREWMATE_PROFILE="$profile"
   CLAUDE_CREWMATE_HOME="$home"
 }
 
@@ -1090,8 +1105,10 @@ wait_for_codex_home_activation() {
   return 1
 }
 
+RAW_LAUNCH_USED=0
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
+    RAW_LAUNCH_USED=1
     set +e
     raw_launch_starts_codex "$ARG3"
     raw_codex_status=$?
@@ -1158,6 +1175,12 @@ case "$ARG3" in
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
 esac
+
+if [ "$KIND" != secondmate ] && [ "$RAW_LAUNCH_USED" -eq 1 ] \
+  && [ -d "$(fm_claude_crew_profile_dir "$DATA")" ]; then
+  echo "error: a configured Claude crewmate profile requires a verified adapter such as --harness claude; raw commands cannot prove task-private account identity" >&2
+  exit 1
+fi
 
 # config/secondmate-harness may carry optional model/effort tokens alongside the
 # harness ("<harness> [<model>] [<effort>]"). They apply only when this is a
@@ -2347,7 +2370,10 @@ if [ -n "$CODEX_CREWMATE_HOME" ]; then
 fi
 if [ -n "$CLAUDE_CREWMATE_HOME" ]; then
   sq_claude_crewmate_home=$(shell_quote "$CLAUDE_CREWMATE_HOME")
-  LAUNCH="CLAUDE_CONFIG_DIR=$sq_claude_crewmate_home $LAUNCH"
+  sq_claude_crewmate_profile=$(shell_quote "$CLAUDE_CREWMATE_PROFILE")
+  sq_claude_auth_helper=$(shell_quote "$FM_ROOT/bin/fm-claude-auth.py")
+  sq_claude_worktree=$(shell_quote "$WT_REAL")
+  LAUNCH="exec python3 $sq_claude_auth_helper --verify-exec --require-verified-cli --profile $sq_claude_crewmate_profile --home $sq_claude_crewmate_home --worktree $sq_claude_worktree -- $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")

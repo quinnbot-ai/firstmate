@@ -12,14 +12,10 @@ set -u
 
 HELPER="$ROOT/bin/fm-claude-home.py"
 TMP_ROOT=$(fm_test_tmproot fm-claude-home-tests)
-TEST_SECURITY_BIN="$TMP_ROOT/security-bin"
-mkdir -p "$TEST_SECURITY_BIN"
-cat > "$TEST_SECURITY_BIN/security" <<'SH'
-#!/usr/bin/env bash
-exit 44
-SH
-chmod 700 "$TEST_SECURITY_BIN/security"
-PATH="$TEST_SECURITY_BIN:$PATH"
+export FM_SPAWN_NO_GUARD=1
+FAKE_KEYCHAIN=$(fm_fake_claude_keychain "$TMP_ROOT/fake-keychain")
+PATH="$FAKE_KEYCHAIN:$PATH"
+export PATH
 
 make_profile() {  # <dir>
   mkdir -p "$1"
@@ -32,30 +28,42 @@ file_mode() {
   if [ "$(uname)" = Darwin ]; then stat -f '%Lp' "$1" 2>/dev/null; else stat -c '%a' "$1" 2>/dev/null; fi
 }
 
-test_create_excludes_customization_surface_and_copies_credentials() {
+test_create_excludes_customization_surface_and_every_credential_file() {
   local case_dir data source home
   case_dir="$TMP_ROOT/create-excludes"
   data="$case_dir/data"
   source="$data/claude-crewmate/profile"
   mkdir -p "$data"
   make_profile "$source"
+  fm_fake_claude_keychain_seed "$FAKE_KEYCHAIN" "$source"
   mkdir -p "$source/backups" "$source/hooks" "$source/commands"
   printf '%s\n' 'b' > "$source/backups/entry.json"
   printf '%s\n' 'h' > "$source/hooks/x.sh"
   printf '{}' > "$source/settings.json"
   printf '{}' > "$source/.mcp.json"
+  printf '%s\n' '{"version":1,"account_sha256":"test-only"}' > "$source/.firstmate-account.json"
+  printf '{"claudeAiOauth":{"accessToken":"must-not-copy"}}\n' > "$source/.credentials.json"
+  printf '{"claudeAiOauth":{"accessToken":"must-not-copy"}}\n' > "$source/.credentials.json.backup"
+  printf '{"claudeAiOauth":{"accessToken":"must-not-copy"}}\n' > "$source/backups/.credentials.json"
 
   home=$(python3 "$HELPER" --data "$data" --source "$source" --task-id t1 --create)
   [ -d "$home" ] || fail "create did not print a directory path"
-  assert_present "$home/.claude.json" "isolated home did not copy the credential file"
+  assert_present "$home/.claude.json" "isolated home did not copy the profile configuration"
   assert_present "$home/backups/entry.json" "isolated home did not copy nested profile content"
+  assert_absent "$home/.credentials.json" "isolated home copied a plaintext credential file"
+  assert_absent "$home/.credentials.json.backup" \
+    "isolated home copied a derived plaintext credential file"
+  assert_absent "$home/backups/.credentials.json" \
+    "isolated home copied a nested plaintext credential file"
   [ ! -e "$home/hooks" ] || fail "isolated home retained the profile's hooks directory"
   [ ! -e "$home/commands" ] || fail "isolated home retained the profile's commands directory"
   [ ! -e "$home/settings.json" ] || fail "isolated home retained the profile's settings.json"
   [ ! -e "$home/.mcp.json" ] || fail "isolated home retained the profile's .mcp.json"
+  [ ! -e "$home/.firstmate-account.json" ] \
+    || fail "isolated home copied the profile-local account attestation"
   [ "$(file_mode "$home")" = 700 ] \
     || fail "isolated home directory must be mode 0700"
-  pass "create copies credentials and nested content while excluding customization surface"
+  pass "create copies nested content while excluding customization surface and every credential file"
 }
 
 test_create_strips_mcp_servers_from_claude_json() {
@@ -115,7 +123,6 @@ import contextlib
 import importlib.util
 import io
 import os
-import subprocess
 import sys
 from types import SimpleNamespace
 
@@ -123,45 +130,56 @@ helper, data, source, state = sys.argv[1:]
 spec = importlib.util.spec_from_file_location("fm_claude_home", helper)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
-calls = []
-deleted = False
+class FakeKeychain:
+    def __init__(self):
+        self.values = {
+            module.keychain_service(source): b"test-only-secret",
+        }
+        self.calls = []
 
-def fake_security(arguments, input_bytes=None):
-    global deleted
-    calls.append((arguments, input_bytes))
-    if arguments[0] == "find-generic-password":
-        if deleted:
-            return subprocess.CompletedProcess(arguments, 44, stdout=b"")
-        if arguments[-1] == module.keychain_service(source):
-            return subprocess.CompletedProcess(arguments, 0, stdout=b"test-only-secret\n")
-        return subprocess.CompletedProcess(arguments, 0, stdout=b"test-only-secret\n")
-    if arguments[0] == "delete-generic-password":
-        deleted = True
-    return subprocess.CompletedProcess(arguments, 0, stdout=b"")
+    def read(self, service):
+        self.calls.append(("read", service))
+        return self.values.get(service)
 
-module.is_macos = lambda: True
-module.run_security = fake_security
+    def write(self, service, value):
+        self.calls.append(("write", service))
+        self.values[service] = bytes(value)
+
+    def delete(self, service):
+        self.calls.append(("delete", service))
+        self.values.pop(service, None)
+
+module.require_macos = lambda: None
+keychain = FakeKeychain()
+module.macos_keychain = lambda: keychain
+with open(os.path.join(source, ".credentials.json"), "w", encoding="utf-8") as file:
+    file.write('{"synthetic":"must-not-copy-on-macOS"}\n')
 out = io.StringIO()
 with contextlib.redirect_stdout(out):
     module.create_home(SimpleNamespace(data=data, source=source, task_id="keychain"))
 home = out.getvalue().strip()
 expected_source = module.keychain_service(source)
 expected_target = module.keychain_service(home)
-if calls[0][0][-1] != expected_source:
-    raise AssertionError("create did not read the profile-derived Keychain service")
-if calls[1][0][-3] != expected_target:
-    raise AssertionError("create did not write the task-home-derived Keychain service")
-if calls[1][0][-1] != "test-only-secret":
-    raise AssertionError("create did not transfer the mocked credential through -w")
-if calls[2][0][-1] != expected_target:
-    raise AssertionError("create did not read the task-home Keychain credential back")
+if expected_source == expected_target:
+    raise AssertionError("test requires path-derived source and target services")
+if keychain.calls[:3] != [
+    ("read", expected_source),
+    ("write", expected_target),
+    ("read", expected_target),
+]:
+    raise AssertionError("create did not clone and verify the exact path-derived services")
+if keychain.values.get(expected_target) != b"test-only-secret":
+    raise AssertionError("create did not transfer the credential bytes in process")
+if os.path.exists(os.path.join(home, ".credentials.json")):
+    raise AssertionError("macOS task home copied plaintext credential material")
 module.remove_home(SimpleNamespace(data=data, state=state, task_id="keychain", home=home))
-deletes = [call for call, _ in calls if call[0] == "delete-generic-password"]
-if not deletes or deletes[-1][-1] != expected_target:
+if ("delete", expected_target) not in keychain.calls:
     raise AssertionError("remove did not delete the task-home-derived Keychain service")
+if expected_target in keychain.values:
+    raise AssertionError("remove left the task-home-derived Keychain service behind")
 PY
   expect_code 0 "$?" "managed Keychain credentials must be cloned and removed without real Keychain access"
-  pass "managed Keychain credentials are cloned into and removed with task homes"
+  pass "path-bound Keychain credentials are cloned in process and removed with task homes"
 }
 
 test_managed_keychain_short_write_is_rejected() {
@@ -175,7 +193,6 @@ test_managed_keychain_short_write_is_rejected() {
 import contextlib
 import importlib.util
 import io
-import subprocess
 import sys
 
 helper, data, source = sys.argv[1:]
@@ -186,20 +203,23 @@ home = data + "/claude-crewmate/.fm-claude-home.target"
 source_service = module.keychain_service(source)
 target_service = module.keychain_service(home)
 
-def fake_security(arguments, input_bytes=None):
-    if arguments[0] == "find-generic-password":
-        secret = b"source-secret\n" if arguments[-1] == source_service else b"\n"
-        return subprocess.CompletedProcess(arguments, 0, stdout=secret)
-    if arguments[0] == "add-generic-password":
-        if input_bytes is not None:
-            raise AssertionError("credential write must not rely on security stdin")
-        if arguments[-2:] != ["-w", "source-secret"]:
-            raise AssertionError("credential write did not use inline -w data")
-        return subprocess.CompletedProcess(arguments, 0, stdout=b"")
-    raise AssertionError(f"unexpected security call: {arguments[0]}")
+class ShortWriteKeychain:
+    def read(self, service):
+        if service == source_service:
+            return b"source-secret"
+        if service == target_service:
+            return b"source"
+        return None
 
-module.is_macos = lambda: True
-module.run_security = fake_security
+    def write(self, service, value):
+        if service != target_service or value != b"source-secret":
+            raise AssertionError("credential write did not use the expected bytes")
+
+    def delete(self, service):
+        raise AssertionError("clone must not delete during verification")
+
+module.require_macos = lambda: None
+module.macos_keychain = ShortWriteKeychain
 with contextlib.redirect_stderr(io.StringIO()):
     try:
         module.clone_keychain_credential(data, source, home)
@@ -212,7 +232,75 @@ if target_service == source_service:
     raise AssertionError("test requires distinct source and target services")
 PY
   expect_code 0 "$?" "a zero-exit short Keychain write must fail verification"
-  pass "a short Keychain write is rejected even when security exits zero"
+  pass "a short in-process Keychain write is rejected by read-back verification"
+}
+
+test_managed_keychain_missing_source_refuses_and_cleans_home() {
+  local case_dir data source out
+  case_dir="$TMP_ROOT/keychain-missing-source"
+  data="$case_dir/data"
+  source="$data/claude-crewmate/profile"
+  mkdir -p "$data"
+  make_profile "$source"
+
+  out=$(python3 - "$HELPER" "$data" "$source" 2>&1 <<'PY'
+import contextlib
+import importlib.util
+import io
+import os
+import sys
+from types import SimpleNamespace
+
+helper, data, source = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("fm_claude_home", helper)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+class EmptyKeychain:
+    def __init__(self):
+        self.deleted = []
+
+    def read(self, service):
+        return None
+
+    def write(self, service, value):
+        raise AssertionError("missing source credential must not be written")
+
+    def delete(self, service):
+        self.deleted.append(service)
+
+module.require_macos = lambda: None
+keychain = EmptyKeychain()
+module.macos_keychain = lambda: keychain
+error_output = io.StringIO()
+with contextlib.redirect_stderr(error_output):
+    try:
+        module.create_home(
+            SimpleNamespace(data=data, source=source, task_id="missing")
+        )
+    except SystemExit as error:
+        if error.code != 1:
+            raise
+    else:
+        raise AssertionError("a missing managed Keychain source was accepted")
+message = error_output.getvalue()
+if "no path-bound Keychain credential" not in message:
+    raise AssertionError("missing source did not produce the operator repair error")
+if "test-only" in message:
+    raise AssertionError("missing source error exposed credential material")
+base = os.path.join(data, "claude-crewmate")
+leftovers = [
+    name for name in os.listdir(base) if name.startswith(".fm-claude-home.")
+]
+if leftovers:
+    raise AssertionError(f"missing source left a partial home behind: {leftovers}")
+if not keychain.deleted:
+    raise AssertionError("missing source cleanup did not target the derived task service")
+PY
+)
+  expect_code 0 "$?" "missing managed Keychain auth must fail closed without leftovers"
+  [ -z "$out" ] || fail "fake missing-Keychain test emitted unexpected output: $out"
+  pass "missing path-bound Keychain auth refuses launch and cleans the partial home"
 }
 
 test_readiness_requires_a_logged_in_copy() {
@@ -224,23 +312,21 @@ test_readiness_requires_a_logged_in_copy() {
   fakebin="$case_dir/fakebin"
   mkdir -p "$profile" "$state" "$fakebin"
   printf '{"hasCompletedOnboarding":true}\n' > "$profile/.claude.json"
-  printf '{"claudeAiOauth":{"accessToken":"test-access"}}\n' > "$profile/.credentials.json"
+  fm_fake_claude_keychain_seed "$FAKE_KEYCHAIN" "$profile"
   cat > "$fakebin/claude" <<'SH'
 #!/usr/bin/env bash
-if [ -f "${CLAUDE_CONFIG_DIR:-}/.credentials.json" ]; then
-  printf '%s\n' '{"loggedIn":true}'
+if [ -f "${CLAUDE_CONFIG_DIR:-}/.claude.json" ]; then
+  printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","email":"crew@example.invalid","orgId":"org-test"}'
   exit 0
 fi
 printf '%s\n' '{"loggedIn":false}'
 exit 1
 SH
-  cat > "$fakebin/security" <<'SH'
-#!/usr/bin/env bash
-exit 44
-SH
-  chmod 700 "$fakebin/claude" "$fakebin/security"
+  chmod 700 "$fakebin/claude"
+  PATH="$fakebin:$PATH" python3 "$ROOT/bin/fm-claude-auth.py" \
+    --attest --profile "$profile" --worktree "$case_dir" >/dev/null
 
-  out=$(PATH="$fakebin:$PATH" FM_CLAUDE_CREW_CLI="$fakebin/claude" bash -c '
+  out=$(PATH="$fakebin:$PATH" bash -c '
     source "$1"
     fm_claude_crew_profile_ready "$2" "$3" "$4"
   ' _ "$ROOT/bin/fm-claude-crew-lib.sh" "$profile" "$data" "$state" 2>&1)
@@ -250,18 +336,17 @@ SH
   find "$data/claude-crewmate" -maxdepth 1 -name '.fm-claude-home.*' | grep -q . \
     && fail "readiness probe left a managed home behind"
 
-  rm "$profile/.credentials.json"
   cat > "$fakebin/claude" <<SH
 #!/usr/bin/env bash
 if [ "\${CLAUDE_CONFIG_DIR:-}" = "$profile" ]; then
-  printf '%s\\n' '{"loggedIn":true}'
+  printf '%s\\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","email":"crew@example.invalid","orgId":"org-test"}'
   exit 0
 fi
 printf '%s\\n' '{"loggedIn":false}'
 exit 1
 SH
   chmod 700 "$fakebin/claude"
-  PATH="$fakebin:$PATH" FM_CLAUDE_CREW_CLI="$fakebin/claude" bash -c '
+  PATH="$fakebin:$PATH" bash -c '
     source "$1"
     fm_claude_crew_profile_ready "$2" "$3" "$4"
   ' _ "$ROOT/bin/fm-claude-crew-lib.sh" "$profile" "$data" "$state"
@@ -432,7 +517,6 @@ test_create_abort_cleanup_survives_keychain_failure() {
   out=$(python3 - "$HELPER" "$data" "$source" 2>&1 <<'PY'
 import importlib.util
 import os
-import subprocess
 import sys
 from types import SimpleNamespace
 
@@ -441,18 +525,26 @@ spec = importlib.util.spec_from_file_location("fm_claude_home", helper)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
-def fake_security(arguments, input_bytes=None):
-    if arguments[0] == "find-generic-password":
-        return subprocess.CompletedProcess(arguments, 0, stdout=b"test-only-secret\n")
-    if arguments[0] == "delete-generic-password":
-        return subprocess.CompletedProcess(arguments, 25, stdout=b"")
-    return subprocess.CompletedProcess(arguments, 0, stdout=b"")
+class FailingCleanupKeychain:
+    def __init__(self):
+        self.values = {
+            module.keychain_service(source): b"test-only-secret",
+        }
+
+    def read(self, service):
+        return self.values.get(service)
+
+    def write(self, service, value):
+        self.values[service] = bytes(value)
+
+    def delete(self, service):
+        module.die("could not remove isolated Claude Keychain credential")
 
 def failing_write_file(*a, **kw):
     raise OSError(28, "No space left on device")
 
-module.is_macos = lambda: True
-module.run_security = fake_security
+module.require_macos = lambda: None
+module.macos_keychain = FailingCleanupKeychain
 module.write_file = failing_write_file
 try:
     module.create_home(SimpleNamespace(data=data, source=source, task_id="abort"))
@@ -485,8 +577,8 @@ test_remove_deletes_keychain_entry_for_absent_home() {
 import contextlib
 import importlib.util
 import io
+import os
 import shutil
-import subprocess
 import sys
 from types import SimpleNamespace
 
@@ -494,41 +586,45 @@ helper, data, source, state = sys.argv[1:]
 spec = importlib.util.spec_from_file_location("fm_claude_home", helper)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
-calls = []
-deleted = False
+class FakeKeychain:
+    def __init__(self):
+        self.values = {
+            module.keychain_service(source): b"test-only-secret",
+        }
+        self.deleted = []
 
-def fake_security(arguments, input_bytes=None):
-    global deleted
-    calls.append(arguments)
-    if arguments[0] == "find-generic-password":
-        if deleted:
-            return subprocess.CompletedProcess(arguments, 44, stdout=b"")
-        return subprocess.CompletedProcess(arguments, 0, stdout=b"test-only-secret\n")
-    if arguments[0] == "delete-generic-password":
-        deleted = True
-    return subprocess.CompletedProcess(arguments, 0, stdout=b"")
+    def read(self, service):
+        return self.values.get(service)
 
-module.is_macos = lambda: True
-module.run_security = fake_security
+    def write(self, service, value):
+        self.values[service] = bytes(value)
+
+    def delete(self, service):
+        self.deleted.append(service)
+        self.values.pop(service, None)
+
+module.require_macos = lambda: None
+keychain = FakeKeychain()
+module.macos_keychain = lambda: keychain
 out = io.StringIO()
 with contextlib.redirect_stdout(out):
     module.create_home(SimpleNamespace(data=data, source=source, task_id="gone"))
 home = out.getvalue().strip()
 expected_target = module.keychain_service(home)
-shutil.rmtree(home)
+shutil.rmtree(os.path.dirname(home))
 module.remove_home(SimpleNamespace(data=data, state=state, task_id="gone", home=home))
-deletes = [c for c in calls if c[0] == "delete-generic-password"]
-if not deletes or deletes[-1][-1] != expected_target:
+if not keychain.deleted or keychain.deleted[-1] != expected_target:
     raise AssertionError("remove did not delete the Keychain entry for an already-absent home")
 PY
-  expect_code 0 "$?" "removing an already-absent home must still delete its Keychain entry"
-  pass "remove deletes the task-home Keychain entry even when the home is already gone"
+  expect_code 0 "$?" "removing an absent Claude-home base must still delete its Keychain entry"
+  pass "remove deletes the task Keychain entry even when the entire home base is gone"
 }
 
-test_create_excludes_customization_surface_and_copies_credentials
+test_create_excludes_customization_surface_and_every_credential_file
 test_create_strips_mcp_servers_from_claude_json
 test_managed_keychain_credential_is_cloned_and_removed
 test_managed_keychain_short_write_is_rejected
+test_managed_keychain_missing_source_refuses_and_cleans_home
 test_create_abort_cleanup_survives_keychain_failure
 test_remove_deletes_keychain_entry_for_absent_home
 test_readiness_requires_a_logged_in_copy

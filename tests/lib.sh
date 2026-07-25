@@ -88,6 +88,98 @@ fm_fakebin() {
   printf '%s\n' "$fakebin"
 }
 
+# fm_fake_claude_keychain <dir> prepares <dir> as a PATH shim that runs
+# bin/fm-claude-home.py with a fake Keychain injected into the imported module,
+# and echoes <dir>. fm_fake_claude_keychain_seed <dir> <config-dir> gives that
+# fake the path-bound credential a managed profile would hold.
+#
+# The helper under test reads no flag, variable, or argument that could select a
+# fake, relax a check, or reach a credential file on disk, so replacing
+# macos_keychain on the imported module is the only way to exercise it without
+# the real Keychain - and nothing a real spawn inherits can reach this fake. The
+# store keeps synthetic bytes only, in the test's own temp directory.
+fm_fake_claude_keychain() {
+  local dir=$1 real_python3
+  real_python3=$(command -v python3) || return 1
+  mkdir -p "$dir"
+  cat > "$dir/fm-claude-home-fake-keychain.py" <<PY
+import base64
+import importlib.util
+import json
+import sys
+
+STORE = "$dir/keychain.json"
+
+
+def load():
+    try:
+        with open(STORE, encoding="utf-8") as file:
+            return json.load(file)
+    except FileNotFoundError:
+        return {}
+
+
+def save(values):
+    with open(STORE, "w", encoding="utf-8") as file:
+        json.dump(values, file)
+
+
+class FakeKeychain:
+    def read(self, service):
+        stored = load().get(service)
+        return None if stored is None else base64.b64decode(stored)
+
+    def write(self, service, value):
+        values = load()
+        values[service] = base64.b64encode(bytes(value)).decode()
+        save(values)
+
+    def delete(self, service):
+        values = load()
+        values.pop(service, None)
+        save(values)
+
+
+def loaded(path):
+    spec = importlib.util.spec_from_file_location("fm_claude_home_fake", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.require_macos = lambda: None
+    module.macos_keychain = FakeKeychain
+    return module
+
+
+target = sys.argv[1]
+if sys.argv[2:3] == ["--fm-fake-seed"]:
+    module = loaded(target)
+    FakeKeychain().write(
+        module.keychain_service(sys.argv[3]), b"fake-keychain-credential"
+    )
+else:
+    module = loaded(target)
+    sys.argv = [target] + sys.argv[2:]
+    module.main()
+PY
+  cat > "$dir/python3" <<SH
+#!/usr/bin/env bash
+set -u
+case "\${1:-}" in
+  */fm-claude-home.py)
+    fm_target=\$1
+    shift
+    exec "$real_python3" "$dir/fm-claude-home-fake-keychain.py" "\$fm_target" "\$@"
+    ;;
+esac
+exec "$real_python3" "\$@"
+SH
+  chmod 700 "$dir/python3"
+  printf '%s\n' "$dir"
+}
+
+fm_fake_claude_keychain_seed() {  # <shim-dir> <config-dir>
+  "$1/python3" "$ROOT/bin/fm-claude-home.py" --fm-fake-seed "$2"
+}
+
 fm_fake_exit0() {
   local fakebin=$1 tool
   shift

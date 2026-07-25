@@ -34,6 +34,7 @@ Never dispatch a crewmate or secondmate on an unverified adapter.
 If `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, tell the captain under `AGENTS.md` section 9 that the requested worker runtime is not verified yet, use firstmate's own verified runtime for current work, and ask only whether to verify the requested runtime before future use.
 Do not pause current work for that future-verification choice, and never launch an unverified adapter.
 If the captain asks for a new harness, propose verifying it first: spawn a trivial supervised task using `fm-spawn`'s raw-launch-command escape hatch, confirm every fact empirically, then record the mechanics in `fm-spawn`, the busy signature in `fm-watch.sh` and `fm-tmux-lib.sh` defaults, any needed `FM_COMPOSER_IDLE_RE` empty-composer override plus any novel bare agent prompt glyph in `bin/fm-composer-lib.sh`'s shared composer classifier (the one fleet-wide owner of the empty/dead-shell/pending decision, so a new harness's own idle composer is not misread as a dead shell), the tmux agent-process liveness classification in `bin/backends/tmux.sh` when the harness can launch a secondmate, and the verified knowledge here.
+While `data/claude-crewmate/profile/` exists, `fm-spawn.sh` refuses raw ship and scout launch commands, so run that verification spawn as a raw secondmate launch instead; [`docs/configuration.md`](../../../docs/configuration.md#claude-crewmate-second-account-isolation-dataclaude-crewmate) owns the refusal contract.
 
 ## Detection
 
@@ -149,8 +150,8 @@ First launch in a fresh worktree, or first ever on a machine, may show a trust o
 After every spawn, peek the pane within about 20 seconds.
 If such a dialog is showing, accept it from an active firstmate session using `FM_HOME=<this-firstmate-home> bin/fm-send.sh <window> --key Enter`, or the choice the dialog requires, unless `FM_HOME` is already set to the active firstmate home; verify the brief started processing.
 
-For ship and scout launches only, a ready captain-populated `data/claude-crewmate/profile/` gives Claude a fresh task-private `CLAUDE_CONFIG_DIR` instead of the captain's seat account.
-An absent profile preserves the default launch and metadata exactly, a present profile that cannot authenticate a task-private copy refuses the Claude spawn, and Claude secondmate launches retain their existing configuration; [`docs/configuration.md`](../../../docs/configuration.md#claude-crewmate-second-account-isolation-dataclaude-crewmate) owns the profile, quota, and cleanup contract.
+For ship and scout launches only, an attested captain-populated `data/claude-crewmate/profile/` gives Claude a fresh task-private `CLAUDE_CONFIG_DIR` whose account identity is verified before spawn and again at exec.
+An absent profile preserves the default launch and metadata exactly, any authentication or identity-proof failure refuses the Claude spawn, and Claude secondmate launches retain their existing configuration; [`docs/configuration.md`](../../../docs/configuration.md#claude-crewmate-second-account-isolation-dataclaude-crewmate) owns the profile, Keychain provisioning, quota, and cleanup contract.
 
 Claude renders a predicted-next-prompt suggestion as dim/faint text inside an otherwise-empty composer after a turn completes.
 A plain `tmux capture-pane` cannot tell that ghost text apart from typed text.
