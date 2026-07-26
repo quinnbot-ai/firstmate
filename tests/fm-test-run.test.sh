@@ -385,8 +385,16 @@ test_ci_and_docs_call_the_owner() {
     in_job && /^  [a-zA-Z0-9_-]+:/ { exit }
     in_job { print }
   ' "$CI")
-  printf '%s\n' "$serial_job" | grep -Fq 'timeout --signal=TERM --kill-after=5s --verbose 19m' \
-    || fail "portable serial must emit its diagnostic deadline before the 20m job tripwire"
+  printf '%s\n' "$serial_job" | grep -Fq 'timeout --signal=TERM --kill-after=5s --verbose "${command_deadline_s}s"' \
+    || fail "portable serial must bound its runner with a computed diagnostic deadline"
+  printf '%s\n' "$serial_job" | grep -Fq 'FM_JOB_STARTED_AT=$(date +%s)' \
+    || fail "portable serial must record job start so the deadline shares the job cap origin"
+  printf '%s\n' "$serial_job" | grep -Fq 'command_deadline_s=$((job_timeout_s - setup_elapsed - deadline_reserve_s))' \
+    || fail "portable serial deadline must derive from the remaining job budget, not a literal that races the 20m cap"
+  printf '%s\n' "$serial_job" | grep -Fq 'deadline_floor_s=1020' \
+    || fail "portable serial deadline must keep a floor above the slowest healthy observation"
+  printf '%s\n' "$serial_job" | grep -Fq '::warning title=Behavior portable serial deadline margin exhausted::' \
+    || fail "portable serial must report, not silently accept, setup overhead that eats the diagnostic reserve"
   printf '%s\n' "$serial_job" | grep -Fq "grep -Fq 'timeout: sending signal TERM to command'" \
     || fail "portable serial must recognize GNU timeout diagnostics even when the killed runner exits 1"
   printf '%s\n' "$serial_job" | grep -Fq 'FM_TEST_DEADLINE lane=portable-serial' \
@@ -420,6 +428,8 @@ test_ci_and_docs_call_the_owner() {
     || fail "timing aggregate must download the Herdr input artifact explicitly"
   printf '%s\n' "$aggregate_job" | grep -Fq 'FM_TEST_AGGREGATE_INCOMPLETE' \
     || fail "timing aggregate must distinguish a missing input from a timing regression"
+  printf '%s\n' "$aggregate_job" | grep -Fq -- '-type f -name "$name.json" -print' \
+    || fail "timing aggregate must resolve lane JSON at any depth, since multi-path artifacts nest under their least common ancestor"
   grep -Fq 'timeout-minutes: 20' "$CI" \
     || fail "portable serial hang tripwire must be timeout-minutes: 20"
   grep -Fq 'timeout-minutes: 10' "$CI" \

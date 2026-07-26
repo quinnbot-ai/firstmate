@@ -113,10 +113,23 @@ jobs:
     # measures the 31 redistributed scripts at 6:34.566, leaving a same-run
     # 13:04.304 serial baseline. An exact local timeout/tee replay on
     # 2026-07-26 completed the new 39-script runner in 16:12.965 and its outer
-    # command in 16:13, leaving 2:47 before the named 19m diagnostic and 3:47
-    # before the unchanged 20m job tripwire for checkout/install/shell overhead.
+    # command in 16:13, so 16:13 is the slowest healthy 39-script observation
+    # and 13:04 the CI-measured one.
+    #
+    # The 20m cap counts from job start, so a literal command deadline cannot
+    # be compared against it: checkout, ShellCheck, tmux, and npm setup shift
+    # the command's origin by an unknown amount. The run step therefore derives
+    # its deadline from the remaining job budget measured on the same origin
+    # (job start recorded below), reserving 60s for the TERM/kill grace and the
+    # diagnostic flush. It never drops below a 17m floor, which keeps 47s over
+    # the slowest healthy observation, and warns conspicuously when setup
+    # overhead has eaten the reserve rather than failing a healthy run early.
     timeout-minutes: 20
     steps:
+      - name: Record job start for the deadline budget
+        run: |
+          set -eu
+          echo "FM_JOB_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
@@ -143,9 +156,20 @@ jobs:
           set -u
           mkdir -p "$RUNNER_TEMP/fm-test"
           run_log="$RUNNER_TEMP/fm-test/portable-serial.log"
+          job_timeout_s=1200
+          deadline_reserve_s=60
+          deadline_floor_s=1020
+          job_started=${FM_JOB_STARTED_AT:?job start timestamp was not recorded}
           run_started=$(date +%s)
+          setup_elapsed=$((run_started - job_started))
+          command_deadline_s=$((job_timeout_s - setup_elapsed - deadline_reserve_s))
+          if [ "$command_deadline_s" -lt "$deadline_floor_s" ]; then
+            command_deadline_s=$deadline_floor_s
+            echo "::warning title=Behavior portable serial deadline margin exhausted::job setup took ${setup_elapsed}s, so the ${command_deadline_s}s command deadline no longer fits inside the 20m job cap; a hang may be cancelled before the diagnostic runs"
+          fi
+          echo "FM_TEST_DEADLINE_BUDGET lane=portable-serial setup_elapsed_s=$setup_elapsed command_deadline_s=$command_deadline_s job_timeout_s=$job_timeout_s"
           set +e
-          timeout --signal=TERM --kill-after=5s --verbose 19m \
+          timeout --signal=TERM --kill-after=5s --verbose "${command_deadline_s}s" \
             bin/fm-test-run.sh --lane portable-serial \
               --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-serial.json" \
             2>&1 | tee "$run_log"
@@ -168,14 +192,14 @@ jobs:
               ' "$run_log"
             )
             active_script=${active_script:-unknown}
-            echo "FM_TEST_DEADLINE lane=portable-serial active_script=$active_script elapsed_s=$elapsed command_deadline_s=1140 job_timeout_min=20"
-            echo "::error title=Behavior portable serial deadline tripwire::active_script=$active_script elapsed_s=$elapsed command_deadline_s=1140 job_timeout_min=20"
+            echo "FM_TEST_DEADLINE lane=portable-serial active_script=$active_script elapsed_s=$elapsed command_deadline_s=$command_deadline_s setup_elapsed_s=$setup_elapsed job_timeout_s=$job_timeout_s"
+            echo "::error title=Behavior portable serial deadline tripwire::active_script=$active_script elapsed_s=$elapsed command_deadline_s=$command_deadline_s setup_elapsed_s=$setup_elapsed job_timeout_s=$job_timeout_s"
             {
               echo "## Behavior portable serial deadline tripwire"
               echo
               echo "Active script: \`$active_script\`"
               echo
-              echo "Elapsed: ${elapsed}s (command deadline 1140s; job tripwire 20m)."
+              echo "Elapsed: ${elapsed}s (command deadline ${command_deadline_s}s after ${setup_elapsed}s of job setup; job tripwire ${job_timeout_s}s)."
             } >> "$GITHUB_STEP_SUMMARY"
             exit 124
           fi
@@ -339,16 +363,25 @@ jobs:
       - name: Build aggregate timing summary
         run: |
           set -eu
-          mkdir -p "$RUNNER_TEMP/fm-test"
+          mkdir -p "$RUNNER_TEMP/fm-test" "$RUNNER_TEMP/fm-test-aggregate"
           inputs=()
           missing=()
+          # upload-artifact@v4 roots a multi-path artifact at the least common
+          # ancestor of its paths, so the Herdr lane's timing JSON arrives under
+          # fm-test/ while single-path lanes arrive flat. Resolve by filename at
+          # any depth so a present artifact is never reported as missing.
           for name in \
             fm-test-timing-portable-parallel-1 \
             fm-test-timing-portable-parallel-2 \
             fm-test-timing-portable-serial \
             fm-test-timing-herdr; do
-            input="$RUNNER_TEMP/fm-test-aggregate/$name.json"
-            if [ -f "$input" ]; then
+            input=$(
+              find "$RUNNER_TEMP/fm-test-aggregate" \
+                -type f -name "$name.json" -print \
+                | LC_ALL=C sort \
+                | head -n 1
+            )
+            if [ -n "$input" ] && [ -f "$input" ]; then
               inputs+=("$input")
             else
               missing+=("$name")

@@ -103,9 +103,18 @@ On 2026-07-26, recent GitHub `FM_TEST_SUMMARY duration_ms` records measured the 
 One runner completed its tests in 20:00.758 but lost the whole-job deadline race before the job could finish.
 Run `30197229441` measured the former serial lane at 19:38.870 and the 31 scripts moved from that lane at 6:34.566 combined.
 Removing those exact script records leaves a same-artifact 39-script baseline of 13:04.304 before job setup overhead.
-An exact local replay of the workflow's 19-minute GNU `timeout` plus `tee` command on 2026-07-26 completed all 39 scripts in 16:12.965 runner time and 16:13 outer wall time.
-That observed replay left 2:47 before the diagnostic deadline and 3:47 before the unchanged 20-minute job tripwire.
+An exact local replay of the workflow's GNU `timeout` plus `tee` command on 2026-07-26 completed all 39 scripts in 16:12.965 runner time and 16:13 outer wall time.
+So 13:04.304 is the CI-measured 39-script baseline and 16:13 the slowest healthy observation of the same set.
 Future drift checks should use the uploaded `fm-test-timing-portable-serial` artifact and the job timestamps because the runner duration does not include checkout or dependency installation.
+
+### Diagnostic deadline budget
+
+`timeout-minutes: 20` counts from job start, while a `timeout` on the run step counts from that step.
+A literal command deadline therefore cannot be compared against the job cap: checkout, ShellCheck, tmux, and `npm install -g tasks-axi` shift the command's origin by an unknown amount, and a hang can lose the race and be cancelled before any diagnostic runs.
+The job records `FM_JOB_STARTED_AT` in its first step and the run step derives `command_deadline_s = 1200 - setup_elapsed_s - 60`, so both deadlines share one origin and 60 seconds are reserved for the TERM/kill grace and the diagnostic flush.
+The derived deadline never drops below a 1020-second (17:00) floor, which keeps 47 seconds over the 16:13 slowest healthy observation and 3:56 over the 13:04 CI baseline, so a slow setup step cannot fail a healthy run early.
+When setup overhead is large enough that the floor no longer fits inside the job cap, the step emits a conspicuous warning naming the measured setup cost instead of silently accepting the race.
+Every run logs `FM_TEST_DEADLINE_BUDGET` with the measured setup cost and the deadline actually applied.
 
 ## Coverage guard
 
@@ -122,6 +131,7 @@ CI runs that guard as a required job (`test-coverage`).
 
 Every portable shard, the portable serial lane, and the Herdr lane upload their runner-generated timing JSON when the runner reaches artifact generation.
 The dependent aggregate job runs after all four lanes, combines every available lane JSON through `bin/fm-test-run.sh --aggregate-json`, and uploads one summary artifact for critical-path review.
+The Herdr lane uploads its timing JSON alongside diagnostics, so that artifact is rooted at the least common ancestor of its paths and the JSON arrives nested under `fm-test/`; the aggregate resolves each lane JSON by filename at any depth rather than assuming a flat layout.
 When a cancelled lane never creates its artifact, the aggregate emits `FM_TEST_AGGREGATE_INCOMPLETE`, names the missing lane, and aggregates the remaining inputs without misreporting the missing fact as a timing regression.
 The workflow in `.github/workflows/ci.yml` owns the exact artifact names and aggregation wiring.
 
@@ -135,11 +145,11 @@ The workflow in `.github/workflows/ci.yml` owns the exact artifact names and agg
 | Job | timeout-minutes | Rationale |
 |---|---:|---|
 | portable parallel 1/2 | 10 | Measured shard sum ~4.3 min; hang tripwire with margin |
-| portable serial | 20 | 39-script replay completed in 16:13 outer wall, leaving 3:47 for job setup and teardown |
+| portable serial | 20 | 39-script replay completed in 16:13 outer wall; the run step's own deadline is derived from the remaining job budget |
 | Herdr | 40 | Unchanged hang tripwire for the real-Herdr lane |
 
 Timeouts remain hang tripwires, not expected healthy ends of green suites.
-The portable serial command has a 19-minute diagnostic deadline so it can name the active script and elapsed time before the whole-job cap cancels the runner.
+The portable serial command has a budget-derived diagnostic deadline so it can name the active script and elapsed time before the whole-job cap cancels the runner.
 Do not raise them as a substitute for green results, retries, or weaker assertions.
 
 ## What this phase does not do
