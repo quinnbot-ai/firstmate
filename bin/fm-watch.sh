@@ -859,16 +859,20 @@ mark_ops_inbox_seen() {
 }
 
 # Bounded by distinct reason, not by write count: an inbox whose listing churns
-# without its failure changing repeats one reason every poll, so a record whose
-# reason already stands as the newest is re-dated in place instead of appended.
-# Distinct movements therefore keep their slots inside the limit.
+# without its failure changing repeats one reason every poll, so in `collapse`
+# mode a record whose reason already stands as the newest is re-dated in place
+# instead of appended. Distinct movements keep their slots inside the limit.
+# Every write builds the whole replacement before one rename, so the evidence a
+# caller records before advancing the baseline is never briefly absent on disk.
 append_bounded_record() {
-  local file=$1 record=$2 newest kept
+  local file=$1 record=$2 mode=${3:-append} newest kept
   newest=$(tail -n 1 "$file" 2>/dev/null || true)
-  if [ -n "$newest" ] && [ "${newest#*$'\t'}" = "${record#*$'\t'}" ]; then
-    sed '$d' "$file" > "$file.next" 2>/dev/null && mv "$file.next" "$file"
+  if [ "$mode" = collapse ] && [ -n "$newest" ] && [ "${newest#*$'\t'}" = "${record#*$'\t'}" ]; then
+    { sed '$d' "$file" 2>/dev/null; printf '%s\n' "$record"; } > "$file.next" \
+      && mv "$file.next" "$file"
+  else
+    printf '%s\n' "$record" >> "$file"
   fi
-  printf '%s\n' "$record" >> "$file"
   kept=$(grep -c . "$file" 2>/dev/null) || kept=0
   [ "$kept" -gt "$FM_OPS_INBOX_SUPPRESSION_LIMIT" ] || return 0
   tail -n "$FM_OPS_INBOX_SUPPRESSION_LIMIT" "$file" > "$file.next" \
@@ -880,15 +884,21 @@ append_bounded_record() {
 # to crowd real occurrences out of either bounded artifact. The unresolved
 # record survives the wake path and every later cycle until the failure itself
 # clears (mark_ops_inbox_seen drops it once the inbox is no longer genuine).
-# The occurrence history outlives that clear, bounded to the same limit, so a
-# failure that clears and recurs reads as flapping instead of as a first sight.
+# That clear is also a recurrence boundary: repeats collapse only while they
+# belong to the episode the unresolved file still holds, so the same failure
+# seen again after a clear lands as its own occurrence and the bounded history
+# reads as flapping instead of as a first sight.
 record_ops_inbox_suppression() {
-  local record
+  local record newest mode=append
   [ -n "${FM_OPS_INBOX_SUPPRESSION:-}" ] || return 0
   if [ "${FM_OPS_INBOX_GENUINE:-no}" = yes ]; then
     record="$(date +%s)"$'\t'"$FM_OPS_INBOX_SUPPRESSION"
-    append_bounded_record "$STATE/.ops-inbox-suppressed" "$record"
-    append_bounded_record "$STATE/.ops-inbox-suppression-log" "$record"
+    newest=$(tail -n 1 "$STATE/.ops-inbox-suppressed" 2>/dev/null || true)
+    if [ -n "$newest" ] && [ "${newest#*$'\t'}" = "$FM_OPS_INBOX_SUPPRESSION" ]; then
+      mode=collapse
+    fi
+    append_bounded_record "$STATE/.ops-inbox-suppressed" "$record" collapse
+    append_bounded_record "$STATE/.ops-inbox-suppression-log" "$record" "$mode"
   fi
   unset FM_OPS_INBOX_SUPPRESSION
   return 0

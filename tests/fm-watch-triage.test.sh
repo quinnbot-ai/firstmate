@@ -1813,10 +1813,28 @@ SH
 
   # The same failure recurs below the level that already woke firstmate; the
   # window closed with the clear, so it must wake again rather than collapse.
-  printf '4\n' > "$counts"
+  printf '5\n' > "$counts"
   wait_for_exit "$pid" 40 || fail "a recurrence after a clear did not wake the watcher"
   grep "$(printf '\tcheck\tops-inbox\t')" "$state/.wake-queue" >/dev/null \
     || fail "the recurrence wake was not durably queued as a check"
+
+  # The recurrence is then suppressed under the reason its pre-clear twin
+  # already used. The clear is a boundary, so the two occurrences must stay
+  # distinct instead of the newer one re-dating the older.
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 15 || { reap "$pid"; fail "watcher exited before the recurring movement: $(cat "$out")"; }
+  printf '3\n' > "$counts"
+  wait_path "$state/.ops-inbox-suppressed" present 40 \
+    || { reap "$pid"; fail "the recurring movement left no unresolved suppression record"; }
+  reap "$pid"
+  [ "$(grep -c 'criticals 3' "$state/.ops-inbox-suppression-log")" -eq 2 ] \
+    || fail "a suppression repeated across a clear merged into its pre-clear occurrence"
+  [ "$(grep -c . "$state/.ops-inbox-suppressed")" -eq 1 ] \
+    || fail "the reopened episode did not start from a single unresolved record"
 
   pass "suppression evidence clears with the failure while its occurrence history survives"
 }
