@@ -11,11 +11,14 @@
 # Known harness command names; extend when a new adapter is verified.
 FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$'
 
-# Walk the current process ancestry (up to 8 hops) and print the first pid whose
-# command looks like a verified harness. The harness pid lives as long as the
-# session, unlike the transient subshell pid of any one tool call.
-fm_harness_ancestry_pid() {
-  local pid=$$ comm args
+# Walk a process ancestry (up to 8 hops) and print the first pid whose command
+# looks like a verified harness. The harness pid lives as long as the session,
+# unlike the transient subshell pid of any one tool call.
+# Starts at $$ by default. A caller whose own argv can carry a harness name (an
+# interpreter invoked with a --harness argument, say) passes its parent pid so
+# that its own command line cannot match itself.
+fm_harness_ancestry_pid() {  # [start-pid]
+  local pid=${1:-$$} comm args
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
     args=$(ps -o args= -p "$pid" 2>/dev/null)

@@ -39,6 +39,8 @@ bin/fm-dispatch-stage.sh <id> --repo <repo> --kind <ship|scout> --harness <harne
 The helper refuses calls outside the lock-owning firstmate ancestry.
 It obtains the authoritative machine-ready task, validates the brief, fingerprints the task and dispatch inputs, seals the concrete profile, and writes `data/<id>/dispatch.json`.
 Any later task, brief, project mode, authority, or dispatch-profile configuration change requires firstmate to stage again.
+Staging refuses an id that already has a report receipt and names that receipt path, because refill would otherwise skip the new envelope silently.
+Retire such a receipt deliberately, only after confirming the earlier report needs superseding.
 
 ## Enable report-only refill
 
@@ -60,6 +62,9 @@ A `done: auto-dispatch would dispatch ...` event is an audit result, not evidenc
 Inspect the consumed envelope and receipt under `state/auto-dispatch-receipts/` when reviewing the judgment.
 A `blocked: auto-dispatch stopped ...` event means refill failed closed before further claims.
 Resolve its concrete ownership, fleet, queue, or capacity cause before staging or enabling more work.
+A `blocked: auto-dispatch refused the dispatch envelope ...` event means a sealed envelope failed integrity verification, so treat it as tampering or a lost seal key rather than ordinary staleness.
+A `working: auto-dispatch is waiting on supervision capacity ...` event is routine and needs no separate captain action beyond the supervision the watcher already surfaces.
+An invalid fleet inventory names any stranded `state/auto-dispatch-claims/<id>.json` journal; confirm no worker exists for that id, run `tasks-axi reopen <id>`, then remove the journal file.
 
 Never delete worker metadata, tear down a task, merge work, answer a decision, or alter no-mistakes state to make capacity available.
 Only the existing supervised lifecycle may free an open lane.

@@ -119,7 +119,10 @@ Indeterminate limits and contradictory fleet evidence stop safely before queue m
 
 Ready order and atomic eligibility remain owned by `tasks-axi`.
 The helper requires machine-readable `ready --json` and conditional `claim --if-ready --json`; it neither parses human output nor duplicates dependency, hold, or public-followup semantics.
+Backend records are checked against the machine contract, which is a hard stop when violated, while ordinary queue-level ineligibility only skips that one candidate.
 The per-home lock serializes refill passes, and the backend's conditional transition protects the ready-to-claim race against other queue writers.
+A lost conditional claim is that protection working, so it skips the candidate instead of stopping refill.
+`bin/fm-session-lock-lib.sh` remains the one owner of verified-harness identity and ancestry, and the staging authority calls it rather than restating that decision.
 
 This phase is deliberately report-only.
 A selected task is atomically claimed, revalidated, reopened, and recorded once as a would-dispatch receipt.

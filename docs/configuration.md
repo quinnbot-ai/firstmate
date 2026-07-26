@@ -379,16 +379,29 @@ The helper is callable only from the verified harness that owns the exact home's
 A crewmate cannot use staging as an instruction-authoring or profile-selection path.
 
 The existing `fm-watch.sh` loop invokes `fm-auto-dispatch-once.sh` on an independently persisted cadence.
+Every pass that is due records its attempt in `state/.last-auto-dispatch-refill` before the ownership, fleet, and capacity gates run, so a home that keeps failing those gates backs off to `interval_seconds` instead of retrying the fleet snapshot on every watcher poll.
 The one-shot verifies session and watcher ownership, reads `fm-fleet-snapshot.sh --json`, computes running and open capacity, preserves authoritative ready order, and considers only current sealed envelopes.
 Terminal metadata still occupies open capacity until the normal guarded cleanup path removes it.
-Unknown state, unexpected dead endpoints, unresolved failures or decisions, contradictory inventory, ownership changes, and exceeded caps stop refill and produce one deduplicated actionable event.
+Unknown state, unexpected dead endpoints, unresolved failures, contradictory inventory, ownership changes, and exceeded caps stop refill and produce one actionable `blocked:` event.
+A fleet that merely needs supervision before more work is reported with the non-captain-actionable `working:` verb, because the watcher already surfaces the underlying parked, blocked, failed, or pending-decision task on its own.
+Failure events are deduplicated per episode in `state/.auto-dispatch-episode.json`: a repeat inside one unbroken run of failing passes stays silent, a pass that no longer reports the condition clears the episode, and a genuine recurrence later reports again.
+
+An invalid main inventory reports the snapshot's own reason.
+Its most common cause is a report-only claim that was interrupted between the atomic claim and the compensating reopen, which leaves the task `in_flight` with no worker metadata.
+`state/auto-dispatch-claims/<id>.json` is the journal for exactly that case, and the failure event names any journal it finds.
+Recover by confirming no worker exists for that id, running `tasks-axi reopen <id>`, and then removing the journal file.
 
 Report-only refill requires a machine-readable `tasks-axi ready --json` contract and an atomic `tasks-axi claim <id> --if-ready --json` transition.
 Manual backlog mode and `tasks-axi` versions without both capabilities are unsupported and fail closed.
 The helper never scrapes human ready output and never substitutes `tasks-axi start`.
 
+Queue-level ineligibility such as a hold, a blocked or held task, an active blocker, or a public-followup obligation skips that one candidate; only a structurally malformed backend record stops the whole pass.
+Losing the conditional claim to another queue writer is the benign outcome `--if-ready` exists to produce, so that candidate is skipped and refill continues.
+
 For each selection, the helper atomically claims and reopens the task, consumes the envelope into a bounded audit receipt under `state/auto-dispatch-receipts/`, and reports what it would dispatch.
 It never invokes `fm-spawn.sh`, creates worker metadata, or starts another daemon.
+A receipt is a permanent record that the id was already reported, so refill skips that id afterwards and `fm-dispatch-stage.sh` refuses to stage it again while naming the receipt path.
+Retiring a receipt is a deliberate operator action in this phase; an automated receipt lifecycle is a possible follow-up, not current behavior.
 Load the agent-only [`auto-dispatch`](../.agents/skills/auto-dispatch/SKILL.md) procedure before staging, enabling, or responding to these reports.
 
 ## Toolchain

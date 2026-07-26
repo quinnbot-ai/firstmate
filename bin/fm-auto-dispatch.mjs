@@ -15,6 +15,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -35,8 +36,9 @@ const MAX_TERMINAL_BUFFER = 64;
 const MAX_LAUNCHES_PER_TICK = 16;
 const DEFAULT_INTERVAL_SECONDS = 60;
 const DEFAULT_SUPERVISION_GRACE_SECONDS = 300;
-const VERIFIED_HARNESS_NAMES = new Set(["claude", "codex", "opencode", "grok", "kimi", "pi"]);
-const VERIFIED_LAUNCH_HARNESSES = new Set(["claude", "codex", "opencode", "pi", "grok", "kimi"]);
+const MAX_EPISODE_KEYS = 64;
+const VERIFIED_HARNESSES = new Set(["claude", "codex", "opencode", "grok", "kimi", "pi"]);
+const SESSION_LOCK_LIB = join(SCRIPT_DIR, "fm-session-lock-lib.sh");
 
 class DispatchError extends Error {
   constructor(message, code = "DISPATCH_INVALID") {
@@ -178,7 +180,7 @@ function validateId(value) {
   return value;
 }
 
-function run(command, args, context, acceptedStatuses = [0]) {
+function runResult(command, args, context) {
   const result = spawnSync(command, args, {
     cwd: context.home,
     encoding: "utf8",
@@ -189,6 +191,11 @@ function run(command, args, context, acceptedStatuses = [0]) {
   if (result.error) {
     fail(`${command} failed: ${result.error.message}`, "COMMAND_FAILED");
   }
+  return result;
+}
+
+function run(command, args, context, acceptedStatuses = [0]) {
+  const result = runResult(command, args, context);
   if (!acceptedStatuses.includes(result.status)) {
     const detail = (result.stderr || result.stdout || `exit ${result.status}`).trim();
     fail(`${command} ${args[0] || ""} failed: ${detail}`, "COMMAND_FAILED");
@@ -236,7 +243,7 @@ function readyTasks(context) {
   }
   const seen = new Set();
   for (const task of payload.ready) {
-    const id = validateReadyTask(task);
+    const id = validateReadyTaskSchema(task);
     if (seen.has(id)) {
       fail(`tasks-axi ready JSON repeats task ${id}`, "QUEUE_UNSUPPORTED");
     }
@@ -245,40 +252,78 @@ function readyTasks(context) {
   return payload.ready;
 }
 
-function validateReadyTask(task, claimed = false) {
+/**
+ * Structural schema only: a violation means the backend broke its machine
+ * contract, which is a hard stop. Per-task eligibility is a separate,
+ * per-candidate decision owned by readyTaskIneligibility.
+ */
+function validateReadyTaskSchema(task) {
   if (task === null || typeof task !== "object" || Array.isArray(task)) {
     fail("ready task must be a JSON object", "QUEUE_UNSUPPORTED");
   }
-  const id = validateId(task.id);
-  const expectedState = claimed ? "in_flight" : "queued";
-  if (task.state !== expectedState) {
-    fail(`task ${id} is not ${expectedState}`, "TASK_NOT_READY");
+  if (typeof task.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(task.id)) {
+    fail("ready task id is missing or contains unsupported characters", "QUEUE_UNSUPPORTED");
   }
-  if (task.kind === "public-followup" || task.public_followup != null) {
-    fail(`task ${id} is a public-followup`, "TASK_NOT_READY");
+  const id = task.id;
+  for (const field of ["state", "title", "repo"]) {
+    const value = task[field];
+    if (typeof value !== "string" || value.trim() === "" || /[\r\n\0]/.test(value)) {
+      fail(`task ${id} ${field} must be a non-empty single-line string`, "QUEUE_UNSUPPORTED");
+    }
   }
-  if (task.blocked !== false || task.held !== false) {
-    fail(`task ${id} is blocked or held`, "TASK_NOT_READY");
-  }
-  if (task.hold !== null && task.hold !== undefined) {
-    fail(`task ${id} has a dispatch hold`, "TASK_NOT_READY");
-  }
-  if (!Array.isArray(task.blocked_by) || task.blocked_by.length !== 0) {
-    fail(`task ${id} has active blockers`, "TASK_NOT_READY");
-  }
-  requireString(task.title, `task ${id} title`);
-  requireString(task.repo, `task ${id} repo`);
   if (task.body !== null && task.body !== undefined && typeof task.body !== "string") {
     fail(`task ${id} body must be a string or null`, "QUEUE_UNSUPPORTED");
+  }
+  if (task.kind !== null && task.kind !== undefined && typeof task.kind !== "string") {
+    fail(`task ${id} kind must be a string or null`, "QUEUE_UNSUPPORTED");
   }
   if (!Array.isArray(task.deps)) {
     fail(`task ${id} deps must be an array`, "QUEUE_UNSUPPORTED");
   }
+  if (typeof task.blocked !== "boolean" || typeof task.held !== "boolean") {
+    fail(`task ${id} blocked and held must be booleans`, "QUEUE_UNSUPPORTED");
+  }
+  if (!Array.isArray(task.blocked_by)) {
+    fail(`task ${id} blocked_by must be an array`, "QUEUE_UNSUPPORTED");
+  }
   return id;
 }
 
-function taskFingerprint(task, claimed = false) {
-  validateReadyTask(task, claimed);
+/**
+ * Null when the task may be dispatched, otherwise the concrete reason it is
+ * not eligible right now. Ineligibility is ordinary queue state, never a
+ * malformed contract, so a caller iterating candidates skips and continues.
+ */
+function readyTaskIneligibility(task, expectedState = "queued") {
+  const id = validateReadyTaskSchema(task);
+  if (task.state !== expectedState) {
+    return `task ${id} is ${task.state}, not ${expectedState}`;
+  }
+  if (task.kind === "public-followup" || task.public_followup != null) {
+    return `task ${id} is a public-followup`;
+  }
+  if (task.blocked !== false || task.held !== false) {
+    return `task ${id} is blocked or held`;
+  }
+  if (task.hold !== null && task.hold !== undefined) {
+    return `task ${id} has a dispatch hold`;
+  }
+  if (task.blocked_by.length !== 0) {
+    return `task ${id} has active blockers`;
+  }
+  return null;
+}
+
+function requireEligibleReadyTask(task, expectedState = "queued") {
+  const reason = readyTaskIneligibility(task, expectedState);
+  if (reason !== null) {
+    fail(reason, "TASK_NOT_READY");
+  }
+  return task.id;
+}
+
+function taskFingerprint(task) {
+  validateReadyTaskSchema(task);
   return sha256(canonicalJson({
     id: task.id,
     title: task.title,
@@ -293,17 +338,42 @@ function taskFingerprint(task, claimed = false) {
   }));
 }
 
+function tryParseJson(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Returns the claimed task, or null when the backend's conditional gate
+ * unambiguously reports that another queue writer won the ready-to-claim race.
+ * Losing that race is the benign outcome --if-ready exists to produce, so it
+ * skips the candidate; every other claim failure is still a hard stop.
+ */
 function claimTask(context, id) {
-  const output = run(
+  const result = runResult(
     "tasks-axi",
     ["claim", id, "--if-ready", "--file", context.backlog, "--json"],
     context,
   );
-  const payload = parseJson(output, "tasks-axi claim output");
+  if (result.status !== 0) {
+    const payload = tryParseJson(result.stdout ?? "") ?? tryParseJson(result.stderr ?? "");
+    if (payload?.ok === false && payload?.error === "not-ready") {
+      return null;
+    }
+    const detail = (result.stderr || result.stdout || `exit ${result.status}`).trim();
+    fail(`tasks-axi claim failed: ${detail}`, "COMMAND_FAILED");
+  }
+  const payload = parseJson(result.stdout, "tasks-axi claim output");
   if (payload?.ok !== true || payload?.action !== "claim" || payload?.task?.id !== id) {
     fail("tasks-axi claim JSON does not match the required machine contract", "QUEUE_UNSUPPORTED");
   }
-  validateReadyTask(payload.task, true);
+  validateReadyTaskSchema(payload.task);
+  if (payload.task.state !== "in_flight") {
+    fail(`tasks-axi claim left ${id} in state ${payload.task.state}`, "QUEUE_UNSUPPORTED");
+  }
   return payload.task;
 }
 
@@ -319,62 +389,35 @@ function reopenTask(context, id) {
   }
 }
 
-function processField(pid, field) {
-  const result = spawnSync("ps", ["-o", `${field}=`, "-p", String(pid)], {
-    encoding: "utf8",
-    maxBuffer: 65536,
-  });
-  if (result.status !== 0 || result.stdout.trim() === "") {
-    return null;
-  }
-  return result.stdout.trim();
-}
-
-function isHarnessProcess(pid) {
-  const command = processField(pid, "comm");
-  const args = processField(pid, "args");
-  if (command === null || args === null) {
-    return false;
-  }
-  const basename = command.split("/").at(-1).toLowerCase();
-  if ([...VERIFIED_HARNESS_NAMES].some((name) => (
-    basename === name
-    || basename.startsWith(`${name}-`)
-    || basename.startsWith(`${name}.`)
-    || basename.startsWith(`${name} `)
-  ))) {
-    return true;
-  }
-  if (!basename.includes("node") && !basename.includes("python")) {
-    return false;
-  }
-  const script = args.trim().split(/\s+/).slice(1).find((token) => !token.startsWith("-"));
-  if (!script) {
-    return false;
-  }
-  const scriptName = script.toLowerCase();
-  return [...VERIFIED_HARNESS_NAMES].some((name) => (
-    scriptName.split("/").some((component) => (
-      component === name
-      || component.startsWith(`${name}-`)
-      || component.startsWith(`${name}.`)
-    ))
-  ));
-}
-
-function processParent(pid) {
-  const result = spawnSync("ps", ["-o", "ppid=", "-p", String(pid)], {
-    encoding: "utf8",
-    maxBuffer: 65536,
-  });
-  const value = result.stdout?.trim();
-  return result.status === 0 && /^[0-9]+$/.test(value) ? Number(value) : null;
+/**
+ * bin/fm-session-lock-lib.sh is the ONE owner of verified-harness identity and
+ * ancestry. Calling it keeps this consumer from drifting into a second, subtly
+ * different definition of the same decision.
+ */
+function sessionLockHelper(fn, args = []) {
+  return spawnSync(
+    "bash",
+    ["-c", `. "$1" || exit 1; shift; ${fn} "$@"`, "_", SESSION_LOCK_LIB, ...args],
+    { encoding: "utf8", maxBuffer: 65536, env: process.env },
+  );
 }
 
 function isAliveHarness(pid) {
-  return Number.isSafeInteger(pid)
-    && pid > 1
-    && isHarnessProcess(pid);
+  if (!Number.isSafeInteger(pid) || pid <= 1) {
+    return false;
+  }
+  return sessionLockHelper("fm_harness_pid_alive", [String(pid)]).status === 0;
+}
+
+/**
+ * Walks from this process's parent, never from this process: a staging call
+ * carries the requested harness name in its own argv, which would otherwise
+ * match the ancestry rule against itself.
+ */
+function harnessAncestryPid() {
+  const result = sessionLockHelper("fm_harness_ancestry_pid", [String(process.ppid)]);
+  const value = result.stdout?.trim() ?? "";
+  return result.status === 0 && /^[0-9]+$/.test(value) ? Number(value) : null;
 }
 
 function requireOwningFirstmate(context) {
@@ -386,20 +429,13 @@ function requireOwningFirstmate(context) {
   if (!isAliveHarness(owner)) {
     fail("firstmate session lock owner is not a live verified harness", "OWNERSHIP_CHANGED");
   }
-  let pid = process.pid;
-  for (let depth = 0; depth < 10 && pid > 1; depth += 1) {
-    if (isHarnessProcess(pid)) {
-      if (pid !== owner) {
-        fail("dispatch staging was not invoked by the lock-owning firstmate", "AUTHOR_UNAUTHORIZED");
-      }
-      return;
-    }
-    pid = processParent(pid);
-    if (pid === null) {
-      break;
-    }
+  const ancestor = harnessAncestryPid();
+  if (ancestor === null) {
+    fail("dispatch staging has no verified firstmate ancestor", "AUTHOR_UNAUTHORIZED");
   }
-  fail("dispatch staging has no verified firstmate ancestor", "AUTHOR_UNAUTHORIZED");
+  if (ancestor !== owner) {
+    fail("dispatch staging was not invoked by the lock-owning firstmate", "AUTHOR_UNAUTHORIZED");
+  }
 }
 
 function readSealKey(context, create) {
@@ -421,6 +457,9 @@ function readSealKey(context, create) {
         closeSync(fd);
       }
     }
+  }
+  if (!existsSync(keyPath)) {
+    fail("auto-dispatch seal key is missing, so no envelope can be verified", "SEAL_INVALID");
   }
   const key = safeRead(keyPath, "auto-dispatch seal key", 128);
   const info = statSync(keyPath);
@@ -567,7 +606,7 @@ function parseManifest(path, context) {
 
 function verifyManifest(context, task, path) {
   const manifest = parseManifest(path, context);
-  const id = validateReadyTask(task);
+  const id = validateReadyTaskSchema(task);
   if (manifest.id !== id || manifest.home !== context.home || manifest.repo !== task.repo) {
     fail(`dispatch envelope identity is stale for ${id}`, "ENVELOPE_STALE");
   }
@@ -627,15 +666,23 @@ function stage(args) {
   if (!["none", "guarded"].includes(herdrLifecycle)) {
     fail("--herdr-lifecycle must be none or guarded");
   }
-  if (!VERIFIED_LAUNCH_HARNESSES.has(harness)) {
+  if (!VERIFIED_HARNESSES.has(harness)) {
     fail("--harness must name a verified firstmate harness");
   }
   requireOwningFirstmate(context);
+  const receiptPath = join(context.state, "auto-dispatch-receipts", `${id}.json`);
+  if (existsSync(receiptPath)) {
+    fail(
+      `task ${id} already has an auto-dispatch report receipt at ${receiptPath}; refill will keep skipping ${id} until that receipt is retired`,
+      "RECEIPT_PRESENT",
+    );
+  }
   const tasks = readyTasks(context);
   const task = tasks.find((candidate) => candidate.id === id);
   if (!task) {
     fail(`task ${id} is not currently ready in this home`, "TASK_NOT_READY");
   }
+  requireEligibleReadyTask(task);
   if (task.repo !== repo) {
     fail(`task ${id} belongs to ${task.repo}, not ${repo}`, "TASK_NOT_READY");
   }
@@ -799,14 +846,42 @@ function assertRuntimeOwnership(context, grace) {
   }
 }
 
+/**
+ * Report-only claim journals that outlived their pass. A process killed between
+ * the atomic claim and the compensating reopen leaves the task in_flight with no
+ * worker metadata, which is exactly what invalidates the main inventory, so the
+ * journal names the ids to reconcile.
+ */
+function strandedClaimIds(context) {
+  try {
+    return readdirSync(join(context.state, "auto-dispatch-claims"))
+      .filter((name) => name.endsWith(".json"))
+      .map((name) => name.slice(0, -".json".length))
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
 function snapshot(context) {
   const output = run(join(context.root, "bin", "fm-fleet-snapshot.sh"), ["--json"], context);
   const value = parseJson(output, "fleet snapshot");
-  if (value?.schema !== "fm-fleet-snapshot.v1"
-    || value?.fm_home !== context.home
-    || value?.main_inventory?.valid !== true
-    || !Array.isArray(value?.tasks)) {
-    fail("fleet snapshot is malformed, cross-home, or contradictory", "FLEET_INVALID");
+  if (value?.schema !== "fm-fleet-snapshot.v1" || !Array.isArray(value?.tasks)) {
+    fail("fleet snapshot does not match the fm-fleet-snapshot.v1 contract", "FLEET_INVALID");
+  }
+  if (value.fm_home !== context.home) {
+    fail(`fleet snapshot reports home ${String(value.fm_home)} instead of ${context.home}`, "FLEET_INVALID");
+  }
+  if (value.main_inventory?.valid !== true) {
+    const raw = value.main_inventory?.reason;
+    const reason = typeof raw === "string" && raw.trim() !== ""
+      ? raw.trim()
+      : "fm-fleet-snapshot.sh reported no reason";
+    const stranded = strandedClaimIds(context);
+    const recovery = stranded.length > 0
+      ? `; state/auto-dispatch-claims still holds a report-only claim journal for ${stranded.join(", ")}, so reopen those task ids and remove each journal file`
+      : "";
+    fail(`fleet main inventory is invalid: ${reason}${recovery}`, "FLEET_INVALID");
   }
   return value;
 }
@@ -842,20 +917,73 @@ function fleetCapacity(snapshotValue, config) {
   return { running, open };
 }
 
-function appendNotice(context, state, message) {
-  const noticeDir = join(context.state, ".auto-dispatch-notices");
-  const key = createHash("sha256").update(`${state}\0${message}`).digest("hex");
-  mkdirSync(noticeDir, { recursive: true, mode: 0o700 });
-  const marker = join(noticeDir, key);
-  if (existsSync(marker)) {
-    return false;
+/**
+ * Failure notices dedup per episode, not forever: a repeat inside one unbroken
+ * run of failing passes is suppressed, a pass that stops reporting a condition
+ * clears it, and a later recurrence reports again. The active key set is one
+ * bounded file, so marker storage cannot grow without bound.
+ */
+function episodePath(context) {
+  return join(context.state, ".auto-dispatch-episode.json");
+}
+
+function beginNoticeEpisode(context) {
+  let active = [];
+  try {
+    const value = JSON.parse(readFileSync(episodePath(context), "utf8"));
+    active = Array.isArray(value?.active) ? value.active.filter((key) => typeof key === "string") : [];
+  } catch {
+    active = [];
   }
-  const pending = `${marker}.pending`;
-  atomicWrite(pending, `${JSON.stringify({ state, message })}\n`, 0o600);
+  context.previousEpisode = new Set(active);
+  context.currentEpisode = new Set();
+}
+
+function endNoticeEpisode(context) {
+  if (context.currentEpisode === undefined) {
+    return;
+  }
+  const active = [...context.currentEpisode].slice(-MAX_EPISODE_KEYS);
+  if (active.length === 0) {
+    rmSync(episodePath(context), { force: true });
+    return;
+  }
+  atomicWrite(
+    episodePath(context),
+    `${JSON.stringify({ schema: "fm-auto-dispatch-episode.v1", active }, null, 2)}\n`,
+    0o600,
+  );
+}
+
+function appendNotice(context, state, message) {
+  const key = createHash("sha256").update(`${state}\0${message}`).digest("hex");
+  // A would-dispatch report is a one-time event guarded by its own receipt, so
+  // only failure notices participate in episode dedup.
+  if (state !== "done") {
+    context.currentEpisode?.add(key);
+    if (context.previousEpisode?.has(key)) {
+      return false;
+    }
+  }
   mkdirSync(context.state, { recursive: true, mode: 0o700 });
   writeFileSync(join(context.state, "auto-dispatch.status"), `${state}: ${message}\n`, { flag: "a", mode: 0o600 });
-  renameSync(pending, marker);
   return true;
+}
+
+/**
+ * A fleet already at supervision capacity is a routine steady state the watcher
+ * surfaces on its own, so it is recorded with a non-captain-actionable verb
+ * instead of waking firstmate once per blocked task id.
+ */
+function reportFailure(context, error) {
+  if (!(error instanceof DispatchError)) {
+    return;
+  }
+  if (error.code === "FLEET_BLOCKED") {
+    appendNotice(context, "working", `auto-dispatch is waiting on supervision capacity: ${error.message}`);
+    return;
+  }
+  appendNotice(context, "blocked", `auto-dispatch stopped: ${error.message}`);
 }
 
 function due(context, interval, force) {
@@ -875,23 +1003,26 @@ function once(args) {
   if (positionals.length !== 0) {
     fail("usage: fm-auto-dispatch-once.sh [--force]");
   }
+  beginNoticeEpisode(context);
   let config;
   try {
     config = readAutoDispatchConfig(context);
   } catch (error) {
-    if (error instanceof DispatchError) {
-      appendNotice(context, "blocked", `auto-dispatch stopped: ${error.message}`);
-    }
+    reportFailure(context, error);
+    endNoticeEpisode(context);
     throw error;
   }
   if (config === null || !due(context, config.interval, options.force === true)) {
     return;
   }
+  // Mark the attempt before the gate checks. A home whose ownership, fleet, or
+  // capacity state keeps failing must back off to interval_seconds rather than
+  // re-running the expensive fleet snapshot on every watcher poll.
+  markRun(context);
   try {
     assertRuntimeOwnership(context, DEFAULT_SUPERVISION_GRACE_SECONDS);
     const snapshotValue = snapshot(context);
     const capacity = fleetCapacity(snapshotValue, config);
-    markRun(context);
     const available = Math.min(
       config.targetRunning - capacity.running,
       config.maxOpen - capacity.open,
@@ -907,6 +1038,12 @@ function once(args) {
         break;
       }
       const id = task.id;
+      // Ordinary queue-level ineligibility belongs to this one candidate.
+      // Skipping it keeps an unrelated held or public-followup item from
+      // aborting refill for every other staged task in the home.
+      if (readyTaskIneligibility(task) !== null) {
+        continue;
+      }
       const manifestPath = join(context.data, id, "dispatch.json");
       const receiptPath = join(context.state, "auto-dispatch-receipts", `${id}.json`);
       if (!existsSync(manifestPath) || existsSync(receiptPath) || existsSync(join(context.state, `${id}.meta`))) {
@@ -917,20 +1054,33 @@ function once(args) {
         manifest = verifyManifest(context, task, manifestPath);
       } catch (error) {
         if (error instanceof DispatchError) {
+          // Staleness is the expected restaging signal, but a broken seal is a
+          // tamper or key-loss finding that nobody learns about unless it is
+          // reported before the candidate is skipped.
+          if (error.code === "SEAL_INVALID") {
+            appendNotice(
+              context,
+              "blocked",
+              `auto-dispatch refused the dispatch envelope for ${id}: ${error.message}`,
+            );
+          }
           continue;
         }
         throw error;
       }
       const claimedTask = claimTask(context, id);
+      if (claimedTask === null) {
+        continue;
+      }
       const claimJournal = join(context.state, "auto-dispatch-claims", `${id}.json`);
       atomicWrite(claimJournal, `${JSON.stringify({
         schema: "fm-dispatch-claim.v1",
         id,
-        task_fingerprint: taskFingerprint(claimedTask, true),
+        task_fingerprint: taskFingerprint(claimedTask),
         claimed_at: new Date().toISOString(),
       }, null, 2)}\n`);
       try {
-        if (taskFingerprint(claimedTask, true) !== manifest.task_fingerprint) {
+        if (taskFingerprint(claimedTask) !== manifest.task_fingerprint) {
           fail(`task ${id} changed during its atomic claim`, "ENVELOPE_STALE");
         }
         verifyManifest(context, { ...claimedTask, state: "queued" }, manifestPath);
@@ -970,10 +1120,10 @@ function once(args) {
       reported += 1;
     }
   } catch (error) {
-    if (error instanceof DispatchError) {
-      appendNotice(context, "blocked", `auto-dispatch stopped: ${error.message}`);
-    }
+    reportFailure(context, error);
     throw error;
+  } finally {
+    endNoticeEpisode(context);
   }
 }
 

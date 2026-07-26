@@ -77,20 +77,34 @@ fi
 
 case "$command_name" in
   ready)
-    ready=$(jq -c '[
-      .tasks[]
-      | select(
-          .state == "queued"
-          and .blocked == false
-          and .held == false
-          and .hold == null
-          and (.blocked_by | length) == 0
-          and .kind != "public-followup"
-          and (.public_followup == null)
-        )
-    ]' "$state_file")
+    if [ "${FM_FAKE_READY_RAW:-0}" = 1 ]; then
+      # Model a backend whose ready list is not pre-filtered, so the consumer's
+      # own per-candidate handling is exercised instead of the fake's.
+      ready=$(jq -c '.tasks' "$state_file")
+    else
+      ready=$(jq -c '[
+        .tasks[]
+        | select(
+            .state == "queued"
+            and .blocked == false
+            and .held == false
+            and .hold == null
+            and (.blocked_by | length) == 0
+            and .kind != "public-followup"
+            and (.public_followup == null)
+          )
+      ]' "$state_file")
+    fi
     jq -n --argjson ready "$ready" \
       '{ok:true,action:"ready",count:($ready|length),ready:$ready}'
+    if [ -n "${FM_FAKE_STEAL_AFTER_READY:-}" ]; then
+      # Another queue writer wins the ready-to-claim race.
+      tmp="${state_file}.tmp.$$"
+      jq --arg id "$FM_FAKE_STEAL_AFTER_READY" \
+        '(.tasks[] | select(.id == $id) | .state) = "in_flight"' \
+        "$state_file" > "$tmp"
+      mv "$tmp" "$state_file"
+    fi
     ;;
   claim)
     id=${2:?}
@@ -291,6 +305,19 @@ run_once() {
   "$ROOT/bin/fm-auto-dispatch-once.sh" --force
 }
 
+run_once_on_cadence() {
+  "$ROOT/bin/fm-auto-dispatch-once.sh"
+}
+
+status_verb_count() {
+  local verb=$1 file="$HOME_DIR/state/auto-dispatch.status"
+  if [ ! -f "$file" ]; then
+    printf '0\n'
+    return 0
+  fi
+  grep -c "^$verb: " "$file" || true
+}
+
 ORIGINAL_PATH=$PATH
 
 # A task worker cannot invoke the staging authority merely because it can read
@@ -325,7 +352,26 @@ mv "$FIXTURE/tampered" "$HOME_DIR/data/tamper-seal/dispatch.json"
 run_once
 [ "$(jq -r .claim_count "$TASKS_STATE")" = 0 ] \
   || fail "tampered envelope reached atomic claim"
-pass "altered dispatch envelopes fail seal verification before claim"
+assert_contains "$(cat "$HOME_DIR/state/auto-dispatch.status")" \
+  "refused the dispatch envelope for tamper-seal" \
+  "a broken seal was detected but never reported"
+pass "altered dispatch envelopes fail seal verification and are reported before claim"
+
+# A deleted seal key makes every envelope unverifiable, which must be observable
+# rather than an invisible skip.
+make_fixture missing-seal-key
+fixture_env
+add_task missing-seal-key
+stage_task missing-seal-key
+start_runtime
+rm -f "$HOME_DIR/state/.auto-dispatch-seal.key"
+run_once
+[ "$(jq -r .claim_count "$TASKS_STATE")" = 0 ] \
+  || fail "unverifiable envelope reached atomic claim"
+assert_contains "$(cat "$HOME_DIR/state/auto-dispatch.status")" \
+  "seal key is missing" \
+  "a lost seal key was not reported"
+pass "a lost seal key is reported instead of silently skipping every envelope"
 
 # Every sealed mutable input invalidates the envelope and is skipped before
 # queue mutation.
@@ -548,6 +594,174 @@ run_once > "$FIXTURE/order.out"
 [ "$(sed -n '2p' "$FIXTURE/order.out" | jq -r .id)" = second-ready ] \
   || fail "second canonical ready task was not reported second"
 pass "report-only refill preserves authoritative ready ordering"
+
+# A disabled or absent config claims nothing and reports nothing, even when a
+# fully staged and dispatchable task is waiting.
+make_fixture inert-when-disabled
+fixture_env
+add_task inert-when-disabled
+stage_task inert-when-disabled
+start_runtime
+jq '.enabled = false' "$HOME_DIR/config/auto-dispatch.json" > "$FIXTURE/disabled-config"
+mv "$FIXTURE/disabled-config" "$HOME_DIR/config/auto-dispatch.json"
+run_once
+[ "$(jq -r .claim_count "$TASKS_STATE")" = 0 ] \
+  || fail "disabled auto-dispatch claimed a task"
+[ ! -e "$HOME_DIR/state/auto-dispatch.status" ] \
+  || fail "disabled auto-dispatch wrote a status event"
+rm -f "$HOME_DIR/config/auto-dispatch.json"
+run_once
+[ "$(jq -r .claim_count "$TASKS_STATE")" = 0 ] \
+  || fail "absent auto-dispatch config claimed a task"
+[ ! -e "$HOME_DIR/state/auto-dispatch.status" ] \
+  || fail "absent auto-dispatch config wrote a status event"
+[ ! -e "$HOME_DIR/state/auto-dispatch-receipts" ] \
+  || fail "inert auto-dispatch produced a receipt"
+pass "auto-dispatch remains fully inert when absent or disabled"
+
+# The persisted cadence bounds how often a pass may run at all.
+make_fixture cadence
+fixture_env
+add_task cadence-one
+add_task cadence-two
+stage_task cadence-one
+stage_task cadence-two
+start_runtime
+run_once >/dev/null
+[ "$(jq -r .claim_count "$TASKS_STATE")" = 1 ] \
+  || fail "the first bounded pass did not claim exactly one task"
+run_once_on_cadence >/dev/null
+[ "$(jq -r .claim_count "$TASKS_STATE")" = 1 ] \
+  || fail "a pass inside interval_seconds was not a no-op"
+run_once >/dev/null
+[ "$(jq -r .claim_count "$TASKS_STATE")" = 2 ] \
+  || fail "a forced pass after the cadence no-op did not resume refill"
+pass "the persisted cadence suppresses passes inside interval_seconds"
+
+# Per-candidate queue ineligibility skips that candidate only; it never aborts
+# refill for unrelated staged work.
+make_fixture ready-ineligibility
+fixture_env
+add_task ineligible-held
+add_task eligible-staged
+stage_task ineligible-held
+stage_task eligible-staged
+tmp="${TASKS_STATE}.tmp"
+jq '
+  (.tasks[] | select(.id == "ineligible-held") | .held) = true
+  | (.tasks[] | select(.id == "ineligible-held") | .hold) = {reason:"wait",kind:"external",until:null}
+' "$TASKS_STATE" > "$tmp"
+mv "$tmp" "$TASKS_STATE"
+start_runtime
+export FM_FAKE_READY_RAW=1
+run_once > "$FIXTURE/ineligible.out"
+unset FM_FAKE_READY_RAW
+[ "$(jq -r .claim_count "$TASKS_STATE")" = 1 ] \
+  || fail "an ineligible ready entry blocked the eligible staged task"
+[ "$(jq -r .id < "$FIXTURE/ineligible.out")" = eligible-staged ] \
+  || fail "refill did not report the eligible staged task"
+[ "$(status_verb_count blocked)" = 0 ] \
+  || fail "ordinary queue ineligibility produced a captain-actionable stop"
+pass "queue-level ineligibility skips one candidate and refill continues"
+
+# A structurally malformed backend record is a different class of problem and
+# still stops the pass before any queue mutation.
+make_fixture ready-malformed
+fixture_env
+add_task malformed-record
+stage_task malformed-record
+start_runtime
+tmp="${TASKS_STATE}.tmp"
+jq 'del(.tasks[] | select(.id == "malformed-record") | .repo)' "$TASKS_STATE" > "$tmp"
+mv "$tmp" "$TASKS_STATE"
+if run_once >"$FIXTURE/malformed.out" 2>"$FIXTURE/malformed.err"; then
+  fail "a malformed backend record did not fail closed"
+fi
+[ "$(jq -r .claim_count "$TASKS_STATE")" = 0 ] \
+  || fail "a malformed backend record reached atomic claim"
+assert_contains "$(cat "$HOME_DIR/state/auto-dispatch.status")" \
+  "repo must be a non-empty single-line string" \
+  "a malformed backend record was not reported as a contract violation"
+pass "a malformed backend record is a hard stop, not an ineligible candidate"
+
+# Another queue writer winning the ready-to-claim race is the benign outcome the
+# conditional claim exists to produce.
+make_fixture claim-race
+fixture_env
+add_task claim-race
+stage_task claim-race
+start_runtime
+export FM_FAKE_STEAL_AFTER_READY=claim-race
+run_once > "$FIXTURE/claim-race.out"
+unset FM_FAKE_STEAL_AFTER_READY
+[ "$(jq -r .claim_count "$TASKS_STATE")" = 0 ] \
+  || fail "a stolen ready task was still claimed"
+[ ! -s "$FIXTURE/claim-race.out" ] \
+  || fail "a lost conditional claim was reported as a would-dispatch selection"
+[ ! -e "$HOME_DIR/state/auto-dispatch-receipts/claim-race.json" ] \
+  || fail "a lost conditional claim consumed the envelope"
+[ "$(status_verb_count blocked)" = 0 ] \
+  || fail "a lost conditional claim stopped refill and woke firstmate"
+pass "losing a conditional claim skips the candidate without stopping refill"
+
+# A consumed receipt is a permanent record, so restaging that id must refuse
+# loudly instead of writing an envelope refill would silently ignore.
+make_fixture receipt-restage
+fixture_env
+add_task receipt-restage
+stage_task receipt-restage
+start_runtime
+run_once >/dev/null
+[ -f "$HOME_DIR/state/auto-dispatch-receipts/receipt-restage.json" ] \
+  || fail "the report-only pass wrote no receipt"
+start_owner "$FIXTURE/restage-result" \
+  "$ROOT/bin/fm-dispatch-stage.sh" receipt-restage \
+  --repo alpha --kind ship --harness codex --herdr-lifecycle none
+[ "$(jq -r .status "$FIXTURE/restage-result")" != 0 ] \
+  || fail "staging over an existing receipt succeeded silently"
+assert_contains "$(jq -r .stderr "$FIXTURE/restage-result")" \
+  "auto-dispatch-receipts/receipt-restage.json" \
+  "the restaging refusal did not name the blocking receipt"
+[ ! -e "$HOME_DIR/data/receipt-restage/dispatch.json" ] \
+  || fail "the refused restaging still wrote an envelope"
+pass "staging over an existing receipt refuses and names the receipt path"
+
+# A fleet that merely needs supervision is routine reporting, deduplicated for
+# as long as the episode lasts and re-reported after a genuine recovery.
+make_fixture capacity-episode
+fixture_env
+add_task capacity-episode
+stage_task capacity-episode
+start_runtime
+cp "$SNAPSHOT" "$FIXTURE/healthy-snapshot"
+jq '.tasks = [{
+  id:"parked-crew",
+  kind:"ship",
+  current_state:{state:"parked"},
+  endpoint:{exists:true},
+  hints:{pending_decision:true,blocked_event:false}
+}]' "$SNAPSHOT" > "$FIXTURE/parked-snapshot"
+cp "$FIXTURE/parked-snapshot" "$SNAPSHOT"
+for _ in 1 2; do
+  run_once >"$FIXTURE/capacity.out" 2>"$FIXTURE/capacity.err" || true
+done
+[ "$(jq -r .claim_count "$TASKS_STATE")" = 0 ] \
+  || fail "a fleet needing supervision still reached atomic claim"
+[ "$(status_verb_count blocked)" = 0 ] \
+  || fail "routine supervision capacity woke firstmate with a blocked event"
+[ "$(status_verb_count working)" = 1 ] \
+  || fail "supervision capacity was not deduplicated within one episode"
+[ -f "$HOME_DIR/state/.last-auto-dispatch-refill" ] \
+  || fail "a failing pass did not advance the persisted cadence"
+cp "$FIXTURE/healthy-snapshot" "$SNAPSHOT"
+run_once >/dev/null
+[ "$(jq -r .claim_count "$TASKS_STATE")" = 1 ] \
+  || fail "refill did not resume once supervision capacity recovered"
+cp "$FIXTURE/parked-snapshot" "$SNAPSHOT"
+run_once >"$FIXTURE/capacity-again.out" 2>"$FIXTURE/capacity-again.err" || true
+[ "$(status_verb_count working)" = 2 ] \
+  || fail "a recurrence after recovery was permanently suppressed"
+pass "capacity holds report without waking firstmate and re-report after recovery"
 
 # The existing watcher loop owns invocation, with no new daemon entrypoint.
 assert_contains "$(cat "$ROOT/bin/fm-watch.sh")" \
