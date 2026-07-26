@@ -334,6 +334,8 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 
 `bin/fm-unit-economics-ledger.mjs` reads this optional gitignored configuration and writes its generated JSON and Markdown ledgers under the active home's ignored `data/unit-economics-ledger/` directory.
 Each financial lane names two or more distinct trusted local read-only helper command arrays under `sources`, while `fleet_operations.cost_sources` optionally supplies the same corroboration for attributable crew/session cost.
+`fleet_operations.daily_sources` optionally supplies the same corroboration for the dated per-crew session-cost and validation-run line.
+An absent, stale, malformed, incomplete, or disagreeing source renders its figures unavailable rather than zero, while quota-axi windows remain provider-reported windowed measurements rather than exact monetary costs.
 The script header owns the source schema, freshness, corroboration, output, and status contract so this setup reference does not duplicate it.
 
 ## Toolchain

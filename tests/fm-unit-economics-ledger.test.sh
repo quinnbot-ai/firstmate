@@ -130,6 +130,29 @@ JSON
   pass "fleet cost requires independent sources"
 }
 
+test_daily_fleet_line_requires_readable_sources() {
+  local config="$TMP_ROOT/daily-unavailable/config.json" out="$TMP_ROOT/daily-unavailable/out.json" quota="$TMP_ROOT/daily-unavailable/quota" date
+  date=$(date -u +%Y-%m-%d)
+  mkdir -p "$(dirname "$config")"; printf '{}\n' > "$config"; write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
+  jq -e --arg date "$date" '(.schema == "fleet-unit-economics-ledger.v2") and ([.lanes[] | select(.id=="fleet_operations") | .daily_fleet_line | select(.date==$date and .session_cost.amount==null and .session_cost.status=="unavailable" and .validation_run_volume.amount==null and .validation_run_volume.status=="unavailable")] | length == 1)' "$out" >/dev/null || fail "missing daily sources were rendered as a number instead of unavailable"
+  grep -F 'unavailable (source unavailable)' "${out%.json}.md" >/dev/null || fail "daily Markdown line hid the unavailable source"
+  pass "daily fleet line renders missing sources as unavailable rather than zero"
+}
+
+test_daily_fleet_line_cross_checks_per_crew_cost_and_validation_runs() {
+  local one="$TMP_ROOT/daily/one" two="$TMP_ROOT/daily/two" config="$TMP_ROOT/daily/config.json" out="$TMP_ROOT/daily/out.json" quota="$TMP_ROOT/daily/quota" date
+  date=$(date -u +%Y-%m-%d)
+  write_source "$one" "{\"source\":\"billing-export\",\"observedAt\":\"$NOW\",\"date\":\"$date\",\"currency\":\"USD\",\"crewSessions\":[{\"crew\":\"alpha\",\"sessionCost\":{\"amount\":2,\"unit\":\"USD\",\"status\":\"measured\"},\"validationRuns\":{\"amount\":3,\"unit\":\"runs\",\"status\":\"measured\"}},{\"crew\":\"bravo\",\"sessionCost\":{\"amount\":0,\"unit\":\"USD\",\"status\":\"measured\"},\"validationRuns\":{\"amount\":0,\"unit\":\"runs\",\"status\":\"measured\"}}]}"
+  write_source "$two" "{\"source\":\"run-audit\",\"observedAt\":\"$NOW\",\"date\":\"$date\",\"currency\":\"USD\",\"crewSessions\":[{\"crew\":\"alpha\",\"sessionCost\":{\"amount\":2,\"unit\":\"USD\",\"status\":\"measured\"},\"validationRuns\":{\"amount\":3,\"unit\":\"runs\",\"status\":\"measured\"}},{\"crew\":\"bravo\",\"sessionCost\":{\"amount\":0,\"unit\":\"USD\",\"status\":\"measured\"},\"validationRuns\":{\"amount\":0,\"unit\":\"runs\",\"status\":\"measured\"}}]}"
+  mkdir -p "$(dirname "$config")"
+  cat > "$config" <<JSON
+{"maxAgeSeconds":900,"lanes":{"fleet_operations":{"daily_sources":[{"command":["$one"]},{"command":["$two"]}]}}}
+JSON
+  write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
+  jq -e '[.lanes[] | select(.id=="fleet_operations") | .daily_fleet_line | select(.session_cost.amount==2 and .validation_run_volume.amount==3 and .sources == ["billing-export", "run-audit"]) | .crew_sessions[] | select(.crew=="bravo" and .session_cost.amount==0 and .validation_runs.amount==0 and .session_cost.status=="independently_cross_checked")] | length == 1' "$out" >/dev/null || fail "daily per-crew figures were not independently cross-checked"
+  pass "daily fleet line preserves explicit cross-checked zeroes"
+}
+
 test_live_helper_timestamps_are_fresh() {
   local one="$TMP_ROOT/live/one" two="$TMP_ROOT/live/two" config="$TMP_ROOT/live/config.json" out="$TMP_ROOT/live/out.json" quota="$TMP_ROOT/live/quota"
   write_live_source "$one"; write_live_source "$two"; write_config "$config" weho "$one" "$two"; write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
@@ -212,6 +235,8 @@ test_unavailable_and_partial_lanes_render
 test_stale_and_failed_cross_check_are_refused
 test_currency_and_units_are_preserved
 test_fleet_cost_requires_independent_sources
+test_daily_fleet_line_requires_readable_sources
+test_daily_fleet_line_cross_checks_per_crew_cost_and_validation_runs
 test_live_helper_timestamps_are_fresh
 test_untrusted_metric_states_and_duplicate_sources_are_refused
 test_stale_quota_provider_state_is_refused
