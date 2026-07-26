@@ -385,10 +385,13 @@ test_ci_and_docs_call_the_owner() {
     in_job && /^  [a-zA-Z0-9_-]+:/ { exit }
     in_job { print }
   ' "$CI")
+  # shellcheck disable=SC2016 # Literal ci.yml text: the unexpanded "${command_deadline_s}s" is what must appear in the workflow.
   printf '%s\n' "$serial_job" | grep -Fq 'timeout --signal=TERM --kill-after=5s --verbose "${command_deadline_s}s"' \
     || fail "portable serial must bound its runner with a computed diagnostic deadline"
+  # shellcheck disable=SC2016 # Literal ci.yml text: the unexpanded $(date +%s) is what must appear in the workflow.
   printf '%s\n' "$serial_job" | grep -Fq 'FM_JOB_STARTED_AT=$(date +%s)' \
     || fail "portable serial must record job start so the deadline shares the job cap origin"
+  # shellcheck disable=SC2016 # Literal ci.yml text: the unexpanded $((...)) arithmetic is what must appear in the workflow.
   printf '%s\n' "$serial_job" | grep -Fq 'command_deadline_s=$((job_timeout_s - setup_elapsed - deadline_reserve_s))' \
     || fail "portable serial deadline must derive from the remaining job budget, not a literal that races the 20m cap"
   printf '%s\n' "$serial_job" | grep -Fq 'deadline_floor_s=1020' \
@@ -428,6 +431,7 @@ test_ci_and_docs_call_the_owner() {
     || fail "timing aggregate must download the Herdr input artifact explicitly"
   printf '%s\n' "$aggregate_job" | grep -Fq 'FM_TEST_AGGREGATE_INCOMPLETE' \
     || fail "timing aggregate must distinguish a missing input from a timing regression"
+  # shellcheck disable=SC2016 # Literal ci.yml text: the unexpanded "$name.json" is what must appear in the workflow.
   printf '%s\n' "$aggregate_job" | grep -Fq -- '-type f -name "$name.json" -print' \
     || fail "timing aggregate must resolve lane JSON at any depth, since multi-path artifacts nest under their least common ancestor"
   grep -Fq 'timeout-minutes: 20' "$CI" \
