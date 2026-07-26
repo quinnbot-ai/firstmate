@@ -55,5 +55,16 @@ test_finance_report_source() {
   pass "finance-report source excludes unconfirmed zero rows"
 }
 
+test_missing_inputs_name_the_path() {
+  local root="$TMP_ROOT/missing" err
+  mkdir -p "$root"
+  err=$(node "$BIN" artifact --current "$root/kdp-current.json" 2>&1 >/dev/null) && fail "missing artifact input did not fail"
+  assert_contains "$err" "$root/kdp-current.json" "missing artifact error did not name the path"
+  err=$(node "$BIN" finance-reports --finance-vault "$root/vault" 2>&1 >/dev/null) && fail "missing finance vault did not fail"
+  assert_contains "$err" "$root/vault" "missing finance-vault error did not name the path"
+  pass "missing source inputs fail naming the missing path"
+}
+
 test_artifact_source
 test_finance_report_source
+test_missing_inputs_name_the_path
