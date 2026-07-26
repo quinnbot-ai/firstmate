@@ -11,19 +11,23 @@
 # decision record has been linked to existing dependent work.
 #
 # A hold identity is <origin-id>-decision-<decision-key>. Origin ids and decision
-# keys must already be privacy-safe slugs. Repeating `hold` with the same identity
-# is idempotent. A different decision key creates a different backlog identity.
+# keys must already be privacy-safe slugs. Each new hold also carries a required
+# repo-scoped decision topic, which is the cross-origin identity for one underlying
+# captain choice. Repeating `hold` with the same identity is idempotent. A different
+# decision key creates a different backlog identity only when its decision topic is
+# not already open or resolved in that repository.
 # All backlog mutations run in the active FM_HOME, which keeps main-home and
 # secondmate-home ownership aligned with the work that discovered the decision.
 #
 # Usage:
 #   fm-decision-hold.sh id <origin-id> <decision-key>
 #   fm-decision-hold.sh hold <origin-id> <decision-key> \
-#     --title <title> --reason <reason> [--repo <repo>]
+#     --title <title> --reason <reason> --topic <topic> [--repo <repo>]
 #   fm-decision-hold.sh complete <origin-id> (--none | <decision-key>...)
 #   fm-decision-hold.sh verify <origin-id>
 #   fm-decision-hold.sh resolve <origin-id> <decision-key> \
 #     --decision-file <path> --routed-to <task-id> [--routed-to <task-id>...]
+#   fm-decision-hold.sh audit
 #
 # `complete` is the shared investigation and visual-review completion gate.
 # `--none` is an explicit semantic attestation that the just-reviewed surface has
@@ -119,6 +123,60 @@ origin_exists_here() {  # <origin-id>
   [ -f "$STATE/$1.meta" ] && return 0
   [ -f "$DATA/$1/report.md" ] && return 0
   task_show "$1" >/dev/null 2>&1
+}
+
+task_ids_in_file() {  # <backlog-or-archive-path>
+  [ -f "$1" ] || return 0
+  awk '/^- \[[ x]\] / { print $4 }' "$1"
+}
+
+same_topic_hold() {  # <self-id> <repo> <topic>
+  local self=$1 repo=$2 topic=$3 path candidate show candidate_repo body
+  for path in "$DATA/backlog.md" "$DATA/done-archive.md"; do
+    while IFS= read -r candidate; do
+      [ -n "$candidate" ] || continue
+      [ "$candidate" != "$self" ] || continue
+      show=$(task_show "$candidate") || continue
+      [ "$(show_field "$show" kind)" = captain ] || continue
+      candidate_repo=$(show_field "$show" repo)
+      [ "$candidate_repo" = "$repo" ] || continue
+      body=$(show_field "$show" body)
+      case "$body" in
+        *"Decision topic: $topic."*) printf '%s\n' "$candidate"; return 0 ;;
+      esac
+    done <<EOF
+$(task_ids_in_file "$path")
+EOF
+  done
+  return 1
+}
+
+same_legacy_title_hold() {  # <self-id> <repo> <title>
+  local self=$1 repo=$2 title=$3 candidate show candidate_repo body state
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    [ "$candidate" != "$self" ] || continue
+    show=$(task_show "$candidate") || continue
+    [ "$(show_field "$show" state)" = queued ] || continue
+    [ "$(show_field "$show" kind)" = captain ] || continue
+    candidate_repo=$(show_field "$show" repo)
+    [ "$candidate_repo" = "$repo" ] || continue
+    [ "$(show_field "$show" title)" = "$title" ] || continue
+    body=$(show_field "$show" body)
+    case "$body" in *"Decision topic: "*) continue ;; esac
+    printf '%s\n' "$candidate"
+    return 0
+  done <<EOF
+$(task_ids_in_file "$DATA/backlog.md")
+EOF
+  return 1
+}
+
+reason_records_answer() {  # <hold-reason>
+  local reason
+  reason=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  printf '%s\n' "$reason" | grep -Eq \
+    '(^|[^[:alnum:]])(answer|answered|decision)[[:space:]]*[:=]|captain[[:space:]]+(answered|chose|selected|decided|approved|said)'
 }
 
 list_has_key() {  # <comma-list> <key>
@@ -229,13 +287,14 @@ command_id() {
 }
 
 command_hold() {
-  local origin=${1:-} key=${2:-} title='' reason='' repo='' id show state kind existing_title body
+  local origin=${1:-} key=${2:-} title='' reason='' topic='' repo='' id show state kind existing_title body duplicate
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --title) shift; title=${1:-} ;;
       --reason) shift; reason=${1:-} ;;
+      --topic) shift; topic=${1:-} ;;
       --repo) shift; repo=${1:-} ;;
       *) usage >&2; exit 2 ;;
     esac
@@ -245,6 +304,7 @@ command_hold() {
   validate_slug decision-key "$key"
   validate_one_line title "$title"
   validate_one_line reason "$reason"
+  validate_slug decision-topic "$topic"
   case "$reason" in *'('*|*')'*) fail "reason must not contain parentheses (tasks-axi hold contract)" ;; esac
   require_tasks_axi
   origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
@@ -256,6 +316,11 @@ command_hold() {
     [ "$state" != "done" ] || fail "captain decision $id is already durably resolved; use a new decision key for a new decision"
     [ "$kind" = captain ] || fail "existing backlog identity $id is not kind captain"
     [ "$existing_title" = "$title" ] || fail "existing captain hold $id has a different title"
+    body=$(show_field "$show" body)
+    case "$body" in
+      *"Decision topic: $topic."*|'') : ;;
+      *"Decision topic: "*) fail "existing captain hold $id has a different decision topic" ;;
+    esac
   else
     if [ -z "$repo" ] && [ -f "$STATE/$origin.meta" ]; then
       repo=$(meta_value "$STATE/$origin.meta" project)
@@ -264,7 +329,17 @@ command_hold() {
     fi
     [ -n "$repo" ] || repo=firstmate
     validate_one_line repo "$repo"
-    body=$(printf 'Origin: %s\nDecision key: %s\nState: awaiting captain decision.' "$origin" "$key")
+    if duplicate=$(same_topic_hold "$id" "$repo" "$topic"); then
+      show=$(task_show "$duplicate")
+      state=$(show_field "$show" state)
+      case "$state" in
+        done) fail "captain decision topic $repo/$topic is already resolved as $duplicate; inspect and route that recorded answer instead of minting a duplicate" ;;
+        *) fail "captain decision topic $repo/$topic is already tracked as $duplicate; do not mint a duplicate under $origin" ;;
+      esac
+    elif duplicate=$(same_legacy_title_hold "$id" "$repo" "$title"); then
+      fail "possible duplicate captain decision $id shares the exact repository and title of untagged legacy hold $duplicate; inspect that hold and assign its topic before creating another"
+    fi
+    body=$(printf 'Origin: %s\nDecision key: %s\nDecision topic: %s.\nState: awaiting captain decision.' "$origin" "$key" "$topic")
     tasks_axi add "$id" "$title" --kind captain --repo "$repo" --body "$body" >/dev/null \
       || fail "could not create captain decision item $id"
   fi
@@ -272,6 +347,30 @@ command_hold() {
     || fail "could not activate captain hold $id"
   verify_hold_active "$id"
   printf '%s\n' "$id"
+}
+
+command_audit() {
+  local path candidate show state held kind hold_kind reason found=0
+  [ "$#" -eq 0 ] || { usage >&2; exit 2; }
+  require_tasks_axi
+  for path in "$DATA/backlog.md"; do
+    while IFS= read -r candidate; do
+      [ -n "$candidate" ] || continue
+      show=$(task_show "$candidate") || continue
+      state=$(show_field "$show" state)
+      held=$(show_field "$show" held)
+      kind=$(show_field "$show" kind)
+      hold_kind=$(show_field "$show" hold_kind)
+      [ "$state" = queued ] && [ "$held" = yes ] && [ "$kind" = captain ] && [ "$hold_kind" = captain ] || continue
+      reason=$(show_field "$show" hold_reason)
+      reason_records_answer "$reason" || continue
+      printf 'answered-open: %s: %s\n' "$candidate" "$reason"
+      found=1
+    done <<EOF
+$(task_ids_in_file "$path")
+EOF
+  done
+  [ "$found" = 1 ] || printf 'answered-open: none\n'
 }
 
 command_complete() {
@@ -459,6 +558,7 @@ case "${1:-}" in
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
   resolve) shift; command_resolve "$@" ;;
+  audit) shift; command_audit "$@" ;;
   -h|--help) usage ;;
   *) usage >&2; exit 2 ;;
 esac

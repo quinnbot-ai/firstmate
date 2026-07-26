@@ -10,6 +10,10 @@ The command runs tasks-axi in the active `FM_HOME`, so the existing backlog rema
 It never reads report bodies, review artifacts, terminal output, or chat.
 
 The `hold` subcommand maps an originating work id and stable decision key to `<origin-id>-decision-<decision-key>`.
+It requires a privacy-safe topic scoped to the repository and refuses a second hold with the same topic, including when the earlier hold came from another origin.
+The topic is an explicit semantic identity supplied by the agent, not a title-similarity heuristic.
+It cannot catch a paraphrased duplicate whose caller chooses a different topic, and it deliberately does not guess from report prose because a false match could suppress a real captain choice.
+For untagged legacy holds, it also flags only an exact repository-and-title match, which is a migration aid rather than semantic matching.
 It creates a kind `captain` backlog item when absent and invokes `tasks-axi hold <id> --reason <reason> --kind captain` on every retry.
 It rejects an identity collision, a changed title, and attempts to reopen an already resolved identity.
 
@@ -28,6 +32,12 @@ It records the decision digest and routed task identities as a retry identity in
 An exact retry can finish a partial routing operation, while a changed decision or routed-task set is rejected.
 A failed intermediate step leaves the hold open.
 
+The read-only `audit` subcommand reports active captain holds whose own hold reason has an explicit recorded-answer signal.
+It never closes a hold because only `resolve` can prove the durable decision record and routed work exist.
+It recognizes `answer:` or `decision:` markers and reasons that say the captain answered, chose, selected, decided, approved, or said something.
+It cannot recognize unmarked answers or every natural-language paraphrase, so agents must still record answers with `resolve`.
+Session start runs the audit and prints only flagged items, so an answered-but-open decision cannot silently blend into ordinary pending choices.
+
 ## Structured read surfaces
 
 `bin/fm-fleet-snapshot.sh` parses canonical tasks-axi `(hold: ...)` and `(hold-kind: captain)` metadata alongside existing backlog fields.
@@ -43,11 +53,13 @@ The projection remains read-only and does not inspect historical prose.
 Verification date: 2026-07-14.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
+Cross-origin topic and answered-open audit verification date: 2026-07-25.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
 The initial Bearings snapshot correctly has no open decision, and the new teardown gate refuses to erase the source.
 A later regression covers tasks-axi's quoted multi-entry `blocked_by` output so `resolve` matches the first, middle, and last ids and rejects a genuinely absent id.
+The current regressions also reject a duplicate repository-scoped topic from a second origin and surface an answered-but-open hold without closing it.
 
 The final verification commands and their exact summarized outputs follow.
 
@@ -61,6 +73,9 @@ ok - ended visual review follows the same decision-hold completion owner
 ok - resolved findings and decision-like prose do not create false holds
 ok - terminal single-owner stale status decisions do not block empty inventory
 ok - main-home and secondmate-home captain holds remain correctly routed
+ok - repository-scoped decision topics reject cross-origin duplicates
+ok - untagged legacy exact-title matches are clearly flagged
+ok - answered-open captain holds are surfaced without heuristic closure
 ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
 
 $ bash tests/fm-fleet-snapshot-view.test.sh

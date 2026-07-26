@@ -218,6 +218,23 @@ print_backlog_compact() {
   fi
 }
 
+print_answered_open_decisions() {
+  local out rc
+  if ! fm_tasks_axi_backend_available "$CONFIG"; then
+    return 0
+  fi
+  out=$(FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-decision-hold.sh" audit 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    subsection "ANSWERED-OPEN CAPTAIN DECISIONS"
+    printf 'unavailable: decision audit failed: %s\n' "$out"
+  elif [ "$out" != "answered-open: none" ]; then
+    subsection "ANSWERED-OPEN CAPTAIN DECISIONS"
+    printf '%s\n' "$out"
+  fi
+}
+
 print_status_tail() {
   local status=$1
   printf 'status tail (last %s line(s), wake-EVENT history, not current state; full log: %s):\n' "$STATUS_TAIL" "$status"
@@ -406,6 +423,7 @@ print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
 # --- 5. fleet-state digest ---------------------------------------------
 section "FLEET STATE"
 print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
+print_answered_open_decisions
 
 subsection "Work under way (state/*.meta)"
 META_FOUND=0

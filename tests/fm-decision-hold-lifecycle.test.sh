@@ -145,17 +145,17 @@ EOF
     "failed completion recorded a false completion attestation"
 
   route_hold=$(run_decisions "$home" hold "$id" route \
-    --title "Choose the sample route" --reason "captain route choice pending" --repo sample) \
+    --title "Choose the sample route" --reason "captain route choice pending" --topic sample-route --repo sample) \
     || fail "could not register route hold"
   [ "$route_hold" = "$id-decision-route" ] || fail "route hold identity was not deterministic: $route_hold"
   run_decisions "$home" hold "$id" route \
-    --title "Choose the sample route" --reason "captain route choice pending" --repo sample >/dev/null \
+    --title "Choose the sample route" --reason "captain route choice pending" --topic sample-route --repo sample >/dev/null \
     || fail "idempotent hold retry failed"
   if run_decisions "$home" complete "$id" route access > "$home/partial-complete.out" 2> "$home/partial-complete.err"; then
     fail "completion succeeded while one of two distinct decisions lacked a hold"
   fi
   access_hold=$(run_decisions "$home" hold "$id" access \
-    --title "Choose the sample access level" --reason "captain access choice pending" --repo sample) \
+    --title "Choose the sample access level" --reason "captain access choice pending" --topic sample-access --repo sample) \
     || fail "could not register access hold"
   [ "$access_hold" = "$id-decision-access" ] || fail "access hold identity was not distinct: $access_hold"
   [ "$(grep -cE "^- \[ \] $route_hold -" "$home/data/backlog.md")" = 1 ] \
@@ -341,7 +341,7 @@ test_visual_review_uses_shared_completion_owner() {
   mkdir -p "$home/.lavish"
   printf '<html><body>Synthetic sample board</body></html>\n' > "$home/.lavish/sample-board.html"
   hold=$(run_decisions "$home" hold "$id" layout \
-    --title "Choose the sample layout" --reason "captain layout choice pending" --repo sample) \
+    --title "Choose the sample layout" --reason "captain layout choice pending" --topic sample-layout --repo sample) \
     || fail "post-teardown visual review could not use the shared hold owner"
   run_decisions "$home" complete "$id" layout >/dev/null \
     || fail "post-teardown visual review could not use the shared completion owner"
@@ -434,7 +434,7 @@ EOF
   printf 'done: report and visual review complete\n' > "$mate/state/$origin.status"
   printf '# Sample secondmate review\n\nOne captain choice remains.\n' > "$mate/data/$origin/report.md"
   hold=$(run_decisions "$mate" hold "$origin" release \
-    --title "Choose the sample release" --reason "captain release choice pending" --repo sample) \
+    --title "Choose the sample release" --reason "captain release choice pending" --topic sample-release --repo sample) \
     || fail "secondmate-owned hold creation failed"
   run_decisions "$mate" complete "$origin" release >/dev/null \
     || fail "secondmate-owned completion failed"
@@ -455,6 +455,72 @@ EOF
   pass "main-home and secondmate-home captain holds remain correctly routed"
 }
 
+test_cross_origin_topic_refuses_duplicate_decision() {
+  local home first second rc
+  home=$(make_home cross-origin-topic)
+  first=sample-first-review
+  second=sample-second-review
+  write_origin_meta "$home" "$first"
+  write_origin_meta "$home" "$second"
+
+  run_decisions "$home" hold "$first" route \
+    --title "Choose the sample route" --reason "captain route choice pending" --topic sample-route --repo sample >/dev/null \
+    || fail "could not create the first topic-bound hold"
+  set +e
+  run_decisions "$home" hold "$second" route-copy \
+    --title "Choose the sample route again" --reason "captain route choice pending" --topic sample-route --repo sample \
+    > "$home/duplicate.out" 2> "$home/duplicate.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a second origin minted the same repository-scoped decision topic"
+  assert_grep "already tracked as $first-decision-route" "$home/duplicate.err" \
+    "duplicate refusal did not name the existing captain decision"
+  assert_no_grep "$second-decision-route-copy" "$home/data/backlog.md" \
+    "duplicate refusal still created a second captain decision"
+  pass "repository-scoped decision topics reject cross-origin duplicates"
+}
+
+test_untagged_legacy_title_flags_possible_duplicate() {
+  local home origin legacy rc
+  home=$(make_home legacy-title-duplicate)
+  origin=sample-new-review
+  legacy=sample-legacy-route
+  write_origin_meta "$home" "$origin"
+  tasks_in "$home" add "$legacy" "Choose the sample route" --kind captain --repo sample >/dev/null \
+    || fail "could not create untagged legacy captain decision"
+  tasks_in "$home" hold "$legacy" --reason "captain route choice pending" --kind captain >/dev/null \
+    || fail "could not activate untagged legacy captain decision"
+  set +e
+  run_decisions "$home" hold "$origin" route \
+    --title "Choose the sample route" --reason "captain route choice pending" --topic sample-route --repo sample \
+    > "$home/legacy-duplicate.out" 2> "$home/legacy-duplicate.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a matching untagged legacy hold did not flag a possible duplicate"
+  assert_grep "possible duplicate captain decision" "$home/legacy-duplicate.err" \
+    "legacy duplicate signal did not clearly identify the ambiguity"
+  assert_grep "$legacy" "$home/legacy-duplicate.err" \
+    "legacy duplicate signal did not identify the existing hold"
+  pass "untagged legacy exact-title matches are clearly flagged"
+}
+
+test_answered_open_audit_surfaces_without_closing() {
+  local home origin hold audit show
+  home=$(make_home answered-open-audit)
+  origin=sample-answer-review
+  write_origin_meta "$home" "$origin"
+  hold=$(run_decisions "$home" hold "$origin" route \
+    --title "Choose the sample route" --reason "captain chose route north" --topic sample-route --repo sample) \
+    || fail "could not create answered-open captain hold fixture"
+  audit=$(run_decisions "$home" audit) || fail "answered-open audit failed"
+  assert_contains "$audit" "answered-open: $hold: captain chose route north" \
+    "audit did not surface the answer recorded in the still-open hold"
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "state: queued" "audit silently closed an answered-open hold"
+  assert_contains "$show" "held: yes" "audit silently released an answered-open hold"
+  pass "answered-open captain holds are surfaced without heuristic closure"
+}
+
 # tasks-axi quotes multi-entry blocked_by values as "a,b,c". resolve must strip
 # those surrounding quotes before comma-boundary membership so the first and last
 # list elements match, not only middle elements.
@@ -470,16 +536,16 @@ test_resolve_matches_quoted_blocked_by_edges() {
   printf '# Quote edge review\n\nThree edge decisions and one absent control.\n' > "$home/data/$origin/report.md"
 
   hold_first=$(run_decisions "$home" hold "$origin" edge-first \
-    --title "First edge decision" --reason "captain first pending" --repo sample) \
+    --title "First edge decision" --reason "captain first pending" --topic edge-first --repo sample) \
     || fail "could not register first-edge hold"
   hold_mid=$(run_decisions "$home" hold "$origin" edge-mid \
-    --title "Middle edge decision" --reason "captain mid pending" --repo sample) \
+    --title "Middle edge decision" --reason "captain mid pending" --topic edge-mid --repo sample) \
     || fail "could not register mid-edge hold"
   hold_last=$(run_decisions "$home" hold "$origin" edge-last \
-    --title "Last edge decision" --reason "captain last pending" --repo sample) \
+    --title "Last edge decision" --reason "captain last pending" --topic edge-last --repo sample) \
     || fail "could not register last-edge hold"
   hold_absent=$(run_decisions "$home" hold "$origin" edge-absent \
-    --title "Absent edge decision" --reason "captain absent pending" --repo sample) \
+    --title "Absent edge decision" --reason "captain absent pending" --topic edge-absent --repo sample) \
     || fail "could not register absent-edge hold"
 
   tasks_in "$home" add pad-a "Pad A" --kind ship --repo sample >/dev/null \
@@ -559,4 +625,7 @@ test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
+test_cross_origin_topic_refuses_duplicate_decision
+test_untagged_legacy_title_flags_possible_duplicate
+test_answered_open_audit_surfaces_without_closing
 test_resolve_matches_quoted_blocked_by_edges
