@@ -2045,6 +2045,56 @@ SH
   pass "a repeated suppression reason collapses to one re-dated record"
 }
 
+# The event sample decides both the routine classification and the identity that
+# collapses duplicates, so a sampler that quietly returns nothing would give two
+# distinct failures one identity and suppress the second. Every supported
+# sampler must therefore agree, and an event that cannot be sampled must keep an
+# identity of its own instead of sharing the empty body.
+test_ops_inbox_event_sampling_agrees_across_samplers() {
+  local dir home first second sampler first_signal second_signal restore
+  local -a first_signals=() second_signals=()
+  restore=$FM_OPS_INBOX_SAMPLER
+  dir=$(make_case ops-inbox-samplers); home="$dir/home"
+  mkdir -p "$home/ops-inbox" "$home/config"
+  first="$home/ops-inbox/first.event"; second="$home/ops-inbox/second.event"
+  printf 'event: replica-download\nresult: failed\n' > "$first"
+  printf 'event: snapshot-upload\nresult: failed\n' > "$second"
+  for sampler in builtin dd; do
+    FM_OPS_INBOX_SAMPLER=$sampler
+    first_signal=$(fm_ops_inbox_event_signal "$first") \
+      || fail "the $sampler sampler classified a genuine failure as routine"
+    second_signal=$(fm_ops_inbox_event_signal "$second") \
+      || fail "the $sampler sampler classified a genuine failure as routine"
+    [ "$first_signal" != "$second_signal" ] \
+      || fail "the $sampler sampler gave two distinct events one identity ($first_signal)"
+    first_signals+=("$first_signal")
+    second_signals+=("$second_signal")
+  done
+  [ "${first_signals[0]}" = "${first_signals[1]}" ] && [ "${second_signals[0]}" = "${second_signals[1]}" ] \
+    || fail "the builtin and dd samplers disagreed about an event identity"
+
+  printf 'event: nightly-replica\nclassification: routine\n' > "$first"
+  for sampler in builtin dd; do
+    FM_OPS_INBOX_SAMPLER=$sampler
+    fm_ops_inbox_event_signal "$first" >/dev/null \
+      && fail "the $sampler sampler surfaced an event that declares itself routine"
+  done
+
+  chmod 000 "$second"
+  if [ ! -r "$second" ]; then
+    for sampler in builtin dd; do
+      FM_OPS_INBOX_SAMPLER=$sampler
+      second_signal=$(fm_ops_inbox_event_signal "$second")
+      [ "$second_signal" = "home:unreadable:$second" ] \
+        || fail "the $sampler sampler gave an unsampled event a shared identity ($second_signal)"
+    done
+  fi
+  chmod 644 "$second"
+  FM_OPS_INBOX_SAMPLER=$restore
+
+  pass "event sampling agrees across samplers and keeps unsampled events distinct"
+}
+
 test_ops_inbox_fingerprint_distinguishes_same_second_same_size_rewrite() {
   local dir home before after
   dir=$(make_case ops-inbox-subsecond); home="$dir/home"
@@ -2733,6 +2783,7 @@ test_ops_inbox_partial_triage_does_not_rewake
 test_ops_inbox_churning_invalid_listing_wakes_once
 test_ops_inbox_routine_declaration_is_header_only
 test_ops_inbox_repeated_suppression_collapses_to_one_record
+test_ops_inbox_event_sampling_agrees_across_samplers
 test_ops_inbox_fingerprint_distinguishes_same_second_same_size_rewrite
 test_ops_inbox_fingerprint_uses_bounded_two_level_file_markers
 test_ops_inbox_marker_scan_counts_discovered_paths

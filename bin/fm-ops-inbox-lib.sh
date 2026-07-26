@@ -13,6 +13,22 @@
 # own on every file of every scan.
 FM_OPS_INBOX_PLATFORM=${FM_OPS_INBOX_PLATFORM:-$(uname)}
 
+# `read -N` is a bash 4.1 builtin option and this file is the only caller of one
+# in bin/, so the interpreter floor is declared here rather than assumed: the
+# builtin sampler saves a fork per retained event where it exists, and bash 3.2
+# - still /bin/bash on macOS - falls back to `dd` instead of silently sampling
+# nothing.  fm_ops_inbox_event_signal cross-checks the sample either way, so a
+# sampler that fails for any other reason cannot collapse distinct events onto
+# one empty-body identity.
+if [ -z "${FM_OPS_INBOX_SAMPLER:-}" ]; then
+  if [ "${BASH_VERSINFO[0]}" -gt 4 ] \
+    || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -ge 1 ]; }; then
+    FM_OPS_INBOX_SAMPLER=builtin
+  else
+    FM_OPS_INBOX_SAMPLER=dd
+  fi
+fi
+
 # fm_ops_inbox_stat_record <path>
 # Prints `<mtime>\t<size>:<precise-mtime>` from a single stat: the ordering key
 # and the change signature of one path, so no consumer of a scan needs a second
@@ -215,8 +231,11 @@ fm_ops_inbox_home_records() {
 # fm_ops_inbox_home_marker <home> [records]
 # A caller that already holds this cycle's scan passes it in, so the home inbox
 # is walked and statted once however many fingerprints are derived from it.
+# The scan is taken as supplied when the argument is present, not when it is
+# non-empty: an empty inbox is the common steady state and has an empty scan,
+# which must not be mistaken for a caller that never scanned.
 fm_ops_inbox_home_marker() {
-  local home=$1 records=${2:-} marker record entry path sig count=0
+  local home=$1 records=${2:-} scanned=$# marker record entry path sig count=0
   local selected_overflow=0 scan_overflow=0
   marker=$(fm_ops_inbox_home_marker_path "$home")
   if [ -f "$marker" ]; then
@@ -224,7 +243,7 @@ fm_ops_inbox_home_marker() {
     [ -n "$entry" ] || return 1
     printf '%s\t%s\n' "${entry#*$'\t'}" "$marker"
   fi
-  [ -n "$records" ] || records=$(fm_ops_inbox_home_records "$home" "$FM_OPS_INBOX_MARKER_SCAN_LIMIT")
+  [ "$scanned" -ge 2 ] || records=$(fm_ops_inbox_home_records "$home" "$FM_OPS_INBOX_MARKER_SCAN_LIMIT")
   while IFS= read -r record; do
     [ -n "$record" ] || continue
     case "$record" in
@@ -274,7 +293,18 @@ fm_ops_inbox_event_signal() {
     printf 'home:unreadable:%s\n' "$path"
     return 0
   fi
-  IFS= read -r -N "$FM_OPS_INBOX_EVENT_SAMPLE_BYTES" sample < "$path" 2>/dev/null || true
+  if [ "$FM_OPS_INBOX_SAMPLER" = builtin ]; then
+    LC_ALL=C IFS= read -r -N "$FM_OPS_INBOX_EVENT_SAMPLE_BYTES" sample < "$path" 2>/dev/null || true
+  else
+    sample=$(dd if="$path" bs="$FM_OPS_INBOX_EVENT_SAMPLE_BYTES" count=1 2>/dev/null) || sample=''
+  fi
+  while [ -n "$sample" ] && [ "${sample: -1}" = $'\n' ]; do
+    sample=${sample%$'\n'}
+  done
+  if [ -z "$sample" ] && [ -s "$path" ]; then
+    printf 'home:unreadable:%s\n' "$path"
+    return 0
+  fi
   fm_ops_inbox_sample_is_routine "$sample" && return 1
   printf 'home:'
   printf '%s' "$sample" | fm_ops_inbox_hash
@@ -366,11 +396,11 @@ fm_ops_inbox_critical_level() {
 # count: a burst or a falling count stays one identity, while a count above the
 # watermark raises the level and wakes once for that escalation.
 fm_ops_inbox_actionable_fingerprint() {
-  local home=$1 config=$2 watermark=${3:-0} reading=${4:-} records=${5:-}
+  local home=$1 config=$2 watermark=${3:-0} reading=${4:-} records=${5:-} scanned=$#
   local record entry path signal header class='none' count=0 identity='' level=0
   local signals='' genuine=no
   [ -n "$reading" ] || reading=$(fm_ops_inbox_external_reading "$config")
-  [ -n "$records" ] || records=$(fm_ops_inbox_home_records "$home" "$FM_OPS_INBOX_MARKER_SCAN_LIMIT")
+  [ "$scanned" -ge 5 ] || records=$(fm_ops_inbox_home_records "$home" "$FM_OPS_INBOX_MARKER_SCAN_LIMIT")
   header=${reading%%$'\n'*}
   if [ "${header%%$'\t'*}" = configured ]; then
     record=${header#*$'\t'}
@@ -418,12 +448,16 @@ EOF
 # suppressor.  A caller that already holds this cycle's reading and home scan
 # passes them in so neither the command nor the traversal is repeated.
 fm_ops_inbox_fingerprint() {
-  local home=$1 config=$2 reading=${3:-} records=${4:-} command header record rc
+  local home=$1 config=$2 reading=${3:-} records=${4:-} scanned=$# command header record rc
   [ -n "$reading" ] || reading=$(fm_ops_inbox_external_reading "$config")
   header=${reading%%$'\n'*}
   {
     printf 'home\n'
-    fm_ops_inbox_home_marker "$home" "$records"
+    if [ "$scanned" -ge 4 ]; then
+      fm_ops_inbox_home_marker "$home" "$records"
+    else
+      fm_ops_inbox_home_marker "$home"
+    fi
     if [ "${header%%$'\t'*}" = configured ] && command=$(fm_ops_inbox_external_command "$config"); then
       record=${header#*$'\t'}
       record=${record#*$'\t'}

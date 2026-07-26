@@ -873,6 +873,20 @@ ops_inbox_external_note() {
     "$FM_OPS_INBOX_EXTERNAL_CLASS" "$FM_OPS_INBOX_CRITICAL_COUNT" "$FM_OPS_INBOX_CRITICAL_LEVEL"
 }
 
+# Each baseline is built whole and renamed into place, like the suppression
+# artifacts below: a truncating redirect can leave a half-written signal line
+# that the next cycle reads as a signal the baseline never carried, which is a
+# wake charged for a failure already surfaced.
+write_ops_inbox_baseline() {  # <file> <content>
+  local file=$1 content=$2
+  if [ -n "$content" ]; then
+    printf '%s\n' "$content" > "$file.next" || return 1
+  else
+    : > "$file.next" || return 1
+  fi
+  mv "$file.next" "$file"
+}
+
 # The cheap fingerprint is written last: it is the only record that stops the
 # next cycle from re-deciding, so an interruption before the signal set and the
 # escalation level are on disk costs one repeated evaluation rather than a
@@ -880,13 +894,9 @@ ops_inbox_external_note() {
 mark_ops_inbox_seen() {
   capture_ops_inbox_actionable
   [ "$FM_OPS_INBOX_GENUINE" = yes ] || rm -f "$STATE/.ops-inbox-suppressed"
-  if [ -n "$FM_OPS_INBOX_ACTIONABLE_SIGNALS" ]; then
-    printf '%s\n' "$FM_OPS_INBOX_ACTIONABLE_SIGNALS" > "$STATE/.ops-inbox-actionable"
-  else
-    : > "$STATE/.ops-inbox-actionable"
-  fi
-  printf '%s\n' "$FM_OPS_INBOX_CRITICAL_LEVEL" > "$STATE/.ops-inbox-critical-level"
-  printf '%s\n' "$FM_OPS_INBOX_FINGERPRINT" > "$STATE/.hash-ops-inbox"
+  write_ops_inbox_baseline "$STATE/.ops-inbox-actionable" "$FM_OPS_INBOX_ACTIONABLE_SIGNALS"
+  write_ops_inbox_baseline "$STATE/.ops-inbox-critical-level" "$FM_OPS_INBOX_CRITICAL_LEVEL"
+  write_ops_inbox_baseline "$STATE/.hash-ops-inbox" "$FM_OPS_INBOX_FINGERPRINT"
 }
 
 # Bounded by distinct reason, not by write count: an inbox whose listing churns
