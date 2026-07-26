@@ -278,6 +278,22 @@ test_stale_terminal_escalates() {
   pass "stale + terminal status escalates immediately"
 }
 
+test_no_mistakes_delivery_pending_stale_escalates_for_delivery() {
+  local dir state out reader
+  dir=$(make_supercase stale-delivery-pending)
+  state="$dir/state"
+  reader="$dir/fm-crew-state.sh"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "state: working · source: status-log · delivery pending: no-mistakes run not started"\n' > "$reader"
+  chmod +x "$reader"
+  printf 'done: committed abc1234 with targeted tests\n' > "$state/pending-t1.status"
+  out=$(FM_CREW_STATE_BIN="$reader" FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-pending-t1" "$state")
+  case "$out" in
+    'escalate|delivery pending: no-mistakes run not started:'*) ;;
+    *) fail "commit-only no-mistakes stale did not surface as delivery pending: $out" ;;
+  esac
+  pass "commit-only no-mistakes stale escalates as delivery pending"
+}
+
 # A DECLARED external-wait pause (paused:) is neither a wedge nor a terminal
 # escalation: classify_stale returns the `pause` action so handle_wake records a
 # pause marker (long re-surface cadence) rather than a wedge stale marker.
@@ -1890,6 +1906,7 @@ test_classify_check_and_unknown_escalate
 test_busy_progress_stale_escalates_immediately
 test_stale_transient_self_records_marker
 test_stale_terminal_escalates
+test_no_mistakes_delivery_pending_stale_escalates_for_delivery
 test_stale_paused_classifies_pause
 test_handle_wake_paused_records_pause_marker
 test_handle_wake_batched_stale_rechecks_dispatch_per_lane

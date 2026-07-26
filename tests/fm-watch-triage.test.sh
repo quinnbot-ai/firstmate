@@ -172,6 +172,15 @@ test_classifier_primitives() {
     || fail "done: not a terminal verb"
   status_is_terminal_verb "working: rebased onto merged #76" \
     && fail "working: wrongly classed as terminal verb"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "state: working · source: status-log · delivery pending: no-mistakes run not started"\n' > "$dir/pending-state"
+  chmod +x "$dir/pending-state"
+  printf 'done: committed abc1234 with targeted tests\n' > "$state/pending.status"
+  FM_CREW_STATE_BIN="$dir/pending-state" status_done_needs_nomistakes_delivery "$state/pending.status" \
+    || fail "delivery-pending no-mistakes done was not recognized"
+  FM_CREW_STATE_BIN="$dir/pending-state" status_is_terminal_verb "done: committed abc1234 with targeted tests" "$state/pending.status" \
+    && fail "delivery-pending no-mistakes done was classed terminal"
+  FM_CREW_STATE_BIN="$dir/pending-state" status_is_captain_relevant "done: committed abc1234 with targeted tests" "$state/pending.status" \
+    || fail "delivery-pending no-mistakes done was not supervisor-actionable"
   status_is_captain_relevant "merged" || fail "legacy bare merged free-text not captain-relevant"
   status_is_captain_relevant "PR ready https://x/pull/2" \
     || fail "legacy bare PR ready free-text not captain-relevant"

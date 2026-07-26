@@ -138,15 +138,41 @@ last_status_line() {
   grep -v '^[[:space:]]*$' "$f" 2>/dev/null | tail -1
 }
 
+# 0 if a status event is the no-mistakes implementation-complete shape that still
+# needs delivery. The current-state reader is the authority for the branch run
+# lookup, so this stays fail-closed: an unavailable or unclassifiable reader never
+# changes a terminal done event. Callers pass the status file so mode metadata and
+# task identity remain bound to the same durable record.
+status_done_needs_nomistakes_delivery() {  # <status-file> [status-line]
+  local file=$1 line=${2:-} id state_line
+  [ -f "$file" ] || return 1
+  [ -n "$line" ] || line=$(last_status_line "$file")
+  [ "$(status_line_verb "$line")" = done ] || return 1
+  id=$(basename "$file")
+  id=${id%.status}
+  [ -n "$id" ] || return 1
+  state_line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || return 1
+  case "$state_line" in
+    'state: working · source: status-log · delivery pending: no-mistakes run not started') return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # 0 if the given (last) status line's leading verb is a real terminal captain verb
-# (done, needs-decision, blocked, failed). Free-text tokens alone never count here;
-# callers that need legacy free-text matching use status_is_captain_relevant.
-status_is_terminal_verb() {
-  local line=$1 verb
+# (done, needs-decision, blocked, failed). A commit-only no-mistakes done event
+# with no started pipeline is supervisor-actionable but not terminal. Free-text
+# tokens alone never count here; callers that need legacy free-text matching use
+# status_is_captain_relevant.
+status_is_terminal_verb() {  # <status-line> [status-file]
+  local line=$1 file=${2:-} verb
   [ -n "$line" ] || return 1
   verb=$(status_line_verb "$line")
   case "$verb" in
-    done|needs-decision|blocked|failed) return 0 ;;
+    done)
+      [ -z "$file" ] || ! status_done_needs_nomistakes_delivery "$file" "$line" || return 1
+      return 0
+      ;;
+    needs-decision|blocked|failed) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -501,8 +527,10 @@ signal_crew_provably_working() {  # <file> ...
 # "non-terminal"; the always-on watcher then applies crew_is_provably_working,
 # while the away-mode daemon applies its persistence recheck.
 stale_is_terminal() {  # <window> <state>
-  local win=$1 state=$2 last
-  last=$(last_status_line "$state/$(window_to_task "$win" "$state").status")
+  local win=$1 state=$2 task file last
+  task=$(window_to_task "$win" "$state")
+  file="$state/$task.status"
+  last=$(last_status_line "$file")
   [ -n "$last" ] && status_is_captain_relevant "$last"
 }
 

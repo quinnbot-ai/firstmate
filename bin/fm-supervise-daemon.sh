@@ -385,12 +385,16 @@ classify_stale() {  # <window> <state>
     return
   fi
   if [ -n "$last" ] && status_is_captain_relevant "$last"; then
+    if status_done_needs_nomistakes_delivery "$state/$task.status" "$last"; then
+      printf 'escalate|delivery pending: no-mistakes run not started: %s' "$last"
+      return
+    fi
     # Independent of free-text captain-relevant matching: a nonterminal progress
     # verb (working:) must never take the terminal stale path. Seen-status dedupe
     # must not permanently suppress or clear possible-wedge aging merely because
     # prose once looked captain-relevant. Real terminal verbs and legacy free-text
     # captain lines without those verbs keep the terminal escalate/dedupe path.
-    if ! status_is_terminal_verb "$last"; then
+    if ! status_is_terminal_verb "$last" "$state/$task.status"; then
       case "$(status_line_verb "$last")" in
         working|resolved|captain-held)
           printf 'self|transient stale (%s): %s' "$win" "$last"
@@ -1268,7 +1272,7 @@ handle_wake() {  # <reason> <state>
         # once looked captain-relevant or was written into a seen marker.
         _clear_wedge=0
         if [ -n "$last" ] && status_is_captain_relevant "$last"; then
-          if status_is_terminal_verb "$last"; then
+          if status_is_terminal_verb "$last" "$STATE/$task.status"; then
             _clear_wedge=1
           else
             case "$(status_line_verb "$last")" in

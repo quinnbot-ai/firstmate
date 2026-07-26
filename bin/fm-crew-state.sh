@@ -39,11 +39,15 @@
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
 #      agree, and are reported as parked.
-#   4. No run for this crew (pre-validation, or kind=scout): fall back to the
+#   4. A commit-only done event on a no-mistakes ship with no pipeline run is
+#      delivery pending, not done. No run must be positively established from
+#      the complete branch run list; an unavailable or unclassifiable list falls
+#      through without inventing that state.
+#   5. No run for this crew (pre-validation, or kind=scout): fall back to the
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
 #      `resolved` never become current state or detail.
-#   5. Missing meta or torn-down worktree: report unknown · none. If no run is
+#   6. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log.
 #
@@ -97,6 +101,7 @@ meta_value() {  # <key>
 WT=$(meta_value worktree)
 KIND=$(meta_value kind)
 [ -n "$KIND" ] || KIND=ship
+MODE=$(meta_value mode)
 
 # A torn-down (or never-created) worktree has no current state to read.
 if [ -z "$WT" ] || [ ! -d "$WT" ]; then
@@ -404,6 +409,42 @@ nm_runs_status_for_branch() {  # <branch>
   return 0
 }
 
+# Return success only when a complete run listing positively proves that this
+# branch has never started a no-mistakes pipeline. A missing command response or
+# an unreadable branch is deliberately unclassifiable, so it cannot turn a done
+# event into a delivery-pending wake by guesswork.
+nm_branch_has_no_runs() {  # <branch>
+  local branch=$1 out row rest listed_branch
+  [ -n "$branch" ] || return 1
+  out=$(nm_run runs --limit 100000)
+  [ -n "$out" ] || return 1
+  while IFS= read -r row; do
+    row=$(trim "$row")
+    [ -n "$row" ] || continue
+    case "$row" in
+      *' more runs, use --limit to see more)'*) return 1 ;;
+    esac
+    rest=${row#* }
+    [ "$rest" != "$row" ] || continue
+    rest=$(trim "$rest")
+    listed_branch=${rest%% *}
+    [ "$listed_branch" = "$branch" ] && return 1
+  done <<< "$out"
+  return 0
+}
+
+# The implementation-complete status used by ship briefs is deliberately narrow:
+# a done note must explicitly name a commit SHA and must not carry a URL. This
+# avoids reclassifying a genuine PR completion that happens to mention a commit.
+status_done_names_commit_only() {  # <status-line>
+  local line=$1 note
+  [ "$(status_line_verb "$line")" = done ] || return 1
+  note=$(status_line_note "$line")
+  printf '%s\n' "$note" | grep -Eqi '(^|[^[:alnum:]])commit(ted)?([^[:alnum:]]|$)' || return 1
+  printf '%s\n' "$note" | grep -Eqi '(^|[^[:alnum:]])[0-9a-f]{7,40}([^[:alnum:]]|$)' || return 1
+  ! printf '%s\n' "$note" | grep -Eqi 'https?://'
+}
+
 # CREW_BRANCH is empty at detached HEAD (a just-spawned crew, or a scout's
 # scratch worktree); with no branch there is no run to attribute to this crew.
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
@@ -602,6 +643,17 @@ fi
 # unknown rather than trusting a possibly-stale status log as the current state.
 [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
 pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACKEND_TARGET"
+
+# A no-mistakes ship is not delivered at its implementation commit. When the
+# status event contains that exact commit-only shape and the complete run list
+# proves this branch has never started a pipeline, expose delivery as still
+# pending. Direct-PR and local-only tasks retain their normal done status, and an
+# unavailable list deliberately leaves the event unclassified.
+if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ] \
+  && status_done_names_commit_only "$LOG_LINE" \
+  && nm_branch_has_no_runs "$CREW_BRANCH"; then
+  emit working status-log "delivery pending: no-mistakes run not started"
+fi
 
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
 # signature is not meaningful for them; read their state from the status log only.
