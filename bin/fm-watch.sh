@@ -762,7 +762,22 @@ heartbeat_scan_finds_actionable() {
 # Poll their compact fingerprint every cycle while a regular task is in flight,
 # then at the existing heartbeat cadence otherwise.  A changed fingerprint is
 # only marked seen after its durable wake record is appended, preventing both a
-# missed event on interruption and a hot loop on an unchanged inbox.
+# missed event on interruption and a hot loop on an unchanged inbox. Every
+# decision in a cycle - the cheap fingerprint, the genuineness of the inbox,
+# the escalation level persisted with the baseline - comes from one reading of
+# both sources and one walk of the home inbox, so the operator's list command
+# runs once per cycle, no path is statted twice, and no two decisions can
+# disagree about what the inbox held. A change that withholds a
+# genuine failure records why before it updates the same baseline; a change
+# with no genuine failure behind it is absorbed into the baseline alone.
+# Current suppression evidence is retained until no genuine failure remains,
+# never merely because a wake was delivered, and a bounded occurrence history
+# outlives the clear so clear-and-recur flapping stays visible in the
+# session-start OPS INBOX digest. A configured critical count collapses while
+# it stays at or below the escalation level of the last baseline, and wakes
+# again the first time it rises above it. A wake needs an actionable signal the
+# last baseline did not carry, so clearing part of a multi-event inbox never
+# re-surfaces the failures already reported for the events left behind.
 ops_inbox_tasks_in_flight() {
   local meta kind
   for meta in "$STATE"/*.meta; do
@@ -775,27 +790,160 @@ ops_inbox_tasks_in_flight() {
 }
 
 ops_inbox_changed() {
-  local fingerprint previous
-  fingerprint=$(fm_ops_inbox_fingerprint "$FM_HOME" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}")
+  local fingerprint previous config
+  config=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
+  FM_OPS_INBOX_READING=$(fm_ops_inbox_external_reading "$config")
+  FM_OPS_INBOX_RECORDS=$(fm_ops_inbox_home_records "$FM_HOME" "$FM_OPS_INBOX_MARKER_SCAN_LIMIT")
+  fingerprint=$(fm_ops_inbox_fingerprint "$FM_HOME" "$config" "$FM_OPS_INBOX_READING" \
+    "$FM_OPS_INBOX_RECORDS")
   previous=$(cat "$STATE/.hash-ops-inbox" 2>/dev/null || true)
+  FM_OPS_INBOX_FINGERPRINT=$fingerprint
+  FM_OPS_INBOX_ACTIONABLE_CAPTURED=''
   if [ -z "$previous" ]; then
-    # A watcher first armed against an empty inbox establishes its baseline
-    # silently.  Existing events or a broken configured command still surface,
-    # while normal task tests and an empty new home do not manufacture a wake.
-    FM_OPS_INBOX_FINGERPRINT=$fingerprint
-    if ! fm_ops_inbox_has_events "$FM_HOME" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"; then
+    # A watcher first armed against a routine or empty inbox establishes its
+    # baseline silently. Existing genuine failures or a broken configured
+    # command still surface, while normal task tests do not manufacture a wake.
+    capture_ops_inbox_actionable
+    if [ "$FM_OPS_INBOX_GENUINE" != yes ]; then
       mark_ops_inbox_seen
       return 1
     fi
     return 0
   fi
   [ "$fingerprint" != "$previous" ] || return 1
-  FM_OPS_INBOX_FINGERPRINT=$fingerprint
+  capture_ops_inbox_actionable
+  if [ "$FM_OPS_INBOX_GENUINE" != yes ]; then
+    mark_ops_inbox_seen
+    return 1
+  fi
+  if ! ops_inbox_actionable_is_new; then
+    FM_OPS_INBOX_SUPPRESSION="duplicate genuine failure$(ops_inbox_external_note)"
+    record_ops_inbox_suppression
+    mark_ops_inbox_seen
+    return 1
+  fi
   return 0
 }
 
+# A genuine failure earns a wake only when this cycle carries an actionable
+# signal the last baseline did not.  Comparing the sets rather than their hashes
+# is what makes partial triage free: an operator clearing one event of several
+# leaves a strict subset, which is the failure firstmate already surfaced, while
+# an added event or a raised escalation always contributes a signal that is not
+# in the baseline.
+ops_inbox_actionable_is_new() {
+  local previous="$STATE/.ops-inbox-actionable"
+  [ -s "$previous" ] || return 0
+  [ -n "$(printf '%s\n' "$FM_OPS_INBOX_ACTIONABLE_SIGNALS" \
+    | LC_ALL=C comm -23 - "$previous" 2>/dev/null)" ]
+}
+
+# The actionable record costs a per-event sample of the retained inbox, so it is
+# computed only once a cycle has already proven the cheap fingerprint changed,
+# or a baseline is about to be persisted.  It reuses this cycle's reading and
+# home scan rather than re-running the operator's list command or re-walking the
+# inbox, so the genuineness decision, the suppression note and the persisted
+# escalation watermark all describe the same observation and cost one traversal
+# between them.  The watermark it is measured against is the level persisted
+# with the last baseline.
+capture_ops_inbox_actionable() {
+  local record header watermark
+  [ -n "${FM_OPS_INBOX_ACTIONABLE_CAPTURED:-}" ] && return 0
+  watermark=$(cat "$STATE/.ops-inbox-critical-level" 2>/dev/null || true)
+  record=$(fm_ops_inbox_actionable_fingerprint "$FM_HOME" \
+    "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "${watermark:-0}" "${FM_OPS_INBOX_READING:-}" \
+    "${FM_OPS_INBOX_RECORDS:-}")
+  header=${record%%$'\n'*}
+  case "$record" in
+    *$'\n'*) FM_OPS_INBOX_ACTIONABLE_SIGNALS=${record#*$'\n'} ;;
+    *) FM_OPS_INBOX_ACTIONABLE_SIGNALS='' ;;
+  esac
+  FM_OPS_INBOX_GENUINE=${header%%$'\t'*}
+  header=${header#*$'\t'}
+  FM_OPS_INBOX_EXTERNAL_CLASS=${header%%$'\t'*}
+  header=${header#*$'\t'}
+  FM_OPS_INBOX_CRITICAL_COUNT=${header%%$'\t'*}
+  FM_OPS_INBOX_CRITICAL_LEVEL=${header#*$'\t'}
+  FM_OPS_INBOX_ACTIONABLE_CAPTURED=1
+}
+
+ops_inbox_external_note() {
+  [ "${FM_OPS_INBOX_EXTERNAL_CLASS:-none}" = none ] && return 0
+  printf ' (external listing %s, criticals %s, escalation level %s)' \
+    "$FM_OPS_INBOX_EXTERNAL_CLASS" "$FM_OPS_INBOX_CRITICAL_COUNT" "$FM_OPS_INBOX_CRITICAL_LEVEL"
+}
+
+# Each baseline is built whole and renamed into place, like the suppression
+# artifacts below: a truncating redirect can leave a half-written signal line
+# that the next cycle reads as a signal the baseline never carried, which is a
+# wake charged for a failure already surfaced.
+write_ops_inbox_baseline() {  # <file> <content>
+  local file=$1 content=$2
+  if [ -n "$content" ]; then
+    printf '%s\n' "$content" > "$file.next" || return 1
+  else
+    : > "$file.next" || return 1
+  fi
+  mv "$file.next" "$file"
+}
+
+# The cheap fingerprint is written last: it is the only record that stops the
+# next cycle from re-deciding, so an interruption before the signal set and the
+# escalation level are on disk costs one repeated evaluation rather than a
+# baseline that claims a failure was surfaced against evidence that never landed.
 mark_ops_inbox_seen() {
-  printf '%s\n' "$FM_OPS_INBOX_FINGERPRINT" > "$STATE/.hash-ops-inbox"
+  capture_ops_inbox_actionable
+  [ "$FM_OPS_INBOX_GENUINE" = yes ] || rm -f "$STATE/.ops-inbox-suppressed"
+  write_ops_inbox_baseline "$STATE/.ops-inbox-actionable" "$FM_OPS_INBOX_ACTIONABLE_SIGNALS"
+  write_ops_inbox_baseline "$STATE/.ops-inbox-critical-level" "$FM_OPS_INBOX_CRITICAL_LEVEL"
+  write_ops_inbox_baseline "$STATE/.hash-ops-inbox" "$FM_OPS_INBOX_FINGERPRINT"
+}
+
+# Bounded by distinct reason, not by write count: an inbox whose listing churns
+# without its failure changing repeats one reason every poll, so in `collapse`
+# mode a record whose reason already stands as the newest is re-dated in place
+# instead of appended. Distinct movements keep their slots inside the limit.
+# Every write builds the whole replacement before one rename, so the evidence a
+# caller records before advancing the baseline is never briefly absent on disk.
+append_bounded_record() {
+  local file=$1 record=$2 mode=${3:-append} newest kept
+  newest=$(tail -n 1 "$file" 2>/dev/null || true)
+  if [ "$mode" = collapse ] && [ -n "$newest" ] && [ "${newest#*$'\t'}" = "${record#*$'\t'}" ]; then
+    { sed '$d' "$file" 2>/dev/null; printf '%s\n' "$record"; } > "$file.next" \
+      && mv "$file.next" "$file"
+  else
+    printf '%s\n' "$record" >> "$file"
+  fi
+  kept=$(grep -c . "$file" 2>/dev/null) || kept=0
+  [ "$kept" -gt "$FM_OPS_INBOX_SUPPRESSION_LIMIT" ] || return 0
+  tail -n "$FM_OPS_INBOX_SUPPRESSION_LIMIT" "$file" > "$file.next" \
+    && mv "$file.next" "$file"
+}
+
+# Per Firstmate's retention rule, only a withheld genuine failure is evidence:
+# a healthy inbox suppressed nothing, so its absorbed changes leave no record
+# to crowd real occurrences out of either bounded artifact. The unresolved
+# record survives the wake path and every later cycle until no genuine failure
+# remains (mark_ops_inbox_seen drops it once the inbox is no longer genuine).
+# That clear is also a recurrence boundary: repeats collapse only while they
+# belong to the episode the unresolved file still holds, so the same failure
+# seen again after a clear lands as its own occurrence and the bounded history
+# reads as flapping instead of as a first sight.  The history is therefore told
+# whether an episode is open, not asked to re-derive the collapse predicate it
+# already applies to its own newest record.
+record_ops_inbox_suppression() {
+  local record mode=append
+  [ -n "${FM_OPS_INBOX_SUPPRESSION:-}" ] || return 0
+  if [ "${FM_OPS_INBOX_GENUINE:-no}" = yes ]; then
+    record="$(date +%s)"$'\t'"$FM_OPS_INBOX_SUPPRESSION"
+    if [ -s "$STATE/.ops-inbox-suppressed" ]; then
+      mode=collapse
+    fi
+    append_bounded_record "$STATE/.ops-inbox-suppressed" "$record" collapse
+    append_bounded_record "$STATE/.ops-inbox-suppression-log" "$record" "$mode"
+  fi
+  unset FM_OPS_INBOX_SUPPRESSION
+  return 0
 }
 
 surface_ops_inbox_change() {

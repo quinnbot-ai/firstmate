@@ -42,8 +42,9 @@
 #                       any answered-but-still-open captain decisions reported
 #                       by fm-decision-hold.sh audit, every state/*.meta, a
 #                       bounded state/*.status tail, state/.afk, bounded
-#                       operations-inbox signals, and a cheap per-task
-#                       endpoint-liveness read: read-only, always runs.
+#                       operations-inbox signals with suppression evidence and
+#                       occurrence history, and a cheap per-task endpoint-
+#                       liveness read: read-only, always runs.
 #   6. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
@@ -253,10 +254,57 @@ print_status_tail() {
   tail -n "$STATUS_TAIL" "$status"
 }
 
+print_ops_inbox_suppression_records() {
+  local file=$1 record when reason
+  while IFS= read -r record; do
+    [ -n "$record" ] || continue
+    when=${record%%$'\t'*}
+    reason=${record#*$'\t'}
+    case "$when" in ''|*[!0-9]*) when=unknown ;; esac
+    printf 'epoch %s: %.200s\n' "$when" "$reason"
+  done < <(tail -n "$OPS_INBOX_LIMIT" "$file" 2>/dev/null)
+}
+
+# Current suppression evidence stands until the watcher observes no genuine
+# failure, so it describes the unresolved inbox episode listed below.
+# The occurrence history is reported alongside it rather than instead of it.
+# Without the earlier occurrences, a fresh unresolved record after a clear
+# reads as a first sight rather than as a recurrence.
+# Once the inbox has no genuine failure the watcher drops the unresolved
+# records and reports the history as past, so a cleared episode is never read
+# as a live one.
+print_ops_inbox_suppression() {
+  local current history total unresolved=0
+  current="$STATE/.ops-inbox-suppressed"
+  history="$STATE/.ops-inbox-suppression-log"
+  if [ -s "$current" ]; then
+    unresolved=1
+    total=$(grep -c . "$current" 2>/dev/null) || total=0
+    printf 'watcher suppression: %s unresolved record(s), oldest first; newest %s, for the inbox reported below:\n' \
+      "$total" "$OPS_INBOX_LIMIT"
+    print_ops_inbox_suppression_records "$current"
+    [ "$total" -le "$OPS_INBOX_LIMIT" ] \
+      || printf '(truncated %s older unresolved suppression record(s))\n' "$((total - OPS_INBOX_LIMIT))"
+  fi
+  [ -s "$history" ] || return 0
+  total=$(grep -c . "$history" 2>/dev/null) || total=0
+  if [ "$unresolved" -eq 1 ]; then
+    printf 'watcher suppression history: %s retained occurrence(s) including the unresolved record(s) above, oldest first; newest %s:\n' \
+      "$total" "$OPS_INBOX_LIMIT"
+  else
+    printf 'watcher suppression: none unresolved; %s retained past occurrence(s), oldest first; newest %s:\n' \
+      "$total" "$OPS_INBOX_LIMIT"
+  fi
+  print_ops_inbox_suppression_records "$history"
+  [ "$total" -le "$OPS_INBOX_LIMIT" ] \
+    || printf '(truncated %s older retained occurrence(s))\n' "$((total - OPS_INBOX_LIMIT))"
+}
+
 print_ops_inbox() {
   local dir record path output rc shown event_count overflow
   local records
   subsection "OPS INBOX"
+  print_ops_inbox_suppression
   dir=$(fm_ops_inbox_home_dir "$FM_HOME")
   if [ ! -d "$dir" ]; then
     printf 'home ops-inbox: ABSENT (%s)\n' "$dir"
@@ -282,7 +330,7 @@ EOF
       shown=0
       while IFS= read -r record; do
         [ "$record" = '__FM_OPS_INBOX_OVERFLOW__' ] && continue
-        IFS=$(printf '\t') read -r _ path <<EOF
+        IFS=$(printf '\t') read -r _ _ path <<EOF
 $record
 EOF
         [ -n "$path" ] || continue

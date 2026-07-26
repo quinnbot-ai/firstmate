@@ -626,6 +626,41 @@ SH
   assert_not_contains "$out" "critical-new" "configured external inbox output was not bounded"
   assert_contains "$out" "(truncated 1 additional output line(s))" "external inbox truncation was not disclosed"
 
+  # A watcher suppression is only observable if the digest reports it, so the
+  # unresolved records must reach the operator alongside the events behind them,
+  # bounded like every other listing in this section.
+  printf '%s\t%s\n' \
+    1753400000 'duplicate genuine failure (external listing critical, criticals 9, escalation level 9)' \
+    1753500000 'duplicate genuine failure (external listing critical, criticals 5, escalation level 5)' \
+    1753500100 'duplicate genuine failure (external listing critical, criticals 4, escalation level 5)' \
+    1753500200 'duplicate genuine failure (external listing critical, criticals 3, escalation level 5)' \
+    > "$home/state/.ops-inbox-suppression-log"
+  tail -n 3 "$home/state/.ops-inbox-suppression-log" > "$home/state/.ops-inbox-suppressed"
+  out=$(FM_SESSION_START_OPS_INBOX_LIMIT=2 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "watcher suppression: 3 unresolved record(s), oldest first; newest 2, for the inbox reported below:" \
+    "OPS INBOX digest did not surface the unresolved watcher suppression records"
+  assert_contains "$out" "epoch 1753500200: duplicate genuine failure (external listing critical, criticals 3, escalation level 5)" \
+    "OPS INBOX digest did not report the newest unresolved suppression record"
+  assert_contains "$out" "epoch 1753500100: duplicate genuine failure (external listing critical, criticals 4, escalation level 5)" \
+    "OPS INBOX digest lost the count movement retained inside the window"
+  assert_contains "$out" "(truncated 1 older unresolved suppression record(s))" "suppression truncation was not disclosed"
+  assert_contains "$out" "$home/ops-inbox/hermes-runtime/new.event" "suppression records replaced the retained event listing"
+  # The earlier occurrences are what make a fresh unresolved record read as a
+  # recurrence, so the history is reported alongside them, not instead of them.
+  assert_contains "$out" "watcher suppression history: 4 retained occurrence(s) including the unresolved record(s) above, oldest first; newest 2:" \
+    "OPS INBOX digest hid the occurrence history behind the unresolved records"
+  assert_contains "$out" "(truncated 2 older retained occurrence(s))" "retained occurrence truncation was not disclosed"
+
+  # Once the failure clears the watcher drops the unresolved records; the
+  # retained history must then read as history, not as a live suppression.
+  rm -f "$home/state/.ops-inbox-suppressed"
+  out=$(FM_SESSION_START_OPS_INBOX_LIMIT=2 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "watcher suppression: none unresolved; 4 retained past occurrence(s), oldest first; newest 2:" \
+    "OPS INBOX digest did not report cleared suppressions as history"
+  assert_not_contains "$out" "for the inbox reported below" "a cleared suppression was still reported as unresolved"
+  assert_contains "$out" "(truncated 2 older retained occurrence(s))" "cleared history truncation was not disclosed"
+  rm -f "$home/state/.ops-inbox-suppression-log"
+
   stat_log="$home/stat.log"
   real_stat=$(command -v stat)
 cat > "$fakebin/stat" <<SH
