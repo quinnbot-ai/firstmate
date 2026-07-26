@@ -138,6 +138,7 @@ done
 SOURCE_FAILURES=$(node - "${SOURCES[@]}" <<'NODE' 2>/dev/null
 const fs = require('fs');
 let failures = 0;
+let unreadable = '';
 
 // Match audio only as a type selector, in any compound or list position, so a
 // wrapper id, class, or attribute value merely named "audio" never trips the
@@ -154,8 +155,8 @@ for (const source of process.argv.slice(2)) {
   try {
     contents = fs.readFileSync(source, 'utf8');
   } catch (error) {
-    console.log(`fm-visual-deliverable-check: could not read source ${source}.`);
-    process.exit(2);
+    unreadable = source;
+    break;
   }
   const css = /\.html?$/i.test(source)
     ? [...contents.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style\s*>/gi)].map((match) => match[1]).join('\n')
@@ -175,7 +176,12 @@ for (const source of process.argv.slice(2)) {
   }
 }
 
-process.exitCode = failures === 0 ? 0 : 1;
+if (unreadable) {
+  console.log(`fm-visual-deliverable-check: could not read source ${unreadable}.`);
+  process.exitCode = 2;
+} else {
+  process.exitCode = failures === 0 ? 0 : 1;
+}
 NODE
 )
 SOURCE_RC=$?
