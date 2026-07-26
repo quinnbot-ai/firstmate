@@ -330,7 +330,7 @@ EOF
       shown=0
       while IFS= read -r record; do
         [ "$record" = '__FM_OPS_INBOX_OVERFLOW__' ] && continue
-        IFS=$(printf '\t') read -r _ path <<EOF
+        IFS=$(printf '\t') read -r _ _ path <<EOF
 $record
 EOF
         [ -n "$path" ] || continue

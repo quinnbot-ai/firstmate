@@ -30,7 +30,8 @@ Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, whil
 Each home may receive operational-failure event files directly in its local `ops-inbox/` directory or one source directory below it (`ops-inbox/<source>/<event>`).
 Write each event once or atomically replace it so the watcher can detect the event or source marker without rescanning retained event files.
 Deeper paths are outside the monitored layout.
-An event that represents an expected non-failure outcome must declare `classification: routine` or `disposition: routine` within its first 4096 bytes.
+An event that represents an expected non-failure outcome must declare `classification: routine` or `disposition: routine` on its own line in its header block - the lines before the first blank line, within its first 4096 bytes.
+The declaration is read only there, so an event that quotes another record or embeds a log excerpt containing that line still reports its own failure.
 All other retained home events fail closed as genuine failures, while identical sampled bodies collapse to one wake until the inbox clears.
 An event whose sample cannot be read is a genuine failure under its own path identity, so an unreadable event is never mistaken for a repeat of an event already surfaced.
 `bin/fm-session-start.sh` reports a bounded count and newest full paths from that directory without changing any event or acknowledgement state.
@@ -38,8 +39,10 @@ Set the local, gitignored `config/ops-inbox-cmd` to one list-only shell command 
 The first non-empty, non-comment line is the command, and firstmate runs it through `bash -c` with combined stdout and stderr.
 The command must be trusted local code and print only its current unhandled critical listing, starting with `unacked_criticals: <count>`; a zero count suppresses an ordinary nonzero exit.
 Exit statuses 124 and 125 are reserved for Firstmate's timeout and output-cap failures and fail closed even when the configured command itself returns one; a malformed listing also wakes because reporting health is uncertain.
+An untrustworthy listing is identified by that status alone, so a broken command whose message changes on every invocation wakes once rather than on every poll.
 The command is intentionally operator-owned and generic, so firstmate does not encode a machine-specific inbox path or acknowledgement implementation.
 The watcher fingerprints both sources, wakes immediately for a new genuine failure while a regular task is in flight, and checks the same fingerprint on its existing heartbeat cadence otherwise.
+A wake needs an actionable signal that the baseline in `state/.ops-inbox-actionable` does not already carry, so clearing part of a multi-event inbox leaves the remaining failures collapsed into the wake that already reported them, while an added event or a raised escalation always wakes.
 A nonzero critical count opens an escalation window recorded in `state/.ops-inbox-critical-level`: further counts at or below that level collapse into the wake already delivered, a count above it wakes once more for that escalation, and a zero count closes the window so the next nonzero count wakes again.
 A duplicate change records the suppression reason before advancing the baseline and, for a configured listing, includes its observed critical count and escalation level; a change with no genuine failure behind it stays in the inbox digest and is absorbed into the baseline alone.
 Per Firstmate's retention rule, only a withheld genuine failure is evidence, so healthy routine changes write no record and cannot crowd real occurrences out of either bounded artifact, and a reason repeated inside one unresolved episode is re-dated in place rather than appended so distinct count movements keep their slots.

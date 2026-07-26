@@ -1843,8 +1843,12 @@ SH
 # it once per decision can outlast the poll period it is supposed to fit in.
 # Every decision must come from one reading, which is also the only way two
 # decisions in a cycle cannot disagree about what the inbox held.
+# The invariant is checked by spacing rather than by a count: two readings of one
+# cycle land microseconds apart, while readings of successive cycles are a poll
+# period apart, so any gap far below the poll period is a second reading no run
+# length can disguise.
 test_ops_inbox_external_command_runs_once_per_cycle() {
-  local dir state fakebin out home command log pid runs
+  local dir state fakebin out home command log pid runs gap
   dir=$(make_case ops-inbox-one-reading); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
   home="$dir/home"; command="$dir/serial-inbox"; log="$dir/invocations"
   mkdir -p "$home/ops-inbox" "$home/config"
@@ -1854,7 +1858,7 @@ test_ops_inbox_external_command_runs_once_per_cycle() {
   # the path that used to re-run the command for each classifier.
   cat > "$command" <<SH
 #!/usr/bin/env bash
-printf 'x\n' >> "$log"
+perl -MTime::HiRes=time -e 'printf "%.4f\n", time' >> "$log"
 printf 'unacked_criticals: 0\nserial %s\n' "\$(grep -c . "$log")"
 SH
   chmod +x "$command"
@@ -1866,13 +1870,133 @@ SH
     FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_live "$pid" 30 || fail "a changing healthy listing woke the watcher: $(cat "$out")"
+  wait_live "$pid" 40 || fail "a changing healthy listing woke the watcher: $(cat "$out")"
   reap "$pid"
   runs=$(grep -c . "$log")
-  [ "$runs" -ge 1 ] || fail "the watcher never ran the configured list command"
-  [ "$runs" -le 6 ] || fail "the configured list command ran $runs times across ~3 changed cycles"
+  [ "$runs" -ge 2 ] || fail "the watcher read the configured list command $runs time(s) across ~4 poll periods"
+  gap=$(awk 'NR > 1 { d = $1 - previous; if (smallest == "" || d < smallest) smallest = d } { previous = $1 } END { printf "%.4f", smallest }' "$log")
+  awk -v gap="$gap" 'BEGIN { exit !(gap >= 0.3) }' \
+    || fail "two readings of the configured list command landed ${gap}s apart, inside one poll period"
 
   pass "a changed operations-inbox cycle reads the configured list command once"
+}
+
+# An operator triaging a multi-event inbox removes one failure at a time. Each
+# removal changes the inbox, so a wake decision that asks whether the inbox looks
+# different charges a wake per removal for failures already reported; only asking
+# whether anything actionable is NEW keeps partial triage free while still
+# surfacing the next real failure.
+test_ops_inbox_partial_triage_does_not_rewake() {
+  local dir state fakebin out home pid
+  dir=$(make_case ops-inbox-partial-triage); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  home="$dir/home"
+  mkdir -p "$home/ops-inbox" "$home/config"
+  printf 'project=firstmate\nkind=ship\n' > "$state/ops.meta"
+  seed_ops_inbox_fingerprint "$home" "$state"
+  printf 'replica download failure\n' > "$home/ops-inbox/first.event"
+  printf 'snapshot upload failure\n' > "$home/ops-inbox/second.event"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "two genuine failures did not wake the watcher"
+
+  # One of the two is triaged away; the other is the failure already surfaced.
+  rm -f "$home/ops-inbox/first.event"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 30 || fail "clearing one event of two woke the watcher for the event left behind: $(cat "$out")"
+  wait_path "$state/.ops-inbox-suppressed" present 40 \
+    || { reap "$pid"; fail "the partially triaged inbox left no unresolved suppression record"; }
+
+  # The inbox is still genuine, so a failure that is actually new must still wake.
+  printf 'index rebuild failure\n' > "$home/ops-inbox/third.event"
+  wait_for_exit "$pid" 40 || fail "a new failure after a partial triage did not wake the watcher"
+  grep "$(printf '\tcheck\tops-inbox\t')" "$state/.wake-queue" >/dev/null \
+    || fail "the post-triage wake was not durably queued as a check"
+
+  pass "partial triage of a multi-event operations inbox costs no extra wake"
+}
+
+# An untrustworthy listing is the one genuine-failure class with no count to
+# collapse on. If its identity followed its output, a broken command whose
+# message carries a clock or a counter would be a new failure every poll.
+test_ops_inbox_churning_invalid_listing_wakes_once() {
+  local dir state fakebin out home command log pid
+  dir=$(make_case ops-inbox-invalid-churn); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  home="$dir/home"; command="$dir/broken-inbox"; log="$dir/invocations"
+  mkdir -p "$home/ops-inbox" "$home/config"
+  printf 'project=firstmate\nkind=ship\n' > "$state/ops.meta"
+  : > "$log"
+  cat > "$command" <<SH
+#!/usr/bin/env bash
+printf 'x\n' >> "$log"
+printf 'inbox backend unreachable (attempt %s)\n' "\$(grep -c . "$log")"
+SH
+  chmod +x "$command"
+  printf '%s\n' "$command" > "$home/config/ops-inbox-cmd"
+  seed_ops_inbox_fingerprint "$home" "$state"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "an untrustworthy listing did not wake the watcher"
+
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 30 || fail "a broken listing whose message changes woke the watcher on a later poll: $(cat "$out")"
+  wait_path "$state/.ops-inbox-suppressed" present 40 \
+    || { reap "$pid"; fail "the collapsed untrustworthy listing left no unresolved suppression record"; }
+  reap "$pid"
+  grep -F 'external listing invalid' "$state/.ops-inbox-suppressed" >/dev/null \
+    || fail "the suppression record lost the untrustworthy listing class"
+
+  pass "a churning untrustworthy listing wakes once instead of on every poll"
+}
+
+# The routine declaration silences an event, so it is the one fail-open path in
+# the design and must be read only where the event speaks for itself: in its own
+# header block, never in a payload it happens to quote.
+test_ops_inbox_routine_declaration_is_header_only() {
+  local dir state fakebin out home pid
+  dir=$(make_case ops-inbox-routine-header); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  home="$dir/home"
+  mkdir -p "$home/ops-inbox" "$home/config"
+  printf 'project=firstmate\nkind=ship\n' > "$state/ops.meta"
+  seed_ops_inbox_fingerprint "$home" "$state"
+  printf 'event: nightly-replica\nclassification: routine\n\nexit 0 as designed\n' \
+    > "$home/ops-inbox/routine.event"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 30 || fail "an event declaring itself routine in its header woke the watcher: $(cat "$out")"
+  reap "$pid"
+  [ ! -s "$state/.wake-queue" ] || fail "a header routine declaration queued a wake"
+
+  # The same declaration below the header belongs to a quoted payload, not to
+  # the failure the event itself reports.
+  printf 'event: replica-download\nresult: failed\n\nupstream record follows:\nclassification: routine\n' \
+    > "$home/ops-inbox/quoted.event"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "an event quoting a routine record in its body was silently absorbed"
+  grep "$(printf '\tcheck\tops-inbox\t')" "$state/.wake-queue" >/dev/null \
+    || fail "the quoted-routine wake was not durably queued as a check"
+
+  pass "a routine declaration counts only in an event's own header block"
 }
 
 # A listing that churns without its failure changing repeats one suppression
@@ -2605,6 +2729,9 @@ test_ops_inbox_duplicate_burst_collapses_to_one_wake
 test_ops_inbox_rising_critical_count_wakes_once_per_escalation
 test_ops_inbox_suppression_evidence_clears_only_with_the_failure
 test_ops_inbox_external_command_runs_once_per_cycle
+test_ops_inbox_partial_triage_does_not_rewake
+test_ops_inbox_churning_invalid_listing_wakes_once
+test_ops_inbox_routine_declaration_is_header_only
 test_ops_inbox_repeated_suppression_collapses_to_one_record
 test_ops_inbox_fingerprint_distinguishes_same_second_same_size_rewrite
 test_ops_inbox_fingerprint_uses_bounded_two_level_file_markers

@@ -5,20 +5,23 @@
 # inbox.  Watcher fingerprints stat at most 64 entries from a 256-file
 # early-cutoff scan, with both bounds configurable below.  This file
 # owns the config seam and fingerprint mechanics.
+# A scanned path is statted once and its record carries every field its
+# consumers need, and a caller holding one scan passes it to each derived
+# fingerprint, so a supervision cycle never walks or stats the same inbox twice.
 
-fm_ops_inbox_stat_sig() {
-  if [ "$(uname)" = Darwin ]; then
-    stat -f '%z:%Fm' "$1" 2>/dev/null
-  else
-    stat -c '%s:%y' "$1" 2>/dev/null
-  fi
-}
+# Resolved once per process: a per-path stat otherwise pays for a `uname` of its
+# own on every file of every scan.
+FM_OPS_INBOX_PLATFORM=${FM_OPS_INBOX_PLATFORM:-$(uname)}
 
-fm_ops_inbox_stat_mtime() {
-  if [ "$(uname)" = Darwin ]; then
-    stat -f %m "$1" 2>/dev/null
+# fm_ops_inbox_stat_record <path>
+# Prints `<mtime>\t<size>:<precise-mtime>` from a single stat: the ordering key
+# and the change signature of one path, so no consumer of a scan needs a second
+# stat of its own.
+fm_ops_inbox_stat_record() {
+  if [ "$FM_OPS_INBOX_PLATFORM" = Darwin ]; then
+    stat -f '%m'$'\t''%z:%Fm' "$1" 2>/dev/null
   else
-    stat -c %Y "$1" 2>/dev/null
+    stat -c '%Y'$'\t''%s:%y' "$1" 2>/dev/null
   fi
 }
 
@@ -184,10 +187,12 @@ fm_ops_inbox_external_run() {
 }
 
 # fm_ops_inbox_home_records <home> <scan-limit>
-# Prints mtime-ordered path records from a bounded home-inbox scan.
+# Prints mtime-ordered `<mtime>\t<signature>\t<path>` records from a bounded
+# home-inbox scan.  Each discovered path is statted exactly once here and every
+# consumer reads its signature from the record instead of statting again.
 # A final __FM_OPS_INBOX_OVERFLOW__ record means the scan limit was reached.
 fm_ops_inbox_home_records() {
-  local home=$1 limit=$2 dir marker path mtime count=0 overflow=0
+  local home=$1 limit=$2 dir marker path entry count=0 overflow=0
   local -a records=()
   dir=$(fm_ops_inbox_home_dir "$home")
   marker=$(fm_ops_inbox_home_marker_path "$home")
@@ -199,21 +204,29 @@ fm_ops_inbox_home_records() {
       break
     fi
     count=$((count + 1))
-    mtime=$(fm_ops_inbox_stat_mtime "$path") || continue
-    records+=("$mtime"$'\t'"$path")
+    entry=$(fm_ops_inbox_stat_record "$path") || continue
+    [ -n "$entry" ] || continue
+    records+=("$entry"$'\t'"$path")
   done < <(find "$dir" -mindepth 1 -maxdepth 2 -type f -print0 2>/dev/null)
   ((${#records[@]})) && printf '%s\n' "${records[@]}" | LC_ALL=C sort -rn
   [ "$overflow" -eq 0 ] || printf '%s\n' '__FM_OPS_INBOX_OVERFLOW__'
 }
 
+# fm_ops_inbox_home_marker <home> [records]
+# A caller that already holds this cycle's scan passes it in, so the home inbox
+# is walked and statted once however many fingerprints are derived from it.
 fm_ops_inbox_home_marker() {
-  local home=$1 marker record path sig count=0 selected_overflow=0 scan_overflow=0
+  local home=$1 records=${2:-} marker record entry path sig count=0
+  local selected_overflow=0 scan_overflow=0
   marker=$(fm_ops_inbox_home_marker_path "$home")
   if [ -f "$marker" ]; then
-    sig=$(fm_ops_inbox_stat_sig "$marker") || return 1
-    printf '%s\t%s\n' "$sig" "$marker"
+    entry=$(fm_ops_inbox_stat_record "$marker") || return 1
+    [ -n "$entry" ] || return 1
+    printf '%s\t%s\n' "${entry#*$'\t'}" "$marker"
   fi
+  [ -n "$records" ] || records=$(fm_ops_inbox_home_records "$home" "$FM_OPS_INBOX_MARKER_SCAN_LIMIT")
   while IFS= read -r record; do
+    [ -n "$record" ] || continue
     case "$record" in
       __FM_OPS_INBOX_OVERFLOW__)
         scan_overflow=1
@@ -224,11 +237,14 @@ fm_ops_inbox_home_marker() {
       selected_overflow=1
       continue
     fi
-    path=${record#*$'\t'}
-    sig=$(fm_ops_inbox_stat_sig "$path") || continue
+    entry=${record#*$'\t'}
+    sig=${entry%%$'\t'*}
+    path=${entry#*$'\t'}
     printf '%s\t%s\n' "$sig" "$path"
     count=$((count + 1))
-  done < <(fm_ops_inbox_home_records "$home" "$FM_OPS_INBOX_MARKER_SCAN_LIMIT")
+  done <<EOF
+$records
+EOF
   if [ "$selected_overflow" -ne 0 ] || [ "$scan_overflow" -ne 0 ]; then
     printf '%s\n' '__FM_OPS_INBOX_MARKER_OVERFLOW__'
   fi
@@ -237,19 +253,28 @@ fm_ops_inbox_home_marker() {
 # fm_ops_inbox_sample_is_routine <sample>
 # Matches the routine declaration against a sample already in memory, so an
 # event file is read once for both its classification and its identity and the
-# two can never come from different bodies.
+# two can never come from different bodies.  Only the header block - the lines
+# before the first blank line - may declare an event routine, so a quoted
+# record, an embedded log excerpt or a wrapped upstream payload carrying that
+# line cannot silence the failure the event around it reports.
 fm_ops_inbox_sample_is_routine() {
-  local sample=$1 blank=$'[ \t\r]' pattern
-  pattern=$'\n'"$blank"'*(classification|disposition):'"$blank"'*routine'"$blank"'*'$'\n'
-  [[ $'\n'$sample$'\n' =~ $pattern ]]
+  local sample=$1 line blank=$'[ \t\r]'
+  while IFS= read -r line || [ -n "$line" ]; do
+    [[ $line =~ ^$blank*$ ]] && return 1
+    [[ $line =~ ^$blank*(classification|disposition):$blank*routine$blank*$ ]] && return 0
+  done <<EOF
+$sample
+EOF
+  return 1
 }
 
 fm_ops_inbox_event_signal() {
-  local path=$1 sample
-  if ! sample=$(dd if="$path" bs="$FM_OPS_INBOX_EVENT_SAMPLE_BYTES" count=1 2>/dev/null); then
+  local path=$1 sample=''
+  if [ ! -r "$path" ]; then
     printf 'home:unreadable:%s\n' "$path"
     return 0
   fi
+  IFS= read -r -N "$FM_OPS_INBOX_EVENT_SAMPLE_BYTES" sample < "$path" 2>/dev/null || true
   fm_ops_inbox_sample_is_routine "$sample" && return 1
   printf 'home:'
   printf '%s' "$sample" | fm_ops_inbox_hash
@@ -264,6 +289,10 @@ fm_ops_inbox_event_signal() {
 # malformed listing, or reserved status 124 or 125.
 # Those statuses represent Firstmate's timeout and output-cap kill, so they fail
 # closed even when the configured command itself returns one.
+# An untrustworthy listing is identified by its status alone: a broken command
+# whose message carries a timestamp, a retry counter or a pid would otherwise
+# report a different failure every invocation and wake on every poll, which is
+# the noise the collapse rules exist to bound.
 # The identity is empty for the counted classes because their fingerprint depends
 # on the caller's escalation watermark.  Every derived value - the cheap
 # fingerprint segment, the genuineness decision, the escalation identity - is
@@ -282,7 +311,7 @@ fm_ops_inbox_external_reading() {
         ''|*[!0-9]*)
           class=invalid
           count=0
-          identity="external:invalid:$rc:$(printf '%s' "$output" | fm_ops_inbox_hash)"
+          identity="external:invalid:$rc"
           ;;
         0) class=ok ;;
         *) class=critical ;;
@@ -318,24 +347,30 @@ fm_ops_inbox_critical_level() {
   fi
 }
 
-# fm_ops_inbox_actionable_fingerprint <home> <config-dir> [critical-watermark] [reading]
-# Prints `<genuine>\t<external-class>\t<critical-count>\t<critical-level>\t<hash>`
-# from one reading of both sources, so a caller decides suppression, reports the
-# count movement behind it, and persists the escalation watermark from a single
-# consistent observation.  A genuine failure is exactly a non-empty actionable
-# signal set: a home overflow, any retained home event that does not declare
-# itself routine (including one whose sample cannot be read), or an external
-# listing that is critical or untrustworthy.  The hash covers only those
-# identities, so copied event records with the same sampled body collapse to
-# one wake until the inbox clears.
+# fm_ops_inbox_actionable_fingerprint <home> <config-dir> [critical-watermark] [reading] [records]
+# Prints a header line `<genuine>\t<external-class>\t<critical-count>\t<critical-level>`
+# followed by this cycle's sorted actionable signal set, one signal per line,
+# from one reading of both sources and one scan of the home inbox, so a caller
+# decides suppression, reports the count movement behind it, and persists the
+# escalation watermark from a single consistent observation.  A genuine failure
+# is exactly a non-empty signal set: a home overflow, any retained home event
+# that does not declare itself routine (including one whose sample cannot be
+# read), or an external listing that is critical or untrustworthy.  Copied event
+# records with the same sampled body share one signal, so they collapse to one
+# wake until the inbox clears.
+# The set is reported rather than hashed because only the set tells a caller
+# whether a signal is NEW: a hash also changes when the set shrinks, which would
+# charge an operator an extra wake for every event they triage out of a
+# multi-event inbox.
 # The external listing contributes its escalation level rather than its raw
 # count: a burst or a falling count stays one identity, while a count above the
 # watermark raises the level and wakes once for that escalation.
 fm_ops_inbox_actionable_fingerprint() {
-  local home=$1 config=$2 watermark=${3:-0} reading=${4:-}
-  local record path signal header class='none' count=0 identity='' level=0
-  local hash signals='' genuine=no
+  local home=$1 config=$2 watermark=${3:-0} reading=${4:-} records=${5:-}
+  local record entry path signal header class='none' count=0 identity='' level=0
+  local signals='' genuine=no
   [ -n "$reading" ] || reading=$(fm_ops_inbox_external_reading "$config")
+  [ -n "$records" ] || records=$(fm_ops_inbox_home_records "$home" "$FM_OPS_INBOX_MARKER_SCAN_LIMIT")
   header=${reading%%$'\n'*}
   if [ "${header%%$'\t'*}" = configured ]; then
     record=${header#*$'\t'}
@@ -351,33 +386,44 @@ fm_ops_inbox_actionable_fingerprint() {
   fi
   signals=$(
     while IFS= read -r record; do
+      [ -n "$record" ] || continue
       if [ "$record" = '__FM_OPS_INBOX_OVERFLOW__' ]; then
         printf '%s\n' 'home:overflow'
         continue
       fi
-      path=${record#*$'\t'}
+      entry=${record#*$'\t'}
+      path=${entry#*$'\t'}
       signal=$(fm_ops_inbox_event_signal "$path") || continue
       printf '%s\n' "$signal"
-    done < <(fm_ops_inbox_home_records "$home" "$FM_OPS_INBOX_MARKER_SCAN_LIMIT")
-    [ -n "$identity" ] && printf '%s\n' "$identity"
+    done <<EOF
+$records
+EOF
+    if [ -n "$identity" ]; then
+      printf '%s\n' "$identity"
+    fi
   )
-  [ -n "$signals" ] && genuine=yes
-  hash=$(printf '%s\n' "$signals" | LC_ALL=C sort -u | fm_ops_inbox_hash)
-  printf '%s\t%s\t%s\t%s\t%s\n' "$genuine" "$class" "$count" "$level" "$hash"
+  if [ -n "$signals" ]; then
+    genuine=yes
+    signals=$(printf '%s\n' "$signals" | LC_ALL=C sort -u)
+  fi
+  printf '%s\t%s\t%s\t%s\n' "$genuine" "$class" "$count" "$level"
+  if [ -n "$signals" ]; then
+    printf '%s\n' "$signals"
+  fi
 }
 
-# fm_ops_inbox_fingerprint <home> <config-dir> [reading]
+# fm_ops_inbox_fingerprint <home> <config-dir> [reading] [records]
 # Hashes local directory markers plus the configured external list output.  The
 # fingerprint is safe to persist in state/.hash-ops-inbox as the watcher's
-# suppressor.  A caller that already holds this cycle's reading passes it in so
-# the command is not run a second time.
+# suppressor.  A caller that already holds this cycle's reading and home scan
+# passes them in so neither the command nor the traversal is repeated.
 fm_ops_inbox_fingerprint() {
-  local home=$1 config=$2 reading=${3:-} command header record rc
+  local home=$1 config=$2 reading=${3:-} records=${4:-} command header record rc
   [ -n "$reading" ] || reading=$(fm_ops_inbox_external_reading "$config")
   header=${reading%%$'\n'*}
   {
     printf 'home\n'
-    fm_ops_inbox_home_marker "$home"
+    fm_ops_inbox_home_marker "$home" "$records"
     if [ "${header%%$'\t'*}" = configured ] && command=$(fm_ops_inbox_external_command "$config"); then
       record=${header#*$'\t'}
       record=${record#*$'\t'}
