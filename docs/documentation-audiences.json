@@ -313,7 +313,7 @@
     },
     {
       "path": "docs/unit-economics-source-readiness.md",
-      "audience": "maintainer-verification"
+      "audience": "operator-current"
     },
     {
       "path": "docs/verification/runtime-backends.md",

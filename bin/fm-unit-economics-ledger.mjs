@@ -30,10 +30,14 @@
 // than two surviving distinct commands says `independent source count
 // insufficient`.
 // A configured command that cannot be read says `source unreadable`, malformed
-// command output says `source malformed`, and a valid source which omits the
-// requested metric says `source metric missing`. A diagnosed source failure is
+// command output says `source malformed`, a valid source which omits the
+// requested metric says `source metric missing`, and one whose requested metric
+// is present but carries an untrusted status, a non-finite amount, or the wrong
+// unit says `source metric untrusted`. A diagnosed source failure is
 // reported ahead of an insufficient source count, so a single broken helper
-// stays distinguishable from an unconfigured pair.
+// stays distinguishable from an unconfigured pair. Each lane's own
+// `source_freshness` repeats the first non-fresh reason among the figures it
+// publishes, so no lane header reads fresh over a refused metric or daily line.
 // The fixed fleet_operations lane reads quota-axi --json fresh at invocation
 // time and publishes the lowest in-range (0-100) percentRemaining of a provider
 // whose own reported state is fresh; a provider without a `state.refreshedAt`
@@ -99,6 +103,7 @@ const SOURCE_CONFIGURATION_MALFORMED = 'source configuration malformed';
 const SOURCE_UNREADABLE = 'source unreadable';
 const SOURCE_MALFORMED = 'source malformed';
 const SOURCE_METRIC_MISSING = 'source metric missing';
+const SOURCE_METRIC_UNTRUSTED = 'source metric untrusted';
 const INDEPENDENT_SOURCE_COUNT_INSUFFICIENT = 'independent source count insufficient';
 const LEDGER_DATE_NOT_COVERED = 'ledger date not covered';
 const SOURCE_DISAGREEMENT_REFUSED = 'source disagreement refused';
@@ -165,16 +170,20 @@ function sourcesAtPublication(sources, maxAgeSeconds, publicationTime) {
     return { ok: false, reason: Number.isFinite(Date.parse(source.body.observedAt || '')) ? 'stale source refused' : SOURCE_MALFORMED };
   });
 }
-function sourceMetric(source, metric) {
-  const value = source.body.metrics?.[metric];
-  if (!value || !['measured', 'estimated'].includes(value.status) || !Number.isFinite(value.amount) || typeof value.unit !== 'string') return null;
-  return value;
+function trustedMetric(container, metric, unit) {
+  const value = container?.[metric];
+  if (value === undefined || value === null) return { ok: false, reason: SOURCE_METRIC_MISSING };
+  if (typeof value !== 'object' || !['measured', 'estimated'].includes(value.status) || !Number.isFinite(value.amount)) return { ok: false, reason: SOURCE_METRIC_UNTRUSTED };
+  if (unit === null ? typeof value.unit !== 'string' : value.unit !== unit) return { ok: false, reason: SOURCE_METRIC_UNTRUSTED };
+  return { ok: true, value };
 }
 function corroboratedMetric(name, unit, sources, missingReason) {
   const failed = sources.find((source) => !source.ok);
   if (failed || sources.length < 2) return unavailable(name, unit, failed?.reason || missingReason || INDEPENDENT_SOURCE_COUNT_INSUFFICIENT);
-  const values = sources.map((source) => sourceMetric(source, name));
-  if (values.some((value) => !value)) return unavailable(name, unit, SOURCE_METRIC_MISSING);
+  const readings = sources.map((source) => trustedMetric(source.body.metrics, name, null));
+  const rejected = readings.find((reading) => !reading.ok);
+  if (rejected) return unavailable(name, unit, rejected.reason);
+  const values = readings.map((reading) => reading.value);
   const [first, ...rest] = values;
   const currency = sources[0].body.currency;
   if (typeof currency !== 'string' || rest.some((value, index) => value.amount !== first.amount || value.unit !== first.unit || sources[index + 1].body.currency !== currency)) {
@@ -186,6 +195,9 @@ function corroboratedMetric(name, unit, sources, missingReason) {
     status: estimated ? 'estimated' : 'independently_cross_checked', source_freshness: 'fresh', cross_check: 'passed',
   };
 }
+function laneFreshness(published) {
+  return published.find((entry) => entry.source_freshness !== 'fresh')?.source_freshness || 'fresh';
+}
 function collectFinancialLane(id, config) {
   const configured = runSources(config?.sources);
   return { id, sources: configured.sources, sourceFailure: configured.reason };
@@ -195,8 +207,7 @@ function financialLane(input, maxAgeSeconds, publicationTime) {
   const spec = laneSpecs[id];
   const sources = sourcesAtPublication(input.sources, maxAgeSeconds, publicationTime);
   const metrics = spec.metrics.map(([name, unit]) => corroboratedMetric(name, unit, sources, sourceFailure));
-  const sourceFreshness = metrics.find((metric) => metric.source_freshness !== 'fresh')?.source_freshness || 'fresh';
-  return { id, label: spec.label, source_freshness: sourceFreshness, metrics };
+  return { id, label: spec.label, source_freshness: laneFreshness(metrics), metrics };
 }
 function findProvider(value, wanted) {
   if (Array.isArray(value)) return value.map((item) => findProvider(item, wanted)).find(Boolean);
@@ -252,11 +263,6 @@ function quotaWindows(body, maxAgeSeconds, publicationTime, dateIsToday) {
     };
   });
 }
-function dailyMetric(row, name, unit) {
-  const value = row?.[name];
-  if (!value || !['measured', 'estimated'].includes(value.status) || !Number.isFinite(value.amount) || value.unit !== unit) return null;
-  return value;
-}
 function dailyCrewSource(source, date) {
   if (!source.ok) return { ok: false, reason: source.reason || SOURCE_UNREADABLE };
   if (typeof source.body.source !== 'string' || !source.body.source || !isCalendarDate(source.body.date) || typeof source.body.currency !== 'string' || !Array.isArray(source.body.crewSessions)) return { ok: false, reason: SOURCE_MALFORMED };
@@ -264,10 +270,11 @@ function dailyCrewSource(source, date) {
   const rows = new Map();
   for (const row of source.body.crewSessions) {
     if (typeof row?.crew !== 'string' || !row.crew || rows.has(row.crew)) return { ok: false, reason: SOURCE_MALFORMED };
-    const sessionCost = dailyMetric(row, 'sessionCost', 'USD');
-    const validationRuns = dailyMetric(row, 'validationRuns', 'runs');
-    if (!sessionCost || !validationRuns) return { ok: false, reason: SOURCE_METRIC_MISSING };
-    rows.set(row.crew, { sessionCost, validationRuns });
+    const sessionCost = trustedMetric(row, 'sessionCost', 'USD');
+    const validationRuns = trustedMetric(row, 'validationRuns', 'runs');
+    const rejected = [sessionCost, validationRuns].find((reading) => !reading.ok);
+    if (rejected) return { ok: false, reason: rejected.reason };
+    rows.set(row.crew, { sessionCost: sessionCost.value, validationRuns: validationRuns.value });
   }
   return { ok: true, source: source.body.source, currency: source.body.currency, rows };
 }
@@ -334,19 +341,19 @@ function fleetLane(input, maxAgeSeconds, publicationTime, date, dateIsToday) {
   const codex = findProvider(body?.providers, ['codex', 'openai']);
   const costSources = sourcesAtPublication(input.costSources, maxAgeSeconds, publicationTime);
   const dailySources = sourcesAtPublication(input.dailySources, maxAgeSeconds, publicationTime);
-  const quotaMetrics = [
+  const metrics = [
     quotaMetric('claude_quota_window', claude, generatedAt, maxAgeSeconds, publicationTime, dateIsToday),
     quotaMetric('codex_quota_window', codex, generatedAt, maxAgeSeconds, publicationTime, dateIsToday),
-  ];
-  const metrics = [
-    ...quotaMetrics,
     corroboratedMetric('attributable_crew_session_cost', 'USD', costSources, input.costSourceFailure),
   ];
-  const sourceFreshness = quotaMetrics.find((metric) => metric.source_freshness === BACKFILLED_WINDOW_REFUSED)?.source_freshness
-    || quotaMetrics.find((metric) => metric.source_freshness === 'stale source refused')?.source_freshness
-    || quotaMetrics.find((metric) => metric.source_freshness === 'source unavailable')?.source_freshness
-    || 'fresh';
-  return { id: 'fleet_operations', label: laneSpecs.fleet_operations.label, source_freshness: sourceFreshness, metrics, daily_fleet_line: { date, quota_windows: quotaWindows(body, maxAgeSeconds, publicationTime, dateIsToday), ...dailyFleetLine(dailySources, date, input.dailySourceFailure) } };
+  const daily = dailyFleetLine(dailySources, date, input.dailySourceFailure);
+  return {
+    id: 'fleet_operations',
+    label: laneSpecs.fleet_operations.label,
+    source_freshness: laneFreshness([...metrics, daily]),
+    metrics,
+    daily_fleet_line: { date, quota_windows: quotaWindows(body, maxAgeSeconds, publicationTime, dateIsToday), ...daily },
+  };
 }
 function markdown(artifact) {
   const fleet = artifact.lanes.find((lane) => lane.id === 'fleet_operations');

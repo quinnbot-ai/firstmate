@@ -223,7 +223,7 @@ test_untrusted_metric_states_and_duplicate_sources_are_refused() {
   write_source "$one" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"pipeline_cost\":{\"amount\":4,\"unit\":\"USD\",\"status\":\"unavailable\"},\"realized_revenue\":{\"amount\":8,\"unit\":\"USD\",\"status\":\"unavailable\"}}}"
   write_source "$two" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"pipeline_cost\":{\"amount\":4,\"unit\":\"USD\",\"status\":\"stale\"},\"realized_revenue\":{\"amount\":8,\"unit\":\"USD\",\"status\":\"stale\"}}}"
   write_config "$config" weho "$one" "$two"; write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
-  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .status=="unavailable")' "$out" >/dev/null || fail "untrusted metric statuses were published"
+  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .status=="unavailable" and .source_freshness=="source metric untrusted")' "$out" >/dev/null || fail "a present but untrusted metric was published or reported as a missing metric"
   write_source "$one" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"pipeline_cost\":{\"amount\":4,\"unit\":\"USD\",\"status\":\"measured\"},\"realized_revenue\":{\"amount\":8,\"unit\":\"USD\",\"status\":\"measured\"}}}"
   write_config "$config" weho "$one" "$one"; run_ledger "$config" "$out" "$quota"
   jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .cross_check=="unavailable" and .source_freshness=="independent source count insufficient")' "$out" >/dev/null || fail "duplicate command arrays satisfied independent corroboration"
@@ -246,6 +246,8 @@ test_malformed_source_containers_render_unavailable() {
   write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
   jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null)' "$out" >/dev/null || fail "malformed lane sources prevented unavailable rendering"
   jq -e '.lanes[] | select(.id=="fleet_operations") | .metrics[] | select(.name=="attributable_crew_session_cost" and .amount==null and .source_freshness=="source configuration malformed")' "$out" >/dev/null || fail "malformed cost sources prevented unavailable rendering"
+  jq -e '.lanes[] | select(.id=="fleet_operations" and .source_freshness=="source configuration malformed")' "$out" >/dev/null || fail "the fleet lane header read fresh over a malformed cost source"
+  jq -e '.lanes[] | select(.id=="weho" and .source_freshness=="source configuration malformed")' "$out" >/dev/null || fail "the financial lane header read fresh over a malformed source container"
   pass "malformed source containers render unavailable"
 }
 
