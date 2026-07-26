@@ -262,6 +262,30 @@ Firstmate will then instruct you to run /no-mistakes.
 EOF
 }
 
+# A scout brief carries the report path exactly as fm-brief.sh spells it, from
+# the unresolved data directory rather than a canonical one.
+add_scout_task() {
+  local id=$1
+  add_task "$id"
+  cat > "$DATA_DIR/$id/brief.md" <<EOF
+You are a crewmate managed by firstmate.
+
+# Task
+Investigate the fixture question and report what you find.
+
+# Herdr lifecycle declaration - NOT ENABLED
+Do not drive Herdr lifecycle behavior.
+
+# Setup
+You are in a disposable git worktree of alpha, at a detached HEAD on a clean default branch.
+
+This is a SCOUT task: investigate and report, and change nothing in the project.
+
+# Definition of done
+Write your findings to \`$DATA_DIR/$id/report.md\`.
+EOF
+}
+
 fixture_env() {
   unset FM_STATE_OVERRIDE FM_CONFIG_OVERRIDE FM_DATA_OVERRIDE
   export FM_HOME="$HOME_DIR"
@@ -294,11 +318,11 @@ start_owner() {
 }
 
 stage_task() {
-  local id=$1 result="$FIXTURE/stage-$1.json"
+  local id=$1 kind=${2:-ship} result="$FIXTURE/stage-$1.json"
   start_owner "$result" \
     "$ROOT/bin/fm-dispatch-stage.sh" "$id" \
     --repo alpha \
-    --kind ship \
+    --kind "$kind" \
     --harness codex \
     --model gpt-fixture \
     --effort low \
@@ -974,19 +998,28 @@ jq -n --arg home "$HOME_DIR" '{
   tasks:[]
 }' > "$SNAPSHOT"
 fixture_env
+add_scout_task symlink-scout
 add_task symlink-home
+stage_task symlink-scout scout
+[ -f "$DATA_DIR/symlink-scout/dispatch.json" ] \
+  || fail "a scout brief on a symlinked home was refused its report path"
 stage_task symlink-home
 start_runtime
 [ "$(cat "$STATE_DIR/.watch.lock/fm-home")" = "$FIXTURE/home-link" ] \
   || fail "the fixture watcher did not record the symlinked home path"
+jq '.target_running = 2 | .terminal_buffer = 2 | .max_launches_per_tick = 2' \
+  "$CONFIG_DIR/auto-dispatch.json" > "$FIXTURE/symlink-config"
+mv "$FIXTURE/symlink-config" "$CONFIG_DIR/auto-dispatch.json"
 run_once > "$FIXTURE/symlink.out"
-[ "$(jq -r .claim_count "$TASKS_STATE")" = 1 ] \
+[ "$(jq -r .claim_count "$TASKS_STATE")" = 2 ] \
   || fail "a symlinked home path stopped refill"
-[ "$(jq -r .id < "$FIXTURE/symlink.out")" = symlink-home ] \
+[ "$(sed -n '1p' "$FIXTURE/symlink.out" | jq -r .id)" = symlink-scout ] \
+  || fail "a scout envelope on a symlinked home was treated as stale"
+[ "$(sed -n '2p' "$FIXTURE/symlink.out" | jq -r .id)" = symlink-home ] \
   || fail "a symlinked home path suppressed the would-dispatch report"
 [ "$(status_verb_count blocked)" = 0 ] \
   || fail "a symlinked home path was reported as an ownership or fleet failure"
-pass "symlinked home and root paths resolve to the same home on both sides"
+pass "symlinked home and root paths resolve to the same home for ship and scout"
 
 # The existing watcher loop owns invocation, with no new daemon entrypoint.
 assert_contains "$(cat "$ROOT/bin/fm-watch.sh")" \

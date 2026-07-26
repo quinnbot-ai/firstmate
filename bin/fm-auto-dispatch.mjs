@@ -607,6 +607,28 @@ function briefPath(context, id) {
   return path;
 }
 
+/**
+ * A scout brief carries the report path exactly as fm-brief.sh spelled it, so a
+ * symlinked home embeds an uncanonical path here just as the watcher and the
+ * fleet snapshot do elsewhere. Each candidate's parent directory is resolved and
+ * required to be this task's own directory, so report.md need not exist yet and
+ * no other home or task is accepted.
+ */
+function scoutReportPathIsOwned(text, context, id) {
+  const owned = join(context.data, id);
+  const suffix = `/${id}/report.md`;
+  const delimiters = ["`", "\n", "\r", "'", '"', "(", "<"];
+  for (let at = text.indexOf(suffix); at !== -1; at = text.indexOf(suffix, at + 1)) {
+    const before = text.slice(0, at);
+    const start = Math.max(...delimiters.map((delimiter) => before.lastIndexOf(delimiter)));
+    const parent = before.slice(start + 1);
+    if (parent.startsWith("/") && canonicalPath(`${parent}/${id}`) === owned) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function validateBrief(context, id, repo, kind, mode, herdrLifecycle) {
   const path = briefPath(context, id);
   const bytes = safeRead(path, `brief for ${id}`, MAX_BRIEF_BYTES);
@@ -634,7 +656,7 @@ function validateBrief(context, id, repo, kind, mode, herdrLifecycle) {
     if (!text.includes("This is a SCOUT task:")) {
       fail("scout brief is missing its scout contract", "BRIEF_INVALID");
     }
-    if (!text.includes(`${context.data}/${id}/report.md`)) {
+    if (!scoutReportPathIsOwned(text, context, id)) {
       fail("scout brief report path does not match the owning home", "BRIEF_INVALID");
     }
   } else if (kind === "ship") {
