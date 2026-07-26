@@ -9,6 +9,7 @@ set -u
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
+SESSION_START="$ROOT/bin/fm-session-start.sh"
 TMP_ROOT=$(fm_test_tmproot fm-decision-hold)
 TASKS_AXI_BIN=$(command -v tasks-axi || true)
 
@@ -35,6 +36,16 @@ run_bearings() {  # <home>
   local home=$1
   PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-14T12:00:00Z \
     "$BEARINGS" --json
+}
+
+# The digest runs against a throwaway git root so its repo-shaped checks operate
+# on scratch, while the scripts still come from this tracked code root.
+run_session_start() {  # <home> <root>
+  local home=$1 root=$2
+  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$SESSION_START" 2>&1
 }
 
 run_teardown() {  # <home> <id>
@@ -589,6 +600,38 @@ test_answered_open_audit_surfaces_without_closing() {
   pass "answered-open captain holds are surfaced without heuristic closure"
 }
 
+# The audit only stops a re-ask if it actually reaches the reader, so the session
+# start digest is part of the guard rather than presentation around it. It must
+# print the flagged decision while the answer sits unrouted and stay silent
+# otherwise, so an ordinary pending choice never trains the reader to skim it.
+test_session_start_surfaces_answered_open_decision() {
+  local home origin root hold out
+  home=$(make_home answered-open-session-start)
+  origin=sample-answer-review
+  write_origin_meta "$home" "$origin"
+  root="$TMP_ROOT/answered-open-session-start-root"
+  mkdir -p "$root"
+  git init -q -b main "$root" || fail "could not create the throwaway session-start root"
+  git -C "$root" commit -q --allow-empty -m init || fail "could not seed the throwaway session-start root"
+
+  hold=$(run_decisions "$home" hold "$origin" route \
+    --title "Choose the sample route" --reason "captain chose route north" --topic sample-route --repo sample) \
+    || fail "could not create answered-open captain hold fixture"
+  out=$(run_session_start "$home" "$root") || fail "session start failed with an answered-open hold"
+  assert_contains "$out" "ANSWERED-OPEN CAPTAIN DECISIONS" \
+    "session start did not surface the answered-open decision section"
+  assert_contains "$out" "answered-open: $hold: captain chose route north" \
+    "session start omitted the answered-but-open captain decision"
+
+  run_decisions "$home" hold "$origin" route \
+    --title "Choose the sample route" --reason "captain route choice pending" --topic sample-route --repo sample >/dev/null \
+    || fail "could not return the hold to a genuinely pending reason"
+  out=$(run_session_start "$home" "$root") || fail "session start failed with a genuinely pending hold"
+  assert_not_contains "$out" "ANSWERED-OPEN CAPTAIN DECISIONS" \
+    "session start flagged a genuinely pending captain decision as already answered"
+  pass "session start prints answered-open decisions and stays quiet for pending ones"
+}
+
 # tasks-axi quotes multi-entry blocked_by values as "a,b,c". resolve must strip
 # those surrounding quotes before comma-boundary membership so the first and last
 # list elements match, not only middle elements.
@@ -698,4 +741,5 @@ test_resolved_topic_refuses_duplicate_decision
 test_topic_match_does_not_collide_on_prefix
 test_untagged_legacy_title_flags_possible_duplicate
 test_answered_open_audit_surfaces_without_closing
+test_session_start_surfaces_answered_open_decision
 test_resolve_matches_quoted_blocked_by_edges

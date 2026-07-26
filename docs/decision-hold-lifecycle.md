@@ -37,7 +37,7 @@ The read-only `audit` subcommand reports active captain holds whose own hold rea
 It never closes a hold because only `resolve` can prove the durable decision record and routed work exist.
 It recognizes `answer:` or `decision:` markers and reasons that say the captain answered, chose, selected, decided, approved, or said something.
 It cannot recognize unmarked answers or every natural-language paraphrase, so agents must still record answers with `resolve`.
-Session start runs the audit and prints only flagged items, so an answered-but-open decision cannot silently blend into ordinary pending choices.
+Session start runs the audit inside its fleet-state digest and prints a section only for flagged items, or for an audit that failed, so an answered-but-open decision cannot silently blend into ordinary pending choices.
 
 ## Structured read surfaces
 
@@ -62,6 +62,7 @@ The initial Bearings snapshot correctly has no open decision, and the new teardo
 A later regression covers tasks-axi's quoted multi-entry `blocked_by` output so `resolve` matches the first, middle, and last ids and rejects a genuinely absent id.
 The current regressions also reject a duplicate repository-scoped topic from a second origin and surface an answered-but-open hold without closing it.
 They further refuse an already-answered topic from both the backlog Done section and `done-archive.md`, and confirm that a topic matches on its full value rather than on a prefix shared with a longer topic.
+One regression drives the whole session-start digest so the flagged decision is proven to reach the reader, while a genuinely pending choice keeps that section silent.
 
 The final verification commands and their exact summarized outputs follow.
 
@@ -80,6 +81,7 @@ ok - answered decision topics are refused from both the Done section and the arc
 ok - decision topics match on full value, not on a shared prefix
 ok - untagged legacy exact-title matches are clearly flagged
 ok - answered-open captain holds are surfaced without heuristic closure
+ok - session start prints answered-open decisions and stays quiet for pending ones
 ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
 
 $ bash tests/fm-fleet-snapshot-view.test.sh
