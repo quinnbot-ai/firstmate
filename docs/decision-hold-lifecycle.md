@@ -13,7 +13,7 @@ The `hold` subcommand maps an originating work id and stable decision key to `<o
 It requires a privacy-safe topic scoped to the repository and refuses a second hold with the same topic, including when the earlier hold came from another origin.
 The topic is an explicit semantic identity supplied by the agent, not a title-similarity heuristic.
 It cannot catch a paraphrased duplicate whose caller chooses a different topic, and it deliberately does not guess from report prose because a false match could suppress a real captain choice.
-The topic scan covers queued holds, the backlog Done section, and `done-archive.md`, and `resolve` carries the topic into the resolution record it writes, so a decision answered through the tool stays matchable after it is archived.
+The topic scan covers every kind `captain` record of that repository wherever it sits in the live backlog, including the In flight and Done sections, and in `done-archive.md`, and `resolve` carries the topic into the resolution record it writes, so a decision answered through the tool stays matchable after it is archived.
 Only a hold whose body never carried a topic, such as one written before this contract, is invisible to the topic scan.
 For that claim to hold, the scan reads the same backlog grammar as the canonical parser in `bin/fm-fleet-snapshot.sh`: a metadata key opens a group with `(` or continues one after `, ` and its value ends at the next `,` or `)`, a row may be bulleted with `-` or `*` and carry an emphasized `**id**` or a `[ ]`, `[x]`, or `[X]` marker, and a blank line inside a body continues that record rather than ending it.
 Requiring `(` or `, ` immediately before a key is also what keeps `hold-kind` from being read as `kind`.
@@ -21,7 +21,7 @@ The scan does not exempt the requested identity itself, because `tasks-axi show`
 For untagged legacy holds, it also flags only an exact repository-and-title match, which is a migration aid rather than semantic matching.
 That refusal names the manual `tasks-axi update` body edit that gives the legacy hold a topic, because the script mints identities from an origin and key and cannot address an arbitrary legacy id.
 It creates a kind `captain` backlog item when absent and invokes `tasks-axi hold <id> --reason <reason> --kind captain` on every retry.
-It rejects an identity collision, a changed title, and attempts to reopen an already resolved identity.
+It rejects an identity collision, a changed title, a changed topic on a retry whose hold already carries one, and attempts to reopen an already resolved identity.
 
 The `complete` subcommand unions the reviewed keys into `decision_keys=` and appends `decisions_reviewed=1` while originating task metadata is live.
 A post-teardown visual review can complete against the surviving report and durable holds without recreating volatile task metadata.
