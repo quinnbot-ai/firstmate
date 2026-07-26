@@ -15,11 +15,11 @@
 # GitHub reports a PR head that contains the current local work, or its content is
 # already present in the up-to-date default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
-# on a remote yet the change is fully in main. Local-only containment also accepts a
-# branch when git cherry proves every branch patch is already equivalent in the local
-# default branch, even though rebasing or cherry-picking gave the landed commits new
-# SHAs. That proof rejects merge commits, malformed or failed git cherry output, and
-# any '+' patch result.
+# on a remote yet the change is fully in main. Landing containment also accepts a
+# branch when git cherry proves every branch patch is already equivalent in the
+# authoritative default branch, even though rebasing or cherry-picking gave the
+# landed commits new SHAs. That proof rejects merge commits, malformed or failed
+# git cherry output, and any '+' patch result.
 # The PR itself is resolved from the task's recorded pr= when present, or - when
 # no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
 # where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
@@ -554,15 +554,10 @@ pr_is_merged() {
   unpushed_patches_are_in_pr_head "$head"
 }
 
-# Is the branch's content already present in the up-to-date default branch? Fetches
-# first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
-# the default branch does not already contain (e.g. its change landed via squash) the
-# merged tree equals the default branch's tree. This isolates branch-only changes, so
-# unrelated commits the default branch gained past the merge-base do not count as
-# "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
-# so the caller refuses rather than guesses.
-content_in_default() {
-  local name ref default_tree merged_tree
+# Resolve the authoritative default ref for landed-work checks. Remote-backed
+# projects refresh origin/<default>; repos without origin use their local default.
+landing_default_ref() {
+  local name ref
   name=$(default_branch) || return 1
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
     git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
@@ -572,6 +567,19 @@ content_in_default() {
   else
     return 1
   fi
+  printf '%s\n' "$ref"
+}
+
+# Is the branch's content already present in the up-to-date default branch? Fetches
+# first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
+# the default branch does not already contain (e.g. its change landed via squash) the
+# merged tree equals the default branch's tree. This isolates branch-only changes, so
+# unrelated commits the default branch gained past the merge-base do not count as
+# "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
+# so the caller tries the patch-equivalence proof before refusing.
+content_in_default() {
+  local ref default_tree merged_tree
+  ref=$(landing_default_ref) || return 1
   default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
   [ -n "$default_tree" ] || return 1
   merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
@@ -584,11 +592,11 @@ content_in_default() {
 # that are not present upstream. Any '+' line, malformed output, or git error is
 # ambiguous and fails closed.
 patches_are_in_default() {
-  local default=$1 cherry line merge_commits
-  [ -n "$default" ] || return 1
-  merge_commits=$(git -C "$WT" rev-list --min-parents=2 "$default..HEAD" 2>/dev/null) || return 1
+  local default=$1 branch=${2:-HEAD} cherry line merge_commits
+  [ -n "$default" ] && [ -n "$branch" ] || return 1
+  merge_commits=$(git -C "$WT" rev-list --min-parents=2 "$default..$branch" 2>/dev/null) || return 1
   [ -z "$merge_commits" ] || return 1
-  cherry=$(git -C "$WT" cherry "$default" HEAD 2>/dev/null) || return 1
+  cherry=$(git -C "$WT" cherry "$default" "$branch" 2>/dev/null) || return 1
   [ -n "$cherry" ] || return 0
   while IFS= read -r line; do
     case "$line" in
@@ -603,13 +611,15 @@ EOF
 
 # Has the worktree's committed work actually LANDED, though its commits are not
 # reachable from any remote-tracking branch? True when a merged PR proves the
-# current local work is contained in the PR head, OR the content is already in the
-# default branch (fallback, which also covers the no-PR and gh-error paths). False
-# only for genuinely unlanded work.
+# current local work is contained in the PR head, the content is already in the
+# default branch, OR every branch patch is equivalent to one in that default.
+# False only for genuinely unlanded work or an inconclusive proof.
 work_is_landed() {
-  local branch=$1
+  local branch=$1 default
   pr_is_merged "$branch" && return 0
-  content_in_default
+  content_in_default && return 0
+  default=$(landing_default_ref) || return 1
+  patches_are_in_default "$default" "$branch"
 }
 
 backlog_refresh_reminder() {
