@@ -105,7 +105,7 @@ Escalate instead of proceeding; this mirrors the same equivalence proof this tas
 The sequence below updates ref, index, and working tree together in one atomic `reset --hard`, after safely stashing anything uncommitted so nothing unlanded is ever discarded (prime directive #3).
 
 ```sh
-cd /Users/nick/ventures/agent-ops/firstmate \
+cd /path/to/primary/firstmate \
   || { echo "STOP: primary checkout not found - refusing to run anywhere else"; exit 1; }
 
 # 0. Re-run the pre-checks above against THIS checkout first.
