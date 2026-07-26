@@ -219,9 +219,9 @@ scan_hold_entries() {  # <backlog-or-archive-path>
   ' "$1"
 }
 
-# Consulted only once the identity itself is absent from the live backlog, so a
-# candidate that carries the new hold's own id can only be an archived record of
-# the same decision, and refusing it is always correct.
+# Both scanners are consulted only once the identity itself is absent from the
+# live backlog, so a candidate that carries the new hold's own id can only be an
+# archived record of the same decision, and refusing it is always correct.
 same_topic_hold() {  # <repo> <topic>
   local repo=$1 topic=$2 path cid _cstate ckind crepo _cheld _chold_kind cbody
   for path in "$DATA/backlog.md" "$DATA/done-archive.md"; do
@@ -240,11 +240,10 @@ EOF
   return 1
 }
 
-same_legacy_title_hold() {  # <self-id> <repo> <title>
-  local self=$1 repo=$2 title=$3 cid cstate ckind crepo cheld chold_kind cbody show
+same_legacy_title_hold() {  # <repo> <title>
+  local repo=$1 title=$2 cid cstate ckind crepo cheld chold_kind cbody show
   while IFS=$'\t' read -r cid cstate ckind crepo cheld chold_kind cbody; do
     [ -n "$cid" ] || continue
-    [ "$cid" != "$self" ] || continue
     [ "$cstate" = queued ] || continue
     [ "$cheld" = yes ] || continue
     [ "$ckind" = captain ] || continue
@@ -433,7 +432,7 @@ command_hold() {
         done) fail "captain decision topic $repo/$topic is already resolved as $duplicate; inspect and route that recorded answer instead of minting a duplicate" ;;
         *) fail "captain decision topic $repo/$topic is already tracked as $duplicate; do not mint a duplicate under $origin" ;;
       esac
-    elif duplicate=$(same_legacy_title_hold "$id" "$repo" "$title"); then
+    elif duplicate=$(same_legacy_title_hold "$repo" "$title"); then
       fail "possible duplicate captain decision $id shares the exact repository and title of untagged legacy hold $duplicate; if it is the same decision, route $duplicate after adding a 'Decision topic: $topic.' line to its body with tasks-axi update, and otherwise give this decision a title that distinguishes it"
     fi
     body=$(printf 'Origin: %s\nDecision key: %s\nDecision topic: %s.\nState: awaiting captain decision.' "$origin" "$key" "$topic")
