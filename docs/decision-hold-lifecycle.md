@@ -15,6 +15,7 @@ The topic is an explicit semantic identity supplied by the agent, not a title-si
 It cannot catch a paraphrased duplicate whose caller chooses a different topic, and it deliberately does not guess from report prose because a false match could suppress a real captain choice.
 The topic scan covers queued holds, the backlog Done section, and `done-archive.md`, and `resolve` carries the topic into the resolution record it writes, so a decision answered through the tool stays matchable after it is archived.
 Only a hold whose body never carried a topic, such as one written before this contract, is invisible to the topic scan.
+The scan does not exempt the requested identity itself, because `tasks-axi show` cannot see the archive and `tasks-axi add` re-adds an archived id as fresh queued work, so the original origin and key re-asking their own answered decision is the easiest way to resurrect it.
 For untagged legacy holds, it also flags only an exact repository-and-title match, which is a migration aid rather than semantic matching.
 That refusal names the manual `tasks-axi update` body edit that gives the legacy hold a topic, because the script mints identities from an origin and key and cannot address an arbitrary legacy id.
 It creates a kind `captain` backlog item when absent and invokes `tasks-axi hold <id> --reason <reason> --kind captain` on every retry.
@@ -67,7 +68,7 @@ A later regression covers tasks-axi's quoted multi-entry `blocked_by` output so 
 The current regressions also reject a duplicate repository-scoped topic from a second origin and surface an answered-but-open hold without closing it.
 They further refuse an already-answered topic from both the backlog Done section and `done-archive.md`, and confirm that a topic matches on its full value rather than on a prefix shared with a longer topic.
 One regression drives the whole session-start digest so the flagged decision is proven to reach the reader, while a genuinely pending choice keeps that section silent.
-Three further regressions hold the guards to their weakest cases: a captain hold with no repo group still reaches the audit, a pending question that labels itself `decision:` or `captain answer:` stays out of it, and a decision answered through `resolve` still blocks a re-ask once it has been archived.
+Three further regressions hold the guards to their weakest cases: a captain hold with no repo group still reaches the audit, a pending question that labels itself `decision:` or `captain answer:` stays out of it, and a decision answered through `resolve` still blocks a re-ask once it has been archived, from its own origin and key as well as from a second origin.
 
 The final verification commands and their exact summarized outputs follow.
 

@@ -219,12 +219,14 @@ scan_hold_entries() {  # <backlog-or-archive-path>
   ' "$1"
 }
 
-same_topic_hold() {  # <self-id> <repo> <topic>
-  local self=$1 repo=$2 topic=$3 path cid _cstate ckind crepo _cheld _chold_kind cbody
+# Consulted only once the identity itself is absent from the live backlog, so a
+# candidate that carries the new hold's own id can only be an archived record of
+# the same decision, and refusing it is always correct.
+same_topic_hold() {  # <repo> <topic>
+  local repo=$1 topic=$2 path cid _cstate ckind crepo _cheld _chold_kind cbody
   for path in "$DATA/backlog.md" "$DATA/done-archive.md"; do
     while IFS=$'\t' read -r cid _cstate ckind crepo _cheld _chold_kind cbody; do
       [ -n "$cid" ] || continue
-      [ "$cid" != "$self" ] || continue
       [ "$ckind" = captain ] || continue
       [ "$crepo" = "$repo" ] || continue
       if body_has_topic "$cbody" "$topic"; then
@@ -421,7 +423,7 @@ command_hold() {
     fi
     [ -n "$repo" ] || repo=firstmate
     validate_one_line repo "$repo"
-    if duplicate=$(same_topic_hold "$id" "$repo" "$topic"); then
+    if duplicate=$(same_topic_hold "$repo" "$topic"); then
       if show=$(task_show "$duplicate"); then
         state=$(show_field "$show" state)
       else

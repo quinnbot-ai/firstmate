@@ -667,6 +667,21 @@ test_resolved_hold_keeps_its_topic_for_the_duplicate_guard() {
     "the archived resolution record did not name the recorded answer"
   assert_no_grep "$second-decision-route-copy" "$home/data/backlog.md" \
     "the refused re-ask still minted a duplicate captain decision"
+
+  # tasks-axi re-adds an archived id as a fresh queued item rather than refusing it,
+  # and `show` cannot see the archive, so the original origin and key re-asking the
+  # same decision is the easiest way to resurrect an answer that was already given.
+  set +e
+  run_decisions "$home" hold "$first" route \
+    --title "Choose the sample route" --reason "captain route choice pending" \
+    --topic sample-route --repo sample > "$home/resolved-self.out" 2> "$home/resolved-self.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the original identity re-opened its own archived resolved decision"
+  assert_grep "already resolved as $hold" "$home/resolved-self.err" \
+    "the same-identity re-ask did not name the archived recorded answer"
+  ! grep -E "^- \[[ x]\] $hold -" "$home/data/backlog.md" >/dev/null \
+    || fail "the refused same-identity re-ask still recreated the resolved hold in the live backlog"
   pass "resolve carries the decision topic into the archived resolution record"
 }
 
