@@ -583,6 +583,93 @@ test_untagged_legacy_title_flags_possible_duplicate() {
   pass "untagged legacy exact-title matches are clearly flagged"
 }
 
+# A backlog entry without a `(repo: ...)` group emits an empty scan field, and tab
+# is IFS whitespace, so an unguarded emit would collapse the gap and shift every
+# later field left until the audit's own held/hold-kind guards silently dropped the
+# entry. The oldest untagged holds are exactly the ones with no repo group.
+test_repoless_captain_hold_still_reaches_the_audit() {
+  local home legacy entry audit
+  home=$(make_home repoless-audit)
+  legacy=sample-legacy-route
+  tasks_in "$home" add "$legacy" "Choose the sample route" --kind captain >/dev/null \
+    || fail "could not create a repo-less captain decision"
+  tasks_in "$home" hold "$legacy" --reason "captain chose route north" --kind captain >/dev/null \
+    || fail "could not activate the repo-less captain hold"
+  entry=$(grep -E "^- \[ \] $legacy -" "$home/data/backlog.md") \
+    || fail "fixture did not reach the live backlog"
+  case "$entry" in
+    *"(repo: "*) fail "fixture must leave the captain hold without a repo group" ;;
+  esac
+  audit=$(run_decisions "$home" audit) || fail "audit failed with a repo-less captain hold"
+  assert_contains "$audit" "answered-open: $legacy: captain chose route north" \
+    "a captain hold with no repo group was silently dropped by the audit"
+  pass "captain holds without a repo group still reach the answered-open audit"
+}
+
+# The audit section only keeps its urgency while it stays rare, so a pending
+# question that labels itself must not read as a recorded answer.
+test_pending_decision_label_stays_out_of_the_audit() {
+  local home origin audit
+  home=$(make_home pending-label-audit)
+  origin=sample-label-review
+  write_origin_meta "$home" "$origin"
+  run_decisions "$home" hold "$origin" route \
+    --title "Choose the sample route" --reason "decision: route north or route coastal" \
+    --topic sample-route --repo sample >/dev/null \
+    || fail "could not create the decision-labelled pending hold"
+  run_decisions "$home" hold "$origin" access \
+    --title "Choose the sample access level" --reason "captain answer: needed on sample access" \
+    --topic sample-access --repo sample >/dev/null \
+    || fail "could not create the answer-labelled pending hold"
+  audit=$(run_decisions "$home" audit) || fail "audit failed with labelled pending holds"
+  assert_contains "$audit" "answered-open: none" \
+    "a pending question labelled as a decision or an answer was flagged as answered"
+  pass "pending questions labelled decision or answer stay out of the audit"
+}
+
+# The duplicate guard is worth least against decisions the tool itself answered, so
+# the resolution record must carry the topic forward rather than erase it.
+test_resolved_hold_keeps_its_topic_for_the_duplicate_guard() {
+  local home first second hold show rc
+  home=$(make_home resolve-keeps-topic)
+  first=sample-first-review
+  second=sample-second-review
+  write_origin_meta "$home" "$first"
+  write_origin_meta "$home" "$second"
+
+  hold=$(run_decisions "$home" hold "$first" route \
+    --title "Choose the sample route" --reason "captain route choice pending" \
+    --topic sample-route --repo sample) \
+    || fail "could not create the topic-bound hold to resolve"
+  tasks_in "$home" add sample-route-work "Apply the selected sample route" \
+    --kind ship --repo sample --blocked-by "$hold" >/dev/null \
+    || fail "could not create the routed dependent work"
+  printf 'Use route north for the sample system.\n' > "$home/route-decision.txt"
+  run_decisions "$home" resolve "$first" route --decision-file "$home/route-decision.txt" \
+    --routed-to sample-route-work >/dev/null \
+    || fail "could not resolve the topic-bound hold"
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "Decision topic: sample-route." \
+    "the resolution record dropped the decision topic"
+
+  tasks_in "$home" "done" "$hold" --keep 0 >/dev/null 2>&1 || true
+  grep -E "^- \[x\] $hold -" "$home/data/done-archive.md" >/dev/null \
+    || fail "fixture must archive the resolved hold into done-archive.md"
+
+  set +e
+  run_decisions "$home" hold "$second" route-copy \
+    --title "Choose the sample route again" --reason "captain route choice pending" \
+    --topic sample-route --repo sample > "$home/resolved-dup.out" 2> "$home/resolved-dup.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a decision answered through resolve was re-asked after archival"
+  assert_grep "already resolved as $hold" "$home/resolved-dup.err" \
+    "the archived resolution record did not name the recorded answer"
+  assert_no_grep "$second-decision-route-copy" "$home/data/backlog.md" \
+    "the refused re-ask still minted a duplicate captain decision"
+  pass "resolve carries the decision topic into the archived resolution record"
+}
+
 test_answered_open_audit_surfaces_without_closing() {
   local home origin hold audit show
   home=$(make_home answered-open-audit)
@@ -740,6 +827,9 @@ test_cross_origin_topic_refuses_duplicate_decision
 test_resolved_topic_refuses_duplicate_decision
 test_topic_match_does_not_collide_on_prefix
 test_untagged_legacy_title_flags_possible_duplicate
+test_repoless_captain_hold_still_reaches_the_audit
+test_pending_decision_label_stays_out_of_the_audit
+test_resolved_hold_keeps_its_topic_for_the_duplicate_guard
 test_answered_open_audit_surfaces_without_closing
 test_session_start_surfaces_answered_open_decision
 test_resolve_matches_quoted_blocked_by_edges

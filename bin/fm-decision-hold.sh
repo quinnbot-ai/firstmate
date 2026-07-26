@@ -137,17 +137,35 @@ body_has_topic() {  # <body> <topic>
   return 1
 }
 
+# The resolution record replaces the whole hold body, so the topic must survive
+# into it or an answered decision would become invisible to the duplicate guard
+# once it leaves the live backlog.
+body_topic() {  # <body>
+  local rest=$1
+  case "$rest" in
+    *"Decision topic: "*) rest=${rest#*"Decision topic: "} ;;
+    *) return 1 ;;
+  esac
+  rest=${rest%%\\n*}
+  rest=${rest%\"}
+  rest=${rest%.}
+  [ -n "$rest" ] || return 1
+  printf '%s\n' "$rest"
+}
+
 # The backlog and the archive share one entry format that already carries every
 # field these scans filter on, so a single awk pass replaces one `tasks-axi show`
 # subprocess per entry. `tasks-axi show` reads only the live backlog anyway, so
 # this is also the only way to see archived decisions. It stays the authority for
 # the free-text title and hold reason, which are re-read for surviving candidates
-# alone. Fields are id, state, kind, repo, held, hold_kind, body.
+# alone. Fields are id, state, kind, repo, held, hold_kind, body. Tab is IFS
+# whitespace, so consecutive tabs would collapse and shift every later field left;
+# every field except the trailing body therefore emits `-` when it is absent.
 scan_hold_entries() {  # <backlog-or-archive-path>
   [ -f "$1" ] || return 0
   awk '
     function reset() {
-      id = ""; state = ""; kind = ""; repo = ""; held = "no"; hold_kind = "-"; body = ""
+      id = ""; state = "-"; kind = "-"; repo = "-"; held = "no"; hold_kind = "-"; body = ""
     }
     function last_group(line, key,   needle, pos, rest, endpos, out) {
       needle = "(" key ": "
@@ -182,8 +200,11 @@ scan_hold_entries() {  # <backlog-or-archive-path>
       split(line, fields, " ")
       id = fields[1]
       state = section
+      if (state == "") state = "-"
       kind = last_group($0, "kind")
+      if (kind == "") kind = "-"
       repo = last_group($0, "repo")
+      if (repo == "") repo = "-"
       hold_kind = last_group($0, "hold-kind")
       if (hold_kind == "") hold_kind = "-"
       held = (index($0, "(hold: ") > 0) ? "yes" : "no"
@@ -238,11 +259,15 @@ EOF
   return 1
 }
 
+# A marker must be the past-tense `answered` form and must carry a value, because
+# a pending question labels itself just as naturally as `decision: north or
+# coastal` or `captain answer: needed`, and a recurring false flag would train the
+# reader to skim the one section that exists to stop a re-ask.
 reason_records_answer() {  # <hold-reason>
   local reason
   reason=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
   printf '%s\n' "$reason" | grep -Eq \
-    '(^|[^[:alnum:]])(answer|answered|decision)[[:space:]]*[:=]|captain[[:space:]]+(answered|chose|selected|decided|approved|said)'
+    '(^|[^[:alnum:]])answered[[:space:]]*[:=][[:space:]]*[^[:space:]]|captain[[:space:]]+(answered|chose|selected|decided|approved|said)'
 }
 
 list_has_key() {  # <comma-list> <key>
@@ -407,7 +432,7 @@ command_hold() {
         *) fail "captain decision topic $repo/$topic is already tracked as $duplicate; do not mint a duplicate under $origin" ;;
       esac
     elif duplicate=$(same_legacy_title_hold "$id" "$repo" "$title"); then
-      fail "possible duplicate captain decision $id shares the exact repository and title of untagged legacy hold $duplicate; inspect that hold and assign its topic before creating another"
+      fail "possible duplicate captain decision $id shares the exact repository and title of untagged legacy hold $duplicate; if it is the same decision, route $duplicate after adding a 'Decision topic: $topic.' line to its body with tasks-axi update, and otherwise give this decision a title that distinguishes it"
     fi
     body=$(printf 'Origin: %s\nDecision key: %s\nDecision topic: %s.\nState: awaiting captain decision.' "$origin" "$key" "$topic")
     tasks_axi add "$id" "$title" --kind captain --repo "$repo" --body "$body" >/dev/null \
@@ -532,7 +557,7 @@ EOF
 }
 
 command_resolve() {
-  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body resolution_recorded=0
+  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body topic topic_line='' resolution_recorded=0
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -594,7 +619,9 @@ command_resolve() {
     esac
   done
 
-  body=$(printf 'Resolution recorded by fm-decision-hold.\nDecision digest: %s\nRouted identities: %s\n\nCaptain decision:\n%s\n\nRouted work:\n' "$decision_digest" "$routed_csv" "$decision")
+  topic=$(body_topic "$hold_body") || topic=''
+  [ -z "$topic" ] || topic_line="Decision topic: ${topic}."$'\n'
+  body=$(printf 'Resolution recorded by fm-decision-hold.\nDecision digest: %s\nRouted identities: %s\n%s\nCaptain decision:\n%s\n\nRouted work:\n' "$decision_digest" "$routed_csv" "$topic_line" "$decision")
   for dep in $routed; do
     body="${body}- ${dep}"$'\n'
   done

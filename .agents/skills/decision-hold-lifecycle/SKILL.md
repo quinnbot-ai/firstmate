@@ -19,7 +19,7 @@ The agent performs the semantic inventory because scripts must not infer decisio
 Give each distinct unresolved decision a stable privacy-safe key and a stable privacy-safe topic scoped to its repository, register it through `bin/fm-decision-hold.sh hold`, and use the same key and topic on retry so registration is idempotent while different decisions retain different durable identities.
 The topic names the underlying captain choice across origins, so an existing topic must be reused and routed rather than minted again by a later scout or review.
 Before asking a captain-held decision again, run `bin/fm-decision-hold.sh audit` and treat every `answered-open` result as an answer that needs durable routing through `resolve`, not as a new request for the captain.
-The audit only flags explicit answer markers such as `answer:` or a reason saying the captain chose or approved something, and topic matching only catches callers that use the same repository-scoped topic.
+The audit only flags an `answered:` marker that carries a value or a reason saying the captain chose or approved something, and topic matching only catches callers that use the same repository-scoped topic.
 Neither guard infers equivalence from report prose or paraphrased titles, because a false semantic match could suppress a real captain choice.
 After inventorying the whole report and review surface, run `bin/fm-decision-hold.sh complete` with every unresolved key, or with `--none` only when the reviewed surface contains no unresolved captain decision.
 A completed investigation and an ended visual review use this same owner and completion command; a visual tool, including Lavish, never owns a parallel completion policy.

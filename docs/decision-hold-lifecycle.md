@@ -13,8 +13,10 @@ The `hold` subcommand maps an originating work id and stable decision key to `<o
 It requires a privacy-safe topic scoped to the repository and refuses a second hold with the same topic, including when the earlier hold came from another origin.
 The topic is an explicit semantic identity supplied by the agent, not a title-similarity heuristic.
 It cannot catch a paraphrased duplicate whose caller chooses a different topic, and it deliberately does not guess from report prose because a false match could suppress a real captain choice.
-The topic scan covers queued holds, the backlog Done section, and `done-archive.md`, but `resolve` replaces the hold body with the resolution record, so a hold closed through `resolve` no longer carries a topic to match.
+The topic scan covers queued holds, the backlog Done section, and `done-archive.md`, and `resolve` carries the topic into the resolution record it writes, so a decision answered through the tool stays matchable after it is archived.
+Only a hold whose body never carried a topic, such as one written before this contract, is invisible to the topic scan.
 For untagged legacy holds, it also flags only an exact repository-and-title match, which is a migration aid rather than semantic matching.
+That refusal names the manual `tasks-axi update` body edit that gives the legacy hold a topic, because the script mints identities from an origin and key and cannot address an arbitrary legacy id.
 It creates a kind `captain` backlog item when absent and invokes `tasks-axi hold <id> --reason <reason> --kind captain` on every retry.
 It rejects an identity collision, a changed title, and attempts to reopen an already resolved identity.
 
@@ -35,7 +37,8 @@ A failed intermediate step leaves the hold open.
 
 The read-only `audit` subcommand reports active captain holds whose own hold reason has an explicit recorded-answer signal.
 It never closes a hold because only `resolve` can prove the durable decision record and routed work exist.
-It recognizes `answer:` or `decision:` markers and reasons that say the captain answered, chose, selected, decided, approved, or said something.
+It recognizes an `answered:` marker that carries a value and reasons that say the captain answered, chose, selected, decided, approved, or said something.
+A bare `answer:` or `decision:` label is deliberately not a signal, because a pending question labels itself the same way and a recurring false flag would train the reader to skim the section.
 It cannot recognize unmarked answers or every natural-language paraphrase, so agents must still record answers with `resolve`.
 Session start runs the audit inside its fleet-state digest and prints a section only for flagged items, or for an audit that failed, so an answered-but-open decision cannot silently blend into ordinary pending choices.
 
@@ -55,6 +58,7 @@ Verification date: 2026-07-14.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
 Cross-origin topic and answered-open audit verification date: 2026-07-25.
+Repo-less scan, labelled-pending audit, and resolved-topic carry verification date: 2026-07-25.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
@@ -63,6 +67,7 @@ A later regression covers tasks-axi's quoted multi-entry `blocked_by` output so 
 The current regressions also reject a duplicate repository-scoped topic from a second origin and surface an answered-but-open hold without closing it.
 They further refuse an already-answered topic from both the backlog Done section and `done-archive.md`, and confirm that a topic matches on its full value rather than on a prefix shared with a longer topic.
 One regression drives the whole session-start digest so the flagged decision is proven to reach the reader, while a genuinely pending choice keeps that section silent.
+Three further regressions hold the guards to their weakest cases: a captain hold with no repo group still reaches the audit, a pending question that labels itself `decision:` or `captain answer:` stays out of it, and a decision answered through `resolve` still blocks a re-ask once it has been archived.
 
 The final verification commands and their exact summarized outputs follow.
 
@@ -80,6 +85,9 @@ ok - repository-scoped decision topics reject cross-origin duplicates
 ok - answered decision topics are refused from both the Done section and the archive
 ok - decision topics match on full value, not on a shared prefix
 ok - untagged legacy exact-title matches are clearly flagged
+ok - captain holds without a repo group still reach the answered-open audit
+ok - pending questions labelled decision or answer stay out of the audit
+ok - resolve carries the decision topic into the archived resolution record
 ok - answered-open captain holds are surfaced without heuristic closure
 ok - session start prints answered-open decisions and stays quiet for pending ones
 ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
