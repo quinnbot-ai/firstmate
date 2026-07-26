@@ -332,22 +332,45 @@ _collapse_newlines() {  # <text>
 # field for "self" is informational (logged); for "escalate" it is the pre-read
 # summary firstmate would otherwise have to re-read.
 
+# Render the digest entry for ONE status file the daemon is about to escalate.
+# A commit-only no-mistakes done is nonterminal work, so its entry carries the
+# delivery framing (fm-classify-lib owns the wording) instead of reading to the
+# operator as a completion. Every file-list escalation path - the per-wake signal
+# and the heartbeat catch-all scan - renders through here so the digest cannot
+# frame the same event two different ways.
+# NOT a pure read: the delivery predicate may cost a bounded no-mistakes call for
+# a `done:` verb, so callers must first establish that this entry is actually
+# being escalated (its seen marker does not already match).
+_distill_status_event() {  # <status-file> <last-line>
+  local f=$1 last=$2
+  if status_done_needs_nomistakes_delivery "$f" "$last"; then
+    printf '%s: %s: %s' "$(basename "$f")" "$FM_CLASSIFY_DELIVERY_PENDING_DETAIL" "$last"
+    return
+  fi
+  printf '%s: %s' "$(basename "$f")" "$last"
+}
+
 classify_signal() {  # <reason-after-colon> <state>
-  local reason=$1 state=$2 f last distilled="" rel="" all_seen=1 task seen
+  local reason=$1 state=$2 f last distilled="" rel="" all_seen=1 task seen entry
   for f in $reason; do
     [ -e "$f" ] || continue
     last=$(last_status_line "$f")
     [ -n "$last" ] || continue
-    distilled="${distilled}$(basename "$f"): ${last} | "
-    status_is_captain_relevant "$last" || continue
-    rel=1
-    # Dedupe against the catch-all scan: if this status was already escalated
-    # (seen marker matches), skip escalating again. The seen marker is the
-    # single source of truth shared between the per-wake signal path and the
-    # heartbeat scan. all_seen stays 1 only if EVERY relevant file was seen.
-    task=$(basename "$f"); task="${task%.status}"
-    seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
-    [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] || all_seen=0
+    entry="$(basename "$f"): ${last}"
+    if status_is_captain_relevant "$last"; then
+      rel=1
+      # Dedupe against the catch-all scan: if this status was already escalated
+      # (seen marker matches), skip escalating again. The seen marker is the
+      # single source of truth shared between the per-wake signal path and the
+      # heartbeat scan. all_seen stays 1 only if EVERY relevant file was seen.
+      task=$(basename "$f"); task="${task%.status}"
+      seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
+      if [ "$(cat "$seen" 2>/dev/null || true)" != "$last" ]; then
+        all_seen=0
+        entry=$(_distill_status_event "$f" "$last")
+      fi
+    fi
+    distilled="${distilled}${entry} | "
   done
   # strip a trailing " | " separator so the distilled line is clean
   distilled="${distilled% | }"
@@ -1068,7 +1091,7 @@ housekeeping() {  # <state>
       [ -n "$f" ] || continue
       seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
       [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] && continue
-      escalate_add "$state" "$(basename "$f"): $last (catch-all scan)"
+      escalate_add "$state" "$(_distill_status_event "$f" "$last") (catch-all scan)"
       mark_status_seen "$state" "$task" "$last"
     done < <(scan_captain_relevant_statuses "$state")
   fi
