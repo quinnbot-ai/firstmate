@@ -334,6 +334,7 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 
 `bin/fm-unit-economics-ledger.mjs` reads this optional gitignored configuration and writes its generated JSON and Markdown ledgers under the active home's ignored `data/unit-economics-ledger/` directory.
 Each financial lane names two or more distinct trusted local read-only helper command arrays under `sources`, while `fleet_operations.cost_sources` optionally supplies the same corroboration for attributable crew/session cost.
+The committed `config/unit-economics-ledger.proposed.json` is an installable proposal that pairs the two independent read-only modes of `bin/fm-unit-economics-kdp-source.mjs` for the `kdp` lane; installing it as the private `config/unit-economics-ledger.json` is a deliberate captain step, never automatic.
 The script header owns the source schema, freshness, corroboration, output, and status contract so this setup reference does not duplicate it.
 
 ## Toolchain
