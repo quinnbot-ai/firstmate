@@ -170,3 +170,17 @@ $ shellcheck -x bin/fm-decision-hold.sh tests/fm-decision-hold-lifecycle.test.sh
 
 The current tree therefore collects 103 scripts, two more than the 101 the earlier walk collected, which is why each dated block is read as evidence from its own run rather than as the standing inventory.
 The complete `--all` walk was not repeated here, so the only full-suite result on record remains the contended 101-script run above.
+
+## Suite-evidence standing, 2026-07-26
+
+This entry states where the suite evidence stands for this change. It records no new run and replaces no earlier block; every count above stays as its own dated run reported it.
+
+The current inventory measurement is 103 `tests/*.test.sh` scripts, measured on this tree with `bin/fm-test-run.sh --check-coverage`. That is an inventory measurement, not a pass result: `--check-coverage` only derives the total from the tree and checks that the lanes still partition it, and it executes no test.
+
+The most recent full-suite result on record is the earlier 101-script walk, which reported one failure: `tests/fm-backend-herdr-presentation-e2e.test.sh` exited 1 on `concurrent primary recovery`, unable to acquire the single real-Herdr session lock.
+
+That failure is diagnosed as active-fleet environment contention rather than a code defect. The captain attests, as the owner of the operational evidence, that three serial standalone real-Herdr presentation runs passed while the fleet remained active, including the concurrent cross-home recovery case that failed inside the walk. The `real-herdr-gated` family serializes on one host lock, so a competing real-Herdr run is sufficient on its own to produce that exact refusal without any code being wrong.
+
+A single uninterrupted full-suite pass was deliberately not re-verified inside this change, because that wide-fleet walk exceeds the fix-round budget available on a machine that is simultaneously running a live fleet.
+
+No passing full-suite result is claimed for this tree. The only full-suite result on record remains the contended 101-script run recorded above, and the authoritative pass or fail verdict for the 103-script tree belongs to this pipeline's dedicated test step.
