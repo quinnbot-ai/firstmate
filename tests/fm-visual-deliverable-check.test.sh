@@ -109,6 +109,58 @@ test_audio_auto_height_reset_fails() {
   pass "visual deliverable check enforces the audio reset rule"
 }
 
+test_audio_type_selector_variants_fail() {
+  local source="$TMP_ROOT/compound-reset.css" result="$TMP_ROOT/compound-reset.result" out rc
+  printf 'main audio.player[controls]{height:auto}\n' > "$source"
+  write_result "$result" '[{"label":"audio#bed","width":318,"height":54,"clientRects":1,"hiddenBy":"","interactive":false,"disabled":false,"pointerEvents":"auto"}]'
+  out=$(run_check "$result" "$source" 2>&1); rc=$?
+  expect_code 1 "$rc" "a compound audio type selector with height:auto must fail"
+  assert_contains "$out" 'gives audio height:auto' "a compound audio type selector escaped the reset rule"
+  pass "visual deliverable check enforces the audio reset rule in compound selectors"
+}
+
+test_audio_named_wrapper_selectors_pass() {
+  local source="$TMP_ROOT/wrapper.css" result="$TMP_ROOT/wrapper.result" out rc
+  printf '#audio{height:auto}\n.audio{height:auto}\n[data-role="audio"]{height:auto}\n.audio-player>div{height:auto}\n' > "$source"
+  write_result "$result" '[{"label":"audio#bed","width":318,"height":54,"clientRects":1,"hiddenBy":"","interactive":false,"disabled":false,"pointerEvents":"auto"}]'
+  out=$(run_check "$result" "$source" 2>&1); rc=$?
+  expect_code 0 "$rc" "wrappers merely named audio must not trip the reset rule"
+  assert_not_contains "$out" 'gives audio height:auto' "an id, class, or attribute value named audio was reported as an audio reset"
+  pass "visual deliverable check ignores wrappers merely named audio"
+}
+
+test_source_scan_execution_failure_is_a_measurement_failure() {
+  local source="$TMP_ROOT/scan-fail.css" result="$TMP_ROOT/scan-fail.result" fakebin out rc
+  printf 'audio{width:318px}\n' > "$source"
+  write_result "$result" '[{"label":"audio#bed","width":318,"height":54,"clientRects":1,"hiddenBy":"","interactive":false,"disabled":false,"pointerEvents":"auto"}]'
+  fakebin=$(fm_fakebin "$TMP_ROOT/scan-fail-bin")
+  printf '#!/usr/bin/env bash\nexit 3\n' > "$fakebin/node"
+  chmod +x "$fakebin/node"
+  out=$(PATH="$fakebin:$PATH" run_check "$result" "$source" 2>&1); rc=$?
+  expect_code 2 "$rc" "a source scan that could not run must not read as a deliverable failure"
+  assert_contains "$out" 'could not scan the --source files for the audio reset rule' "the source scan failure was not typed"
+  assert_not_contains "$out" 'ok - rendered media' "a failed source scan passed"
+  pass "visual deliverable check reports a failed source scan as a measurement failure"
+}
+
+test_unreadable_source_is_a_measurement_failure() {
+  local source="$TMP_ROOT/unreadable.css" result="$TMP_ROOT/unreadable.result" out rc
+  printf 'audio{width:318px}\n' > "$source"
+  write_result "$result" '[{"label":"audio#bed","width":318,"height":54,"clientRects":1,"hiddenBy":"","interactive":false,"disabled":false,"pointerEvents":"auto"}]'
+  chmod 000 "$source"
+  if [ -r "$source" ]; then
+    chmod 644 "$source"
+    pass "visual deliverable check unreadable-source case skipped: this user can read a mode 000 file"
+    return
+  fi
+  out=$(run_check "$result" "$source" 2>&1); rc=$?
+  chmod 644 "$source"
+  expect_code 2 "$rc" "an unreadable source must not read as a deliverable failure"
+  assert_contains "$out" "could not read source $source" "the unreadable source was not named"
+  assert_not_contains "$out" 'ok - rendered media' "an unreadable source passed"
+  pass "visual deliverable check reports an unreadable source as a measurement failure"
+}
+
 test_usable_elements_pass() {
   local source="$TMP_ROOT/usable.html" result="$TMP_ROOT/usable.result" out
   printf '<style>audio { width: 318px; min-height: 54px; }</style>\n' > "$source"
@@ -224,6 +276,10 @@ test_help_states_file_url_contract() {
 test_zero_height_audio_fails
 test_hidden_interactive_control_fails
 test_audio_auto_height_reset_fails
+test_audio_type_selector_variants_fail
+test_audio_named_wrapper_selectors_pass
+test_source_scan_execution_failure_is_a_measurement_failure
+test_unreadable_source_is_a_measurement_failure
 test_usable_elements_pass
 test_zero_matched_elements_fails
 test_marked_hidden_control_is_exempt
