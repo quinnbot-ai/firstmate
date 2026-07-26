@@ -253,10 +253,22 @@ print_status_tail() {
   tail -n "$STATUS_TAIL" "$status"
 }
 
+print_ops_inbox_suppression() {
+  local record when reason
+  record=$(head -n 1 "$STATE/.ops-inbox-suppressed" 2>/dev/null || true)
+  [ -n "$record" ] || return 0
+  when=${record%%$'\t'*}
+  reason=${record#*$'\t'}
+  case "$when" in ''|*[!0-9]*) when=unknown ;; esac
+  printf 'last watcher suppression: %s (epoch %s); the events behind it are still listed below\n' \
+    "$(printf '%.200s' "$reason")" "$when"
+}
+
 print_ops_inbox() {
   local dir record path output rc shown event_count overflow
   local records
   subsection "OPS INBOX"
+  print_ops_inbox_suppression
   dir=$(fm_ops_inbox_home_dir "$FM_HOME")
   if [ ! -d "$dir" ]; then
     printf 'home ops-inbox: ABSENT (%s)\n' "$dir"

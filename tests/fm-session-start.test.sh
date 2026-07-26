@@ -626,6 +626,16 @@ SH
   assert_not_contains "$out" "critical-new" "configured external inbox output was not bounded"
   assert_contains "$out" "(truncated 1 additional output line(s))" "external inbox truncation was not disclosed"
 
+  # A watcher suppression is only observable if the digest reports it, so the
+  # retained record must reach the operator alongside the events behind it.
+  printf '%s\t%s\n' 1753500000 'duplicate genuine failure (external listing critical, criticals 3, escalation level 5)' \
+    > "$home/state/.ops-inbox-suppressed"
+  out=$(FM_SESSION_START_OPS_INBOX_LIMIT=2 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "last watcher suppression: duplicate genuine failure (external listing critical, criticals 3, escalation level 5) (epoch 1753500000)" \
+    "OPS INBOX digest did not surface the retained watcher suppression record"
+  assert_contains "$out" "$home/ops-inbox/hermes-runtime/new.event" "suppression record replaced the retained event listing"
+  rm -f "$home/state/.ops-inbox-suppressed"
+
   stat_log="$home/stat.log"
   real_stat=$(command -v stat)
 cat > "$fakebin/stat" <<SH

@@ -763,8 +763,11 @@ heartbeat_scan_finds_actionable() {
 # then at the existing heartbeat cadence otherwise.  A changed fingerprint is
 # only marked seen after its durable wake record is appended, preventing both a
 # missed event on interruption and a hot loop on an unchanged inbox. Routine
-# and duplicate changes update the same baseline without waking and leave a
-# current suppression record for the next session-start inspection.
+# and duplicate changes record why they were suppressed before they update the
+# same baseline, so the session-start OPS INBOX digest can report the current
+# suppression and no observed change is lost on interruption. A configured
+# critical count collapses while it stays at or below the escalation level of
+# the last baseline, and wakes again the first time it rises above it.
 ops_inbox_tasks_in_flight() {
   local meta kind
   for meta in "$STATE"/*.meta; do
@@ -777,14 +780,12 @@ ops_inbox_tasks_in_flight() {
 }
 
 ops_inbox_changed() {
-  local fingerprint previous actionable previous_action config
+  local fingerprint previous previous_action config
   config=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
-  fingerprint=$(fm_ops_inbox_fingerprint "$FM_HOME" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}")
+  fingerprint=$(fm_ops_inbox_fingerprint "$FM_HOME" "$config")
   previous=$(cat "$STATE/.hash-ops-inbox" 2>/dev/null || true)
-  actionable=$(fm_ops_inbox_actionable_fingerprint "$FM_HOME" "$config")
-  previous_action=$(cat "$STATE/.hash-ops-inbox-actionable" 2>/dev/null || true)
   FM_OPS_INBOX_FINGERPRINT=$fingerprint
-  FM_OPS_INBOX_ACTIONABLE_FINGERPRINT=$actionable
+  FM_OPS_INBOX_ACTIONABLE_FINGERPRINT=''
   if [ -z "$previous" ]; then
     # A watcher first armed against a routine or empty inbox establishes its
     # baseline silently. Existing genuine failures or a broken configured
@@ -796,24 +797,53 @@ ops_inbox_changed() {
     return 0
   fi
   [ "$fingerprint" != "$previous" ] || return 1
+  capture_ops_inbox_actionable
   if ! fm_ops_inbox_has_genuine_failures "$FM_HOME" "$config"; then
-    FM_OPS_INBOX_SUPPRESSION='routine event'
-    mark_ops_inbox_seen
+    FM_OPS_INBOX_SUPPRESSION="routine event$(ops_inbox_external_note)"
     record_ops_inbox_suppression
+    mark_ops_inbox_seen
     return 1
   fi
-  if [ "$actionable" = "$previous_action" ]; then
-    FM_OPS_INBOX_SUPPRESSION='duplicate genuine failure'
-    mark_ops_inbox_seen
+  previous_action=$(cat "$STATE/.hash-ops-inbox-actionable" 2>/dev/null || true)
+  if [ "$FM_OPS_INBOX_ACTIONABLE_FINGERPRINT" = "$previous_action" ]; then
+    FM_OPS_INBOX_SUPPRESSION="duplicate genuine failure$(ops_inbox_external_note)"
     record_ops_inbox_suppression
+    mark_ops_inbox_seen
     return 1
   fi
   return 0
 }
 
+# The actionable fingerprint costs a second bounded run of the operator's list
+# command plus a per-event sample of the retained inbox, so it is computed only
+# once a cycle has already proven the cheap fingerprint changed, or a baseline
+# is about to be persisted.  The escalation watermark it is measured against is
+# the level persisted with the last baseline.
+capture_ops_inbox_actionable() {
+  local record watermark
+  [ -n "${FM_OPS_INBOX_ACTIONABLE_FINGERPRINT:-}" ] && return 0
+  watermark=$(cat "$STATE/.ops-inbox-critical-level" 2>/dev/null || true)
+  record=$(fm_ops_inbox_actionable_fingerprint "$FM_HOME" \
+    "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "${watermark:-0}")
+  FM_OPS_INBOX_EXTERNAL_CLASS=${record%%$'\t'*}
+  record=${record#*$'\t'}
+  FM_OPS_INBOX_CRITICAL_COUNT=${record%%$'\t'*}
+  record=${record#*$'\t'}
+  FM_OPS_INBOX_CRITICAL_LEVEL=${record%%$'\t'*}
+  FM_OPS_INBOX_ACTIONABLE_FINGERPRINT=${record#*$'\t'}
+}
+
+ops_inbox_external_note() {
+  [ "${FM_OPS_INBOX_EXTERNAL_CLASS:-none}" = none ] && return 0
+  printf ' (external listing %s, criticals %s, escalation level %s)' \
+    "$FM_OPS_INBOX_EXTERNAL_CLASS" "$FM_OPS_INBOX_CRITICAL_COUNT" "$FM_OPS_INBOX_CRITICAL_LEVEL"
+}
+
 mark_ops_inbox_seen() {
+  capture_ops_inbox_actionable
   printf '%s\n' "$FM_OPS_INBOX_FINGERPRINT" > "$STATE/.hash-ops-inbox"
   printf '%s\n' "$FM_OPS_INBOX_ACTIONABLE_FINGERPRINT" > "$STATE/.hash-ops-inbox-actionable"
+  printf '%s\n' "$FM_OPS_INBOX_CRITICAL_LEVEL" > "$STATE/.ops-inbox-critical-level"
 }
 
 record_ops_inbox_suppression() {

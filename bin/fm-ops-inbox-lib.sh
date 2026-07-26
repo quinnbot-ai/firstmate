@@ -244,65 +244,115 @@ fm_ops_inbox_event_is_routine() {
 fm_ops_inbox_event_signal() {
   local path=$1 sample
   fm_ops_inbox_event_is_routine "$path" && return 1
-  sample=$(dd if="$path" bs="$FM_OPS_INBOX_EVENT_SAMPLE_BYTES" count=1 2>/dev/null) || return 1
+  if ! sample=$(dd if="$path" bs="$FM_OPS_INBOX_EVENT_SAMPLE_BYTES" count=1 2>/dev/null); then
+    printf 'home:unreadable:%s\n' "$path"
+    return 0
+  fi
   printf 'home:'
   printf '%s' "$sample" | fm_ops_inbox_hash
+}
+
+# fm_ops_inbox_external_state <config-dir>
+# Prints one `<class>\t<count>\t<identity>` record for the configured list
+# command and returns 1 when no command is configured.  The class is `ok` for a
+# trustworthy zero count, `critical` for a trustworthy nonzero count, and
+# `invalid` when the listing itself cannot be believed - a malformed listing,
+# or a firstmate-internal timeout (124) or output-cap kill (125) rather than
+# the command's own routine nonzero convention.  Every reader of the
+# `unacked_criticals: <n>` contract goes through here so the classifiers cannot
+# drift.  The identity field is empty for the counted classes because their
+# fingerprint identity depends on the caller's escalation watermark.
+fm_ops_inbox_external_state() {
+  local config=$1 output rc count
+  fm_ops_inbox_external_command "$config" >/dev/null || return 1
+  output=$(fm_ops_inbox_external_output "$config")
+  rc=$?
+  case "$rc" in
+    124|125) printf 'invalid\t0\texternal:unreachable:%s\n' "$rc"; return 0 ;;
+  esac
+  count=$(printf '%s\n' "$output" | awk '/^unacked_criticals:[[:space:]]*[0-9]+$/ { sub(/^unacked_criticals:[[:space:]]*/, ""); print; exit }')
+  case "$count" in
+    ''|*[!0-9]*) printf 'invalid\t0\texternal:invalid:%s:%s\n' "$rc" "$(printf '%s' "$output" | fm_ops_inbox_hash)" ;;
+    0) printf 'ok\t0\t\n' ;;
+    *) printf 'critical\t%s\t\n' "$count" ;;
+  esac
+}
+
+# fm_ops_inbox_critical_level <count> <watermark>
+# Prints the escalation level of a critical count against the watermark the
+# caller persisted.  A zero count closes the escalation window and clears the
+# watermark; inside an open window only a count above the watermark raises the
+# level.  A burst or a falling count therefore keeps one identity, while every
+# rise still produces a new one.
+fm_ops_inbox_critical_level() {
+  local count=$1 watermark=$2
+  case "$count" in ''|*[!0-9]*) count=0 ;; esac
+  case "$watermark" in ''|*[!0-9]*) watermark=0 ;; esac
+  if [ "$count" -eq 0 ] || [ "$count" -gt "$watermark" ]; then
+    printf '%s\n' "$count"
+  else
+    printf '%s\n' "$watermark"
+  fi
 }
 
 # fm_ops_inbox_has_genuine_failures <home> <config-dir>
 # Routine home events declare `classification: routine` or `disposition:
 # routine` within their first sample. The configured list-command contract
 # starts with `unacked_criticals: <n>`; its status is not a failure signal when
-# the count is zero. A malformed list result still surfaces because the local
-# failure-reporting seam is no longer trustworthy.
+# the count is zero. A malformed or unreachable list result still surfaces
+# because the local failure-reporting seam is no longer trustworthy.
 fm_ops_inbox_has_genuine_failures() {
-  local home=$1 config=$2 record path output rc count
+  local home=$1 config=$2 record path state
   while IFS= read -r record; do
     [ "$record" = '__FM_OPS_INBOX_OVERFLOW__' ] && return 0
     path=${record#*$'\t'}
     fm_ops_inbox_event_is_routine "$path" || return 0
   done < <(fm_ops_inbox_home_records "$home" "$FM_OPS_INBOX_MARKER_SCAN_LIMIT")
 
-  fm_ops_inbox_external_command "$config" >/dev/null || return 1
-  output=$(fm_ops_inbox_external_output "$config")
-  rc=$?
-  count=$(printf '%s\n' "$output" | awk '/^unacked_criticals:[[:space:]]*[0-9]+$/ { sub(/^unacked_criticals:[[:space:]]*/, ""); print; exit }')
-  case "$count" in
-    ''|*[!0-9]*) return 0 ;;
-    0) return 1 ;;
-    *) return 0 ;;
-  esac
+  state=$(fm_ops_inbox_external_state "$config") || return 1
+  [ "${state%%$'\t'*}" = ok ] && return 1
+  return 0
 }
 
-# fm_ops_inbox_actionable_fingerprint <home> <config-dir>
-# Hashes only genuine failure identities, so copied event records with the same
-# body collapse to one wake until the inbox clears. The external listing has a
-# single identity while its critical count is nonzero, which coalesces a burst
-# of list updates into the first actionable wake.
+# fm_ops_inbox_actionable_fingerprint <home> <config-dir> [critical-watermark]
+# Prints `<external-class>\t<critical-count>\t<critical-level>\t<hash>` from a
+# single external-command invocation, so a caller can both compare the hash and
+# report the count movement behind it without running the command twice.  The
+# hash covers only genuine failure identities, so copied event records with the
+# same body collapse to one wake until the inbox clears, and an event that
+# cannot be read keeps a stable path identity instead of vanishing from the
+# hash.  The external listing contributes its escalation level rather than its
+# raw count: a burst or a falling count stays one identity, while a count above
+# the watermark raises the level and wakes once for that escalation.
 fm_ops_inbox_actionable_fingerprint() {
-  local home=$1 config=$2 record path signal command output rc count
-  {
-    while IFS= read -r record; do
-      if [ "$record" = '__FM_OPS_INBOX_OVERFLOW__' ]; then
-        printf '%s\n' 'home:overflow'
-        continue
-      fi
-      path=${record#*$'\t'}
-      signal=$(fm_ops_inbox_event_signal "$path") || continue
-      printf '%s\n' "$signal"
-    done < <(fm_ops_inbox_home_records "$home" "$FM_OPS_INBOX_MARKER_SCAN_LIMIT")
-
-    if command=$(fm_ops_inbox_external_command "$config"); then
-      output=$(fm_ops_inbox_external_output "$config")
-      rc=$?
-      count=$(printf '%s\n' "$output" | awk '/^unacked_criticals:[[:space:]]*[0-9]+$/ { sub(/^unacked_criticals:[[:space:]]*/, ""); print; exit }')
-      case "$count" in
-        ''|*[!0-9]*) printf 'external:invalid:%s:' "$rc"; printf '%s' "$output" | fm_ops_inbox_hash ;;
-        0) ;;
-        *) printf '%s\n' 'external:critical' ;;
-      esac
+  local home=$1 config=$2 watermark=${3:-0}
+  local record path signal state class='none' count=0 identity='' level=0 hash
+  if state=$(fm_ops_inbox_external_state "$config"); then
+    class=${state%%$'\t'*}
+    count=${state#*$'\t'}
+    count=${count%%$'\t'*}
+    identity=${state##*$'\t'}
+    level=$(fm_ops_inbox_critical_level "$count" "$watermark")
+    if [ "$class" = critical ]; then
+      identity="external:critical:$level"
     fi
-  } | LC_ALL=C sort -u | fm_ops_inbox_hash
+  fi
+  hash=$(
+    {
+      while IFS= read -r record; do
+        if [ "$record" = '__FM_OPS_INBOX_OVERFLOW__' ]; then
+          printf '%s\n' 'home:overflow'
+          continue
+        fi
+        path=${record#*$'\t'}
+        signal=$(fm_ops_inbox_event_signal "$path") || continue
+        printf '%s\n' "$signal"
+      done < <(fm_ops_inbox_home_records "$home" "$FM_OPS_INBOX_MARKER_SCAN_LIMIT")
+
+      [ -n "$identity" ] && printf '%s\n' "$identity"
+    } | LC_ALL=C sort -u | fm_ops_inbox_hash
+  )
+  printf '%s\t%s\t%s\t%s\n' "$class" "$count" "$level" "$hash"
 }
 
 # fm_ops_inbox_fingerprint <home> <config-dir>

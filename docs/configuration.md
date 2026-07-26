@@ -32,13 +32,15 @@ Write each event once or atomically replace it so the watcher can detect the eve
 Deeper paths are outside the monitored layout.
 An event that represents an expected non-failure outcome must declare `classification: routine` or `disposition: routine` within its first 4096 bytes.
 All other retained home events fail closed as genuine failures, while identical event bodies collapse to one wake until the inbox clears.
+An event whose sample cannot be read is a genuine failure under its own path identity, so an unreadable event is never mistaken for a repeat of an event already surfaced.
 `bin/fm-session-start.sh` reports a bounded count and newest full paths from that directory without changing any event or acknowledgement state.
 Set the local, gitignored `config/ops-inbox-cmd` to one list-only shell command when this machine also has a durable machine-level inbox.
 The first non-empty, non-comment line is the command, and firstmate runs it through `bash -c` with combined stdout and stderr.
-The command must be trusted local code and print only its current unhandled critical listing, starting with `unacked_criticals: <count>`; a zero count suppresses a routine nonzero exit, while a malformed listing still wakes because reporting health is uncertain.
+The command must be trusted local code and print only its current unhandled critical listing, starting with `unacked_criticals: <count>`; a zero count suppresses a routine nonzero exit, while a malformed listing, a timeout, or an output-cap kill still wakes because reporting health is uncertain.
 The command is intentionally operator-owned and generic, so firstmate does not encode a machine-specific inbox path or acknowledgement implementation.
 The watcher fingerprints both sources, wakes immediately for a new genuine failure while a regular task is in flight, and checks the same fingerprint on its existing heartbeat cadence otherwise.
-Routine and duplicate changes remain in the inbox digest and update `state/.ops-inbox-suppressed` with the current suppression reason, so suppression is inspectable rather than silent.
+A nonzero critical count opens an escalation window recorded in `state/.ops-inbox-critical-level`: further counts at or below that level collapse into the wake already delivered, a count above it wakes once more for that escalation, and a zero count closes the window so the next nonzero count wakes again.
+Routine and duplicate changes remain in the inbox digest and record the suppression reason, the observed critical count, and the escalation level in `state/.ops-inbox-suppressed` before advancing the baseline; `bin/fm-session-start.sh` reports that record at the top of the OPS INBOX digest, so no observed movement is silently lost.
 `bin/fm-ops-inbox-lib.sh`'s header owns the discovery and fingerprint mechanics; the tunables below bound them.
 `FM_SESSION_START_OPS_INBOX_LIMIT` bounds both the home-event paths and configured-command output lines in the digest, defaulting to 5.
 `FM_SESSION_START_OPS_INBOX_SCAN_LIMIT` bounds retained home-event records inspected at startup, defaulting to 256, and reports an explicit sampled overflow when reached.

@@ -1696,6 +1696,58 @@ test_ops_inbox_duplicate_burst_collapses_to_one_wake() {
   pass "a duplicate operations-inbox burst collapses to one wake and retains evidence"
 }
 
+# The configured critical count must not wake on every movement, but a count
+# rising above the level already surfaced is a new escalation, not a repeat of
+# the burst that opened the window.
+test_ops_inbox_rising_critical_count_wakes_once_per_escalation() {
+  local dir state fakebin out home command counts pid
+  dir=$(make_case ops-inbox-escalation); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  home="$dir/home"; command="$dir/critical-inbox"; counts="$dir/counts"
+  mkdir -p "$home/ops-inbox" "$home/config"
+  printf 'project=firstmate\nkind=ship\n' > "$state/ops.meta"
+  printf '2\n' > "$counts"
+  cat > "$command" <<SH
+#!/usr/bin/env bash
+printf 'unacked_criticals: %s\n' "\$(cat "$counts")"
+SH
+  chmod +x "$command"
+  printf '%s\n' "$command" > "$home/config/ops-inbox-cmd"
+  seed_ops_inbox_fingerprint "$home" "$state"
+
+  start_ops_inbox_watcher() {
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" FM_STATE_OVERRIDE="$state" \
+      FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    wait_live "$pid" 15 || { reap "$pid"; fail "watcher exited before the critical count moved: $(cat "$out")"; }
+  }
+
+  start_ops_inbox_watcher
+  printf '5\n' > "$counts"
+  wait_for_exit "$pid" 40 || fail "a rising critical count did not wake the watcher"
+  [ "$(cat "$state/.ops-inbox-critical-level" 2>/dev/null || true)" = 5 ] \
+    || fail "the escalation window did not record the surfaced critical level"
+
+  start_ops_inbox_watcher
+  printf '3\n' > "$counts"
+  wait_live "$pid" 30 || fail "a critical count below the surfaced level woke the watcher again: $(cat "$out")"
+  grep -F $'\tduplicate genuine failure' "$state/.ops-inbox-suppressed" >/dev/null \
+    || { reap "$pid"; fail "the collapsed count movement was not observable"; }
+  grep -F 'criticals 3' "$state/.ops-inbox-suppressed" >/dev/null \
+    || { reap "$pid"; fail "the suppression record lost the observed count movement"; }
+  reap "$pid"
+
+  start_ops_inbox_watcher
+  printf '7\n' > "$counts"
+  wait_for_exit "$pid" 40 || fail "a count rising above the surfaced level did not wake the watcher"
+  grep "$(printf '\tcheck\tops-inbox\t')" "$state/.wake-queue" >/dev/null \
+    || fail "the escalation wake was not durably queued as a check"
+
+  unset -f start_ops_inbox_watcher
+  pass "a rising configured critical count wakes once per escalation without waking on every movement"
+}
+
 test_ops_inbox_fingerprint_distinguishes_same_second_same_size_rewrite() {
   local dir home before after
   dir=$(make_case ops-inbox-subsecond); home="$dir/home"
@@ -2377,6 +2429,7 @@ test_ops_inbox_new_event_wakes_with_task_in_flight
 test_ops_inbox_new_event_wakes_on_heartbeat_without_tasks
 test_ops_inbox_routine_nonzero_exit_is_suppressed
 test_ops_inbox_duplicate_burst_collapses_to_one_wake
+test_ops_inbox_rising_critical_count_wakes_once_per_escalation
 test_ops_inbox_fingerprint_distinguishes_same_second_same_size_rewrite
 test_ops_inbox_fingerprint_uses_bounded_two_level_file_markers
 test_ops_inbox_marker_scan_counts_discovered_paths
