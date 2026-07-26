@@ -150,7 +150,51 @@ test_unreadable_malformed_and_unmapped_sources_stay_unavailable() {
   write_source "$bad" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"pipeline_cost\":{\"amount\":4,\"unit\":\"USD\",\"status\":\"measured\"}}}"
   write_config "$config" weho "$bad" "$good"; run_ledger "$config" "$out" "$quota"
   jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .source_freshness=="source metric missing")' "$out" >/dev/null || fail "an unmapped metric was not identified"
+  write_source "$bad" '{"currency":"USD","metrics":{"pipeline_cost":{"amount":4,"unit":"USD","status":"measured"},"realized_revenue":{"amount":8,"unit":"USD","status":"measured"}}}'
+  write_config "$config" weho "$bad" "$good"; run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .source_freshness=="source malformed")' "$out" >/dev/null || fail "helper output without a parsable observedAt was not identified as malformed"
   pass "unreadable malformed and unmapped sources remain unavailable with reasons"
+}
+
+test_source_configuration_and_count_failures_are_named() {
+  local one="$TMP_ROOT/source-contract/one" config="$TMP_ROOT/source-contract/config.json" out="$TMP_ROOT/source-contract/out.json" quota="$TMP_ROOT/source-contract/quota"
+  write_source "$one" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"pipeline_cost\":{\"amount\":4,\"unit\":\"USD\",\"status\":\"measured\"},\"realized_revenue\":{\"amount\":8,\"unit\":\"USD\",\"status\":\"measured\"}}}"
+  mkdir -p "$(dirname "$config")"
+  cat > "$config" <<JSON
+{"maxAgeSeconds":900,"lanes":{"weho":{"sources":[{"command":["$one"]}]},"trading":{"sources":[{"command":"$one"}]}}}
+JSON
+  write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .source_freshness=="independent source count insufficient")' "$out" >/dev/null || fail "a single configured helper was not named an insufficient independent source count"
+  jq -e '.lanes[] | select(.id=="trading") | .metrics[] | select(.name=="realized_pnl" and .amount==null and .source_freshness=="source configuration malformed")' "$out" >/dev/null || fail "a malformed source entry was not named malformed configuration"
+  printf '%s\n' '{"lanes":{"weho":{"sources":{}}}}' > "$config"; run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .source_freshness=="source configuration malformed")' "$out" >/dev/null || fail "a malformed sources container was not named malformed configuration"
+  pass "malformed source configuration and insufficient source counts are named"
+}
+
+test_daily_fleet_line_names_helper_failures_before_source_count() {
+  local one="$TMP_ROOT/daily-diagnosis/one" two="$TMP_ROOT/daily-diagnosis/two" missing="$TMP_ROOT/daily-diagnosis/missing"
+  local config="$TMP_ROOT/daily-diagnosis/config.json" out="$TMP_ROOT/daily-diagnosis/out.json" quota="$TMP_ROOT/daily-diagnosis/quota" date past
+  date=$(date -u +%Y-%m-%d); past=$(node -p 'new Date(Date.now() - 86400000).toISOString().slice(0, 10)')
+  mkdir -p "$(dirname "$config")"
+  cat > "$config" <<JSON
+{"maxAgeSeconds":900,"lanes":{"fleet_operations":{"daily_sources":[{"command":["$missing"]}]}}}
+JSON
+  write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="fleet_operations") | .daily_fleet_line | select(.session_cost.amount==null and .source_freshness=="source unreadable")' "$out" >/dev/null || fail "a single unreadable daily helper was reported as an insufficient source count"
+  write_source "$one" "{\"source\":\"billing-export\",\"observedAt\":\"$NOW\",\"date\":\"$date\",\"currency\":\"USD\",\"crewSessions\":[]}"
+  cat > "$config" <<JSON
+{"maxAgeSeconds":900,"lanes":{"fleet_operations":{"daily_sources":[{"command":["$one"]}]}}}
+JSON
+  run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="fleet_operations") | .daily_fleet_line | select(.session_cost.amount==null and .source_freshness=="independent source count insufficient")' "$out" >/dev/null || fail "a single readable daily helper was not named an insufficient independent source count"
+  write_source "$two" "{\"source\":\"run-audit\",\"observedAt\":\"$NOW\",\"date\":\"$date\",\"currency\":\"USD\",\"crewSessions\":[]}"
+  cat > "$config" <<JSON
+{"maxAgeSeconds":900,"lanes":{"fleet_operations":{"daily_sources":[{"command":["$one"]},{"command":["$two"]}]}}}
+JSON
+  FM_UNIT_ECONOMICS_LEDGER_DATE="$past" FM_UNIT_ECONOMICS_QUOTA_AXI="$quota" node "$BIN" --config "$config" --output "$out" --format json >/dev/null
+  jq -e '.lanes[] | select(.id=="fleet_operations") | .daily_fleet_line | select(.session_cost.amount==null and .source_freshness=="ledger date not covered")' "$out" >/dev/null || fail "a backfilled date no helper covers was reported as malformed helper output"
+  grep -F 'unavailable (ledger date not covered)' "${out%.json}.md" >/dev/null || fail "the uncovered ledger date was hidden in Markdown"
+  pass "daily helper failures are diagnosed ahead of the independent source count"
 }
 
 test_daily_fleet_line_cross_checks_per_crew_cost_and_validation_runs() {
@@ -182,7 +226,7 @@ test_untrusted_metric_states_and_duplicate_sources_are_refused() {
   jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .status=="unavailable")' "$out" >/dev/null || fail "untrusted metric statuses were published"
   write_source "$one" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"pipeline_cost\":{\"amount\":4,\"unit\":\"USD\",\"status\":\"measured\"},\"realized_revenue\":{\"amount\":8,\"unit\":\"USD\",\"status\":\"measured\"}}}"
   write_config "$config" weho "$one" "$one"; run_ledger "$config" "$out" "$quota"
-  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .cross_check=="unavailable")' "$out" >/dev/null || fail "duplicate command arrays satisfied independent corroboration"
+  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .cross_check=="unavailable" and .source_freshness=="independent source count insufficient")' "$out" >/dev/null || fail "duplicate command arrays satisfied independent corroboration"
   pass "metric states and source identity gate corroboration"
 }
 
@@ -201,7 +245,7 @@ test_malformed_source_containers_render_unavailable() {
   printf '%s\n' '{"lanes":{"weho":{"sources":{}},"fleet_operations":{"cost_sources":"invalid"}}}' > "$config"
   write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
   jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null)' "$out" >/dev/null || fail "malformed lane sources prevented unavailable rendering"
-  jq -e '.lanes[] | select(.id=="fleet_operations") | .metrics[] | select(.name=="attributable_crew_session_cost" and .amount==null)' "$out" >/dev/null || fail "malformed cost sources prevented unavailable rendering"
+  jq -e '.lanes[] | select(.id=="fleet_operations") | .metrics[] | select(.name=="attributable_crew_session_cost" and .amount==null and .source_freshness=="source configuration malformed")' "$out" >/dev/null || fail "malformed cost sources prevented unavailable rendering"
   pass "malformed source containers render unavailable"
 }
 
@@ -238,7 +282,7 @@ test_malformed_source_timeouts_render_unavailable() {
 {"lanes":{"weho":{"sources":[{"command":["$one"],"timeoutMs":"invalid"},{"command":["$two"],"timeoutMs":-1}]}}}
 JSON
   write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
-  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .status=="unavailable")' "$out" >/dev/null || fail "malformed source timeouts were not rendered unavailable"
+  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .status=="unavailable" and .source_freshness=="source configuration malformed")' "$out" >/dev/null || fail "malformed source timeouts were not rendered unavailable"
   jq -e '.lanes[] | select(.id=="fleet_operations") | .metrics[] | select(.name=="claude_quota_window" and .amount==80 and .status=="measured")' "$out" >/dev/null || fail "malformed source timeout prevented partial rendering"
   [ -f "${out%.json}.md" ] || fail "malformed source timeout prevented artifact publication"
   pass "malformed source timeouts render unavailable"
@@ -360,6 +404,8 @@ test_relative_source_commands_resolve_against_fm_home() {
 test_zero_revenue_is_explicit_and_cross_checked
 test_unavailable_and_partial_lanes_render
 test_unreadable_malformed_and_unmapped_sources_stay_unavailable
+test_source_configuration_and_count_failures_are_named
+test_daily_fleet_line_names_helper_failures_before_source_count
 test_relative_source_commands_resolve_against_fm_home
 test_stale_and_failed_cross_check_are_refused
 test_currency_and_units_are_preserved

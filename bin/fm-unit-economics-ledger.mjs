@@ -17,14 +17,22 @@
 // returned a fresh reading, at least two of them ran distinct commands
 // (identical command arrays collapse to one and corroborate nothing), and they
 // agree exactly on amount, unit, and top-level currency. Freshness is judged
-// against the artifact's own publication timestamp, so an `observedAt` in the
-// future or older than the window is refused. A source can mark a value
+// against the artifact's own publication timestamp, so a parsable `observedAt`
+// in the future or older than the window says `stale source refused`, while
+// output whose `observedAt` is absent or unparsable is malformed rather than
+// stale. A source can mark a value
 // `estimated`; it remains estimated even when corroborated. Missing, stale,
 // malformed, or disagreeing inputs are rendered unavailable, never as zero.
-// A lane without any configured sources says `source configuration absent`.
+// A lane without any configured sources says `source configuration absent`, a
+// `sources` container that is not an array or an entry without a well-formed
+// string command array and positive `timeoutMs` says `source configuration
+// malformed`, and fewer than two surviving distinct commands says `independent
+// source count insufficient`.
 // A configured command that cannot be read says `source unreadable`, malformed
 // command output says `source malformed`, and a valid source which omits the
-// requested metric says `source metric missing`.
+// requested metric says `source metric missing`. A diagnosed source failure is
+// reported ahead of an insufficient source count, so a single broken helper
+// stays distinguishable from an unconfigured pair.
 // The fixed fleet_operations lane reads quota-axi --json fresh at invocation
 // time and publishes the lowest in-range (0-100) percentRemaining of a provider
 // whose own reported state is fresh; a provider without a `state.refreshedAt`
@@ -48,7 +56,10 @@
 // and where corroborating helpers label one agreed amount differently the
 // weakest label wins, so a `measured`/`estimated` pair publishes as estimated.
 // An explicit corroborated empty roster is a rendered zero, while every missing
-// or unreadable source is unavailable. The ledger date is today in UTC unless
+// or unreadable source is unavailable. A daily helper whose own `date` is a
+// valid calendar date other than the ledger date says `ledger date not
+// covered`, so a backfill can tell an uncovered day from broken helper output.
+// The ledger date is today in UTC unless
 // `FM_UNIT_ECONOMICS_LEDGER_DATE` overrides it with a valid `YYYY-MM-DD` date
 // for tests and backfills; any other value is rejected before anything is
 // written. Because quota-axi only ever reports the present, a ledger date other
@@ -86,6 +97,7 @@ const SOURCE_UNREADABLE = 'source unreadable';
 const SOURCE_MALFORMED = 'source malformed';
 const SOURCE_METRIC_MISSING = 'source metric missing';
 const INDEPENDENT_SOURCE_COUNT_INSUFFICIENT = 'independent source count insufficient';
+const LEDGER_DATE_NOT_COVERED = 'ledger date not covered';
 
 function fail(message) { process.stderr.write(`error: ${message}\n`); process.exit(2); }
 function isCalendarDate(value) {
@@ -146,7 +158,7 @@ function runSources(definitions) {
 function sourcesAtPublication(sources, maxAgeSeconds, publicationTime) {
   return sources.map((source) => {
     if (!source.ok || isoFresh(source.body.observedAt, maxAgeSeconds, publicationTime)) return source;
-    return { ok: false, reason: source.body.observedAt ? 'stale source refused' : 'source unavailable' };
+    return { ok: false, reason: Number.isFinite(Date.parse(source.body.observedAt || '')) ? 'stale source refused' : SOURCE_MALFORMED };
   });
 }
 function sourceMetric(source, metric) {
@@ -243,7 +255,8 @@ function dailyMetric(row, name, unit) {
 }
 function dailyCrewSource(source, date) {
   if (!source.ok) return { ok: false, reason: source.reason || SOURCE_UNREADABLE };
-  if (typeof source.body.source !== 'string' || !source.body.source || source.body.date !== date || typeof source.body.currency !== 'string' || !Array.isArray(source.body.crewSessions)) return { ok: false, reason: SOURCE_MALFORMED };
+  if (typeof source.body.source !== 'string' || !source.body.source || !isCalendarDate(source.body.date) || typeof source.body.currency !== 'string' || !Array.isArray(source.body.crewSessions)) return { ok: false, reason: SOURCE_MALFORMED };
+  if (source.body.date !== date) return { ok: false, reason: LEDGER_DATE_NOT_COVERED };
   const rows = new Map();
   for (const row of source.body.crewSessions) {
     if (typeof row?.crew !== 'string' || !row.crew || rows.has(row.crew)) return { ok: false, reason: SOURCE_MALFORMED };
@@ -264,10 +277,9 @@ function unavailableDaily(reason = 'source unavailable') {
   };
 }
 function dailyFleetLine(sources, date, missingReason) {
-  if (sources.length < 2) return unavailableDaily(missingReason || INDEPENDENT_SOURCE_COUNT_INSUFFICIENT);
   const parsed = sources.map((source) => dailyCrewSource(source, date));
   const failed = parsed.find((source) => !source.ok);
-  if (failed) return unavailableDaily(failed.reason);
+  if (failed || sources.length < 2) return unavailableDaily(failed?.reason || missingReason || INDEPENDENT_SOURCE_COUNT_INSUFFICIENT);
   const currency = parsed[0].currency;
   if (parsed.some((source) => source.currency !== currency)) return unavailableDaily('source disagreement refused');
   if (currency !== 'USD') return unavailableDaily('unsupported currency refused');
