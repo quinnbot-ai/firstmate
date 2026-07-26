@@ -115,6 +115,7 @@ The job records `FM_JOB_STARTED_AT` in its first step and the run step derives `
 The derived deadline never drops below a 1020-second (17:00) floor, which keeps 47 seconds over the 16:13 slowest healthy observation and 3:56 over the 13:04 CI baseline, so a slow setup step cannot fail a healthy run early.
 When setup overhead is large enough that the floor no longer fits inside the job cap, the step emits a conspicuous warning naming the measured setup cost instead of silently accepting the race.
 Every run logs `FM_TEST_DEADLINE_BUDGET` with the measured setup cost and the deadline actually applied.
+A run that hits the derived deadline logs `FM_TEST_DEADLINE` with the active script name and elapsed seconds, repeats it as an annotation and a job-summary block, and exits 124.
 
 ## Coverage guard
 
