@@ -714,6 +714,8 @@ test_session_start_surfaces_answered_open_decision() {
   root="$TMP_ROOT/answered-open-session-start-root"
   mkdir -p "$root"
   git init -q -b main "$root" || fail "could not create the throwaway session-start root"
+  git -C "$root" config user.name "Firstmate test" || fail "could not configure the throwaway session-start root"
+  git -C "$root" config user.email "firstmate-test@example.invalid" || fail "could not configure the throwaway session-start root"
   git -C "$root" commit -q --allow-empty -m init || fail "could not seed the throwaway session-start root"
 
   hold=$(run_decisions "$home" hold "$origin" route \
