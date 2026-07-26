@@ -164,16 +164,15 @@ status_done_names_commit_only() {  # <status-line>
 # lookup, so this stays fail-closed: an unavailable or unclassifiable reader never
 # changes a terminal done event. Callers pass the status file so mode metadata and
 # task identity remain bound to the same durable record.
-# Cost ladder, cheapest first: only a done verb whose note is the commit-only shape
-# can ever read as delivery pending, so the bounded reader exec is reached solely
-# for that shape - a PR-bearing completion, the dominant done, never pays for it.
+# Cost ladder, cheapest first: status_done_names_commit_only (pure, and the sole
+# owner of the done-verb precondition) must hold before the bounded reader exec is
+# reached at all, so a PR-bearing completion - the dominant done - never pays for it.
 # The reader gets no stdin: callers invoke this from `while read` loops fed by a
 # pipe, and a subprocess reading that pipe would silently truncate the loop.
 status_done_needs_nomistakes_delivery() {  # <status-file> [status-line]
   local file=$1 line=${2:-} id state_line
   [ -f "$file" ] || return 1
   [ -n "$line" ] || line=$(last_status_line "$file")
-  [ "$(status_line_verb "$line")" = "done" ] || return 1
   status_done_names_commit_only "$line" || return 1
   id=$(basename "$file")
   id=${id%.status}

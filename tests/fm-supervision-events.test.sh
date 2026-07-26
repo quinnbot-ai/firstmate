@@ -140,4 +140,29 @@ WTN=$(wc -l < "$TMP/wtcalls" | tr -d '[:space:]')
 [ "$WTN" = 2 ] || fail "after EVENT_CAP_FAIL_MAX connect failures the event path must be disabled for the process (expected 2 wait_transition calls, got $WTN)"
 pass "event_wait_or_sleep: consecutive event-path failures disable the fast-path and revert to pure polling (fail-closed)"
 
+# --- pause_state_class: the crew-state read must not consume the caller's stdin -
+# Every pause_state_class call site sits inside the watcher's main poll loop, a
+# `while IFS= read -r w; ... done < <(recorded_windows)` whose body inherits that
+# pipe as stdin. A reader (or the no-mistakes CLI beneath it) that reads stdin would
+# drain the remaining windows and silently drop them from the poll cycle.
+
+reset_state
+DRAIN_READER="$TMP/draining-crew-state.sh"
+printf '#!/usr/bin/env bash\ncat >/dev/null\nprintf "%%s\\n" "state: working · source: pane · harness busy"\n' \
+  > "$DRAIN_READER"
+chmod +x "$DRAIN_READER"
+: > "$TMP/polled"
+for _t in drain-w1 drain-w2 drain-w3; do
+  fm_write_meta "$STATE_DIR/$_t.meta" "window=fmses:fm-$_t" "kind=ship"
+  printf 'paused: awaiting the upstream release\n' > "$STATE_DIR/$_t.status"
+done
+while IFS= read -r _w; do
+  _task=${_w##*:fm-}
+  FM_CREW_STATE_BIN="$DRAIN_READER" pause_state_class "$_w" "$_task" >/dev/null
+  printf '%s\n' "$_task" >> "$TMP/polled"
+done < <(printf '%s\n' fmses:fm-drain-w1 fmses:fm-drain-w2 fmses:fm-drain-w3)
+POLLED=$(wc -l < "$TMP/polled" | tr -d '[:space:]')
+[ "$POLLED" = 3 ] || fail "pause_state_class let the crew-state reader drain the poll loop's stdin (expected 3 windows polled, got $POLLED)"
+pass "pause_state_class: the bounded crew-state read is stdin-isolated, so a pipe-fed poll loop keeps every window"
+
 echo "# fm-supervision-events.test.sh: all assertions passed"
