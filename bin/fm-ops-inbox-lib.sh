@@ -25,7 +25,7 @@ if [ -z "${FM_OPS_INBOX_SAMPLER:-}" ]; then
     || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -ge 1 ]; }; then
     FM_OPS_INBOX_SAMPLER=builtin
   else
-    FM_OPS_INBOX_SAMPLER=dd
+    FM_OPS_INBOX_SAMPLER='dd'
   fi
 fi
 
@@ -209,7 +209,7 @@ fm_ops_inbox_external_run() {
 # A final __FM_OPS_INBOX_OVERFLOW__ record means the scan limit was reached.
 fm_ops_inbox_home_records() {
   local home=$1 limit=$2 dir marker path entry count=0 overflow=0
-  local -a records=()
+  local -a scan=()
   dir=$(fm_ops_inbox_home_dir "$home")
   marker=$(fm_ops_inbox_home_marker_path "$home")
   [ -d "$dir" ] || return 0
@@ -222,9 +222,9 @@ fm_ops_inbox_home_records() {
     count=$((count + 1))
     entry=$(fm_ops_inbox_stat_record "$path") || continue
     [ -n "$entry" ] || continue
-    records+=("$entry"$'\t'"$path")
+    scan+=("$entry"$'\t'"$path")
   done < <(find "$dir" -mindepth 1 -maxdepth 2 -type f -print0 2>/dev/null)
-  ((${#records[@]})) && printf '%s\n' "${records[@]}" | LC_ALL=C sort -rn
+  ((${#scan[@]})) && printf '%s\n' "${scan[@]}" | LC_ALL=C sort -rn
   [ "$overflow" -eq 0 ] || printf '%s\n' '__FM_OPS_INBOX_OVERFLOW__'
 }
 
