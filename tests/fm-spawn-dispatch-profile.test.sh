@@ -1800,6 +1800,32 @@ test_task_brief_guard_allows_filled_task_that_mentions_placeholder() {
   pass "a filled task brief can mention {TASK} without being refused"
 }
 
+test_task_brief_guard_exempts_unfilled_secondmate_charter() {
+  local rec id sm brief out status
+  id='brief-guard-charter-z21'
+  rec=$(make_spawn_case brief-guard-charter codex "$id")
+  read_case_record "$rec"
+  brief="$HOME_DIR/data/$id/brief.md"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  rm -f "$brief"
+  FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_DATA_OVERRIDE="$HOME_DIR/data" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null \
+    || fail "secondmate charter scaffold failed"
+  grep -qxF '# Charter' "$brief" || fail "scaffolded charter lost its # Charter section"
+  grep -qxF '{TASK}' "$brief" || fail "scaffolded charter is not the unfilled shape this exemption covers"
+  ! grep -qE '^# Task[[:space:]]*$' "$brief" || fail "scaffolded charter unexpectedly carries a # Task section"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "a secondmate charter must be exempt from the # Task brief guard"
+  assert_contains "$out" "spawned $id harness=codex kind=secondmate" "exempt secondmate charter did not launch"
+  assert_present "$HOME_DIR/state/$id.meta" "exempt secondmate charter did not write metadata"
+  pass "an unfilled secondmate charter is exempt from the ship/scout task-brief guard"
+}
+
 test_active_dispatch_profile_does_not_block_secondmate_launch() {
   local rec id sm out status
   id=profile-secondmate-z16
@@ -2208,6 +2234,7 @@ test_quota_selected_default_array_reaches_spawn
 test_batch_forwards_shared_profile_flags
 test_task_brief_guard_refuses_unfilled_or_empty_sections_without_task_state
 test_task_brief_guard_allows_filled_task_that_mentions_placeholder
+test_task_brief_guard_exempts_unfilled_secondmate_charter
 test_active_dispatch_profile_does_not_block_secondmate_launch
 test_claude_crewmate_home_used_when_profile_ready
 test_claude_crewmate_home_absent_profile_matches_default_behavior

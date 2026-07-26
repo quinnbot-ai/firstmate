@@ -234,7 +234,7 @@ run_spawn() {
   local home=$1 id=$2 proj=$3 pane=$4 fakebin=$5 lease_path
   lease_path=${6:-$pane}
   mkdir -p "$home/data/$id"
-  printf 'brief\n' > "$home/data/$id/brief.md"
+  printf '# Task\nbrief\n' > "$home/data/$id/brief.md"
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
@@ -361,7 +361,7 @@ run_spawn_lease_case() {
   local home=$1 id=$2 proj=$3 pane=$4 fakebin=$5 rec=$6 kind=${7:-} lease_path
   lease_path=${8:-$pane}
   mkdir -p "$home/data/$id"
-  printf 'brief\n' > "$home/data/$id/brief.md"
+  printf '# Task\nbrief\n' > "$home/data/$id/brief.md"
   if [ "$kind" = scout ]; then
     FM_ROOT_OVERRIDE='' FM_HOME="$home" \
       FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
@@ -922,7 +922,7 @@ SH
 run_spawn_record() {
   local home=$1 id=$2 proj=$3 pane=$4 fakebin=$5 rec=$6
   mkdir -p "$home/data/$id"
-  printf 'brief\n' > "$home/data/$id/brief.md"
+  printf '# Task\nbrief\n' > "$home/data/$id/brief.md"
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
