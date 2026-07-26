@@ -56,12 +56,13 @@ subcommand=${2:-}
 state_file=${FM_FAKE_TASKS_STATE:?}
 
 if [ "$subcommand" = --help ]; then
+  help_text=
   case "$command_name" in
     ready)
       if [ "${FM_FAKE_API_UNSUPPORTED:-0}" = 1 ]; then
-        echo "usage: tasks-axi ready"
+        help_text="usage: tasks-axi ready"
       else
-        echo "usage: tasks-axi ready --json"
+        help_text="usage: tasks-axi ready --json"
       fi
       ;;
     claim)
@@ -69,9 +70,18 @@ if [ "$subcommand" = --help ]; then
         echo "unknown command: claim" >&2
         exit 2
       fi
-      echo "usage: tasks-axi claim <id> --if-ready --json"
+      help_text="usage: tasks-axi claim <id> --if-ready --json"
       ;;
   esac
+  if [ -n "$help_text" ]; then
+    # Writing usage to stderr is ordinary for --help and must not be read as a
+    # missing capability.
+    if [ "${FM_FAKE_HELP_ON_STDERR:-0}" = 1 ]; then
+      printf '%s\n' "$help_text" >&2
+    else
+      printf '%s\n' "$help_text"
+    fi
+  fi
   exit 0
 fi
 
@@ -929,6 +939,54 @@ run_once
 [ ! -e "$STATE_DIR/.last-auto-dispatch-refill" ] \
   || fail "an absent config with no episode advanced the persisted cadence"
 pass "a home with no config and no episode marker stays a complete no-op"
+
+# Help text on stderr is an ordinary --help convention, not a missing capability.
+make_fixture help-on-stderr
+fixture_env
+export FM_FAKE_HELP_ON_STDERR=1
+add_task help-on-stderr
+stage_task help-on-stderr
+start_runtime
+run_once > "$FIXTURE/stderr-help.out"
+unset FM_FAKE_HELP_ON_STDERR
+[ "$(jq -r .claim_count "$TASKS_STATE")" = 1 ] \
+  || fail "conforming help text on stderr was rejected as a missing capability"
+[ "$(jq -r .id < "$FIXTURE/stderr-help.out")" = help-on-stderr ] \
+  || fail "conforming help text on stderr suppressed the would-dispatch report"
+[ "$(status_verb_count blocked)" = 0 ] \
+  || fail "conforming help text on stderr produced a capability refusal"
+pass "the capability probe reads help text from stdout or stderr"
+
+# The fleet records FM_HOME and its watcher path exactly as the environment
+# carried them, so a symlinked home or root must still be the same home.
+make_fixture symlink-home
+ln -s "$HOME_DIR" "$FIXTURE/home-link"
+ln -s "$FAKE_ROOT" "$FIXTURE/root-link"
+HOME_DIR="$FIXTURE/home-link"
+FAKE_ROOT="$FIXTURE/root-link"
+STATE_DIR="$HOME_DIR/state"
+CONFIG_DIR="$HOME_DIR/config"
+DATA_DIR="$HOME_DIR/data"
+jq -n --arg home "$HOME_DIR" '{
+  schema:"fm-fleet-snapshot.v1",
+  fm_home:$home,
+  main_inventory:{valid:true,reason:null,orphan_in_flight:[],unstructured_current_count:0},
+  tasks:[]
+}' > "$SNAPSHOT"
+fixture_env
+add_task symlink-home
+stage_task symlink-home
+start_runtime
+[ "$(cat "$STATE_DIR/.watch.lock/fm-home")" = "$FIXTURE/home-link" ] \
+  || fail "the fixture watcher did not record the symlinked home path"
+run_once > "$FIXTURE/symlink.out"
+[ "$(jq -r .claim_count "$TASKS_STATE")" = 1 ] \
+  || fail "a symlinked home path stopped refill"
+[ "$(jq -r .id < "$FIXTURE/symlink.out")" = symlink-home ] \
+  || fail "a symlinked home path suppressed the would-dispatch report"
+[ "$(status_verb_count blocked)" = 0 ] \
+  || fail "a symlinked home path was reported as an ownership or fleet failure"
+pass "symlinked home and root paths resolve to the same home on both sides"
 
 # The existing watcher loop owns invocation, with no new daemon entrypoint.
 assert_contains "$(cat "$ROOT/bin/fm-watch.sh")" \

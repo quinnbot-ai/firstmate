@@ -134,6 +134,23 @@ function resolveHomeDir(overrideName, fallback) {
   }
 }
 
+/**
+ * The fleet records FM_HOME and its watcher path raw, keeping whatever symlink
+ * components the operator's environment carried, while this process resolves
+ * its own context. Both sides go through here before any identity comparison so
+ * a symlinked home is the same home rather than a permanent mismatch.
+ */
+function canonicalPath(value) {
+  if (typeof value !== "string" || value.trim() === "") {
+    return null;
+  }
+  try {
+    return realpathSync(value);
+  } catch {
+    return resolve(value);
+  }
+}
+
 function resolveContext() {
   const rootInput = process.env.FM_ROOT_OVERRIDE || SOURCE_ROOT;
   const homeInput = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || SOURCE_ROOT;
@@ -222,9 +239,23 @@ function run(command, args, context, acceptedStatuses = [0]) {
   return result.stdout;
 }
 
+/**
+ * Help text is discovered across both streams, because writing usage to stderr
+ * is ordinary for a --help flag and says nothing about whether the JSON
+ * capability itself conforms.
+ */
+function helpText(context, args, acceptedStatuses) {
+  const result = runResult("tasks-axi", args, context);
+  if (!acceptedStatuses.includes(result.status)) {
+    const detail = (result.stderr || result.stdout || `exit ${result.status}`).trim();
+    fail(`tasks-axi ${args[0]} failed: ${detail}`, "COMMAND_FAILED");
+  }
+  return `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+}
+
 function tasksAxiSupportsMachineClaim(context) {
-  const readyHelp = run("tasks-axi", ["ready", "--help"], context);
-  const claimHelp = run("tasks-axi", ["claim", "--help"], context, [0, 1, 2]);
+  const readyHelp = helpText(context, ["ready", "--help"], [0]);
+  const claimHelp = helpText(context, ["claim", "--help"], [0, 1, 2]);
   return readyHelp.includes("--json")
     && claimHelp.includes("--if-ready")
     && claimHelp.includes("--json");
@@ -863,12 +894,30 @@ function assertRuntimeOwnership(context, grace) {
   const expectedPath = safeRead(join(watchLock, "watcher-path"), "watcher path binding", 4096).toString("utf8").trim();
   const recordedIdentity = safeRead(join(watchLock, "pid-identity"), "watcher identity", 65536).toString("utf8").trim();
   const currentIdentity = pidIdentity(context, watcherPid);
-  if (expectedHome !== context.home
-    || expectedPath !== join(context.root, "bin", "fm-watch.sh")
-    || currentIdentity === null
-    || recordedIdentity !== currentIdentity
-    || fileAgeSeconds(join(context.state, ".last-watcher-beat")) >= grace) {
-    fail("the exact home's supervision loop is not healthy", "SUPERVISION_UNHEALTHY");
+  const watchPath = join(context.root, "bin", "fm-watch.sh");
+  if (canonicalPath(expectedHome) !== context.home) {
+    fail(
+      `the exact home's supervision loop is not healthy: the watcher lock binds home ${expectedHome}, not ${context.home}`,
+      "SUPERVISION_UNHEALTHY",
+    );
+  }
+  if (canonicalPath(expectedPath) !== canonicalPath(watchPath)) {
+    fail(
+      `the exact home's supervision loop is not healthy: the watcher lock binds ${expectedPath}, not ${watchPath}`,
+      "SUPERVISION_UNHEALTHY",
+    );
+  }
+  if (currentIdentity === null || recordedIdentity !== currentIdentity) {
+    fail(
+      `the exact home's supervision loop is not healthy: watcher pid ${watcherPid} no longer matches its recorded identity`,
+      "SUPERVISION_UNHEALTHY",
+    );
+  }
+  if (fileAgeSeconds(join(context.state, ".last-watcher-beat")) >= grace) {
+    fail(
+      `the exact home's supervision loop is not healthy: the watcher heartbeat has been stale for at least ${grace}s`,
+      "SUPERVISION_UNHEALTHY",
+    );
   }
 }
 
@@ -895,7 +944,7 @@ function snapshot(context) {
   if (value?.schema !== "fm-fleet-snapshot.v1" || !Array.isArray(value?.tasks)) {
     fail("fleet snapshot does not match the fm-fleet-snapshot.v1 contract", "FLEET_INVALID");
   }
-  if (value.fm_home !== context.home) {
+  if (canonicalPath(value.fm_home) !== context.home) {
     fail(`fleet snapshot reports home ${String(value.fm_home)} instead of ${context.home}`, "FLEET_INVALID");
   }
   if (value.main_inventory?.valid !== true) {

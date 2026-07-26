@@ -407,8 +407,9 @@ The helper never scrapes human ready output and never substitutes `tasks-axi sta
 Both capabilities are external prerequisites, so this is the contract an implementation must satisfy.
 
 The refill first probes for those capabilities through help text, and failing that probe is what makes the whole feature fail closed.
-`tasks-axi ready --help` must exit 0 and print the literal substring `--json` somewhere in its combined output.
-`tasks-axi claim --help` must exit 0, 1, or 2, and print both literal substrings `--if-ready` and `--json`.
+`tasks-axi ready --help` must exit 0 and print the literal substring `--json` on either stdout or stderr.
+`tasks-axi claim --help` must exit 0, 1, or 2, and print both literal substrings `--if-ready` and `--json` on either stdout or stderr.
+Which stream carries the help text does not matter, because writing usage to stderr says nothing about whether the JSON capability conforms.
 An implementation that documents these flags only in a man page, spells them `--json=<bool>`, or exits with any other status from `ready --help` is rejected with `blocked: tasks-axi must provide ready --json and claim --if-ready --json` even when its actual JSON output would conform.
 
 `ready --json` must exit 0 and print one object of the form `{"ok": true, "action": "ready", "ready": [...]}`, optionally carrying a `count` that equals `ready.length`.
