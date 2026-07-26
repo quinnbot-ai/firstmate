@@ -494,6 +494,7 @@ FM_OPS_INBOX_MARKER_SCAN_LIMIT=256   # home-event records considered before fing
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when axi status cannot be attributed to the current code
+FM_CREW_STATE_RUNS_SCAN_LIMIT=5000  # run rows requested for the complete listing that must prove a branch never started a pipeline; a listing the CLI truncates fails that proof closed
 FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by working/paused watcher triage
 FMX_PAIRING_TOKEN=      # X mode pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FMX_RELAY_URL=https://myfirstmate.io   # optional X relay override, mainly for local relay development

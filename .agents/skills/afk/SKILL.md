@@ -158,6 +158,8 @@ Classify each wake this way:
 - `signal` with a terminal captain verb (`done:`, `needs-decision:`, `blocked:`, or `failed:`) -> escalate.
   A nonterminal progress verb remains nonterminal even when its prose contains a legacy free-text token such as `PR ready`, `checks green`, `ready in branch`, or `merged`; only a bare legacy line with such a token escalates.
   Other signals with no captain-relevant status -> self-handle.
+- `signal` or `stale` for a `done:` event that names only an implementation commit, carries no URL, and belongs to a `no-mistakes` ship whose branch never started a pipeline -> escalate as delivery pending rather than as a completion, because the work is actionable but not delivered.
+  `bin/fm-crew-state.sh` is the authority for that never-ran proof, so an unavailable or truncated run listing leaves the event terminal.
 - `signal` or `stale` for a declared `paused:` external wait -> self-handle and track the pause rather than a wedge.
   If it remains declared and idle past `FM_PAUSE_RESURFACE_SECS` (default 3600s), housekeeping sends one awaiting-external recheck and resets the pause window.
 - `check` -> always escalate. Check scripts print only when firstmate should wake.
