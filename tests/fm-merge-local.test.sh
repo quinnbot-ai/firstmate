@@ -90,5 +90,36 @@ test_intersecting_dirty_path_refuses() {
   pass "fm-merge-local refuses and names dirty paths changed by the fast-forward"
 }
 
+test_dirty_path_under_changed_file_refuses() {
+  local case_dir rc before after err
+  case_dir=$(make_case dirty-under-changed-file)
+  # The branch adds a file where the project carries an untracked directory of runtime
+  # drift. The dirty entry is reported as logs/drift.txt while the fast-forward changes
+  # logs, so only a directory-aware comparison catches the collision.
+  printf 'now a file\n' > "$case_dir/wt/logs"
+  git -C "$case_dir/wt" add logs
+  git -C "$case_dir/wt" commit -qm "add logs file"
+  mkdir -p "$case_dir/project/logs"
+  printf 'runtime drift\n' > "$case_dir/project/logs/drift.txt"
+  before=$(git -C "$case_dir/project" rev-parse main)
+
+  set +e
+  run_merge_local "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  after=$(git -C "$case_dir/project" rev-parse main)
+  err=$(cat "$case_dir/stderr")
+
+  expect_code 1 "$rc" "dirty-under-changed-file: merge must refuse a dirty path under a changed path"
+  [ "$after" = "$before" ] || fail "dirty-under-changed-file: main moved despite the refusal"
+  assert_contains "$err" "REFUSED:" "dirty-under-changed-file: refusal was not loud"
+  assert_contains "$err" "logs/drift.txt" \
+    "dirty-under-changed-file: refusal did not name the overlapping path"
+  [ "$(cat "$case_dir/project/logs/drift.txt")" = "runtime drift" ] \
+    || fail "dirty-under-changed-file: the dirty file was modified"
+  pass "fm-merge-local refuses a dirty path held by a path the fast-forward changes"
+}
+
 test_unrelated_dirty_paths_allow_fast_forward
 test_intersecting_dirty_path_refuses
+test_dirty_path_under_changed_file_refuses

@@ -570,16 +570,16 @@ landing_default_ref() {
   printf '%s\n' "$ref"
 }
 
-# Is the branch's content already present in the up-to-date default branch? Fetches
-# first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
-# the default branch does not already contain (e.g. its change landed via squash) the
-# merged tree equals the default branch's tree. This isolates branch-only changes, so
-# unrelated commits the default branch gained past the merge-base do not count as
-# "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
-# so the caller tries the patch-equivalence proof before refusing.
+# Is the branch's content already present in the default branch the caller resolved?
+# 3-way merges that default ref with HEAD: when HEAD introduces nothing the default
+# branch does not already contain (e.g. its change landed via squash) the merged tree
+# equals the default branch's tree. This isolates branch-only changes, so unrelated
+# commits the default branch gained past the merge-base do not count as "added".
+# Returns non-zero when inconclusive (no ref given, or a merge conflict), so the
+# caller tries the patch-equivalence proof before refusing.
 content_in_default() {
-  local ref default_tree merged_tree
-  ref=$(landing_default_ref) || return 1
+  local ref=$1 default_tree merged_tree
+  [ -n "$ref" ] || return 1
   default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
   [ -n "$default_tree" ] || return 1
   merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
@@ -614,11 +614,15 @@ EOF
 # current local work is contained in the PR head, the content is already in the
 # default branch, OR every branch patch is equivalent to one in that default.
 # False only for genuinely unlanded work or an inconclusive proof.
+#
+# The default ref is resolved once and shared by both proofs: its fetch is the only
+# network step here, so resolving it twice would both double the round-trips and let a
+# transient failure between them strand work the second proof would have accepted.
 work_is_landed() {
   local branch=$1 default
   pr_is_merged "$branch" && return 0
-  content_in_default && return 0
   default=$(landing_default_ref) || return 1
+  content_in_default "$default" && return 0
   patches_are_in_default "$default" "$branch"
 }
 

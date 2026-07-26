@@ -58,20 +58,51 @@ if ! git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BRANCH"; then
   exit 1
 fi
 
-# Query each dirty path against the exact fast-forward range. Porcelain -z keeps
-# unusual path bytes unambiguous; --untracked-files=all expands untracked
-# directories so an untracked file that the branch would add cannot hide behind
-# its parent directory. Rename and copy records carry a second path, and both
+# Collect the fast-forward's changed paths once, so the dirty comparison below costs
+# one range diff instead of one per dirty entry - the projects this feature exists for
+# carry hundreds or thousands of standing untracked runtime artifacts. --no-renames
+# keeps both sides of a rename in the set, and -z keeps unusual path bytes unambiguous.
+CHANGED_LIST=$(mktemp "${TMPDIR:-/tmp}/fm-merge-local-changed.XXXXXX") || { echo "REFUSED: cannot create a scratch file to list the $DEFAULT..$BRANCH changes; refusing to merge." >&2; exit 1; }
+trap 'rm -f "$CHANGED_LIST"' EXIT
+if ! git -C "$PROJ" diff --name-only --no-renames -z "$DEFAULT..$BRANCH" -- > "$CHANGED_LIST"; then
+  echo "REFUSED: cannot list the paths changed by the $DEFAULT..$BRANCH fast-forward in $PROJ; refusing to merge." >&2
+  exit 1
+fi
+CHANGED_PATHS=()
+while IFS= read -r -d '' changed_path; do
+  [ -n "$changed_path" ] || continue
+  CHANGED_PATHS+=("$changed_path")
+done < "$CHANGED_LIST"
+
+# A dirty path intersects the fast-forward when the same path changed, when the dirty
+# path is a directory holding a changed path, or when a changed path is a directory
+# holding the dirty path. The directory cases keep a dirty entry from hiding behind a
+# parent name and preserve the file-becomes-directory collision in both directions.
+# Porcelain reports an untracked nested repository with a trailing slash, so the dirty
+# side is normalized before the directory comparisons.
+paths_intersect() {  # <dirty-path> <changed-path>
+  local dirty=${1%/} changed=$2
+  case "$changed" in
+    "$dirty"|"$dirty"/*) return 0 ;;
+  esac
+  case "$dirty" in
+    "$changed"/*) return 0 ;;
+  esac
+  return 1
+}
+
+# Porcelain -z keeps unusual path bytes unambiguous; --untracked-files=all expands
+# untracked directories so an untracked file that the branch would add cannot hide
+# behind its parent directory. Rename and copy records carry a second path, and both
 # sides can intersect the fast-forward.
 path_if_changed_by_fast_forward() {
-  local path=$1 rc
-  if GIT_LITERAL_PATHSPECS=1 git -C "$PROJ" diff --quiet "$DEFAULT..$BRANCH" -- "$path" </dev/null; then
-    return 0
-  else
-    rc=$?
-  fi
-  [ "$rc" -eq 1 ] || return "$rc"
-  printf '  %q\n' "$path"
+  local path=$1 changed
+  for changed in ${CHANGED_PATHS+"${CHANGED_PATHS[@]}"}; do
+    if paths_intersect "$path" "$changed"; then
+      printf '  %q\n' "$path"
+      return 0
+    fi
+  done
 }
 
 dirty_paths_changed_by_fast_forward() {
