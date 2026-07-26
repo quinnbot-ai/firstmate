@@ -6,6 +6,9 @@
 # obtains authoritative machine-readable ready work, atomically claims and
 # reopens each selected task, and reports what it would dispatch.
 # It never calls fm-spawn.sh and never starts another daemon.
+# Each selection prints one JSON line on stdout and appends one supervision
+# event to state/auto-dispatch.status; docs/configuration.md "Report-only
+# auto-dispatch" owns the config, event, receipt, and queue contracts.
 # Usage: fm-auto-dispatch-once.sh [--force]
 set -eu
 
