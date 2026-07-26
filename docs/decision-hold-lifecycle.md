@@ -18,7 +18,7 @@ Only a hold whose body never carried a topic, such as one written before this co
 For that claim to hold, the scan reads the same backlog grammar as the canonical parser in `bin/fm-fleet-snapshot.sh`: a metadata key opens a group with `(` or continues one after `, ` and its value ends at the next `,` or `)`, a row may be bulleted with `-` or `*` and carry an emphasized `**id**` or a `[ ]`, `[x]`, or `[X]` marker, and a blank line inside a body continues that record rather than ending it.
 Requiring `(` or `, ` immediately before a key is also what keeps `hold-kind` from being read as `kind`.
 The scan does not exempt the requested identity itself, because `tasks-axi show` cannot see the archive and `tasks-axi add` re-adds an archived id as fresh queued work, so the original origin and key re-asking their own answered decision is the easiest way to resurrect it.
-For untagged legacy holds, it also flags only an exact repository-and-title match, which is a migration aid rather than semantic matching.
+For untagged legacy holds, it also flags only an exact repository-and-title match against a still-open captain hold in the live backlog, which is a migration aid rather than semantic matching.
 That refusal names the manual `tasks-axi update` body edit that gives the legacy hold a topic, because the script mints identities from an origin and key and cannot address an arbitrary legacy id.
 It creates a kind `captain` backlog item when absent and invokes `tasks-axi hold <id> --reason <reason> --kind captain` on every retry.
 It rejects an identity collision, a changed title, a changed topic on a retry whose hold already carries one, and attempts to reopen an already resolved identity.
