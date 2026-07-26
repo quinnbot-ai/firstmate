@@ -253,15 +253,39 @@ print_status_tail() {
   tail -n "$STATUS_TAIL" "$status"
 }
 
+print_ops_inbox_suppression_records() {
+  local file=$1 record when reason
+  while IFS= read -r record; do
+    [ -n "$record" ] || continue
+    when=${record%%$'\t'*}
+    reason=${record#*$'\t'}
+    case "$when" in ''|*[!0-9]*) when=unknown ;; esac
+    printf 'epoch %s: %.200s\n' "$when" "$reason"
+  done < <(tail -n "$OPS_INBOX_LIMIT" "$file" 2>/dev/null)
+}
+
+# Current suppression evidence stands until the failure it withheld clears, so
+# it describes the events listed below.  Once that failure clears the watcher
+# drops it and only the bounded occurrence history remains, which is reported
+# as history so a cleared record is never read as a live one.
 print_ops_inbox_suppression() {
-  local record when reason
-  record=$(head -n 1 "$STATE/.ops-inbox-suppressed" 2>/dev/null || true)
-  [ -n "$record" ] || return 0
-  when=${record%%$'\t'*}
-  reason=${record#*$'\t'}
-  case "$when" in ''|*[!0-9]*) when=unknown ;; esac
-  printf 'last watcher suppression: %s (epoch %s); the events behind it are still listed below\n' \
-    "$(printf '%.200s' "$reason")" "$when"
+  local current history total
+  current="$STATE/.ops-inbox-suppressed"
+  history="$STATE/.ops-inbox-suppression-log"
+  if [ -s "$current" ]; then
+    total=$(grep -c . "$current" 2>/dev/null || printf '0')
+    printf 'watcher suppression: %s unresolved record(s), oldest first; newest %s, for the inbox reported below:\n' \
+      "$total" "$OPS_INBOX_LIMIT"
+    print_ops_inbox_suppression_records "$current"
+    [ "$total" -le "$OPS_INBOX_LIMIT" ] \
+      || printf '(truncated %s older unresolved suppression record(s))\n' "$((total - OPS_INBOX_LIMIT))"
+    return
+  fi
+  [ -s "$history" ] || return 0
+  total=$(grep -c . "$history" 2>/dev/null || printf '0')
+  printf 'watcher suppression: none unresolved; %s retained past occurrence(s), oldest first; newest %s:\n' \
+    "$total" "$OPS_INBOX_LIMIT"
+  print_ops_inbox_suppression_records "$history"
 }
 
 print_ops_inbox() {

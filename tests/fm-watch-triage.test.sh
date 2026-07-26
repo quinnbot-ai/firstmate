@@ -51,6 +51,20 @@ wait_live() {
   return 0
 }
 
+wait_path() {  # <path> <present|gone> [limit]
+  local path=$1 want=$2 limit=${3:-40} i=0
+  while [ "$i" -lt "$limit" ]; do
+    if [ "$want" = present ]; then
+      [ -s "$path" ] && return 0
+    else
+      [ -e "$path" ] || return 0
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
 wait_numeric_file() {
   local file=$1 limit=${2:-30} i=0 value
   while [ "$i" -lt "$limit" ]; do
@@ -1658,8 +1672,10 @@ SH
   pid=$!
   wait_live "$pid" 30 || fail "routine nonzero exit woke the watcher: $(cat "$out")"
   [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "routine nonzero exit queued a wake"; }
-  grep -F $'\troutine event' "$state/.ops-inbox-suppressed" >/dev/null \
+  grep -F $'\troutine event' "$state/.ops-inbox-suppression-log" >/dev/null \
     || { reap "$pid"; fail "routine nonzero exit suppression was not observable"; }
+  [ ! -e "$state/.ops-inbox-suppressed" ] \
+    || { reap "$pid"; fail "a healthy listing left an unresolved suppression record"; }
   [ -f "$home/config/ops-inbox-cmd" ] || { reap "$pid"; fail "routine inbox listing was not retained for the digest"; }
   reap "$pid"
   pass "a routine nonzero-exit inbox listing is suppressed but remains observable"
@@ -1746,6 +1762,99 @@ SH
 
   unset -f start_ops_inbox_watcher
   pass "a rising configured critical count wakes once per escalation without waking on every movement"
+}
+
+# Suppression evidence is about the failure it withheld, so it must outlive the
+# wake that acknowledged it and only clear when the failure itself clears -
+# while the occurrence history has to survive that clear for flapping to read
+# as flapping.
+test_ops_inbox_suppression_evidence_clears_only_with_the_failure() {
+  local dir state fakebin out home command counts pid
+  dir=$(make_case ops-inbox-retention); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  home="$dir/home"; command="$dir/flapping-inbox"; counts="$dir/counts"
+  mkdir -p "$home/ops-inbox" "$home/config"
+  printf 'project=firstmate\nkind=ship\n' > "$state/ops.meta"
+  printf '2\n' > "$counts"
+  cat > "$command" <<SH
+#!/usr/bin/env bash
+printf 'unacked_criticals: %s\n' "\$(cat "$counts")"
+SH
+  chmod +x "$command"
+  printf '%s\n' "$command" > "$home/config/ops-inbox-cmd"
+  seed_ops_inbox_fingerprint "$home" "$state"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 15 || { reap "$pid"; fail "watcher exited before the first escalation: $(cat "$out")"; }
+  printf '5\n' > "$counts"
+  wait_for_exit "$pid" 40 || fail "the first escalation did not wake the watcher"
+
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 15 || { reap "$pid"; fail "watcher exited before the collapsed movement: $(cat "$out")"; }
+  printf '3\n' > "$counts"
+  wait_path "$state/.ops-inbox-suppressed" present 40 \
+    || { reap "$pid"; fail "the collapsed movement left no unresolved suppression record"; }
+
+  # The criticals clear: the unresolved record goes with the failure, the
+  # occurrence history does not.
+  printf '0\n' > "$counts"
+  wait_path "$state/.ops-inbox-suppressed" gone 40 \
+    || { reap "$pid"; fail "a cleared failure kept its unresolved suppression record"; }
+  [ "$(grep -c . "$state/.ops-inbox-suppression-log")" -ge 2 ] \
+    || { reap "$pid"; fail "the occurrence history did not survive the clear"; }
+  grep -F 'criticals 3' "$state/.ops-inbox-suppression-log" >/dev/null \
+    || { reap "$pid"; fail "the occurrence history lost the movement inside the closed window"; }
+
+  # The same failure recurs below the level that already woke firstmate; the
+  # window closed with the clear, so it must wake again rather than collapse.
+  printf '4\n' > "$counts"
+  wait_for_exit "$pid" 40 || fail "a recurrence after a clear did not wake the watcher"
+  grep "$(printf '\tcheck\tops-inbox\t')" "$state/.wake-queue" >/dev/null \
+    || fail "the recurrence wake was not durably queued as a check"
+
+  pass "suppression evidence clears with the failure while its occurrence history survives"
+}
+
+# The operator's list command is bounded per invocation, so a cycle that runs
+# it once per decision can outlast the poll period it is supposed to fit in.
+# Every decision must come from one reading, which is also the only way two
+# decisions in a cycle cannot disagree about what the inbox held.
+test_ops_inbox_external_command_runs_once_per_cycle() {
+  local dir state fakebin out home command log pid runs
+  dir=$(make_case ops-inbox-one-reading); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  home="$dir/home"; command="$dir/serial-inbox"; log="$dir/invocations"
+  mkdir -p "$home/ops-inbox" "$home/config"
+  printf 'project=firstmate\nkind=ship\n' > "$state/ops.meta"
+  : > "$log"
+  # Its output changes on every invocation, so every cycle is a changed cycle -
+  # the path that used to re-run the command for each classifier.
+  cat > "$command" <<SH
+#!/usr/bin/env bash
+printf 'x\n' >> "$log"
+printf 'unacked_criticals: 0\nserial %s\n' "\$(grep -c . "$log")"
+SH
+  chmod +x "$command"
+  printf '%s\n' "$command" > "$home/config/ops-inbox-cmd"
+  seed_ops_inbox_fingerprint "$home" "$state"
+  : > "$log"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 30 || fail "a changing healthy listing woke the watcher: $(cat "$out")"
+  reap "$pid"
+  runs=$(grep -c . "$log")
+  [ "$runs" -ge 1 ] || fail "the watcher never ran the configured list command"
+  [ "$runs" -le 6 ] || fail "the configured list command ran $runs times across ~3 changed cycles"
+
+  pass "a changed operations-inbox cycle reads the configured list command once"
 }
 
 test_ops_inbox_fingerprint_distinguishes_same_second_same_size_rewrite() {
@@ -2430,6 +2539,8 @@ test_ops_inbox_new_event_wakes_on_heartbeat_without_tasks
 test_ops_inbox_routine_nonzero_exit_is_suppressed
 test_ops_inbox_duplicate_burst_collapses_to_one_wake
 test_ops_inbox_rising_critical_count_wakes_once_per_escalation
+test_ops_inbox_suppression_evidence_clears_only_with_the_failure
+test_ops_inbox_external_command_runs_once_per_cycle
 test_ops_inbox_fingerprint_distinguishes_same_second_same_size_rewrite
 test_ops_inbox_fingerprint_uses_bounded_two_level_file_markers
 test_ops_inbox_marker_scan_counts_discovered_paths

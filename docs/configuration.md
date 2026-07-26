@@ -40,13 +40,16 @@ The command must be trusted local code and print only its current unhandled crit
 The command is intentionally operator-owned and generic, so firstmate does not encode a machine-specific inbox path or acknowledgement implementation.
 The watcher fingerprints both sources, wakes immediately for a new genuine failure while a regular task is in flight, and checks the same fingerprint on its existing heartbeat cadence otherwise.
 A nonzero critical count opens an escalation window recorded in `state/.ops-inbox-critical-level`: further counts at or below that level collapse into the wake already delivered, a count above it wakes once more for that escalation, and a zero count closes the window so the next nonzero count wakes again.
-Routine and duplicate changes remain in the inbox digest and record the suppression reason, the observed critical count, and the escalation level in `state/.ops-inbox-suppressed` before advancing the baseline; `bin/fm-session-start.sh` reports that record at the top of the OPS INBOX digest, so no observed movement is silently lost.
+Routine and duplicate changes remain in the inbox digest and record the suppression reason, the observed critical count, and the escalation level before advancing the baseline.
+`state/.ops-inbox-suppressed` holds the bounded records of failures withheld from firstmate and is cleared only when the underlying failure itself clears, never merely because a wake was delivered; `state/.ops-inbox-suppression-log` keeps the same bounded records across that clear, so a failure that clears and recurs reads as flapping.
+`bin/fm-session-start.sh` reports the unresolved records at the top of the OPS INBOX digest, and reports the retained history as history once nothing is unresolved.
 `bin/fm-ops-inbox-lib.sh`'s header owns the discovery and fingerprint mechanics; the tunables below bound them.
 `FM_SESSION_START_OPS_INBOX_LIMIT` bounds both the home-event paths and configured-command output lines in the digest, defaulting to 5.
 `FM_SESSION_START_OPS_INBOX_SCAN_LIMIT` bounds retained home-event records inspected at startup, defaulting to 256, and reports an explicit sampled overflow when reached.
 `FM_OPS_INBOX_TIMEOUT` bounds each configured command invocation to 10 seconds by default.
 `FM_OPS_INBOX_OUTPUT_MAX_BYTES` bounds each configured command capture to 32768 bytes by default.
 `FM_OPS_INBOX_EVENT_SAMPLE_BYTES` bounds home-event classification and duplicate fingerprints to 4096 bytes by default.
+`FM_OPS_INBOX_SUPPRESSION_LIMIT` bounds both suppression artifacts to their 10 most recent records by default.
 `FM_OPS_INBOX_MARKER_LIMIT` bounds home-event records selected for each watcher fingerprint, defaulting to 64.
 `FM_OPS_INBOX_MARKER_SCAN_LIMIT` bounds the home-event records considered before that selection, defaulting to 256.
 When either limit is exceeded, the fingerprint records an overflow sentinel and the inbox must be retained below both limits before individual changes can be surfaced again.
