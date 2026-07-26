@@ -175,7 +175,9 @@ The complete `--all` walk was not repeated here, so the only full-suite result o
 
 This entry states where the suite evidence stands for this change. It records no new run and replaces no earlier block; every count above stays as its own dated run reported it.
 
-The current inventory measurement is 103 `tests/*.test.sh` scripts, measured on this tree with `bin/fm-test-run.sh --check-coverage`. That is an inventory measurement, not a pass result: `--check-coverage` only derives the total from the tree and checks that the lanes still partition it, and it executes no test.
+The shipped, rebased tree measures 104 `tests/*.test.sh` scripts, measured today with `bin/fm-test-run.sh --check-coverage`, which reports `FM_TEST_COVERAGE ok total=104 parallel=30 serial=65 herdr=9`. That is an inventory measurement, not a pass result: `--check-coverage` only derives the total from the tree and checks that the lanes still partition it, and it executes no test.
+
+The 103-script figure recorded in the `2026-07-26T21:00Z` block above is a pre-rebase historical measurement and is superseded here: it measured a different tree, one commit behind the rebased tree this change ships, so it no longer describes the current inventory.
 
 The most recent full-suite result on record is the earlier 101-script walk, which reported one failure: `tests/fm-backend-herdr-presentation-e2e.test.sh` exited 1 on `concurrent primary recovery`, unable to acquire the single real-Herdr session lock.
 
@@ -183,4 +185,4 @@ That failure is diagnosed as active-fleet environment contention rather than a c
 
 A single uninterrupted full-suite pass was deliberately not re-verified inside this change, because that wide-fleet walk exceeds the fix-round budget available on a machine that is simultaneously running a live fleet.
 
-No passing full-suite result is claimed for this tree. The only full-suite result on record remains the contended 101-script run recorded above, and the authoritative pass or fail verdict for the 103-script tree belongs to this pipeline's dedicated test step.
+No passing full-suite result is claimed for this tree. The only full-suite result on record remains the contended 101-script run recorded above, and the authoritative pass or fail verdict for the 104-script tree belongs to this pipeline's dedicated test step.
