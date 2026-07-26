@@ -34,6 +34,11 @@
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                captain approves, firstmate merges to local main
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
+# The two PR-producing modes then add an early setup step that runs
+# bin/fm-pr-capability.sh from the worktree, before implementation and before the
+# no-mistakes pipeline, so a credential that cannot create pull requests becomes a
+# "blocked:" status instead of a late delivery failure; a WARNING from that probe
+# is recorded and the work continues, and local-only briefs omit the step.
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
