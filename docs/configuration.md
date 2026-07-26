@@ -360,8 +360,7 @@ Any absent, malformed, unreadable, incomplete, stale, or disagreeing source rend
 The ledger date is today in UTC, and the optional `FM_UNIT_ECONOMICS_LEDGER_DATE` environment variable overrides it for tests and backfills with a valid `YYYY-MM-DD` date that also selects the dated default output file.
 Any other value for that variable is rejected with a non-zero exit before any ledger is written.
 Because quota-axi only ever reports the present, a ledger date other than today in UTC refuses every quota window and quota metric as a backfilled window instead of filling that day with the present day's live measurements.
-This repository proposes no `kdp` sources, so the lane stays unavailable until a pair of helpers with genuinely separate provenance is installed.
-[`unit-economics-source-readiness.md`](unit-economics-source-readiness.md) states the public generic source-readiness contract, while the active home's ignored `data/unit-economics-source-readiness.md` holds the operator-specific audit and follow-up evidence.
+[`unit-economics-source-readiness.md`](unit-economics-source-readiness.md) owns the public generic source-readiness contract, including which lanes have sources configured, while the active home's ignored `data/unit-economics-source-readiness.md` holds the operator-specific audit and follow-up evidence.
 The script header owns the source schema, freshness, corroboration, output, and status contract so this setup reference does not duplicate it.
 
 ## Report-only auto-dispatch (config/auto-dispatch.json)
