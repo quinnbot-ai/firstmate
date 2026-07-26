@@ -137,8 +137,10 @@ test_pr_capability_preflight_renders_for_pr_delivery_modes() {
   brief="$home/data/$id/brief.md"
   assert_grep "$ROOT/bin/fm-pr-capability.sh" "$brief" \
     "direct-PR brief omitted the PR capability preflight"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
   assert_grep 'If it prints `BLOCKED:`, append its message as a `blocked:` status and stop' "$brief" \
     "PR-capability denial was not raised to firstmate as an early blocker"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
   assert_grep 'If it prints `WARNING:`, record the warning in your work log and continue' "$brief" \
     "probe uncertainty was incorrectly made blocking"
 
