@@ -8,9 +8,24 @@
 # source file that contributes to the render must be passed with --source so
 # the source-level audio-reset rule remains enforceable.
 #
+# It drives a per-run named browser session, on its own bridge and port, so it
+# neither navigates nor is disturbed by a page the caller or a concurrent
+# crewmate has open, and it stops that session when it finishes.
+#
 # Usage:
 #   fm-visual-deliverable-check.sh <url> --source <html-or-css> [--source <html-or-css> ...]
 #   The URL must be http(s); serve local artifacts instead of passing file:// URLs.
+#
+# Finding no measurable media or interactive element is a failure, not a pass.
+#
+# Zero-dimension and hidden elements fail by default.  An element that is
+# deliberately not presented opts out one element at a time with the
+# rendered-markup attribute data-fm-visual-check="intentionally-hidden" on that
+# element itself, and never on a container that stands in for it.  The marker
+# is never inherited from an ancestor, so there is no page-level or global
+# suppression, every use of it is reported, and a render whose every matched
+# element carries it still fails.  The marker waives only the dimension,
+# visibility, and pointer-events findings; a disabled control still fails.
 #
 # The check verifies rendered dimensions and CSS visibility only.  It cannot
 # prove that media can play or be heard, that a control has useful behavior, or
@@ -19,8 +34,15 @@ set -u
 
 BROWSER=${FM_VISUAL_CHECK_BROWSER:-chrome-devtools-axi}
 
+export CHROME_DEVTOOLS_AXI_SESSION="fm-visual-check-$$"
+unset CHROME_DEVTOOLS_AXI_PORT
+
 usage() {
-  sed -n '10,17{s/^# \{0,1\}//;p;}' "$0"
+  awk '
+    /^# Usage:/ { emit = 1 }
+    emit && !/^#/ { exit }
+    emit { sub(/^# ?/, ""); print }
+  ' "$0"
 }
 
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
@@ -119,21 +141,23 @@ if [ -n "$SOURCE_FAILURES" ]; then
   printf '%s\n' "$SOURCE_FAILURES"
 fi
 
+trap '"$BROWSER" stop >/dev/null 2>&1 || true' EXIT
+
 if ! BROWSER_OPEN=$($BROWSER open "$URL" 2>&1); then
   printf '%s\n' "$BROWSER_OPEN" >&2
   echo "fm-visual-deliverable-check: browser could not open $URL" >&2
   exit 2
 fi
 
-READ_RENDERED_ELEMENTS='() => JSON.stringify([...document.querySelectorAll("audio, video, button, input:not([type=hidden]), select, textarea, a[href], [role=button], [role=link], [contenteditable=true], [tabindex]:not([tabindex=\"-1\"])" )].map((element) => { const rect = element.getBoundingClientRect(); const label = element.tagName.toLowerCase() + (element.id ? "#" + element.id : ""); const interactive = element.matches("button, input:not([type=hidden]), select, textarea, a[href], [role=button], [role=link], [contenteditable=true], [tabindex]:not([tabindex=\"-1\"])"); let hiddenBy = ""; for (let node = element; node; node = node.parentElement) { const style = getComputedStyle(node); if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse" || style.contentVisibility === "hidden" || Number(style.opacity) === 0) { hiddenBy = node === element ? "its computed style" : "an ancestor\u0027s computed style"; break; } } const style = getComputedStyle(element); return { label, width: rect.width, height: rect.height, clientRects: element.getClientRects().length, hiddenBy, interactive, disabled: interactive && (element.matches(":disabled") || element.getAttribute("aria-disabled") === "true"), pointerEvents: style.pointerEvents }; }))'
+READ_RENDERED_ELEMENTS='() => { const INTERACTIVE = "button, input:not([type=hidden]), select, textarea, a[href], [role=button], [role=link], [contenteditable=true], [tabindex]:not([tabindex=\"-1\"])"; return JSON.stringify([...document.querySelectorAll("audio, video, " + INTERACTIVE)].map((element) => { const rect = element.getBoundingClientRect(); const label = element.tagName.toLowerCase() + (element.id ? "#" + element.id : ""); const interactive = element.matches(INTERACTIVE); let hiddenBy = ""; for (let node = element; node; node = node.parentElement) { const style = getComputedStyle(node); if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse" || style.contentVisibility === "hidden" || Number(style.opacity) === 0) { hiddenBy = node === element ? "its computed style" : "an ancestor\u0027s computed style"; break; } } const style = getComputedStyle(element); return { label, width: rect.width, height: rect.height, clientRects: element.getClientRects().length, hiddenBy, interactive, disabled: interactive && (element.matches(":disabled") || element.getAttribute("aria-disabled") === "true"), pointerEvents: style.pointerEvents, exempt: element.getAttribute("data-fm-visual-check") === "intentionally-hidden" }; })); }'
 
-if ! BROWSER_RESULT=$($BROWSER eval "$READ_RENDERED_ELEMENTS" 2>&1); then
+if ! BROWSER_RESULT=$($BROWSER eval "$READ_RENDERED_ELEMENTS" --full 2>&1); then
   printf '%s\n' "$BROWSER_RESULT" >&2
   echo "fm-visual-deliverable-check: browser could not inspect rendered elements at $URL" >&2
   exit 2
 fi
 
-RENDER_FAILURES=$(printf '%s\n' "$BROWSER_RESULT" | node -e '
+RENDER_REPORT=$(printf '%s\n' "$BROWSER_RESULT" | node -e '
 const fs = require("fs");
 const output = fs.readFileSync(0, "utf8");
 const resultLine = output.split(/\r?\n/).find((line) => line.startsWith("result:"));
@@ -141,28 +165,50 @@ if (!resultLine) process.exit(2);
 let value;
 try {
   value = JSON.parse(resultLine.slice("result:".length).trim());
-  if (typeof value === "string") value = JSON.parse(value);
 } catch (_) {
   process.exit(2);
 }
+for (let depth = 0; typeof value === "string" && depth < 4; depth += 1) {
+  try {
+    value = JSON.parse(value);
+  } catch (_) {
+    process.exit(2);
+  }
+}
 if (!Array.isArray(value)) process.exit(2);
 let failures = 0;
+const MARKER = "data-fm-visual-check=intentionally-hidden";
+const measured = value.filter((element) => element.exempt !== true);
+for (const element of value) {
+  if (element.exempt === true) {
+    console.log(`note - ${element.label}: presentation findings waived by the ${MARKER} marker.`);
+  }
+}
+if (value.length === 0) {
+  console.log(`FAIL - no media or interactive element was found in the rendered page, so nothing could be measured.`);
+  failures += 1;
+} else if (measured.length === 0) {
+  console.log(`FAIL - every matched element carries the ${MARKER} marker, so nothing could be measured.`);
+  failures += 1;
+}
 for (const element of value) {
   const dimensions = `${element.width}x${element.height}`;
-  if (!(element.width > 0) || !(element.height > 0) || element.clientRects === 0) {
-    console.log(`FAIL - ${element.label}: rendered dimensions are ${dimensions}.`);
-    failures += 1;
-  }
-  if (element.hiddenBy) {
-    console.log(`FAIL - ${element.label}: hidden by ${element.hiddenBy}.`);
-    failures += 1;
+  if (element.exempt !== true) {
+    if (!(element.width > 0) || !(element.height > 0) || element.clientRects === 0) {
+      console.log(`FAIL - ${element.label}: rendered dimensions are ${dimensions}.`);
+      failures += 1;
+    }
+    if (element.hiddenBy) {
+      console.log(`FAIL - ${element.label}: hidden by ${element.hiddenBy}.`);
+      failures += 1;
+    }
+    if (element.interactive && element.pointerEvents === "none") {
+      console.log(`FAIL - ${element.label}: pointer events are disabled.`);
+      failures += 1;
+    }
   }
   if (element.interactive && element.disabled) {
     console.log(`FAIL - ${element.label}: disabled interactive control.`);
-    failures += 1;
-  }
-  if (element.interactive && element.pointerEvents === "none") {
-    console.log(`FAIL - ${element.label}: pointer events are disabled.`);
     failures += 1;
   }
 }
@@ -177,8 +223,8 @@ if [ "$RENDER_RC" -ne 0 ] && [ "$RENDER_RC" -ne 1 ]; then
   echo "fm-visual-deliverable-check: could not measure rendered elements at $URL." >&2
   exit 2
 fi
-if [ -n "$RENDER_FAILURES" ]; then
-  printf '%s\n' "$RENDER_FAILURES"
+if [ -n "$RENDER_REPORT" ]; then
+  printf '%s\n' "$RENDER_REPORT"
 fi
 
 if [ "$SOURCE_RC" -ne 0 ] || [ "$RENDER_RC" -ne 0 ]; then
