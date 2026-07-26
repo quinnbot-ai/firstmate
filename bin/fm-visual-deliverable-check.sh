@@ -10,7 +10,8 @@
 #
 # It drives a per-run named browser session, on its own bridge and port, so it
 # neither navigates nor is disturbed by a page the caller or a concurrent
-# crewmate has open, and it stops that session when it finishes.
+# crewmate has open, and it stops that session and removes its state directory
+# when it finishes.
 #
 # Usage:
 #   fm-visual-deliverable-check.sh <url> --source <html-or-css> [--source <html-or-css> ...]
@@ -34,8 +35,23 @@ set -u
 
 BROWSER=${FM_VISUAL_CHECK_BROWSER:-chrome-devtools-axi}
 
-export CHROME_DEVTOOLS_AXI_SESSION="fm-visual-check-$$"
+BROWSER_SESSION="fm-visual-check-$$"
+export CHROME_DEVTOOLS_AXI_SESSION="$BROWSER_SESSION"
 unset CHROME_DEVTOOLS_AXI_PORT
+if [ -n "${HOME:-}" ]; then
+  BROWSER_SESSION_STATE_DIR="$HOME/.chrome-devtools-axi/sessions/$BROWSER_SESSION"
+else
+  BROWSER_SESSION_STATE_DIR=
+fi
+
+release_browser_session() {
+  "$BROWSER" stop >/dev/null 2>&1 || true
+  case "$BROWSER_SESSION_STATE_DIR" in
+    */.chrome-devtools-axi/sessions/fm-visual-check-[0-9]*)
+      rm -rf "$BROWSER_SESSION_STATE_DIR"
+      ;;
+  esac
+}
 
 usage() {
   awk '
@@ -141,7 +157,7 @@ if [ -n "$SOURCE_FAILURES" ]; then
   printf '%s\n' "$SOURCE_FAILURES"
 fi
 
-trap '"$BROWSER" stop >/dev/null 2>&1 || true' EXIT
+trap release_browser_session EXIT
 
 if ! BROWSER_OPEN=$($BROWSER open "$URL" 2>&1); then
   printf '%s\n' "$BROWSER_OPEN" >&2
@@ -149,7 +165,7 @@ if ! BROWSER_OPEN=$($BROWSER open "$URL" 2>&1); then
   exit 2
 fi
 
-READ_RENDERED_ELEMENTS='() => { const INTERACTIVE = "button, input:not([type=hidden]), select, textarea, a[href], [role=button], [role=link], [contenteditable=true], [tabindex]:not([tabindex=\"-1\"])"; return JSON.stringify([...document.querySelectorAll("audio, video, " + INTERACTIVE)].map((element) => { const rect = element.getBoundingClientRect(); const label = element.tagName.toLowerCase() + (element.id ? "#" + element.id : ""); const interactive = element.matches(INTERACTIVE); let hiddenBy = ""; for (let node = element; node; node = node.parentElement) { const style = getComputedStyle(node); if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse" || style.contentVisibility === "hidden" || Number(style.opacity) === 0) { hiddenBy = node === element ? "its computed style" : "an ancestor\u0027s computed style"; break; } } const style = getComputedStyle(element); return { label, width: rect.width, height: rect.height, clientRects: element.getClientRects().length, hiddenBy, interactive, disabled: interactive && (element.matches(":disabled") || element.getAttribute("aria-disabled") === "true"), pointerEvents: style.pointerEvents, exempt: element.getAttribute("data-fm-visual-check") === "intentionally-hidden" }; })); }'
+READ_RENDERED_ELEMENTS='() => { const INTERACTIVE = "button, input:not([type=hidden]), select, textarea, a[href], [role=button], [role=link], [contenteditable=true], [tabindex]:not([tabindex=\"-1\"])"; return [...document.querySelectorAll("audio, video, " + INTERACTIVE)].map((element) => { const rect = element.getBoundingClientRect(); const label = element.tagName.toLowerCase() + (element.id ? "#" + element.id : ""); const interactive = element.matches(INTERACTIVE); let hiddenBy = ""; for (let node = element; node; node = node.parentElement) { const style = getComputedStyle(node); if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse" || style.contentVisibility === "hidden" || Number(style.opacity) === 0) { hiddenBy = node === element ? "its computed style" : "an ancestor\u0027s computed style"; break; } } const style = getComputedStyle(element); return { label, width: rect.width, height: rect.height, clientRects: element.getClientRects().length, hiddenBy, interactive, disabled: interactive && (element.matches(":disabled") || element.getAttribute("aria-disabled") === "true"), pointerEvents: style.pointerEvents, exempt: element.getAttribute("data-fm-visual-check") === "intentionally-hidden" }; }); }'
 
 if ! BROWSER_RESULT=$($BROWSER eval "$READ_RENDERED_ELEMENTS" --full 2>&1); then
   printf '%s\n' "$BROWSER_RESULT" >&2

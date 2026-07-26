@@ -17,7 +17,15 @@ make_browser() {
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
-  open) printf 'page opened\n' ;;
+  open)
+    if [ -n "${FM_VISUAL_CHECK_STATE_LOG:-}" ] && [ -n "${HOME:-}" ]; then
+      state_dir="$HOME/.chrome-devtools-axi/sessions/${CHROME_DEVTOOLS_AXI_SESSION:-default}"
+      mkdir -p "$state_dir"
+      printf '%s\n' "$$" > "$state_dir/bridge.pid"
+      printf '%s\n' "$state_dir" > "$FM_VISUAL_CHECK_STATE_LOG"
+    fi
+    printf 'page opened\n'
+    ;;
   eval)
     if [ -n "${FM_VISUAL_CHECK_EVAL_LOG:-}" ]; then
       printf 'argv: %s\nsession: %s\nport: %s\n' \
@@ -41,15 +49,16 @@ console.log(`result: ${text}`);
 ' "$1" "$2"
 }
 
-# The bridge hands the evaluated JSON.stringify output back re-encoded twice.
+# The bridge serializes the probe's returned array and then escapes that string
+# once more, so a real result needs two parses.
 write_result() {  # <path> <json-array>
   local path=$1 result=$2
-  encode_result 2 "$result" > "$path"
+  encode_result 1 "$result" > "$path"
 }
 
-write_singly_encoded_result() {  # <path> <json-array>
+write_doubly_encoded_result() {  # <path> <json-array>
   local path=$1 result=$2
-  encode_result 1 "$result" > "$path"
+  encode_result 2 "$result" > "$path"
 }
 
 run_check() {  # <result-file> <source>...
@@ -61,8 +70,10 @@ run_check() {  # <result-file> <source>...
     args+=(--source "$source")
   done
   CHROME_DEVTOOLS_AXI_SESSION=crewmate-in-flight CHROME_DEVTOOLS_AXI_PORT=9224 \
+    HOME="${FM_TEST_HOME:-$HOME}" \
     FM_VISUAL_CHECK_BROWSER="$TMP_ROOT/browser" FM_VISUAL_CHECK_RESULT="$result" \
-    FM_VISUAL_CHECK_EVAL_LOG="$EVAL_LOG" "$CHECK" "${args[@]}"
+    FM_VISUAL_CHECK_EVAL_LOG="$EVAL_LOG" \
+    FM_VISUAL_CHECK_STATE_LOG="${FM_TEST_STATE_LOG:-}" "$CHECK" "${args[@]}"
 }
 
 make_browser "$TMP_ROOT/browser"
@@ -151,14 +162,34 @@ test_render_probe_is_isolated_and_untruncated() {
   pass "visual deliverable check probes an isolated session with untruncated output"
 }
 
-test_singly_encoded_result_is_measured() {
-  local source="$TMP_ROOT/shallow.html" result="$TMP_ROOT/shallow.result" out rc
+test_doubly_encoded_result_is_measured() {
+  local source="$TMP_ROOT/deep.html" result="$TMP_ROOT/deep.result" out rc
   printf '<audio controls></audio>\n' > "$source"
-  write_singly_encoded_result "$result" '[{"label":"audio#bed","width":318,"height":0,"clientRects":1,"hiddenBy":"","interactive":false,"disabled":false,"pointerEvents":"auto","exempt":false}]'
+  write_doubly_encoded_result "$result" '[{"label":"audio#bed","width":318,"height":0,"clientRects":1,"hiddenBy":"","interactive":false,"disabled":false,"pointerEvents":"auto","exempt":false}]'
   out=$(run_check "$result" "$source" 2>&1); rc=$?
-  expect_code 1 "$rc" "a less deeply encoded browser result must still be measured"
-  assert_contains "$out" 'audio#bed: rendered dimensions are 318x0' "a less deeply encoded result was not measured"
+  expect_code 1 "$rc" "a more deeply encoded browser result must still be measured"
+  assert_contains "$out" 'audio#bed: rendered dimensions are 318x0' "a more deeply encoded result was not measured"
   pass "visual deliverable check measures either browser result encoding depth"
+}
+
+test_probe_returns_an_unstringified_array() {
+  assert_grep 'return [...document.querySelectorAll(' "$CHECK" "the render probe no longer returns the element array directly"
+  assert_no_grep 'JSON.stringify([...document.querySelectorAll(' "$CHECK" "the render probe re-stringifies a result the bridge already serializes"
+  pass "visual deliverable check probe leaves serialization to the browser bridge"
+}
+
+test_session_state_dir_is_removed() {
+  local source="$TMP_ROOT/state.html" result="$TMP_ROOT/state.result" created
+  local FM_TEST_HOME="$TMP_ROOT/home" FM_TEST_STATE_LOG="$TMP_ROOT/state.dir"
+  printf '<audio controls></audio>\n' > "$source"
+  write_result "$result" '[{"label":"audio#bed","width":318,"height":54,"clientRects":1,"hiddenBy":"","interactive":false,"disabled":false,"pointerEvents":"auto","exempt":false}]'
+  mkdir -p "$FM_TEST_HOME/.chrome-devtools-axi/sessions/keep-me"
+  run_check "$result" "$source" >/dev/null 2>&1
+  created=$(cat "$FM_TEST_STATE_LOG")
+  assert_contains "$created" "$FM_TEST_HOME/.chrome-devtools-axi/sessions/fm-visual-check-" "the bridge stand-in did not create a per-run session state directory to clean up"
+  assert_absent "$created" "the per-run browser session state directory was left behind"
+  assert_present "$FM_TEST_HOME/.chrome-devtools-axi/sessions/keep-me" "session cleanup removed a directory belonging to another session"
+  pass "visual deliverable check removes its own browser session state directory"
 }
 
 test_unexpected_browser_result_fails_cleanly() {
@@ -197,7 +228,9 @@ test_zero_matched_elements_fails
 test_marked_hidden_control_is_exempt
 test_every_element_marked_still_fails
 test_render_probe_is_isolated_and_untruncated
-test_singly_encoded_result_is_measured
+test_probe_returns_an_unstringified_array
+test_session_state_dir_is_removed
+test_doubly_encoded_result_is_measured
 test_unexpected_browser_result_fails_cleanly
 test_file_url_is_refused_cleanly
 test_help_states_file_url_contract
