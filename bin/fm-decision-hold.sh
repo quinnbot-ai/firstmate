@@ -38,8 +38,10 @@
 # `verify` is read-only and is called by scout teardown so teardown cannot erase a
 # source before this gate has succeeded.
 # When a pre-archive legacy resolution is absent from both live structured
-# surfaces, its originating status resolution or decision artifact remains a
-# compatibility fallback until that record can be migrated to the archive.
+# surfaces, its originating keyed status resolution, or a decision artifact that
+# names that exact hold identity or decision key, remains a compatibility
+# fallback until that record can be migrated to the archive. Evidence that names
+# no hold never verifies a decision.
 #
 # `resolve` requires every --routed-to task to exist and to be blocked by the hold.
 # It writes the captain decision and routed identities into the hold body, clears
@@ -396,9 +398,51 @@ hold_show_is_resolved() {  # <tasks-axi-show-output>
   return 1
 }
 
-same_task_resolution_evidence() {  # <origin-id> <hold-id>
-  local origin=$1 id=$2 key status_file artifact
-  key=${id#"$origin-decision-"}
+text_has_key_token() {  # <text> <decision-key>
+  local key=$2
+  awk -v key="$key" '
+    function boundary(c) { return c == "" || c !~ /[A-Za-z0-9]/ }
+    {
+      line = $0
+      start = 1
+      while ((pos = index(substr(line, start), key)) > 0) {
+        at = start + pos - 1
+        if (boundary(at == 1 ? "" : substr(line, at - 1, 1)) &&
+          boundary(substr(line, at + length(key), 1))) {
+          found = 1
+          exit
+        }
+        start = at + 1
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  ' <<EOF
+$1
+EOF
+}
+
+# A pre-archive artifact is evidence only for the exact hold it names, so one
+# resolved decision can never stand in for a different unrecorded decision.
+decision_artifact_evidence() {  # <origin-id> <decision-key> <hold-id>
+  local origin=$1 key=$2 id=$3 dir artifact base
+  dir="$DATA/$origin"
+  [ -d "$dir" ] || return 1
+  while IFS= read -r artifact; do
+    [ -n "$artifact" ] || continue
+    base=${artifact##*/}
+    case "$base" in
+      *"$id"*) return 0 ;;
+    esac
+    text_has_key_token "$base" "$key" && return 0
+    grep -F -q -e "$id" -e "[key=$key]" "$artifact" 2>/dev/null && return 0
+  done <<EOF
+$(find "$dir" -type f \( -iname '*decision*' -o -iname '*resolution*' \) 2>/dev/null || true)
+EOF
+  return 1
+}
+
+same_task_resolution_evidence() {  # <origin-id> <decision-key> <hold-id>
+  local origin=$1 key=$2 id=$3 status_file
   status_file="$STATE/$origin.status"
   if [ -f "$status_file" ] && awk -v id="$id" -v key="$key" '
     $0 == "resolved: " id || index($0, "resolved: " id " -> ") == 1 { found = 1 }
@@ -408,20 +452,19 @@ same_task_resolution_evidence() {  # <origin-id> <hold-id>
   ' "$status_file"; then
     return 0
   fi
-  [ -d "$DATA/$origin" ] || return 1
-  artifact=$(find "$DATA/$origin" -type f \( -iname '*decision*' -o -iname '*resolution*' \) -print -quit 2>/dev/null || true)
-  [ -n "$artifact" ]
+  decision_artifact_evidence "$origin" "$key" "$id"
 }
 
-verify_hold_durable() {  # <origin-id> <hold-id>
-  local origin=$1 id=$2 show archive_show state held kind hold_kind body
+verify_hold_durable() {  # <origin-id> <decision-key>
+  local origin=$1 key=$2 id show archive_show state held kind hold_kind
+  id=$(hold_id "$origin" "$key")
   if ! show=$(task_show "$id"); then
     if archive_show=$(fm_tasks_axi_archive_show "$FM_HOME" "$id"); then
       hold_show_is_resolved "$archive_show" \
         || fail "archived captain decision $id is not durably resolved"
       return 0
     fi
-    if same_task_resolution_evidence "$origin" "$id"; then
+    if same_task_resolution_evidence "$origin" "$key" "$id"; then
       return 0
     fi
     fail "captain decision $id is absent from the live backlog and authoritative archive"
@@ -430,14 +473,11 @@ verify_hold_durable() {  # <origin-id> <hold-id>
   held=$(show_field "$show" held)
   kind=$(show_field "$show" kind)
   hold_kind=$(show_field "$show" hold_kind)
-  body=$(show_field "$show" body)
   if [ "$state" = queued ] && [ "$held" = yes ] && [ "$kind" = captain ] && [ "$hold_kind" = captain ]; then
     return 0
   fi
-  if [ "$state" = "done" ] && [ "$kind" = captain ]; then
-    case "$body" in
-      *"Resolution recorded by fm-decision-hold."*"Routed work:"*) return 0 ;;
-    esac
+  if hold_show_is_resolved "$show"; then
+    return 0
   fi
   fail "captain decision $id is neither actively held nor durably resolved"
 }
@@ -579,7 +619,7 @@ command_complete() {
   if [ -n "$keys" ]; then
     while IFS= read -r key; do
       [ -n "$key" ] || continue
-      verify_hold_durable "$origin" "$(hold_id "$origin" "$key")"
+      verify_hold_durable "$origin" "$key"
     done <<EOF
 $(printf '%s\n' "$keys" | tr ',' '\n')
 EOF
@@ -629,7 +669,7 @@ command_verify() {
   if [ -n "$keys" ]; then
     while IFS= read -r key; do
       [ -n "$key" ] || continue
-      verify_hold_durable "$origin" "$(hold_id "$origin" "$key")"
+      verify_hold_durable "$origin" "$key"
     done <<EOF
 $(printf '%s\n' "$keys" | tr ',' '\n')
 EOF
@@ -639,7 +679,7 @@ EOF
     [ -n "$key" ] || continue
     list_has_key "$keys" "$key" \
       || fail "open structured decision $origin/$key is outside the reviewed inventory"
-    verify_hold_durable "$origin" "$(hold_id "$origin" "$key")"
+    verify_hold_durable "$origin" "$key"
   done <<EOF
 $open
 EOF

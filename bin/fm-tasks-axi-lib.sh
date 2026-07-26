@@ -55,6 +55,7 @@ fm_tasks_axi_update_has_archive_body() {
 # the configuration, archive, or requested record is absent.
 fm_tasks_axi_archive_show() {  # <home> <id>
   local home=$1 wanted=$2 config archive
+  [ -n "$wanted" ] || return 1
   config="$home/.tasks.toml"
   [ -f "$config" ] || return 1
   archive=$(awk '
@@ -99,7 +100,7 @@ fm_tasks_axi_archive_show() {  # <home> <id>
       kind = "-"
       body = ""
     }
-    /^## Archived[[:space:]]/ { emit(); archived = 1; next }
+    /^## Archived/ { emit(); archived = 1; next }
     /^## / { emit(); archived = 0; next }
     archived && /^- \[x\] / {
       emit()

@@ -34,6 +34,7 @@ Scout teardown calls the script's read-only `verify` subcommand after checking f
 The `--force` path remains the explicit captain-approved discard escape hatch.
 After Done retention pruning removes a resolved hold from `data/backlog.md`, `verify` reads that exact completed `captain` record from the configured tasks-axi archive and requires its resolution and routing markers.
 The archive is checked before the pre-archive compatibility fallback for an originating matching keyed `resolved` status event or a decision or resolution artifact under `data/<origin-id>/`.
+That artifact counts only when it names the exact hold, either through its hold identity or its decision key as a whole word in the file name, or through its hold identity or a `[key=<key>]` marker in the file contents, so a resolved decision can never verify a different unrecorded one.
 An absent live record, archive record, and same-task compatibility record remains an explicit verification failure, so a decision that was never recorded cannot pass.
 
 The `resolve` subcommand requires a decision file and at least one existing dependent task whose structured `blocked-by` edge points to the hold.
@@ -79,6 +80,7 @@ Three further regressions hold the guards to their weakest cases: a captain hold
 A later regression drives the canonical backlog grammar directly, so a comma-continued `(repo: sample, since ...)` group, an uppercase `[X]` marker, an emphasized `**id**` row, and an archived record whose topic sits below a blank body line each still refuse the duplicate they would otherwise mint.
 A retention regression resolves a hold, prunes it to `data/done-archive.md`, and verifies its originating inventory without relying on same-task evidence.
 A missing hold still fails after both live and archive lookup, while the status and decision-artifact compatibility paths remain covered for pre-archive records.
+A separate regression proves an artifact that names no hold does not verify a second unrecorded key in the same origin.
 
 The final verification commands and their exact summarized outputs follow.
 
@@ -89,6 +91,7 @@ ok - non-forced scout teardown always requires durable inventory verification
 ok - pruned resolved holds verify from the authoritative archive
 ok - unrecorded decisions still fail loudly after archive lookup
 ok - same-task resolution evidence remains a compatibility fallback
+ok - decision artifacts only verify the hold they name
 ok - captain holds are idempotent, distinct, teardown-safe, Bearings-visible, and durably routed before close
 ok - completion and verification validate origins before constructing paths
 ok - ended visual review follows the same decision-hold completion owner

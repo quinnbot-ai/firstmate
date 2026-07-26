@@ -376,10 +376,34 @@ test_same_task_resolution_evidence_remains_compatible() {
   run_decisions "$home" verify "$id" >/dev/null \
     || fail "resolved status evidence no longer verified an absent legacy hold"
   : > "$home/state/$id.status"
-  printf 'Captain decision: use the compatibility route.\n' > "$home/data/$id/captain-decision.md"
+  printf 'Captain decision: use the compatibility route.\n' > "$home/data/$id/route-decision.md"
   run_decisions "$home" verify "$id" >/dev/null \
-    || fail "decision artifact evidence no longer verified an absent legacy hold"
+    || fail "keyed decision artifact evidence no longer verified an absent legacy hold"
+  rm "$home/data/$id/route-decision.md"
+  printf 'Captain decision recorded for %s-decision-route.\n' "$id" \
+    > "$home/data/$id/captain-decision.md"
+  run_decisions "$home" verify "$id" >/dev/null \
+    || fail "hold-naming decision artifact evidence no longer verified an absent legacy hold"
   pass "same-task resolution evidence remains a compatibility fallback"
+}
+
+# One resolved decision must never verify a different unrecorded decision, so a
+# decision artifact that names no hold is not evidence for an arbitrary key.
+test_unkeyed_decision_artifact_is_not_evidence() {
+  local home id
+  home=$(make_home unkeyed-evidence)
+  id=sample-unkeyed-review
+  mkdir -p "$home/data/$id"
+  write_origin_meta "$home" "$id"
+  printf 'decisions_reviewed=1\ndecision_keys=route,scope\n' >> "$home/state/$id.meta"
+  printf 'resolved [key=route]: firstmate recorded the compatibility route\n' > "$home/state/$id.status"
+  printf 'Captain decision: use the compatibility route.\n' > "$home/data/$id/captain-decision.md"
+  if run_decisions "$home" verify "$id" > "$home/unkeyed.out" 2> "$home/unkeyed.err"; then
+    fail "an unkeyed decision artifact verified an unrecorded decision"
+  fi
+  assert_grep "$id-decision-scope is absent from the live backlog and authoritative archive" \
+    "$home/unkeyed.err" "unrecorded second decision did not fail loudly"
+  pass "decision artifacts only verify the hold they name"
 }
 
 test_origin_slug_validation_precedes_path_construction() {
@@ -981,6 +1005,7 @@ test_scout_teardown_always_requires_inventory_verification
 test_pruned_resolved_hold_verifies_from_authoritative_archive
 test_unrecorded_decision_fails_after_retention_lookup
 test_same_task_resolution_evidence_remains_compatible
+test_unkeyed_decision_artifact_is_not_evidence
 test_structured_holds_survive_teardown_and_route_resolution
 test_origin_slug_validation_precedes_path_construction
 test_visual_review_uses_shared_completion_owner
