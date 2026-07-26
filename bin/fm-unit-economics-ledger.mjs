@@ -24,10 +24,11 @@
 // `estimated`; it remains estimated even when corroborated. Missing, stale,
 // malformed, or disagreeing inputs are rendered unavailable, never as zero.
 // A lane without any configured sources says `source configuration absent`, a
-// `sources` container that is not an array or an entry without a well-formed
-// string command array and positive `timeoutMs` says `source configuration
-// malformed`, and fewer than two surviving distinct commands says `independent
-// source count insufficient`.
+// `sources` container that is not an array, or an entry without a non-empty
+// array of string command words, or one whose optional `timeoutMs` is present
+// but not a positive number, says `source configuration malformed`, and fewer
+// than two surviving distinct commands says `independent source count
+// insufficient`.
 // A configured command that cannot be read says `source unreadable`, malformed
 // command output says `source malformed`, and a valid source which omits the
 // requested metric says `source metric missing`. A diagnosed source failure is
@@ -56,7 +57,9 @@
 // and where corroborating helpers label one agreed amount differently the
 // weakest label wins, so a `measured`/`estimated` pair publishes as estimated.
 // An explicit corroborated empty roster is a rendered zero, while every missing
-// or unreadable source is unavailable. A daily helper whose own `date` is a
+// or unreadable source is unavailable. Readable helpers that disagree on the
+// crew roster, on the top-level currency, or on any amount all say `source
+// disagreement refused`. A daily helper whose own `date` is a
 // valid calendar date other than the ledger date says `ledger date not
 // covered`, so a backfill can tell an uncovered day from broken helper output.
 // The ledger date is today in UTC unless
@@ -98,6 +101,7 @@ const SOURCE_MALFORMED = 'source malformed';
 const SOURCE_METRIC_MISSING = 'source metric missing';
 const INDEPENDENT_SOURCE_COUNT_INSUFFICIENT = 'independent source count insufficient';
 const LEDGER_DATE_NOT_COVERED = 'ledger date not covered';
+const SOURCE_DISAGREEMENT_REFUSED = 'source disagreement refused';
 
 function fail(message) { process.stderr.write(`error: ${message}\n`); process.exit(2); }
 function isCalendarDate(value) {
@@ -281,10 +285,10 @@ function dailyFleetLine(sources, date, missingReason) {
   const failed = parsed.find((source) => !source.ok);
   if (failed || sources.length < 2) return unavailableDaily(failed?.reason || missingReason || INDEPENDENT_SOURCE_COUNT_INSUFFICIENT);
   const currency = parsed[0].currency;
-  if (parsed.some((source) => source.currency !== currency)) return unavailableDaily('source disagreement refused');
+  if (parsed.some((source) => source.currency !== currency)) return unavailableDaily(SOURCE_DISAGREEMENT_REFUSED);
   if (currency !== 'USD') return unavailableDaily('unsupported currency refused');
   const roster = [...parsed[0].rows.keys()].sort();
-  if (parsed.some((source) => source.rows.size !== roster.length || roster.some((crew) => !source.rows.has(crew)))) return unavailableDaily('source unavailable');
+  if (parsed.some((source) => source.rows.size !== roster.length || roster.some((crew) => !source.rows.has(crew)))) return unavailableDaily(SOURCE_DISAGREEMENT_REFUSED);
   const crewSessions = [];
   for (const crew of roster) {
     const rows = parsed.map((source) => source.rows.get(crew));
@@ -292,7 +296,7 @@ function dailyFleetLine(sources, date, missingReason) {
     const validationRuns = rows.map((row) => row.validationRuns);
     const sameCost = sessionCost.every((value) => value.amount === sessionCost[0].amount);
     const sameRuns = validationRuns.every((value) => value.amount === validationRuns[0].amount);
-    if (!sameCost || !sameRuns) return unavailableDaily('source disagreement refused');
+    if (!sameCost || !sameRuns) return unavailableDaily(SOURCE_DISAGREEMENT_REFUSED);
     crewSessions.push({
       crew,
       session_cost: { ...sessionCost[0], status: sessionCost.some((value) => value.status === 'estimated') ? 'estimated' : 'independently_cross_checked', cross_check: 'passed' },

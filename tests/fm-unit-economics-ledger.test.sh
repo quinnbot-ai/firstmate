@@ -322,6 +322,21 @@ JSON
   pass "daily helpers disagreeing on currency render unavailable"
 }
 
+test_daily_fleet_line_refuses_roster_disagreement() {
+  local one="$TMP_ROOT/daily-roster/one" two="$TMP_ROOT/daily-roster/two" config="$TMP_ROOT/daily-roster/config.json" out="$TMP_ROOT/daily-roster/out.json" quota="$TMP_ROOT/daily-roster/quota" date
+  date=$(date -u +%Y-%m-%d)
+  write_source "$one" "{\"source\":\"billing-export\",\"observedAt\":\"$NOW\",\"date\":\"$date\",\"currency\":\"USD\",\"crewSessions\":[{\"crew\":\"alpha\",\"sessionCost\":{\"amount\":2,\"unit\":\"USD\",\"status\":\"measured\"},\"validationRuns\":{\"amount\":3,\"unit\":\"runs\",\"status\":\"measured\"}},{\"crew\":\"bravo\",\"sessionCost\":{\"amount\":1,\"unit\":\"USD\",\"status\":\"measured\"},\"validationRuns\":{\"amount\":1,\"unit\":\"runs\",\"status\":\"measured\"}}]}"
+  write_source "$two" "{\"source\":\"run-audit\",\"observedAt\":\"$NOW\",\"date\":\"$date\",\"currency\":\"USD\",\"crewSessions\":[{\"crew\":\"alpha\",\"sessionCost\":{\"amount\":2,\"unit\":\"USD\",\"status\":\"measured\"},\"validationRuns\":{\"amount\":3,\"unit\":\"runs\",\"status\":\"measured\"}}]}"
+  mkdir -p "$(dirname "$config")"
+  cat > "$config" <<JSON
+{"maxAgeSeconds":900,"lanes":{"fleet_operations":{"daily_sources":[{"command":["$one"]},{"command":["$two"]}]}}}
+JSON
+  write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="fleet_operations") | .daily_fleet_line | select(.session_cost.amount==null and .session_cost.status=="unavailable" and .source_freshness=="source disagreement refused")' "$out" >/dev/null || fail "a crew-roster disagreement was not named a source disagreement"
+  grep -F 'unavailable (source disagreement refused)' "${out%.json}.md" >/dev/null || fail "the roster disagreement was hidden in Markdown"
+  pass "daily helpers disagreeing on the crew roster render a named disagreement"
+}
+
 test_daily_fleet_line_renders_corroborated_empty_roster_as_zero() {
   local one="$TMP_ROOT/daily-empty/one" two="$TMP_ROOT/daily-empty/two" config="$TMP_ROOT/daily-empty/config.json" out="$TMP_ROOT/daily-empty/out.json" quota="$TMP_ROOT/daily-empty/quota" date
   date=$(date -u +%Y-%m-%d)
@@ -422,6 +437,7 @@ test_malformed_source_timeouts_render_unavailable
 test_empty_quota_provider_list_is_unavailable
 test_quota_provider_without_refresh_time_is_unavailable
 test_daily_fleet_line_refuses_currency_disagreement
+test_daily_fleet_line_refuses_roster_disagreement
 test_daily_fleet_line_renders_corroborated_empty_roster_as_zero
 test_malformed_ledger_date_is_refused
 test_backfilled_ledger_date_refuses_quota_windows
