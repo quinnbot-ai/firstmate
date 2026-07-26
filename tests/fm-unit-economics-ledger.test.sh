@@ -88,7 +88,7 @@ test_unavailable_and_partial_lanes_render() {
   local config="$TMP_ROOT/unavailable/config.json" out="$TMP_ROOT/unavailable/out.json" quota="$TMP_ROOT/unavailable/quota"
   mkdir -p "$(dirname "$config")"; printf '{}\n' > "$config"; printf 'old\n' > "$out"; printf 'old\n' > "${out%.json}.md"; chmod 0644 "$out" "${out%.json}.md"; write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
   jq -e '[.lanes[].id] | length == 5 and index("weho") and index("fleet_operations")' "$out" >/dev/null || fail "all lanes did not render"
-  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .status=="unavailable")' "$out" >/dev/null || fail "unavailable lane was not honest"
+  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .status=="unavailable" and .source_freshness=="source configuration absent")' "$out" >/dev/null || fail "missing source configuration was not identified"
   jq -e '.lanes[] | select(.id=="fleet_operations") | .metrics[] | select(.name=="claude_quota_window" and .amount==80 and .unit=="percent")' "$out" >/dev/null || fail "available lane did not render beside unavailable lanes"
   [ -f "${out%.json}.md" ] || fail "captain-readable companion artifact was not written"
   [ "$(file_mode "$out")" = 600 ] && [ "$(file_mode "${out%.json}.md")" = 600 ] || fail "existing ledger artifacts were not made private"
@@ -135,8 +135,22 @@ test_daily_fleet_line_requires_readable_sources() {
   date=$(date -u +%Y-%m-%d)
   mkdir -p "$(dirname "$config")"; printf '{}\n' > "$config"; write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
   jq -e --arg date "$date" '(.schema == "fleet-unit-economics-ledger.v2") and ([.lanes[] | select(.id=="fleet_operations") | .daily_fleet_line | select(.date==$date and .session_cost.amount==null and .session_cost.status=="unavailable" and .validation_run_volume.amount==null and .validation_run_volume.status=="unavailable")] | length == 1)' "$out" >/dev/null || fail "missing daily sources were rendered as a number instead of unavailable"
-  grep -F 'unavailable (source unavailable)' "${out%.json}.md" >/dev/null || fail "daily Markdown line hid the unavailable source"
+  grep -F 'unavailable (source configuration absent)' "${out%.json}.md" >/dev/null || fail "daily Markdown line hid the unavailable source"
   pass "daily fleet line renders missing sources as unavailable rather than zero"
+}
+
+test_unreadable_malformed_and_unmapped_sources_stay_unavailable() {
+  local good="$TMP_ROOT/source-diagnosis/good" bad="$TMP_ROOT/source-diagnosis/bad" config="$TMP_ROOT/source-diagnosis/config.json" out="$TMP_ROOT/source-diagnosis/out.json" quota="$TMP_ROOT/source-diagnosis/quota"
+  write_source "$good" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"pipeline_cost\":{\"amount\":4,\"unit\":\"USD\",\"status\":\"measured\"},\"realized_revenue\":{\"amount\":8,\"unit\":\"USD\",\"status\":\"measured\"}}}"
+  write_config "$config" weho "$TMP_ROOT/source-diagnosis/missing" "$good"; write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .source_freshness=="source unreadable")' "$out" >/dev/null || fail "an unreadable helper was not identified"
+  write_source "$bad" 'not-json'
+  write_config "$config" weho "$bad" "$good"; run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .source_freshness=="source malformed")' "$out" >/dev/null || fail "malformed helper output was not identified"
+  write_source "$bad" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"pipeline_cost\":{\"amount\":4,\"unit\":\"USD\",\"status\":\"measured\"}}}"
+  write_config "$config" weho "$bad" "$good"; run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .source_freshness=="source metric missing")' "$out" >/dev/null || fail "an unmapped metric was not identified"
+  pass "unreadable malformed and unmapped sources remain unavailable with reasons"
 }
 
 test_daily_fleet_line_cross_checks_per_crew_cost_and_validation_runs() {
@@ -345,6 +359,7 @@ test_relative_source_commands_resolve_against_fm_home() {
 
 test_zero_revenue_is_explicit_and_cross_checked
 test_unavailable_and_partial_lanes_render
+test_unreadable_malformed_and_unmapped_sources_stay_unavailable
 test_relative_source_commands_resolve_against_fm_home
 test_stale_and_failed_cross_check_are_refused
 test_currency_and_units_are_preserved
