@@ -389,6 +389,11 @@ Being past the hard cap is deliberately not treated that way, because bounded re
 That case keeps its own captain-actionable `blocked: auto-dispatch stopped on a breached lane cap ...` wording so it cannot be mistaken for the routine at-capacity path.
 Failure events are deduplicated per episode in `state/.auto-dispatch-episode.json`: a repeat inside one unbroken run of failing passes stays silent, a pass that no longer reports the condition clears the episode, and a genuine recurrence later reports again.
 A not-due tick preserves the active episode because it belongs to the same run, while an absent or disabled config ends it, so re-enabling a home reports its blocking condition again.
+Retiring a leftover marker is the only reason an absent config runs a pass at all, and such a pass claims nothing and reports nothing; a home with no config and no marker never starts one.
+
+Every home directory this feature touches follows the fleet's own override convention.
+`FM_STATE_OVERRIDE`, `FM_CONFIG_OVERRIDE`, and `FM_DATA_OVERRIDE` relocate the state, config, and data directories for both the wrapper and the refill itself, matching what `fm-watch.sh` and `fm-fleet-snapshot.sh` already honour.
+The refill also pins those resolved directories into every shell helper it sources, so a helper that resolves and creates its own state directory cannot land outside the owning home.
 
 An invalid main inventory reports the snapshot's own reason.
 Its most common cause is a report-only claim that was interrupted between the atomic claim and the compensating reopen, which leaves the task `in_flight` with no worker metadata.
@@ -400,6 +405,11 @@ Manual backlog mode and `tasks-axi` versions without both capabilities are unsup
 The helper never scrapes human ready output and never substitutes `tasks-axi start`.
 
 Both capabilities are external prerequisites, so this is the contract an implementation must satisfy.
+
+The refill first probes for those capabilities through help text, and failing that probe is what makes the whole feature fail closed.
+`tasks-axi ready --help` must exit 0 and print the literal substring `--json` somewhere in its combined output.
+`tasks-axi claim --help` must exit 0, 1, or 2, and print both literal substrings `--if-ready` and `--json`.
+An implementation that documents these flags only in a man page, spells them `--json=<bool>`, or exits with any other status from `ready --help` is rejected with `blocked: tasks-axi must provide ready --json and claim --if-ready --json` even when its actual JSON output would conform.
 
 `ready --json` must exit 0 and print one object of the form `{"ok": true, "action": "ready", "ready": [...]}`, optionally carrying a `count` that equals `ready.length`.
 Each ready record must be a JSON object, and every id in the list must be distinct.

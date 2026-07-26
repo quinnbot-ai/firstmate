@@ -166,6 +166,9 @@ make_fixture() {
   FAKEBIN="$FIXTURE/fakebin"
   TASKS_STATE="$FIXTURE/tasks.json"
   SNAPSHOT="$FIXTURE/snapshot.json"
+  STATE_DIR="$HOME_DIR/state"
+  CONFIG_DIR="$HOME_DIR/config"
+  DATA_DIR="$HOME_DIR/data"
   mkdir -p "$HOME_DIR/data" "$HOME_DIR/state" "$HOME_DIR/config" "$FAKE_ROOT/bin" "$FAKEBIN"
   ln -s "$ROOT/bin/fm-project-mode.sh" "$FAKE_ROOT/bin/fm-project-mode.sh"
   cat > "$FAKE_ROOT/bin/fm-fleet-snapshot.sh" <<'SH'
@@ -228,8 +231,8 @@ add_task() {
     public_followup:null
   }]' "$TASKS_STATE" > "$tmp"
   mv "$tmp" "$TASKS_STATE"
-  mkdir -p "$HOME_DIR/data/$id"
-  cat > "$HOME_DIR/data/$id/brief.md" <<EOF
+  mkdir -p "$DATA_DIR/$id"
+  cat > "$DATA_DIR/$id/brief.md" <<EOF
 You are a crewmate managed by firstmate.
 
 # Task
@@ -250,6 +253,7 @@ EOF
 }
 
 fixture_env() {
+  unset FM_STATE_OVERRIDE FM_CONFIG_OVERRIDE FM_DATA_OVERRIDE
   export FM_HOME="$HOME_DIR"
   export FM_ROOT_OVERRIDE="$FAKE_ROOT"
   export FM_FAKE_TASKS_STATE="$TASKS_STATE"
@@ -273,7 +277,7 @@ wait_for_path() {
 start_owner() {
   local result=$1
   shift
-  node "$OWNER_JS" "$HOME_DIR/state/.lock" "$result" "$@" &
+  node "$OWNER_JS" "$STATE_DIR/.lock" "$result" "$@" &
   OWNER_PID=$!
   PIDS+=("$OWNER_PID")
   wait_for_path "$result" "owner wrapper did not finish its command"
@@ -298,14 +302,14 @@ start_runtime() {
   node "$WATCHER_JS" &
   WATCHER_PID=$!
   PIDS+=("$WATCHER_PID")
-  mkdir -p "$HOME_DIR/state/.watch.lock"
-  printf '%s\n' "$WATCHER_PID" > "$HOME_DIR/state/.watch.lock/pid"
-  printf '%s\n' "$HOME_DIR" > "$HOME_DIR/state/.watch.lock/fm-home"
-  printf '%s\n' "$FAKE_ROOT/bin/fm-watch.sh" > "$HOME_DIR/state/.watch.lock/watcher-path"
-  FM_HOME="$HOME_DIR" bash -c \
+  mkdir -p "$STATE_DIR/.watch.lock"
+  printf '%s\n' "$WATCHER_PID" > "$STATE_DIR/.watch.lock/pid"
+  printf '%s\n' "$HOME_DIR" > "$STATE_DIR/.watch.lock/fm-home"
+  printf '%s\n' "$FAKE_ROOT/bin/fm-watch.sh" > "$STATE_DIR/.watch.lock/watcher-path"
+  FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE_DIR" bash -c \
     '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$WATCHER_PID" \
-    > "$HOME_DIR/state/.watch.lock/pid-identity"
-  touch "$HOME_DIR/state/.last-watcher-beat"
+    > "$STATE_DIR/.watch.lock/pid-identity"
+  touch "$STATE_DIR/.last-watcher-beat"
 }
 
 run_once() {
@@ -317,7 +321,7 @@ run_once_on_cadence() {
 }
 
 status_verb_count() {
-  local verb=$1 file="$HOME_DIR/state/auto-dispatch.status"
+  local verb=$1 file="$STATE_DIR/auto-dispatch.status"
   if [ ! -f "$file" ]; then
     printf '0\n'
     return 0
@@ -335,7 +339,7 @@ add_task author-boundary
 node "$OWNER_JS" "$HOME_DIR/state/.lock" "$FIXTURE/idle-result" /usr/bin/true &
 owner=$!
 PIDS+=("$owner")
-wait_for_path "$HOME_DIR/state/.lock" "owner wrapper did not publish a session lock"
+wait_for_path "$STATE_DIR/.lock" "owner wrapper did not publish a session lock"
 if "$ROOT/bin/fm-dispatch-stage.sh" author-boundary \
   --repo alpha --kind ship --harness codex --herdr-lifecycle none \
   >"$FIXTURE/unauthorized.out" 2>"$FIXTURE/unauthorized.err"; then
@@ -436,7 +440,7 @@ jq '
 mv "$tmp" "$TASKS_STATE"
 node "$OWNER_JS" "$HOME_DIR/state/.lock" "$FIXTURE/queue-owner-result" /usr/bin/true &
 PIDS+=("$!")
-wait_for_path "$HOME_DIR/state/.lock" "owner wrapper did not publish a session lock"
+wait_for_path "$STATE_DIR/.lock" "owner wrapper did not publish a session lock"
 start_runtime
 run_once
 [ "$(jq -r .claim_count "$TASKS_STATE")" = 0 ] \
@@ -449,7 +453,7 @@ fixture_env
 add_task cap-indeterminate
 node "$OWNER_JS" "$HOME_DIR/state/.lock" "$FIXTURE/cap-owner-result" /usr/bin/true &
 PIDS+=("$!")
-wait_for_path "$HOME_DIR/state/.lock" "owner wrapper did not publish a session lock"
+wait_for_path "$STATE_DIR/.lock" "owner wrapper did not publish a session lock"
 start_runtime
 jq '.target_running = "unknown"' "$HOME_DIR/config/auto-dispatch.json" > "$FIXTURE/bad-config"
 mv "$FIXTURE/bad-config" "$HOME_DIR/config/auto-dispatch.json"
@@ -513,7 +517,7 @@ fixture_env
 add_task missing-api
 node "$OWNER_JS" "$HOME_DIR/state/.lock" "$FIXTURE/api-owner-result" /usr/bin/true &
 PIDS+=("$!")
-wait_for_path "$HOME_DIR/state/.lock" "owner wrapper did not publish a session lock"
+wait_for_path "$STATE_DIR/.lock" "owner wrapper did not publish a session lock"
 start_runtime
 export FM_FAKE_API_UNSUPPORTED=1
 for _ in 1 2; do
@@ -843,6 +847,88 @@ run_once >"$FIXTURE/episode-again.out" 2>"$FIXTURE/episode-again.err" || true
 [ "$(status_verb_count working)" = 2 ] \
   || fail "re-enabling a home kept its unchanged condition suppressed"
 pass "a disable interval ends the failure episode while a not-due tick preserves it"
+
+# A home whose state, config, and data live behind the fleet's own overrides is
+# fully operable, and nothing lands at the unoverridden default paths.
+make_fixture layout-overrides
+fixture_env
+STATE_DIR="$FIXTURE/alt-state"
+CONFIG_DIR="$FIXTURE/alt-config"
+DATA_DIR="$FIXTURE/alt-data"
+mv "$HOME_DIR/state" "$STATE_DIR"
+mv "$HOME_DIR/config" "$CONFIG_DIR"
+mv "$HOME_DIR/data" "$DATA_DIR"
+export FM_STATE_OVERRIDE="$STATE_DIR"
+export FM_CONFIG_OVERRIDE="$CONFIG_DIR"
+export FM_DATA_OVERRIDE="$DATA_DIR"
+add_task layout-overrides
+stage_task layout-overrides
+[ -f "$DATA_DIR/layout-overrides/dispatch.json" ] \
+  || fail "staging did not honour the data directory override"
+start_runtime
+run_once > "$FIXTURE/overrides.out"
+[ "$(jq -r .claim_count "$TASKS_STATE")" = 1 ] \
+  || fail "an override-relocated home did not complete its refill pass"
+[ "$(jq -r .id < "$FIXTURE/overrides.out")" = layout-overrides ] \
+  || fail "an override-relocated home did not report its selection"
+[ -f "$STATE_DIR/auto-dispatch-receipts/layout-overrides.json" ] \
+  || fail "the receipt did not land under the state directory override"
+[ ! -e "$HOME_DIR/state" ] \
+  || fail "a sourced helper or the refill recreated the default state directory"
+[ ! -e "$HOME_DIR/config" ] \
+  || fail "the refill read or created the default config directory"
+[ ! -e "$HOME_DIR/data" ] \
+  || fail "the refill read or created the default data directory"
+pass "state, config, and data overrides are honoured end to end"
+
+# A leftover episode marker is retired when the config is removed, so a later
+# re-enable reports its condition again instead of staying suppressed.
+make_fixture absent-config-episode
+fixture_env
+add_task absent-config-episode
+stage_task absent-config-episode
+start_runtime
+jq '.tasks = [{
+  id:"parked-crew",
+  kind:"ship",
+  current_state:{state:"parked"},
+  endpoint:{exists:true},
+  hints:{pending_decision:true,blocked_event:false}
+}]' "$SNAPSHOT" > "$FIXTURE/parked-snapshot"
+mv "$FIXTURE/parked-snapshot" "$SNAPSHOT"
+run_once >"$FIXTURE/absent.out" 2>"$FIXTURE/absent.err" || true
+[ -f "$STATE_DIR/.auto-dispatch-episode.json" ] \
+  || fail "the failing pass did not persist a failure episode"
+rm -f "$CONFIG_DIR/auto-dispatch.json"
+run_once
+[ ! -e "$STATE_DIR/.auto-dispatch-episode.json" ] \
+  || fail "removing the config left the failure episode active forever"
+[ "$(jq -r .claim_count "$TASKS_STATE")" = 0 ] \
+  || fail "an absent config claimed a task while retiring its episode"
+[ "$(status_verb_count working)" = 1 ] \
+  || fail "an absent config reported an event while retiring its episode"
+pass "an absent config retires a leftover episode and reports nothing"
+
+# With no config and no leftover marker there is nothing to retire, so the pass
+# stays a complete no-op.
+make_fixture absent-config-inert
+fixture_env
+add_task absent-config-inert
+stage_task absent-config-inert
+start_runtime
+rm -f "$CONFIG_DIR/auto-dispatch.json"
+run_once
+[ "$(jq -r .claim_count "$TASKS_STATE")" = 0 ] \
+  || fail "an absent config with no episode claimed a task"
+[ ! -e "$STATE_DIR/auto-dispatch.status" ] \
+  || fail "an absent config with no episode wrote a status event"
+[ ! -e "$STATE_DIR/.auto-dispatch-episode.json" ] \
+  || fail "an absent config with no episode created an episode marker"
+[ ! -e "$STATE_DIR/auto-dispatch-receipts" ] \
+  || fail "an absent config with no episode produced a receipt"
+[ ! -e "$STATE_DIR/.last-auto-dispatch-refill" ] \
+  || fail "an absent config with no episode advanced the persisted cadence"
+pass "a home with no config and no episode marker stays a complete no-op"
 
 # The existing watcher loop owns invocation, with no new daemon entrypoint.
 assert_contains "$(cat "$ROOT/bin/fm-watch.sh")" \

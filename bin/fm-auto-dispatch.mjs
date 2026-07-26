@@ -117,6 +117,23 @@ function atomicWrite(path, value, mode = 0o600) {
   }
 }
 
+/**
+ * The rest of the fleet resolves each home directory through its own override,
+ * so this consumer must too. Reading them under $FM_HOME while the watcher
+ * writes them under an override would make every pass fail closed.
+ */
+function resolveHomeDir(overrideName, fallback) {
+  const raw = process.env[overrideName];
+  if (!raw || raw.trim() === "") {
+    return fallback;
+  }
+  try {
+    return realpathSync(raw);
+  } catch {
+    return resolve(raw);
+  }
+}
+
 function resolveContext() {
   const rootInput = process.env.FM_ROOT_OVERRIDE || SOURCE_ROOT;
   const homeInput = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || SOURCE_ROOT;
@@ -128,13 +145,14 @@ function resolveContext() {
   } catch {
     fail("FM_ROOT and FM_HOME must resolve to existing directories");
   }
+  const data = resolveHomeDir("FM_DATA_OVERRIDE", join(home, "data"));
   return {
     root,
     home,
-    data: join(home, "data"),
-    state: join(home, "state"),
-    config: join(home, "config"),
-    backlog: join(home, "data", "backlog.md"),
+    data,
+    state: resolveHomeDir("FM_STATE_OVERRIDE", join(home, "state")),
+    config: resolveHomeDir("FM_CONFIG_OVERRIDE", join(home, "config")),
+    backlog: join(data, "backlog.md"),
   };
 }
 
@@ -397,23 +415,36 @@ function reopenTask(context, id) {
  * them keeps this consumer from drifting into a second, subtly different
  * definition of the same decision.
  */
-function shellHelper(lib, fn, args = []) {
+function shellHelper(context, lib, fn, args = []) {
   return spawnSync(
     "bash",
     ["-c", `. "$1" || exit 1; shift; ${fn} "$@"`, "_", lib, ...args],
-    { encoding: "utf8", maxBuffer: 65536, env: process.env },
+    {
+      encoding: "utf8",
+      maxBuffer: 65536,
+      // Pin the sourced library to the directories this process already
+      // resolved. A helper that resolves its own state dir at source time and
+      // creates it must not be able to land outside the owning home.
+      env: {
+        ...process.env,
+        FM_HOME: context.home,
+        FM_STATE_OVERRIDE: context.state,
+        FM_CONFIG_OVERRIDE: context.config,
+        FM_DATA_OVERRIDE: context.data,
+      },
+    },
   );
 }
 
-function sessionLockHelper(fn, args = []) {
-  return shellHelper(SESSION_LOCK_LIB, fn, args);
+function sessionLockHelper(context, fn, args = []) {
+  return shellHelper(context, SESSION_LOCK_LIB, fn, args);
 }
 
-function isAliveHarness(pid) {
+function isAliveHarness(context, pid) {
   if (!Number.isSafeInteger(pid) || pid <= 1) {
     return false;
   }
-  return sessionLockHelper("fm_harness_pid_alive", [String(pid)]).status === 0;
+  return sessionLockHelper(context, "fm_harness_pid_alive", [String(pid)]).status === 0;
 }
 
 /**
@@ -421,8 +452,8 @@ function isAliveHarness(pid) {
  * carries the requested harness name in its own argv, which would otherwise
  * match the ancestry rule against itself.
  */
-function harnessAncestryPid() {
-  const result = sessionLockHelper("fm_harness_ancestry_pid", [String(process.ppid)]);
+function harnessAncestryPid(context) {
+  const result = sessionLockHelper(context, "fm_harness_ancestry_pid", [String(process.ppid)]);
   const value = result.stdout?.trim() ?? "";
   return result.status === 0 && /^[0-9]+$/.test(value) ? Number(value) : null;
 }
@@ -433,10 +464,10 @@ function requireOwningFirstmate(context) {
     fail("firstmate session lock has no valid owner", "OWNERSHIP_CHANGED");
   }
   const owner = Number(raw);
-  if (!isAliveHarness(owner)) {
+  if (!isAliveHarness(context, owner)) {
     fail("firstmate session lock owner is not a live verified harness", "OWNERSHIP_CHANGED");
   }
-  const ancestor = harnessAncestryPid();
+  const ancestor = harnessAncestryPid(context);
   if (ancestor === null) {
     fail("dispatch staging has no verified firstmate ancestor", "AUTHOR_UNAUTHORIZED");
   }
@@ -803,8 +834,8 @@ function readAutoDispatchConfig(context) {
  * must ask that same helper rather than restate its /proc preference, its
  * readability gate, its ps fallback, or FM_PROC_ROOT_OVERRIDE.
  */
-function pidIdentity(pid) {
-  const result = shellHelper(WAKE_LIB, "fm_pid_identity", [String(pid)]);
+function pidIdentity(context, pid) {
+  const result = shellHelper(context, WAKE_LIB, "fm_pid_identity", [String(pid)]);
   const value = result.stdout?.trim() ?? "";
   return result.status === 0 && value !== "" ? value : null;
 }
@@ -819,7 +850,7 @@ function fileAgeSeconds(path) {
 
 function assertRuntimeOwnership(context, grace) {
   const sessionRaw = safeRead(join(context.state, ".lock"), "firstmate session lock", 64).toString("utf8").trim();
-  if (!/^[0-9]+$/.test(sessionRaw) || !isAliveHarness(Number(sessionRaw))) {
+  if (!/^[0-9]+$/.test(sessionRaw) || !isAliveHarness(context, Number(sessionRaw))) {
     fail("the exact home has no live owning firstmate session", "OWNERSHIP_CHANGED");
   }
   const watchLock = join(context.state, ".watch.lock");
@@ -831,7 +862,7 @@ function assertRuntimeOwnership(context, grace) {
   const expectedHome = safeRead(join(watchLock, "fm-home"), "watcher home binding", 4096).toString("utf8").trim();
   const expectedPath = safeRead(join(watchLock, "watcher-path"), "watcher path binding", 4096).toString("utf8").trim();
   const recordedIdentity = safeRead(join(watchLock, "pid-identity"), "watcher identity", 65536).toString("utf8").trim();
-  const currentIdentity = pidIdentity(watcherPid);
+  const currentIdentity = pidIdentity(context, watcherPid);
   if (expectedHome !== context.home
     || expectedPath !== join(context.root, "bin", "fm-watch.sh")
     || currentIdentity === null
