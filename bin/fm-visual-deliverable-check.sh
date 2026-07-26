@@ -173,6 +173,7 @@ if ! BROWSER_RESULT=$($BROWSER eval "$READ_RENDERED_ELEMENTS" --full 2>&1); then
   exit 2
 fi
 
+# shellcheck disable=SC2016  # single quotes are deliberate: the Node program's ${...} template literals must reach node verbatim, not expand in the shell.
 RENDER_REPORT=$(printf '%s\n' "$BROWSER_RESULT" | node -e '
 const fs = require("fs");
 const output = fs.readFileSync(0, "utf8");

@@ -42,6 +42,7 @@ SH
 }
 
 encode_result() {  # <encoding-depth> <json-array>
+  # shellcheck disable=SC2016  # single quotes are deliberate: the Node program's ${...} template literal must reach node verbatim, not expand in the shell.
   node -e '
 let text = process.argv[2];
 for (let depth = 0; depth < Number(process.argv[1]); depth += 1) text = JSON.stringify(text);
