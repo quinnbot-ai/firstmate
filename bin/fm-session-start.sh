@@ -265,27 +265,37 @@ print_ops_inbox_suppression_records() {
 }
 
 # Current suppression evidence stands until the failure it withheld clears, so
-# it describes the events listed below.  Once that failure clears the watcher
-# drops it and only the bounded occurrence history remains, which is reported
-# as history so a cleared record is never read as a live one.
+# it describes the events listed below.  The occurrence history is reported
+# alongside it rather than instead of it, because the case worth seeing is a
+# failure that cleared and came back: without the earlier occurrences a fresh
+# unresolved record reads as a first sight rather than as a recurrence.  Once
+# the failure clears the watcher drops the unresolved records and the history
+# is reported as history, so a cleared record is never read as a live one.
 print_ops_inbox_suppression() {
-  local current history total
+  local current history total unresolved=0
   current="$STATE/.ops-inbox-suppressed"
   history="$STATE/.ops-inbox-suppression-log"
   if [ -s "$current" ]; then
-    total=$(grep -c . "$current" 2>/dev/null || printf '0')
+    unresolved=1
+    total=$(grep -c . "$current" 2>/dev/null) || total=0
     printf 'watcher suppression: %s unresolved record(s), oldest first; newest %s, for the inbox reported below:\n' \
       "$total" "$OPS_INBOX_LIMIT"
     print_ops_inbox_suppression_records "$current"
     [ "$total" -le "$OPS_INBOX_LIMIT" ] \
       || printf '(truncated %s older unresolved suppression record(s))\n' "$((total - OPS_INBOX_LIMIT))"
-    return
   fi
   [ -s "$history" ] || return 0
-  total=$(grep -c . "$history" 2>/dev/null || printf '0')
-  printf 'watcher suppression: none unresolved; %s retained past occurrence(s), oldest first; newest %s:\n' \
-    "$total" "$OPS_INBOX_LIMIT"
+  total=$(grep -c . "$history" 2>/dev/null) || total=0
+  if [ "$unresolved" -eq 1 ]; then
+    printf 'watcher suppression history: %s retained occurrence(s) including the unresolved record(s) above, oldest first; newest %s:\n' \
+      "$total" "$OPS_INBOX_LIMIT"
+  else
+    printf 'watcher suppression: none unresolved; %s retained past occurrence(s), oldest first; newest %s:\n' \
+      "$total" "$OPS_INBOX_LIMIT"
+  fi
   print_ops_inbox_suppression_records "$history"
+  [ "$total" -le "$OPS_INBOX_LIMIT" ] \
+    || printf '(truncated %s older retained occurrence(s))\n' "$((total - OPS_INBOX_LIMIT))"
 }
 
 print_ops_inbox() {

@@ -1672,10 +1672,10 @@ SH
   pid=$!
   wait_live "$pid" 30 || fail "routine nonzero exit woke the watcher: $(cat "$out")"
   [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "routine nonzero exit queued a wake"; }
-  grep -F $'\troutine event' "$state/.ops-inbox-suppression-log" >/dev/null \
-    || { reap "$pid"; fail "routine nonzero exit suppression was not observable"; }
   [ ! -e "$state/.ops-inbox-suppressed" ] \
     || { reap "$pid"; fail "a healthy listing left an unresolved suppression record"; }
+  [ ! -s "$state/.ops-inbox-suppression-log" ] \
+    || { reap "$pid"; fail "a healthy listing wrote occurrence history that crowds out real failures"; }
   [ -f "$home/config/ops-inbox-cmd" ] || { reap "$pid"; fail "routine inbox listing was not retained for the digest"; }
   reap "$pid"
   pass "a routine nonzero-exit inbox listing is suppressed but remains observable"
@@ -1806,7 +1806,7 @@ SH
   printf '0\n' > "$counts"
   wait_path "$state/.ops-inbox-suppressed" gone 40 \
     || { reap "$pid"; fail "a cleared failure kept its unresolved suppression record"; }
-  [ "$(grep -c . "$state/.ops-inbox-suppression-log")" -ge 2 ] \
+  [ "$(grep -c . "$state/.ops-inbox-suppression-log")" -ge 1 ] \
     || { reap "$pid"; fail "the occurrence history did not survive the clear"; }
   grep -F 'criticals 3' "$state/.ops-inbox-suppression-log" >/dev/null \
     || { reap "$pid"; fail "the occurrence history lost the movement inside the closed window"; }
@@ -1855,6 +1855,52 @@ SH
   [ "$runs" -le 6 ] || fail "the configured list command ran $runs times across ~3 changed cycles"
 
   pass "a changed operations-inbox cycle reads the configured list command once"
+}
+
+# A listing that churns without its failure changing repeats one suppression
+# reason every poll. Appending each repeat would evict the distinct movements
+# the retained evidence exists to show, so a repeat is re-dated in place.
+test_ops_inbox_repeated_suppression_collapses_to_one_record() {
+  local dir state fakebin out home command log pid records
+  dir=$(make_case ops-inbox-repeat-collapse); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  home="$dir/home"; command="$dir/churning-inbox"; log="$dir/invocations"
+  mkdir -p "$home/ops-inbox" "$home/config"
+  printf 'project=firstmate\nkind=ship\n' > "$state/ops.meta"
+  : > "$log"
+  # The count stands still at 5 while the rest of the listing moves, so every
+  # poll is a changed cycle that collapses onto the same escalation identity.
+  cat > "$command" <<SH
+#!/usr/bin/env bash
+printf 'x\n' >> "$log"
+printf 'unacked_criticals: 5\nlast checked serial %s\n' "\$(grep -c . "$log")"
+SH
+  chmod +x "$command"
+  printf '%s\n' "$command" > "$home/config/ops-inbox-cmd"
+  seed_ops_inbox_fingerprint "$home" "$state"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "the first genuine critical listing did not wake the watcher"
+
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 30 || fail "a churning listing at an unchanged count woke the watcher again: $(cat "$out")"
+  wait_path "$state/.ops-inbox-suppressed" present 40 \
+    || { reap "$pid"; fail "the collapsed listing left no unresolved suppression record"; }
+  reap "$pid"
+  records=$(grep -c . "$state/.ops-inbox-suppressed")
+  [ "$records" -eq 1 ] || fail "one repeated suppression reason kept $records records instead of collapsing"
+  [ "$(grep -c . "$state/.ops-inbox-suppression-log")" -eq 1 ] \
+    || fail "the occurrence history grew one record per poll of an unchanged failure"
+  grep -F 'criticals 5' "$state/.ops-inbox-suppressed" >/dev/null \
+    || fail "the collapsed record lost the observed count"
+
+  pass "a repeated suppression reason collapses to one re-dated record"
 }
 
 test_ops_inbox_fingerprint_distinguishes_same_second_same_size_rewrite() {
@@ -2541,6 +2587,7 @@ test_ops_inbox_duplicate_burst_collapses_to_one_wake
 test_ops_inbox_rising_critical_count_wakes_once_per_escalation
 test_ops_inbox_suppression_evidence_clears_only_with_the_failure
 test_ops_inbox_external_command_runs_once_per_cycle
+test_ops_inbox_repeated_suppression_collapses_to_one_record
 test_ops_inbox_fingerprint_distinguishes_same_second_same_size_rewrite
 test_ops_inbox_fingerprint_uses_bounded_two_level_file_markers
 test_ops_inbox_marker_scan_counts_discovered_paths

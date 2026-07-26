@@ -766,8 +766,9 @@ heartbeat_scan_finds_actionable() {
 # decision in a cycle - the cheap fingerprint, the genuineness of the inbox,
 # the escalation level persisted with the baseline - comes from one reading of
 # both sources, so the operator's list command runs once per cycle and no two
-# decisions can disagree about what the inbox held. Routine and duplicate
-# changes record why they were suppressed before they update the same baseline.
+# decisions can disagree about what the inbox held. A change that withholds a
+# genuine failure records why before it updates the same baseline; a change
+# with no genuine failure behind it is absorbed into the baseline alone.
 # Current suppression evidence is retained until the underlying failure itself
 # clears, never merely because a wake was delivered, and a bounded occurrence
 # history outlives the clear so clear-and-recur flapping stays visible in the
@@ -807,8 +808,6 @@ ops_inbox_changed() {
   [ "$fingerprint" != "$previous" ] || return 1
   capture_ops_inbox_actionable
   if [ "$FM_OPS_INBOX_GENUINE" != yes ]; then
-    FM_OPS_INBOX_SUPPRESSION="routine event$(ops_inbox_external_note)"
-    record_ops_inbox_suppression
     mark_ops_inbox_seen
     return 1
   fi
@@ -859,16 +858,26 @@ mark_ops_inbox_seen() {
   printf '%s\n' "$FM_OPS_INBOX_CRITICAL_LEVEL" > "$STATE/.ops-inbox-critical-level"
 }
 
+# Bounded by distinct reason, not by write count: an inbox whose listing churns
+# without its failure changing repeats one reason every poll, so a record whose
+# reason already stands as the newest is re-dated in place instead of appended.
+# Distinct movements therefore keep their slots inside the limit.
 append_bounded_record() {
-  local file=$1 record=$2 kept
+  local file=$1 record=$2 newest kept
+  newest=$(tail -n 1 "$file" 2>/dev/null || true)
+  if [ -n "$newest" ] && [ "${newest#*$'\t'}" = "${record#*$'\t'}" ]; then
+    sed '$d' "$file" > "$file.next" 2>/dev/null && mv "$file.next" "$file"
+  fi
   printf '%s\n' "$record" >> "$file"
-  kept=$(grep -c . "$file" 2>/dev/null || printf '0')
+  kept=$(grep -c . "$file" 2>/dev/null) || kept=0
   [ "$kept" -gt "$FM_OPS_INBOX_SUPPRESSION_LIMIT" ] || return 0
   tail -n "$FM_OPS_INBOX_SUPPRESSION_LIMIT" "$file" > "$file.next" \
     && mv "$file.next" "$file"
 }
 
-# A suppression is evidence about the failure it withheld, so the current
+# Per Firstmate's retention rule, only a withheld genuine failure is evidence:
+# a healthy inbox suppressed nothing, so its absorbed changes leave no record
+# to crowd real occurrences out of either bounded artifact. The unresolved
 # record survives the wake path and every later cycle until the failure itself
 # clears (mark_ops_inbox_seen drops it once the inbox is no longer genuine).
 # The occurrence history outlives that clear, bounded to the same limit, so a
@@ -876,10 +885,11 @@ append_bounded_record() {
 record_ops_inbox_suppression() {
   local record
   [ -n "${FM_OPS_INBOX_SUPPRESSION:-}" ] || return 0
-  record="$(date +%s)"$'\t'"$FM_OPS_INBOX_SUPPRESSION"
-  append_bounded_record "$STATE/.ops-inbox-suppression-log" "$record"
-  [ "${FM_OPS_INBOX_GENUINE:-no}" = yes ] \
-    && append_bounded_record "$STATE/.ops-inbox-suppressed" "$record"
+  if [ "${FM_OPS_INBOX_GENUINE:-no}" = yes ]; then
+    record="$(date +%s)"$'\t'"$FM_OPS_INBOX_SUPPRESSION"
+    append_bounded_record "$STATE/.ops-inbox-suppressed" "$record"
+    append_bounded_record "$STATE/.ops-inbox-suppression-log" "$record"
+  fi
   unset FM_OPS_INBOX_SUPPRESSION
   return 0
 }
