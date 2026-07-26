@@ -65,6 +65,7 @@ bin/                 helper scripts, committed; read each script's header before
 .env                 optional X-mode pairing token; LOCAL, gitignored; presence-gates section 14
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate. Inherited as the literal file: a concrete primary adapter value also controls a secondmate home's own crewmates (section 4)
 config/crew-dispatch.json  optional crewmate dispatch profiles; LOCAL, gitignored; firstmate-maintained but human-editable natural-language rules that choose a per-task harness/model/effort profile (section 4). Inherited by secondmate homes
+config/auto-dispatch.json  optional per-home bounded report-only refill config; LOCAL, gitignored, not inherited; see docs/configuration.md "Report-only auto-dispatch"
 config/secondmate-harness  harness the PRIMARY uses to launch SECONDMATE agents, optionally followed by a model and effort token on the same line ("<harness> [<model>] [<effort>]"; section 4); LOCAL, gitignored; absent or "default" harness falls back to config/crew-harness then firstmate's own. The primary's own setting; NOT inherited into secondmate homes (secondmates do not spawn secondmates)
 config/backlog-backend  backlog backend override; LOCAL, gitignored; absent or "tasks-axi" = default tasks-axi backend, "manual" = force routine backlog updates to hand-editing; inherited by secondmate homes (section 10)
 config/backend  runtime session-provider backend override for new tasks; LOCAL, gitignored; absent = falls through to runtime auto-detection (the runtime firstmate itself is executing inside), then tmux; tmux is the verified reference backend (docs/tmux-backend.md), while herdr, zellij, orca, and cmux are experimental spawn backends (docs/herdr-backend.md, docs/zellij-backend.md, docs/orca-backend.md, docs/cmux-backend.md) - herdr and cmux can also be selected by runtime auto-detection, zellij and orca never are (always explicit), and codex-app is not accepted; see docs/codex-app-backend.md; not inherited into secondmate homes
@@ -84,6 +85,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   projects.md        thin fleet navigation registry; firstmate-private, parsed by fm-project-mode.sh (section 6)
   secondmates.md      secondmate routing table; firstmate-private, maintained by fm-home-seed.sh (section 6)
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
+  <id>/dispatch.json sealed firstmate-authored report-only dispatch envelope for one ready ordinary task
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
   codex-crewmate/    task-private Codex homes for ship and scout launches; LOCAL, gitignored, owned by fm-codex-home.py and removed by teardown (docs/configuration.md)
   claude-crewmate/   optional second-account Claude isolation: captain-populated profile/ plus task-private homes for ship and scout launches; LOCAL, gitignored, dormant while profile/ is absent (docs/configuration.md)
@@ -96,6 +98,7 @@ state/               volatile runtime signals; gitignored
   <id>.kimi-turnend-token   firstmate-owned Kimi hook registry token for the task; removed by teardown
   <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; treehouse-backed ship/scout tasks also record treehouse_lease=1, Codex ship/scout tasks also record codex_crewmate_home=, and ready-profile Claude ship/scout tasks also record claude_crewmate_home= (docs/configuration.md); kind=secondmate also records home= and projects=; the runtime backend records further backend-specific fields, including tmux_window_id= on the default tmux backend (docs/configuration.md "Runtime backend"; bin/fm-backend.sh, section 8); fm-pr-check, including through fm-pr-merge, records one canonical pr= and the forge's pr_head= when available (GitHub pull requests and GitLab merge requests; docs/gitlab-merge-watch.md); fm-x-link appends x_request=, x_request_ts=, x_followups=, and optional x_platform=/x_reply_max_chars= for an X-mode-originated task (section 14)
   <id>.herdr-presentation  quarantinable attempt and restart-binding journal for Herdr's optional visual projection; never task or endpoint authority; see docs/herdr-backend.md "Optional presentation spaces"
+  auto-dispatch* .auto-dispatch* .last-auto-dispatch-refill  auto-dispatch status, claim, and receipt state plus the refill lock, seal key, notice-episode marker, and persisted cadence; see docs/configuration.md
   <id>.check.sh      authenticated slow poll; the watcher dispatches validated PR data and the byte-identified X shim through trusted repository scripts, runs registered custom checks from hash-validated private snapshots, and rejects every other state check without execution
   <id>.check-trust   private content binding created by fm-check-register.sh for an intentional custom check
   <id>.pr-poll       private validated data sidecar for the byte-static PR merge poll
@@ -181,6 +184,8 @@ Break genuine headroom ties without array-order or harness bias.
 `quota-axi` owns how model or product windows relate to bounding account windows.
 The generic effort fallback and its precedence are owned by `harness-adapters`: explicit captain and standing configured effort win; otherwise use low for well-understood explicit work, xhigh for ambiguous investigation or design, intermediate levels proportionally, and never max without explicit captain preference.
 Do not add model-specific versions of that policy.
+Load `auto-dispatch` before staging or replacing a dispatch envelope, enabling or changing auto-dispatch config, or handling an auto-dispatch report or refusal.
+Auto-dispatch may consume only a sealed firstmate-authored brief and concrete profile; it never authors instructions, chooses a profile, launches a worker in report-only mode, or creates another daemon.
 
 `secondmate-provisioning` owns secondmate harness pins and inherited local material, while `harness-adapters` owns the harness consequences.
 Dispatch only on a backend that `fm-spawn` validates as spawn-capable.
