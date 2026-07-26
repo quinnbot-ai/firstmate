@@ -6,7 +6,9 @@
 // contains optional lane definitions for weho, content_accounts, trading, and
 // kdp, plus an optional `maxAgeSeconds` freshness window (default 900). A
 // lane's `sources` are trusted private command arrays, each with an optional
-// `timeoutMs` (default 30000). Each command is run fresh and must print one
+// `timeoutMs` (default 30000). Each command is run fresh with $FM_HOME as its
+// working directory - so relative helper paths in a config resolve against the
+// same base as the config itself, not the invoker's cwd - and must print one
 // JSON object:
 //   {"observedAt":"<ISO-8601>","currency":"USD","metrics":{
 //     "metric_name":{"amount":12.3,"unit":"USD","status":"measured"}}}
@@ -74,7 +76,7 @@ function runSource(source) {
   if (!source || !Array.isArray(source.command) || source.command.length === 0 || source.command.some((item) => typeof item !== 'string')) return { ok: false, reason: 'source unavailable' };
   let result;
   try {
-    result = spawnSync(source.command[0], source.command.slice(1), { encoding: 'utf8', timeout: source.timeoutMs || 30000, env: process.env });
+    result = spawnSync(source.command[0], source.command.slice(1), { cwd: fmHome, encoding: 'utf8', timeout: source.timeoutMs || 30000, env: process.env });
   } catch {
     return { ok: false, reason: 'source unavailable' };
   }
@@ -158,7 +160,7 @@ function quotaMetric(name, provider, generatedAt, maxAgeSeconds, publicationTime
   return { name, amount, unit: 'percent', currency: null, status: 'measured', source_freshness: 'fresh', cross_check: 'not-required' };
 }
 function collectFleetLane(config) {
-  const quota = spawnSync(process.env.FM_UNIT_ECONOMICS_QUOTA_AXI || 'quota-axi', ['--json'], { encoding: 'utf8', timeout: 30000, env: process.env });
+  const quota = spawnSync(process.env.FM_UNIT_ECONOMICS_QUOTA_AXI || 'quota-axi', ['--json'], { cwd: fmHome, encoding: 'utf8', timeout: 30000, env: process.env });
   const body = quota.status === 0 ? parseJson(quota.stdout, 'quota') : null;
   return { id: 'fleet_operations', body, costSources: runSources(config?.cost_sources) };
 }

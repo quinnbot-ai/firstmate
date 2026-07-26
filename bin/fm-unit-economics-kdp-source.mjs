@@ -39,20 +39,20 @@ function json(path) {
   try {
     return JSON.parse(readFileSync(path, 'utf8'));
   } catch {
-    fail('KDP source is unavailable');
+    fail(`KDP source is unavailable: cannot read JSON from ${path}`);
   }
 }
 
-function amount(value) {
-  if (!Number.isFinite(value) || value < 0) fail('KDP source is unavailable');
+function amount(value, input) {
+  if (!Number.isFinite(value) || value < 0) fail(`KDP source is unavailable: no valid royalty amount in ${input}`);
   return value;
 }
 
 function artifactObservation(path) {
   const body = json(path);
   const observedAt = body.ts;
-  if (!Number.isFinite(Date.parse(observedAt)) || body.payment_summary?.status !== 'LIVE') fail('KDP source is unavailable');
-  return { observedAt, royalties: amount(body.payment_summary.lifetime_confirmed_usd) };
+  if (!Number.isFinite(Date.parse(observedAt)) || body.payment_summary?.status !== 'LIVE') fail(`KDP source is unavailable: no live timestamped payment summary in ${path}`);
+  return { observedAt, royalties: amount(body.payment_summary.lifetime_confirmed_usd, path) };
 }
 
 function reportFiles(vault) {
@@ -84,8 +84,8 @@ function reportAmount(path) {
 
 function financeReportObservation(vault) {
   const values = reportFiles(vault).map(reportAmount).filter((value) => Number.isFinite(value));
-  if (!values.length) fail('KDP source is unavailable');
-  return { observedAt: new Date().toISOString(), royalties: amount(values.reduce((sum, value) => sum + value, 0)) };
+  if (!values.length) fail(`KDP source is unavailable: no confirmed KDP revenue rows under ${vault}`);
+  return { observedAt: new Date().toISOString(), royalties: amount(values.reduce((sum, value) => sum + value, 0), vault) };
 }
 
 const { mode, options } = parseArgs();

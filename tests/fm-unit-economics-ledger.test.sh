@@ -207,8 +207,20 @@ JSON
   pass "malformed source timeouts render unavailable"
 }
 
+test_relative_source_commands_resolve_against_fm_home() {
+  local home="$TMP_ROOT/fm-home" config="$TMP_ROOT/fm-home/config.json" out="$TMP_ROOT/fm-home/out.json" quota="$TMP_ROOT/fm-home/quota"
+  write_source "$home/bin/weho-one" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"pipeline_cost\":{\"amount\":4,\"unit\":\"USD\",\"status\":\"measured\"},\"realized_revenue\":{\"amount\":8,\"unit\":\"USD\",\"status\":\"measured\"}}}"
+  write_source "$home/bin/weho-two" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"pipeline_cost\":{\"amount\":4,\"unit\":\"USD\",\"status\":\"measured\"},\"realized_revenue\":{\"amount\":8,\"unit\":\"USD\",\"status\":\"measured\"}}}"
+  write_config "$config" weho "bin/weho-one" "bin/weho-two"
+  write_quota "$quota" "$NOW"
+  (cd "$TMP_ROOT" && FM_HOME="$home" FM_UNIT_ECONOMICS_QUOTA_AXI="$quota" node "$BIN" --config "$config" --output "$out" --format json >/dev/null)
+  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==8 and .cross_check=="passed")' "$out" >/dev/null || fail "relative source commands did not resolve against FM_HOME"
+  pass "relative source commands resolve against FM_HOME, not the invoking cwd"
+}
+
 test_zero_revenue_is_explicit_and_cross_checked
 test_unavailable_and_partial_lanes_render
+test_relative_source_commands_resolve_against_fm_home
 test_stale_and_failed_cross_check_are_refused
 test_currency_and_units_are_preserved
 test_fleet_cost_requires_independent_sources
