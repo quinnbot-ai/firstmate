@@ -34,13 +34,19 @@
 //   {"crew":"<id>","sessionCost":{"amount":1,"unit":"USD","status":"measured"},
 //    "validationRuns":{"amount":1,"unit":"runs","status":"measured"}}
 // The helpers must agree on the complete crew roster, on a single top-level
-// `USD` currency, and on every row before a per-crew cost, validation-run
+// `USD` currency, and on every amount before a per-crew cost, validation-run
 // volume, or fleet total is published under `daily_attributable_crew_session_cost`;
-// an explicit corroborated empty roster is a rendered zero, while every missing
+// a readable, corroborated non-USD currency is refused rather than converted,
+// and where corroborating helpers label one agreed amount differently the
+// weakest label wins, so a `measured`/`estimated` pair publishes as estimated.
+// An explicit corroborated empty roster is a rendered zero, while every missing
 // or unreadable source is unavailable. The ledger date is today in UTC unless
 // `FM_UNIT_ECONOMICS_LEDGER_DATE` overrides it with a valid `YYYY-MM-DD` date
 // for tests and backfills; any other value is rejected before anything is
-// written. The command writes two durable owner-only (0600) ledgers at the
+// written. Because quota-axi only ever reports the present, a ledger date other
+// than today in UTC refuses every quota window and quota metric as a backfilled
+// window rather than filling that day with present-day evidence. The command
+// writes two durable owner-only (0600) ledgers at the
 // dated default output `data/unit-economics-ledger/YYYY-MM-DD.json` and adjacent
 // Markdown file, or at --output and its adjacent Markdown file when overridden.
 // It prints whichever one --format selects (default markdown).
@@ -64,6 +70,8 @@ const laneSpecs = {
   kdp: { label: 'KDP', metrics: [['royalties', 'USD'], ['attributable_costs', 'USD']] },
   fleet_operations: { label: 'Fleet operations', metrics: [['claude_quota_window', 'percent'], ['codex_quota_window', 'percent'], ['attributable_crew_session_cost', 'USD']] },
 };
+
+const BACKFILLED_WINDOW_REFUSED = 'backfilled window refused';
 
 function fail(message) { process.stderr.write(`error: ${message}\n`); process.exit(2); }
 function isCalendarDate(value) {
@@ -169,7 +177,8 @@ function findProvider(value, wanted) {
   }
   return null;
 }
-function quotaProviderWindows(provider, generatedAt, maxAgeSeconds, publicationTime) {
+function quotaProviderWindows(provider, generatedAt, maxAgeSeconds, publicationTime, dateIsToday) {
+  if (!dateIsToday) return { ok: false, reason: BACKFILLED_WINDOW_REFUSED };
   if (!provider || !generatedAt) return { ok: false, reason: 'source unavailable' };
   if (!isoFresh(generatedAt, maxAgeSeconds, publicationTime)) return { ok: false, reason: 'stale source refused' };
   const state = provider.state;
@@ -182,17 +191,18 @@ function quotaProviderWindows(provider, generatedAt, maxAgeSeconds, publicationT
   if (!windows.length) return { ok: false, reason: 'source unavailable' };
   return { ok: true, windows };
 }
-function quotaMetric(name, provider, generatedAt, maxAgeSeconds, publicationTime) {
-  const gated = quotaProviderWindows(provider, generatedAt, maxAgeSeconds, publicationTime);
+function quotaMetric(name, provider, generatedAt, maxAgeSeconds, publicationTime, dateIsToday) {
+  const gated = quotaProviderWindows(provider, generatedAt, maxAgeSeconds, publicationTime, dateIsToday);
   if (!gated.ok) return unavailable(name, 'percent', gated.reason);
   const amount = Math.min(...gated.windows.map((window) => window.percentRemaining));
   return { name, amount, unit: 'percent', currency: null, status: 'measured', source_freshness: 'fresh', cross_check: 'not-required' };
 }
-function quotaWindows(body, maxAgeSeconds, publicationTime) {
+function quotaWindows(body, maxAgeSeconds, publicationTime, dateIsToday) {
+  if (!dateIsToday) return [{ provider: 'quota-axi', status: 'unavailable', source_freshness: BACKFILLED_WINDOW_REFUSED, windows: [] }];
   if (!Array.isArray(body?.providers) || !body.providers.length) return [{ provider: 'quota-axi', status: 'unavailable', source_freshness: 'source unavailable', windows: [] }];
   return body.providers.map((provider) => {
     const providerName = typeof provider?.provider === 'string' && provider.provider ? provider.provider : 'unknown provider';
-    const gated = quotaProviderWindows(provider, body.generatedAt, maxAgeSeconds, publicationTime);
+    const gated = quotaProviderWindows(provider, body.generatedAt, maxAgeSeconds, publicationTime, dateIsToday);
     if (!gated.ok) return { provider: providerName, status: 'unavailable', source_freshness: gated.reason, windows: [] };
     return {
       provider: providerName,
@@ -243,7 +253,7 @@ function dailyFleetLine(sources, date) {
   if (failed) return unavailableDaily(failed.reason);
   const currency = parsed[0].currency;
   if (parsed.some((source) => source.currency !== currency)) return unavailableDaily('source disagreement refused');
-  if (currency !== 'USD') return unavailableDaily('source unavailable');
+  if (currency !== 'USD') return unavailableDaily('unsupported currency refused');
   const roster = [...parsed[0].rows.keys()].sort();
   if (parsed.some((source) => source.rows.size !== roster.length || roster.some((crew) => !source.rows.has(crew)))) return unavailableDaily('source unavailable');
   const crewSessions = [];
@@ -251,20 +261,21 @@ function dailyFleetLine(sources, date) {
     const rows = parsed.map((source) => source.rows.get(crew));
     const sessionCost = rows.map((row) => row.sessionCost);
     const validationRuns = rows.map((row) => row.validationRuns);
-    const sameCost = sessionCost.every((value) => value.amount === sessionCost[0].amount && value.status === sessionCost[0].status);
-    const sameRuns = validationRuns.every((value) => value.amount === validationRuns[0].amount && value.status === validationRuns[0].status);
+    const sameCost = sessionCost.every((value) => value.amount === sessionCost[0].amount);
+    const sameRuns = validationRuns.every((value) => value.amount === validationRuns[0].amount);
     if (!sameCost || !sameRuns) return unavailableDaily('source disagreement refused');
     crewSessions.push({
       crew,
-      session_cost: { ...sessionCost[0], status: sessionCost[0].status === 'estimated' ? 'estimated' : 'independently_cross_checked', cross_check: 'passed' },
-      validation_runs: { ...validationRuns[0], status: validationRuns[0].status === 'estimated' ? 'estimated' : 'independently_cross_checked', cross_check: 'passed' },
+      session_cost: { ...sessionCost[0], status: sessionCost.some((value) => value.status === 'estimated') ? 'estimated' : 'independently_cross_checked', cross_check: 'passed' },
+      validation_runs: { ...validationRuns[0], status: validationRuns.some((value) => value.status === 'estimated') ? 'estimated' : 'independently_cross_checked', cross_check: 'passed' },
     });
   }
-  const estimated = crewSessions.some((crew) => crew.session_cost.status === 'estimated' || crew.validation_runs.status === 'estimated');
+  const costEstimated = crewSessions.some((crew) => crew.session_cost.status === 'estimated');
+  const runsEstimated = crewSessions.some((crew) => crew.validation_runs.status === 'estimated');
   return {
     crew_sessions: crewSessions,
-    session_cost: { name: 'daily_attributable_crew_session_cost', amount: crewSessions.reduce((total, crew) => total + crew.session_cost.amount, 0), unit: 'USD', currency, status: estimated ? 'estimated' : 'independently_cross_checked', source_freshness: 'fresh', cross_check: 'passed' },
-    validation_run_volume: { name: 'validation_run_volume', amount: crewSessions.reduce((total, crew) => total + crew.validation_runs.amount, 0), unit: 'runs', currency: null, status: estimated ? 'estimated' : 'independently_cross_checked', source_freshness: 'fresh', cross_check: 'passed' },
+    session_cost: { name: 'daily_attributable_crew_session_cost', amount: crewSessions.reduce((total, crew) => total + crew.session_cost.amount, 0), unit: 'USD', currency, status: costEstimated ? 'estimated' : 'independently_cross_checked', source_freshness: 'fresh', cross_check: 'passed' },
+    validation_run_volume: { name: 'validation_run_volume', amount: crewSessions.reduce((total, crew) => total + crew.validation_runs.amount, 0), unit: 'runs', currency: null, status: runsEstimated ? 'estimated' : 'independently_cross_checked', source_freshness: 'fresh', cross_check: 'passed' },
     sources: parsed.map((source) => source.source),
     source_freshness: 'fresh',
   };
@@ -274,7 +285,7 @@ function collectFleetLane(config) {
   const body = quota.status === 0 ? parseJson(quota.stdout, 'quota') : null;
   return { id: 'fleet_operations', body, costSources: runSources(config?.cost_sources), dailySources: runSources(config?.daily_sources) };
 }
-function fleetLane(input, maxAgeSeconds, publicationTime, date) {
+function fleetLane(input, maxAgeSeconds, publicationTime, date, dateIsToday) {
   const { body } = input;
   const generatedAt = body?.generatedAt;
   const claude = findProvider(body?.providers, ['claude', 'anthropic']);
@@ -282,17 +293,18 @@ function fleetLane(input, maxAgeSeconds, publicationTime, date) {
   const costSources = sourcesAtPublication(input.costSources, maxAgeSeconds, publicationTime);
   const dailySources = sourcesAtPublication(input.dailySources, maxAgeSeconds, publicationTime);
   const quotaMetrics = [
-    quotaMetric('claude_quota_window', claude, generatedAt, maxAgeSeconds, publicationTime),
-    quotaMetric('codex_quota_window', codex, generatedAt, maxAgeSeconds, publicationTime),
+    quotaMetric('claude_quota_window', claude, generatedAt, maxAgeSeconds, publicationTime, dateIsToday),
+    quotaMetric('codex_quota_window', codex, generatedAt, maxAgeSeconds, publicationTime, dateIsToday),
   ];
   const metrics = [
     ...quotaMetrics,
     corroboratedMetric('attributable_crew_session_cost', 'USD', costSources),
   ];
-  const sourceFreshness = quotaMetrics.find((metric) => metric.source_freshness === 'stale source refused')?.source_freshness
+  const sourceFreshness = quotaMetrics.find((metric) => metric.source_freshness === BACKFILLED_WINDOW_REFUSED)?.source_freshness
+    || quotaMetrics.find((metric) => metric.source_freshness === 'stale source refused')?.source_freshness
     || quotaMetrics.find((metric) => metric.source_freshness === 'source unavailable')?.source_freshness
     || 'fresh';
-  return { id: 'fleet_operations', label: laneSpecs.fleet_operations.label, source_freshness: sourceFreshness, metrics, daily_fleet_line: { date, quota_windows: quotaWindows(body, maxAgeSeconds, publicationTime), ...dailyFleetLine(dailySources, date) } };
+  return { id: 'fleet_operations', label: laneSpecs.fleet_operations.label, source_freshness: sourceFreshness, metrics, daily_fleet_line: { date, quota_windows: quotaWindows(body, maxAgeSeconds, publicationTime, dateIsToday), ...dailyFleetLine(dailySources, date) } };
 }
 function markdown(artifact) {
   const fleet = artifact.lanes.find((lane) => lane.id === 'fleet_operations');
@@ -326,13 +338,14 @@ const inputs = Object.keys(laneSpecs).map((id) => (
   id === 'fleet_operations' ? collectFleetLane(config.lanes?.[id]) : collectFinancialLane(id, config.lanes?.[id])
 ));
 const publicationTime = new Date();
+const ledgerDateIsToday = ledgerDate === publicationTime.toISOString().slice(0, 10);
 const artifact = {
   schema: 'fleet-unit-economics-ledger.v2',
   generated_at: publicationTime.toISOString(),
   max_age_seconds: maxAgeSeconds,
   lanes: inputs.map((input) => (
     input.id === 'fleet_operations'
-      ? fleetLane(input, maxAgeSeconds, publicationTime.getTime(), ledgerDate)
+      ? fleetLane(input, maxAgeSeconds, publicationTime.getTime(), ledgerDate, ledgerDateIsToday)
       : financialLane(input, maxAgeSeconds, publicationTime.getTime())
   )),
 };

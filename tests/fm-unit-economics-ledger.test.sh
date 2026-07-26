@@ -291,6 +291,47 @@ test_malformed_ledger_date_is_refused() {
   pass "a malformed ledger date fails fast before writing"
 }
 
+test_backfilled_ledger_date_refuses_quota_windows() {
+  local config="$TMP_ROOT/backfill/config.json" out="$TMP_ROOT/backfill/out.json" quota="$TMP_ROOT/backfill/quota" past
+  past=$(node -p 'new Date(Date.now() - 86400000).toISOString().slice(0, 10)')
+  mkdir -p "$(dirname "$config")"; printf '{}\n' > "$config"; write_quota "$quota" "$NOW"
+  FM_UNIT_ECONOMICS_LEDGER_DATE="$past" FM_UNIT_ECONOMICS_QUOTA_AXI="$quota" node "$BIN" --config "$config" --output "$out" --format json >/dev/null
+  jq -e --arg date "$past" '.lanes[] | select(.id=="fleet_operations") | .daily_fleet_line | select(.date==$date) | [.quota_windows[] | select(.status=="unavailable" and .source_freshness=="backfilled window refused")] | length == 1' "$out" >/dev/null || fail "a backfilled ledger date published present-day quota windows"
+  jq -e '[.lanes[] | select(.id=="fleet_operations") | .metrics[] | select((.name=="claude_quota_window" or .name=="codex_quota_window") and .amount==null and .source_freshness=="backfilled window refused")] | length==2' "$out" >/dev/null || fail "a backfilled ledger date published present-day quota metrics"
+  grep -F 'backfilled window refused' "${out%.json}.md" >/dev/null || fail "the backfilled window refusal was hidden in Markdown"
+  pass "a backfilled ledger date refuses present-day quota windows"
+}
+
+test_daily_fleet_line_refuses_unsupported_currency() {
+  local one="$TMP_ROOT/daily-eur/one" two="$TMP_ROOT/daily-eur/two" config="$TMP_ROOT/daily-eur/config.json" out="$TMP_ROOT/daily-eur/out.json" quota="$TMP_ROOT/daily-eur/quota" date
+  date=$(date -u +%Y-%m-%d)
+  write_source "$one" "{\"source\":\"billing-export\",\"observedAt\":\"$NOW\",\"date\":\"$date\",\"currency\":\"EUR\",\"crewSessions\":[{\"crew\":\"alpha\",\"sessionCost\":{\"amount\":2,\"unit\":\"USD\",\"status\":\"measured\"},\"validationRuns\":{\"amount\":3,\"unit\":\"runs\",\"status\":\"measured\"}}]}"
+  write_source "$two" "{\"source\":\"run-audit\",\"observedAt\":\"$NOW\",\"date\":\"$date\",\"currency\":\"EUR\",\"crewSessions\":[{\"crew\":\"alpha\",\"sessionCost\":{\"amount\":2,\"unit\":\"USD\",\"status\":\"measured\"},\"validationRuns\":{\"amount\":3,\"unit\":\"runs\",\"status\":\"measured\"}}]}"
+  mkdir -p "$(dirname "$config")"
+  cat > "$config" <<JSON
+{"maxAgeSeconds":900,"lanes":{"fleet_operations":{"daily_sources":[{"command":["$one"]},{"command":["$two"]}]}}}
+JSON
+  write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="fleet_operations") | .daily_fleet_line | select(.session_cost.amount==null and .source_freshness=="unsupported currency refused")' "$out" >/dev/null || fail "a readable non-USD source was reported as a missing source"
+  grep -F 'unavailable (unsupported currency refused)' "${out%.json}.md" >/dev/null || fail "the unsupported-currency refusal was hidden in Markdown"
+  pass "a readable non-USD daily source is refused as an unsupported currency"
+}
+
+test_daily_fleet_line_publishes_mixed_labels_as_estimated() {
+  local one="$TMP_ROOT/daily-estimated/one" two="$TMP_ROOT/daily-estimated/two" config="$TMP_ROOT/daily-estimated/config.json" out="$TMP_ROOT/daily-estimated/out.json" quota="$TMP_ROOT/daily-estimated/quota" date
+  date=$(date -u +%Y-%m-%d)
+  write_source "$one" "{\"source\":\"billing-export\",\"observedAt\":\"$NOW\",\"date\":\"$date\",\"currency\":\"USD\",\"crewSessions\":[{\"crew\":\"alpha\",\"sessionCost\":{\"amount\":2,\"unit\":\"USD\",\"status\":\"measured\"},\"validationRuns\":{\"amount\":3,\"unit\":\"runs\",\"status\":\"measured\"}}]}"
+  write_source "$two" "{\"source\":\"run-audit\",\"observedAt\":\"$NOW\",\"date\":\"$date\",\"currency\":\"USD\",\"crewSessions\":[{\"crew\":\"alpha\",\"sessionCost\":{\"amount\":2,\"unit\":\"USD\",\"status\":\"estimated\"},\"validationRuns\":{\"amount\":3,\"unit\":\"runs\",\"status\":\"measured\"}}]}"
+  mkdir -p "$(dirname "$config")"
+  cat > "$config" <<JSON
+{"maxAgeSeconds":900,"lanes":{"fleet_operations":{"daily_sources":[{"command":["$one"]},{"command":["$two"]}]}}}
+JSON
+  write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="fleet_operations") | .daily_fleet_line | select(.session_cost.amount==2 and .session_cost.status=="estimated" and .validation_run_volume.amount==3 and .validation_run_volume.status=="independently_cross_checked")' "$out" >/dev/null || fail "an agreed amount with one estimating helper was refused instead of labeled estimated"
+  jq -e '[.lanes[] | select(.id=="fleet_operations") | .daily_fleet_line.crew_sessions[] | select(.crew=="alpha" and .session_cost.status=="estimated" and .validation_runs.status=="independently_cross_checked")] | length == 1' "$out" >/dev/null || fail "the weakest per-crew label did not govern"
+  pass "corroborated amounts with a mixed label publish as estimated"
+}
+
 test_zero_revenue_is_explicit_and_cross_checked
 test_unavailable_and_partial_lanes_render
 test_stale_and_failed_cross_check_are_refused
@@ -310,3 +351,6 @@ test_quota_provider_without_refresh_time_is_unavailable
 test_daily_fleet_line_refuses_currency_disagreement
 test_daily_fleet_line_renders_corroborated_empty_roster_as_zero
 test_malformed_ledger_date_is_refused
+test_backfilled_ledger_date_refuses_quota_windows
+test_daily_fleet_line_refuses_unsupported_currency
+test_daily_fleet_line_publishes_mixed_labels_as_estimated
