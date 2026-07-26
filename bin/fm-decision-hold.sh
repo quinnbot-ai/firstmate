@@ -41,7 +41,13 @@
 # archive. When a pre-archive legacy resolution is absent from both the live
 # backlog and that archive, its originating keyed status resolution, or a
 # decision artifact that names that exact hold identity or decision key, remains
-# a compatibility fallback until that record can be migrated to the archive.
+# a compatibility fallback. That fallback covers only holds resolved before
+# archive-backed recording landed, and it retires on a checkable condition, not
+# when it stops being convenient: after one full Done retention cycle from this
+# change (`done_keep` completions, see .tasks.toml), confirm that every captain
+# hold reachable from a live origin inventory verifies from the live backlog or
+# the configured archive, then delete same_task_resolution_evidence and
+# decision_artifact_evidence.
 # Evidence that names no hold never verifies a decision.
 #
 # `resolve` requires every --routed-to task to exist and to be blocked by the hold.
