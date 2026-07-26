@@ -7,9 +7,10 @@
 // kdp, plus an optional `maxAgeSeconds` freshness window (default 900). A
 // lane's `sources` are trusted private command arrays, each with an optional
 // `timeoutMs` (default 30000). Each command is run fresh with $FM_HOME as its
-// working directory, so a relative helper path resolves against $FM_HOME itself
-// - never against the invoker's cwd or the directory holding --config - and
-// must print one JSON object:
+// working directory - the current directory stands in only when FM_HOME is
+// unset - so a relative helper path resolves against $FM_HOME itself, never
+// against the invoker's cwd or the directory holding --config, and must print
+// one JSON object:
 //   {"observedAt":"<ISO-8601>","currency":"USD","metrics":{
 //     "metric_name":{"amount":12.3,"unit":"USD","status":"measured"}}}
 // A financial fact is published only when every source configured for its lane
