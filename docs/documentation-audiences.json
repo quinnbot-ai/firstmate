@@ -172,6 +172,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/visual-deliverable-usability/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "AGENTS.md",
       "audience": "agent-runtime"
     },
