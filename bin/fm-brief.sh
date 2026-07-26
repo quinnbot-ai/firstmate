@@ -295,7 +295,13 @@ EOF
 
 case "$MODE" in
   direct-PR)
-    SETUP2=""
+    SETUP2=$(cat <<EOF
+
+2. Before investing in implementation, run \`$FM_ROOT/bin/fm-pr-capability.sh\` from this worktree.
+   If it prints \`BLOCKED:\`, append its message as a \`blocked:\` status and stop so firstmate can fix the credential permission.
+   If it prints \`WARNING:\`, record the warning in your work log and continue - the probe is not a new blocking gate.
+EOF
+)
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
     DOD=$(cat <<EOF
 # Definition of done
@@ -320,8 +326,14 @@ EOF
 )
     ;;
   *)  # no-mistakes (default)
-    SETUP2="
-2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
+    SETUP2=$(cat <<EOF
+
+2. Before investing in implementation or the full no-mistakes pipeline, run \`$FM_ROOT/bin/fm-pr-capability.sh\` from this worktree.
+   If it prints \`BLOCKED:\`, append its message as a \`blocked:\` status and stop so firstmate can fix the credential permission.
+   If it prints \`WARNING:\`, record the warning in your work log and continue - the probe is not a new blocking gate.
+3. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`.
+EOF
+)
     RULE1='1. Never push to the default branch. Never merge a PR.'
     DOD=$(cat <<EOF
 # Definition of done
