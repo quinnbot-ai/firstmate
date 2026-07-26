@@ -29,6 +29,8 @@ It measures media and interactive elements in the rendered page and rejects zero
 
 Finding no measurable media or interactive element is its own loud failure, because a 404, a broken script, or a control that never rendered must never read as a pass.
 
+Exit `1` means the check ran and reported findings, while exit `2` means it could not run at all - a rejected URL, a missing or non-source `--source`, an unavailable browser, or an unexpected browser result - and neither exit ever counts as a pass.
+
 An element that is deliberately not presented - a collapsed panel, a closed dialog, an entrance that starts at `opacity:0` - opts out one element at a time with `data-fm-visual-check="intentionally-hidden"` on that element itself in the rendered markup.
 
 The marker is per element and never inherited from an ancestor, so there is no page-level or global suppression, every use of it is reported on stdout, and a render whose every matched element carries it still fails.
