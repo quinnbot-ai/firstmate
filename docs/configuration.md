@@ -345,6 +345,7 @@ An absent, stale, malformed, incomplete, or disagreeing source renders its figur
 The ledger date is today in UTC, and the optional `FM_UNIT_ECONOMICS_LEDGER_DATE` environment variable overrides it for tests and backfills with a valid `YYYY-MM-DD` date that also selects the dated default output file.
 Any other value for that variable is rejected with a non-zero exit before any ledger is written.
 Because quota-axi only ever reports the present, a ledger date other than today in UTC refuses every quota window and quota metric as a backfilled window instead of filling that day with the present day's live measurements.
+The committed `config/unit-economics-ledger.proposed.json` is an installable proposal that pairs the two independent read-only modes of `bin/fm-unit-economics-kdp-source.mjs` for the `kdp` lane; installing it as the private `config/unit-economics-ledger.json` is a deliberate captain step, never automatic.
 The script header owns the source schema, freshness, corroboration, output, and status contract so this setup reference does not duplicate it.
 
 ## Toolchain
