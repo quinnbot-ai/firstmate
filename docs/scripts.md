@@ -20,6 +20,9 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-backlog-handoff.sh`  | Validate and delegate queued backlog-item moves into a secondmate home               |
 | `fm-decision-hold.sh`    | Create, verify, complete, audit, and resolve durable captain-held decisions          |
 | `fm-brief.sh`            | Scaffold ship, scout, secondmate-charter, and Herdr-lab briefs                       |
+| `fm-dispatch-stage.sh`   | Seal one lock-owner-authored ready task and concrete profile for report-only dispatch |
+| `fm-auto-dispatch-once.sh` | Run one ownership-checked, capacity-bounded would-dispatch refill pass              |
+| `fm-auto-dispatch.mjs`   | Implement dispatch-envelope sealing, capacity checks, and atomic report receipts     |
 | `fm-herdr-lab.sh`        | Provision and guardedly operate an isolated, never-default Herdr lab session         |
 | `fm-install-herdr.sh`    | Install CI's exact-version Herdr pin with official asset URL, SHA-256, and protocol checks |
 | `fm-install-treehouse.sh`| Install CI's exact-version Treehouse pin for real-Herdr E2E that needs spawn worktrees |

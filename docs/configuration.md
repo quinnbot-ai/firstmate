@@ -347,6 +347,50 @@ Any other value for that variable is rejected with a non-zero exit before any le
 Because quota-axi only ever reports the present, a ledger date other than today in UTC refuses every quota window and quota metric as a backfilled window instead of filling that day with the present day's live measurements.
 The script header owns the source schema, freshness, corroboration, output, and status contract so this setup reference does not duplicate it.
 
+## Report-only auto-dispatch (config/auto-dispatch.json)
+
+`config/auto-dispatch.json` is an optional local, gitignored per-home configuration for bounded report-only refill.
+It is not inherited by secondmate homes.
+An absent file or `"enabled": false` is inert.
+
+The initial release accepts only this schema:
+
+```json
+{
+  "enabled": true,
+  "mode": "report-only",
+  "target_running": 1,
+  "terminal_buffer": 1,
+  "max_launches_per_tick": 1,
+  "interval_seconds": 60
+}
+```
+
+`target_running` is required and must be an integer from 1 through 64.
+`terminal_buffer` must be an integer from 0 through 64 and defaults to `target_running`.
+The hard open-lane cap is `target_running + terminal_buffer`.
+`max_launches_per_tick` must be an integer from 1 through 16 and defaults to 1.
+`interval_seconds` must be an integer from 1 through 3600 and defaults to 60.
+Malformed, missing, out-of-range, or otherwise indeterminate enabled limits stop refill before a queue claim.
+
+Firstmate stages one fully authored task with `bin/fm-dispatch-stage.sh` after selecting its concrete harness, model, and effort under `AGENTS.md` section 4.
+The staging helper writes a sealed `data/<id>/dispatch.json` envelope that binds the exact home, ready task, brief, project mode and authority, dispatch-profile configuration, Herdr attestation, and concrete launch profile.
+The helper is callable only from the verified harness that owns the exact home's firstmate session lock.
+A crewmate cannot use staging as an instruction-authoring or profile-selection path.
+
+The existing `fm-watch.sh` loop invokes `fm-auto-dispatch-once.sh` on an independently persisted cadence.
+The one-shot verifies session and watcher ownership, reads `fm-fleet-snapshot.sh --json`, computes running and open capacity, preserves authoritative ready order, and considers only current sealed envelopes.
+Terminal metadata still occupies open capacity until the normal guarded cleanup path removes it.
+Unknown state, unexpected dead endpoints, unresolved failures or decisions, contradictory inventory, ownership changes, and exceeded caps stop refill and produce one deduplicated actionable event.
+
+Report-only refill requires a machine-readable `tasks-axi ready --json` contract and an atomic `tasks-axi claim <id> --if-ready --json` transition.
+Manual backlog mode and `tasks-axi` versions without both capabilities are unsupported and fail closed.
+The helper never scrapes human ready output and never substitutes `tasks-axi start`.
+
+For each selection, the helper atomically claims and reopens the task, consumes the envelope into a bounded audit receipt under `state/auto-dispatch-receipts/`, and reports what it would dispatch.
+It never invokes `fm-spawn.sh`, creates worker metadata, or starts another daemon.
+Load the agent-only [`auto-dispatch`](../.agents/skills/auto-dispatch/SKILL.md) procedure before staging, enabling, or responding to these reports.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.

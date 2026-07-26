@@ -99,6 +99,33 @@ Stalled escalation delivery writes `state/.subsuper-inject-wedged` and attempts 
 On an unmarked return, `bin/fm-afk-return.sh` owns ordered shutdown, durable catch-up evidence, and the fail-closed gate that keeps ordinary work behind every live firstmate-actionable blocker.
 `fm-send.sh` selects a pre-Enter popup-settle for slash commands and for codex `$...` skill invocations using metadata-routed target `harness=` values, then adds its own `FM_SEND_SETTLE` pause after successful text sends so immediate peeks catch the receiving turn starting; the sub-supervisor uses only the shared submit core and does not pay that post-submit pause.
 
+## Report-only auto-dispatch
+
+Auto-dispatch uses a compile-then-detect boundary.
+Firstmate performs normal semantic intake, authors the complete task brief, chooses the concrete launch profile, and invokes `bin/fm-dispatch-stage.sh`.
+The staging helper is bound to the exact lock-owning firstmate process ancestry and writes a sealed `data/<id>/dispatch.json` envelope.
+The envelope fingerprints the authoritative ready task, brief, project delivery and authority settings, dispatch-profile configuration, Herdr lifecycle attestation, exact home, and concrete profile.
+The seal detects any later envelope alteration, while the fingerprints force restaging after an input changes.
+The backlog remains the one task queue because the envelope is an authorization receipt rather than another readiness list.
+
+`bin/fm-watch.sh` calls `bin/fm-auto-dispatch-once.sh` inside its existing loop.
+The helper keeps its own persisted cadence and per-home lock, so event-heavy cycles and duplicate watcher attempts cannot multiply claims.
+No auto-dispatch daemon or background lifecycle owner exists.
+
+Each due pass verifies the live firstmate session, watcher identity, structured fleet snapshot, unresolved supervision state, and two independent capacity limits.
+`target_running` controls desired positive working evidence, while `target_running + terminal_buffer` is a hard cap over every ordinary metadata lane, including terminal and ambiguous lanes.
+Only guarded lifecycle cleanup frees an open lane.
+Indeterminate limits and contradictory fleet evidence stop safely before queue mutation.
+
+Ready order and atomic eligibility remain owned by `tasks-axi`.
+The helper requires machine-readable `ready --json` and conditional `claim --if-ready --json`; it neither parses human output nor duplicates dependency, hold, or public-followup semantics.
+The per-home lock serializes refill passes, and the backend's conditional transition protects the ready-to-claim race against other queue writers.
+
+This phase is deliberately report-only.
+A selected task is atomically claimed, revalidated, reopened, and recorded once as a would-dispatch receipt.
+The helper never calls `fm-spawn.sh`, never writes worker metadata, and never turns a title into instructions.
+Live spawning, claim compensation after launch failure, and worker acceptance receipts remain outside this phase.
+
 ## Runtime session backends
 
 The runtime backend is the session-provider layer below firstmate's scripts.
