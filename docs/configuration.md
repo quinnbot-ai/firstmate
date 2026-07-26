@@ -336,6 +336,8 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 Each financial lane names two or more distinct trusted local read-only helper command arrays under `sources`, while `fleet_operations.cost_sources` optionally supplies the same corroboration for attributable crew/session cost.
 `fleet_operations.daily_sources` optionally supplies the same corroboration for the dated per-crew session-cost and validation-run line.
 An absent, stale, malformed, incomplete, or disagreeing source renders its figures unavailable rather than zero, while quota-axi windows remain provider-reported windowed measurements rather than exact monetary costs.
+The ledger date is today in UTC, and the optional `FM_UNIT_ECONOMICS_LEDGER_DATE` environment variable overrides it for tests and backfills with a valid `YYYY-MM-DD` date that also selects the dated default output file.
+Any other value for that variable is rejected with a non-zero exit before any ledger is written.
 The script header owns the source schema, freshness, corroboration, output, and status contract so this setup reference does not duplicate it.
 
 ## Toolchain

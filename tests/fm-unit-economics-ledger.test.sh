@@ -230,6 +230,67 @@ JSON
   pass "malformed source timeouts render unavailable"
 }
 
+test_empty_quota_provider_list_is_unavailable() {
+  local config="$TMP_ROOT/quota-empty/config.json" out="$TMP_ROOT/quota-empty/out.json" quota="$TMP_ROOT/quota-empty/quota"
+  mkdir -p "$(dirname "$config")"; printf '{}\n' > "$config"
+  write_source "$quota" "{\"generatedAt\":\"$NOW\",\"providers\":[]}"
+  run_ledger "$config" "$out" "$quota"
+  jq -e '[.lanes[] | select(.id=="fleet_operations") | .daily_fleet_line.quota_windows[] | select(.provider=="quota-axi" and .status=="unavailable" and .source_freshness=="source unavailable")] | length == 1' "$out" >/dev/null || fail "an empty quota provider list was not marked unavailable"
+  grep -F 'quota-axi: unavailable (source unavailable)' "${out%.json}.md" >/dev/null || fail "empty quota provider list rendered a blank Markdown cell"
+  pass "an empty quota provider list renders unavailable rather than blank"
+}
+
+test_quota_provider_without_refresh_time_is_unavailable() {
+  local config="$TMP_ROOT/quota-no-refresh/config.json" out="$TMP_ROOT/quota-no-refresh/out.json" quota="$TMP_ROOT/quota-no-refresh/quota"
+  mkdir -p "$(dirname "$config")"; printf '{}\n' > "$config"
+  write_source "$quota" "{\"generatedAt\":\"$NOW\",\"providers\":[{\"provider\":\"claude\",\"state\":{\"status\":\"fresh\",\"stale\":false},\"windows\":[{\"percentRemaining\":80}]}]}"
+  run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="fleet_operations") | .metrics[] | select(.name=="claude_quota_window" and .amount==null and .source_freshness=="source unavailable")' "$out" >/dev/null || fail "a provider without a refresh time published a measured percentage"
+  jq -e '[.lanes[] | select(.id=="fleet_operations") | .daily_fleet_line.quota_windows[] | select(.provider=="claude" and .status=="unavailable" and .source_freshness=="source unavailable")] | length == 1' "$out" >/dev/null || fail "the lane metric and the daily window disagreed about the same provider"
+  pass "a quota provider without a refresh time is unavailable in both views"
+}
+
+test_daily_fleet_line_refuses_currency_disagreement() {
+  local one="$TMP_ROOT/daily-currency/one" two="$TMP_ROOT/daily-currency/two" config="$TMP_ROOT/daily-currency/config.json" out="$TMP_ROOT/daily-currency/out.json" quota="$TMP_ROOT/daily-currency/quota" date
+  date=$(date -u +%Y-%m-%d)
+  write_source "$one" "{\"source\":\"billing-export\",\"observedAt\":\"$NOW\",\"date\":\"$date\",\"currency\":\"USD\",\"crewSessions\":[{\"crew\":\"alpha\",\"sessionCost\":{\"amount\":2,\"unit\":\"USD\",\"status\":\"measured\"},\"validationRuns\":{\"amount\":3,\"unit\":\"runs\",\"status\":\"measured\"}}]}"
+  write_source "$two" "{\"source\":\"run-audit\",\"observedAt\":\"$NOW\",\"date\":\"$date\",\"currency\":\"EUR\",\"crewSessions\":[{\"crew\":\"alpha\",\"sessionCost\":{\"amount\":2,\"unit\":\"USD\",\"status\":\"measured\"},\"validationRuns\":{\"amount\":3,\"unit\":\"runs\",\"status\":\"measured\"}}]}"
+  mkdir -p "$(dirname "$config")"
+  cat > "$config" <<JSON
+{"maxAgeSeconds":900,"lanes":{"fleet_operations":{"daily_sources":[{"command":["$one"]},{"command":["$two"]}]}}}
+JSON
+  write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="fleet_operations") | .daily_fleet_line | select(.session_cost.amount==null and .session_cost.status=="unavailable" and .source_freshness=="source disagreement refused")' "$out" >/dev/null || fail "disagreeing currencies were published as a cross-checked USD figure"
+  pass "daily helpers disagreeing on currency render unavailable"
+}
+
+test_daily_fleet_line_renders_corroborated_empty_roster_as_zero() {
+  local one="$TMP_ROOT/daily-empty/one" two="$TMP_ROOT/daily-empty/two" config="$TMP_ROOT/daily-empty/config.json" out="$TMP_ROOT/daily-empty/out.json" quota="$TMP_ROOT/daily-empty/quota" date
+  date=$(date -u +%Y-%m-%d)
+  write_source "$one" "{\"source\":\"billing-export\",\"observedAt\":\"$NOW\",\"date\":\"$date\",\"currency\":\"USD\",\"crewSessions\":[]}"
+  write_source "$two" "{\"source\":\"run-audit\",\"observedAt\":\"$NOW\",\"date\":\"$date\",\"currency\":\"USD\",\"crewSessions\":[]}"
+  mkdir -p "$(dirname "$config")"
+  cat > "$config" <<JSON
+{"maxAgeSeconds":900,"lanes":{"fleet_operations":{"daily_sources":[{"command":["$one"]},{"command":["$two"]}]}}}
+JSON
+  write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="fleet_operations") | .daily_fleet_line | select(.session_cost.name=="daily_attributable_crew_session_cost" and .session_cost.amount==0 and .session_cost.status=="independently_cross_checked")' "$out" >/dev/null || fail "a corroborated empty roster was not an explicit cross-checked zero"
+  grep -F '0 USD (independently_cross_checked); no crews reported' "${out%.json}.md" >/dev/null || fail "a corroborated empty roster was rendered as unavailable in Markdown"
+  pass "a corroborated empty roster renders as an explicit zero"
+}
+
+test_malformed_ledger_date_is_refused() {
+  local config="$TMP_ROOT/bad-date/config.json" out="$TMP_ROOT/bad-date/out.json" quota="$TMP_ROOT/bad-date/quota" status=0
+  mkdir -p "$(dirname "$config")"; printf '{}\n' > "$config"; write_quota "$quota" "$NOW"
+  FM_UNIT_ECONOMICS_LEDGER_DATE='../escape' FM_UNIT_ECONOMICS_QUOTA_AXI="$quota" node "$BIN" --config "$config" --output "$out" --format json >/dev/null 2>&1 || status=$?
+  [ "$status" -eq 2 ] || fail "a malformed ledger date was accepted"
+  [ ! -f "$out" ] || fail "a malformed ledger date still wrote a ledger"
+  status=0
+  FM_UNIT_ECONOMICS_LEDGER_DATE='2026-02-30' FM_UNIT_ECONOMICS_QUOTA_AXI="$quota" node "$BIN" --config "$config" --output "$out" --format json >/dev/null 2>&1 || status=$?
+  [ "$status" -eq 2 ] || fail "a non-existent calendar date was accepted"
+  pass "a malformed ledger date fails fast before writing"
+}
+
 test_zero_revenue_is_explicit_and_cross_checked
 test_unavailable_and_partial_lanes_render
 test_stale_and_failed_cross_check_are_refused
@@ -244,3 +305,8 @@ test_malformed_source_containers_render_unavailable
 test_observations_are_rechecked_at_publication
 test_quota_percentages_must_be_in_range
 test_malformed_source_timeouts_render_unavailable
+test_empty_quota_provider_list_is_unavailable
+test_quota_provider_without_refresh_time_is_unavailable
+test_daily_fleet_line_refuses_currency_disagreement
+test_daily_fleet_line_renders_corroborated_empty_roster_as_zero
+test_malformed_ledger_date_is_refused
