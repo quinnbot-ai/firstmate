@@ -11,6 +11,7 @@
 #   (d) pr= present but PR head unreachable -> fallback to local branch + warning
 #   (e) pr= + STALE recorded pr_head= + newer remote pull head -> must use fetched head
 #       (this is the class that bit reviewers holding merges over "missing" fixes)
+#   (f) local-only + unreachable configured remote -> use the local default branch
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -226,6 +227,37 @@ test_pr_meta_uses_matching_remote_for_base() {
   pass "fm-review-diff fetches the comparison base from the repository named by pr="
 }
 
+test_local_only_unreachable_remote_uses_local_default() {
+  local case_dir out err rc
+  case_dir=$(make_case local-only-unreachable)
+  printf 'local base\n' > "$case_dir/project/local-base.txt"
+  git -C "$case_dir/project" add local-base.txt
+  git -C "$case_dir/project" commit -qm "advance local main"
+  git -C "$case_dir/wt" rebase -q main
+  printf 'local feature\n' > "$case_dir/wt/local-feature.txt"
+  git -C "$case_dir/wt" add local-feature.txt
+  git -C "$case_dir/wt" commit -qm "local-only feature"
+  mv "$case_dir/origin.git" "$case_dir/origin-unreachable.git"
+  write_task_meta "$case_dir" "mode=local-only"
+
+  set +e
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+  rc=$?
+  set -e
+  err=$(cat "$case_dir/stderr")
+
+  expect_code 0 "$rc" "local-only-unreachable: review should not require the dead remote"
+  assert_contains "$out" "diff base: main" \
+    "local-only-unreachable: review did not select the local default branch"
+  assert_contains "$out" "+local feature" \
+    "local-only-unreachable: review omitted the task change"
+  assert_not_contains "$out" "+local base" \
+    "local-only-unreachable: local default content leaked into the task diff"
+  assert_not_contains "$err" "Could not read from remote repository" \
+    "local-only-unreachable: review attempted to fetch the dead remote"
+  pass "fm-review-diff uses local main when a local-only repository's remote is unreachable"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
@@ -233,3 +265,4 @@ test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
 test_pr_meta_fetches_from_matching_remote_not_origin
 test_pr_meta_uses_matching_remote_for_base
+test_local_only_unreachable_remote_uses_local_default

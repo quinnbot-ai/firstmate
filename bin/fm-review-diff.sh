@@ -44,26 +44,45 @@ META="$STATE/$ID.meta"
 
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
+MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
 [ -n "$WT" ] || { echo "error: meta for task $ID is missing worktree=" >&2; exit 1; }
 [ -n "$PROJ" ] || { echo "error: meta for task $ID is missing project=" >&2; exit 1; }
 [ -d "$WT" ] || { echo "error: worktree for task $ID is missing: $WT" >&2; exit 1; }
 [ -d "$PROJ" ] || { echo "error: project for task $ID is missing: $PROJ" >&2; exit 1; }
 
-default_branch() {  # <remote>
-  local remote=$1 ref branch
+# Resolve the default branch name to compare against. scope=local-only never trusts
+# the remote - neither its symbolic HEAD alone nor a remote-tracking ref - so a stale,
+# dead, or absent remote cannot decide a local-only review's base; it still honours a
+# recorded remote HEAD when that branch also exists locally. Both scopes share the
+# main/master probe so the two resolution rules cannot drift apart.
+default_branch() {  # <remote> [scope: any|local-only]
+  local remote=$1 scope=${2:-any} ref branch
   ref=$(git -C "$WT" symbolic-ref --quiet --short "refs/remotes/$remote/HEAD" 2>/dev/null || true)
   if [ -n "$ref" ]; then
-    echo "${ref#"$remote/"}"
-    return 0
+    branch=${ref#"$remote/"}
+    if [ "$scope" != local-only ]; then
+      echo "$branch"
+      return 0
+    fi
+    if git -C "$WT" show-ref --verify --quiet "refs/heads/$branch"; then
+      echo "$branch"
+      return 0
+    fi
   fi
-  ref=$(git -C "$WT" ls-remote --symref "$remote" HEAD 2>/dev/null | awk '/^ref: / { sub("refs/heads/", "", $2); print $2; exit }' || true)
-  if [ -n "$ref" ]; then
-    echo "$ref"
-    return 0
+  if [ "$scope" != local-only ]; then
+    ref=$(git -C "$WT" ls-remote --symref "$remote" HEAD 2>/dev/null | awk '/^ref: / { sub("refs/heads/", "", $2); print $2; exit }' || true)
+    if [ -n "$ref" ]; then
+      echo "$ref"
+      return 0
+    fi
   fi
   for branch in main master; do
-    if git -C "$WT" show-ref --verify --quiet "refs/remotes/$remote/$branch" \
-      || git -C "$WT" show-ref --verify --quiet "refs/heads/$branch"; then
+    if git -C "$WT" show-ref --verify --quiet "refs/heads/$branch"; then
+      echo "$branch"
+      return 0
+    fi
+    if [ "$scope" != local-only ] \
+      && git -C "$WT" show-ref --verify --quiet "refs/remotes/$remote/$branch"; then
       echo "$branch"
       return 0
     fi
@@ -189,7 +208,11 @@ if [ -n "$PR_URL" ] && [[ "$PR_URL" != [0-9]* ]]; then
   BASE_REMOTE=$(remote_for_pr "$PR_URL" 2>/dev/null || true)
   [ -n "$BASE_REMOTE" ] || BASE_REMOTE=origin
 fi
-DEFAULT=$(default_branch "$BASE_REMOTE") || { echo "error: cannot determine default branch for $PROJ on $BASE_REMOTE; expected $BASE_REMOTE/HEAD, main, or master" >&2; exit 1; }
+if [ "$MODE" = local-only ]; then
+  DEFAULT=$(default_branch "$BASE_REMOTE" local-only) || { echo "error: cannot determine local default branch for $PROJ; expected main or master" >&2; exit 1; }
+else
+  DEFAULT=$(default_branch "$BASE_REMOTE") || { echo "error: cannot determine default branch for $PROJ on $BASE_REMOTE; expected $BASE_REMOTE/HEAD, main, or master" >&2; exit 1; }
+fi
 COMPARE_REF=$BRANCH
 if [ -n "$PR_URL" ]; then
   if PR_HEAD=$(resolve_pr_head "$PR_URL" "$PR_HEAD_RECORDED"); then
@@ -199,7 +222,9 @@ if [ -n "$PR_URL" ]; then
   fi
 fi
 
-if git -C "$WT" remote get-url "$BASE_REMOTE" >/dev/null 2>&1; then
+if [ "$MODE" = local-only ]; then
+  BASE="$DEFAULT"
+elif git -C "$WT" remote get-url "$BASE_REMOTE" >/dev/null 2>&1; then
   # Update the remote-tracking ref itself; a bare single-branch fetch can leave
   # origin/<default> stale on some Git versions and only refresh FETCH_HEAD.
   git -C "$WT" fetch "$BASE_REMOTE" "+refs/heads/$DEFAULT:refs/remotes/$BASE_REMOTE/$DEFAULT" --quiet

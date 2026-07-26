@@ -15,19 +15,20 @@
 # GitHub reports a PR head that contains the current local work, or its content is
 # already present in the up-to-date default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
-# on a remote yet the change is fully in main. Local-only containment also accepts a
-# branch when git cherry proves every branch patch is already equivalent in the local
-# default branch, even though rebasing or cherry-picking gave the landed commits new
-# SHAs. That proof rejects merge commits, malformed or failed git cherry output, and
-# any '+' patch result.
+# on a remote yet the change is fully in main. Landing containment also accepts a
+# branch when git cherry proves every branch patch is already equivalent in the
+# authoritative default branch, even though rebasing or cherry-picking gave the
+# landed commits new SHAs. That proof rejects merge commits, malformed or failed
+# git cherry output, and any '+' patch result.
 # The PR itself is resolved from the task's recorded pr= when present, or - when
 # no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
 # where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
 # up a merged PR whose head branch matches the worktree's branch, fetching its head
 # via refs/pull/<n>/head when the branch itself was deleted. So a missing pr= never
 # by itself causes a false refusal of landed work.
-# A gh lookup error falls back to the content check; if that is also inconclusive,
-# teardown refuses rather than risk discarding unlanded work.
+# A gh lookup error falls back to the default-branch content and patch-equivalence
+# proofs; if both are also inconclusive, teardown refuses rather than risk discarding
+# unlanded work.
 # Uncommitted changes are never landed.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
@@ -554,15 +555,10 @@ pr_is_merged() {
   unpushed_patches_are_in_pr_head "$head"
 }
 
-# Is the branch's content already present in the up-to-date default branch? Fetches
-# first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
-# the default branch does not already contain (e.g. its change landed via squash) the
-# merged tree equals the default branch's tree. This isolates branch-only changes, so
-# unrelated commits the default branch gained past the merge-base do not count as
-# "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
-# so the caller refuses rather than guesses.
-content_in_default() {
-  local name ref default_tree merged_tree
+# Resolve the authoritative default ref for landed-work checks. Remote-backed
+# projects refresh origin/<default>; repos without origin use their local default.
+landing_default_ref() {
+  local name ref
   name=$(default_branch) || return 1
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
     git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
@@ -572,6 +568,19 @@ content_in_default() {
   else
     return 1
   fi
+  printf '%s\n' "$ref"
+}
+
+# Is the branch's content already present in the default branch the caller resolved?
+# 3-way merges that default ref with HEAD: when HEAD introduces nothing the default
+# branch does not already contain (e.g. its change landed via squash) the merged tree
+# equals the default branch's tree. This isolates branch-only changes, so unrelated
+# commits the default branch gained past the merge-base do not count as "added".
+# Returns non-zero when inconclusive (no ref given, or a merge conflict), so the
+# caller tries the patch-equivalence proof before refusing.
+content_in_default() {
+  local ref=$1 default_tree merged_tree
+  [ -n "$ref" ] || return 1
   default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
   [ -n "$default_tree" ] || return 1
   merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
@@ -584,11 +593,11 @@ content_in_default() {
 # that are not present upstream. Any '+' line, malformed output, or git error is
 # ambiguous and fails closed.
 patches_are_in_default() {
-  local default=$1 cherry line merge_commits
-  [ -n "$default" ] || return 1
-  merge_commits=$(git -C "$WT" rev-list --min-parents=2 "$default..HEAD" 2>/dev/null) || return 1
+  local default=$1 branch=${2:-HEAD} cherry line merge_commits
+  [ -n "$default" ] && [ -n "$branch" ] || return 1
+  merge_commits=$(git -C "$WT" rev-list --min-parents=2 "$default..$branch" 2>/dev/null) || return 1
   [ -z "$merge_commits" ] || return 1
-  cherry=$(git -C "$WT" cherry "$default" HEAD 2>/dev/null) || return 1
+  cherry=$(git -C "$WT" cherry "$default" "$branch" 2>/dev/null) || return 1
   [ -n "$cherry" ] || return 0
   while IFS= read -r line; do
     case "$line" in
@@ -603,13 +612,19 @@ EOF
 
 # Has the worktree's committed work actually LANDED, though its commits are not
 # reachable from any remote-tracking branch? True when a merged PR proves the
-# current local work is contained in the PR head, OR the content is already in the
-# default branch (fallback, which also covers the no-PR and gh-error paths). False
-# only for genuinely unlanded work.
+# current local work is contained in the PR head, the content is already in the
+# default branch, OR every branch patch is equivalent to one in that default.
+# False only for genuinely unlanded work or an inconclusive proof.
+#
+# The default ref is resolved once and shared by both proofs: its fetch is the only
+# network step here, so resolving it twice would both double the round-trips and let a
+# transient failure between them strand work the second proof would have accepted.
 work_is_landed() {
-  local branch=$1
+  local branch=$1 default
   pr_is_merged "$branch" && return 0
-  content_in_default
+  default=$(landing_default_ref) || return 1
+  content_in_default "$default" && return 0
+  patches_are_in_default "$default" "$branch"
 }
 
 backlog_refresh_reminder() {

@@ -40,10 +40,11 @@
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
 #   (r) local-only + rebased-equivalent patches in local main    -> ALLOW  (git cherry)
 #   (s) local-only + one unlanded patch after a rebase           -> REFUSE (fail-safe)
-#   (t) worktree checked out on default branch                   -> preserve default branch
-#   (u) branch-unique merge with no `git cherry` '+' patch       -> REFUSE (safety)
-#   (v) legacy exact task temporary directory                    -> ALLOW and remove
-#   (w) malformed, non-directory, or symlinked task temp path    -> REFUSE (safety)
+#   (t) no-mistakes + equivalent patch in evolved remote main     -> ALLOW  (git cherry)
+#   (u) worktree checked out on default branch                   -> preserve default branch
+#   (v) branch-unique merge with no `git cherry` '+' patch       -> REFUSE (safety)
+#   (w) legacy exact task temporary directory                    -> ALLOW and remove
+#   (x) malformed, non-directory, or symlinked task temp path    -> REFUSE (safety)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -209,6 +210,23 @@ land_on_origin_main() {
   printf '%s\n' "$content" > "$tmp/$file"
   git -C "$tmp" add -- "$file"
   git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "squash $file"
+  git -C "$tmp" push -q origin HEAD:main
+  rm -rf "$tmp"
+}
+
+# Land the branch's patch independently on origin/main, then evolve the same file.
+# The branch SHA remains a non-ancestor and a tree merge is inconclusive, while
+# git cherry can still prove that the original patch already landed.
+land_patch_then_evolve_on_origin_main() {
+  local case_dir=$1 file=$2 landed=$3 evolved=$4 tmp
+  tmp="$case_dir/_evolved"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  printf '%s\n' "$landed" > "$tmp/$file"
+  git -C "$tmp" add -- "$file"
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "land $file"
+  printf '%s\n' "$evolved" > "$tmp/$file"
+  git -C "$tmp" add -- "$file"
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "evolve $file"
   git -C "$tmp" push -q origin HEAD:main
   rm -rf "$tmp"
 }
@@ -989,6 +1007,34 @@ test_no_mistakes_truly_unpushed_refuses() {
   expect_code 1 "$rc" "nm-unpushed: teardown should refuse"
   grep -q REFUSED "$case_dir/stderr" || fail "nm-unpushed: no REFUSED line in stderr"
   pass "no-mistakes worktree with genuinely unlanded work is refused (safety preserved)"
+}
+
+test_no_mistakes_equivalent_patch_in_evolved_default_allows() {
+  local case_dir rc branch_head main_head cherry
+  case_dir=$(make_case nm-rebased-equivalent)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt landed "original task patch"
+  branch_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  land_patch_then_evolve_on_origin_main "$case_dir" feature.txt landed evolved
+  git -C "$case_dir/wt" fetch -q origin main
+  main_head=$(git -C "$case_dir/wt" rev-parse origin/main)
+  ! git -C "$case_dir/wt" merge-base --is-ancestor "$branch_head" "$main_head" \
+    || fail "nm-rebased-equivalent: original task SHA unexpectedly became an ancestor"
+  cherry=$(git -C "$case_dir/wt" cherry origin/main fm/task-x1)
+  printf '%s\n' "$cherry" | grep -Eq '^- [0-9a-f]+$' \
+    || fail "nm-rebased-equivalent: git cherry did not prove patch equivalence: $cherry"
+  ! git -C "$case_dir/wt" merge-tree --write-tree origin/main fm/task-x1 >/dev/null 2>&1 \
+    || fail "nm-rebased-equivalent: fixture must make the content merge inconclusive"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "nm-rebased-equivalent: teardown should accept equivalent landed patches"
+  ! grep -q REFUSED "$case_dir/stderr" \
+    || fail "nm-rebased-equivalent: teardown printed a REFUSED line"
+  pass "no-mistakes teardown recognizes an equivalent patch in an evolved default branch"
 }
 
 test_squash_merged_branch_deleted_allows() {
@@ -2010,6 +2056,7 @@ test_teardown_preserves_default_branch_when_worktree_is_parked_on_it
 test_live_lock_refuses_before_returning_checked_out_task_branch
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
+test_no_mistakes_equivalent_patch_in_evolved_default_allows
 test_local_only_force_overrides_unpushed
 test_teardown_clears_busy_progress_tracking
 test_detached_window_confirms_endpoint_absence
