@@ -365,7 +365,7 @@ The ledger date is today in UTC, and the optional `FM_UNIT_ECONOMICS_LEDGER_DATE
 Any other value for that variable is rejected with a non-zero exit before any ledger is written.
 Because quota-axi only ever reports the present, a ledger date other than today in UTC refuses every quota window and quota metric as a backfilled window instead of filling that day with the present day's live measurements.
 This repository proposes no `kdp` sources, so the lane stays unavailable until an independent pair is installed: the KDP payment-telemetry artifact is itself imported from the monthly finance reports, so reading both is one provenance, not the two independent readings the lane requires, and no independent daily KDP source exists yet.
-[`unit-economics-source-readiness.md`](unit-economics-source-readiness.md) records the dated live-home audit of which metrics are still unwired, the exact independent source pair each one needs, and the follow-up required before helpers can be configured.
+[`unit-economics-source-readiness.md`](unit-economics-source-readiness.md) states the public generic source-readiness contract, while the active home's ignored `data/unit-economics-source-readiness.md` holds the operator-specific audit and follow-up evidence.
 The script header owns the source schema, freshness, corroboration, output, and status contract so this setup reference does not duplicate it.
 
 ## Report-only auto-dispatch (config/auto-dispatch.json)
