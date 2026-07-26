@@ -32,6 +32,13 @@ For an open keyed status decision, it appends a `captain-held [key=<key>]: ...` 
 
 Scout teardown calls the script's read-only `verify` subcommand after checking for the report and before removing any source state.
 The `--force` path remains the explicit captain-approved discard escape hatch.
+After Done retention pruning removes a resolved hold from `data/backlog.md`, `verify` reads that exact completed `captain` record through `bin/fm-tasks-axi-lib.sh` and requires its resolution and routing markers.
+That read path parses the archive file directly because tasks-axi exposes no archive-read command; [`configuration.md`](configuration.md#backlog-backend-taskstoml--configbacklog-backend) owns the archive setting itself.
+The archive is checked before the pre-archive compatibility fallback for an originating `resolved` status event that names the hold identity or its key, or a decision or resolution artifact under `data/<origin-id>/`.
+Only the `default` key also accepts a bare `resolved:` status line, matching the unkeyed one-open-decision-per-task status vocabulary owned by `bin/fm-classify-lib.sh`.
+That artifact counts only when it names the exact hold, either through its hold identity or its decision key as a whole word in the file name, or through its hold identity or a `[key=<key>]` marker in the file contents, so a resolved decision can never verify a different unrecorded one.
+An absent live record, archive record, and same-task compatibility record remains an explicit verification failure, so a decision that was never recorded cannot pass.
+That compatibility fallback covers only holds resolved before archive-backed recording landed, and it retires on a checkable condition rather than by convenience: after one full Done retention cycle from this change - `done_keep` completions under the [`configuration.md`](configuration.md#backlog-backend-taskstoml--configbacklog-backend) archive setting - confirm that every captain hold reachable from a live origin inventory verifies from `data/backlog.md` or the configured archive, then delete the status and decision-artifact paths so an unarchived record fails loudly.
 
 The `resolve` subcommand requires a decision file and at least one existing dependent task whose structured `blocked-by` edge points to the hold.
 It records the decision digest and routed task identities as a retry identity in the hold body, clears each dependency edge through tasks-axi, and marks the hold Done only after those writes succeed.
@@ -57,7 +64,7 @@ The projection remains read-only and does not inspect historical prose.
 
 ## Verification record
 
-Verification date: 2026-07-14.
+Verification date: 2026-07-26.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
 Cross-origin topic and answered-open audit verification date: 2026-07-25.
@@ -74,6 +81,9 @@ They further refuse an already-answered topic from both the backlog Done section
 One regression drives the whole session-start digest so the flagged decision is proven to reach the reader, while a genuinely pending choice keeps that section silent.
 Three further regressions hold the guards to their weakest cases: a captain hold with no repo group still reaches the audit, a pending question that labels itself `decision:` or `captain answer:` stays out of it, and a decision answered through `resolve` still blocks a re-ask once it has been archived, from its own origin and key as well as from a second origin.
 A later regression drives the canonical backlog grammar directly, so a comma-continued `(repo: sample, since ...)` group, an uppercase `[X]` marker, an emphasized `**id**` row, and an archived record whose topic sits below a blank body line each still refuse the duplicate they would otherwise mint.
+A retention regression resolves a hold, prunes it to `data/done-archive.md`, and verifies its originating inventory without relying on same-task evidence.
+A missing hold still fails after both live and archive lookup, while the status and decision-artifact compatibility paths remain covered for pre-archive records.
+A separate regression proves an artifact that names no hold does not verify a second unrecorded key in the same origin.
 
 The final verification commands and their exact summarized outputs follow.
 
@@ -81,6 +91,10 @@ The final verification commands and their exact summarized outputs follow.
 $ bash tests/fm-decision-hold-lifecycle.test.sh
 ok - report-only unresolved decision is reproduced and completion refuses before loss
 ok - non-forced scout teardown always requires durable inventory verification
+ok - pruned resolved holds verify from the authoritative archive
+ok - unrecorded decisions still fail loudly after archive lookup
+ok - same-task resolution evidence remains a compatibility fallback
+ok - decision artifacts only verify the hold they name
 ok - captain holds are idempotent, distinct, teardown-safe, Bearings-visible, and durably routed before close
 ok - completion and verification validate origins before constructing paths
 ok - ended visual review follows the same decision-hold completion owner

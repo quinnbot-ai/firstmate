@@ -316,6 +316,96 @@ EOF
   pass "non-forced scout teardown always requires durable inventory verification"
 }
 
+test_pruned_resolved_hold_verifies_from_authoritative_archive() {
+  local home id hold
+  home=$(make_home archived-resolution)
+  id=sample-archive-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Review archive retention" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create archived-resolution origin"
+  write_origin_meta "$home" "$id"
+  hold=$(run_decisions "$home" hold "$id" route \
+    --title "Choose the archive route" --reason "captain archive choice pending" --topic sample-archive-route --repo sample) \
+    || fail "could not create archived-resolution hold"
+  tasks_in "$home" add sample-archive-implementation "Apply the archive route" --kind ship --repo sample >/dev/null \
+    || fail "could not create archived-resolution dependent"
+  tasks_in "$home" block sample-archive-implementation --by "$hold" >/dev/null \
+    || fail "could not block archived-resolution dependent"
+  printf 'Use the retained archive record.\n' > "$home/archive-decision.txt"
+  run_decisions "$home" resolve "$id" route --decision-file "$home/archive-decision.txt" \
+    --routed-to sample-archive-implementation >/dev/null \
+    || fail "could not resolve archived-resolution hold"
+  run_decisions "$home" complete "$id" route >/dev/null \
+    || fail "could not attest archived-resolution inventory"
+  tasks_in "$home" "done" "$hold" --keep 0 >/dev/null \
+    || fail "could not prune archived-resolution hold"
+  ! grep -E "^- \\[x\\] $hold -" "$home/data/backlog.md" >/dev/null \
+    || fail "resolved hold remained in the live backlog after pruning"
+  grep -E "^- \\[x\\] $hold -" "$home/data/done-archive.md" >/dev/null \
+    || fail "resolved hold was not retained in the authoritative archive"
+  run_decisions "$home" verify "$id" >/dev/null \
+    || fail "verification rejected a resolved hold retained only in the archive"
+  pass "pruned resolved holds verify from the authoritative archive"
+}
+
+test_unrecorded_decision_fails_after_retention_lookup() {
+  local home id
+  home=$(make_home unrecorded-decision)
+  id=sample-unrecorded-review
+  mkdir -p "$home/data/$id"
+  write_origin_meta "$home" "$id"
+  printf 'decisions_reviewed=1\ndecision_keys=route\n' >> "$home/state/$id.meta"
+  printf 'done: review complete\n' > "$home/state/$id.status"
+  printf '# Sample review\n\nNo decision record exists.\n' > "$home/data/$id/report.md"
+  if run_decisions "$home" verify "$id" > "$home/unrecorded.out" 2> "$home/unrecorded.err"; then
+    fail "verification accepted a decision that was never recorded"
+  fi
+  assert_grep "absent from the live backlog and authoritative archive" "$home/unrecorded.err" \
+    "missing decision record did not fail loudly after archive lookup"
+  pass "unrecorded decisions still fail loudly after archive lookup"
+}
+
+test_same_task_resolution_evidence_remains_compatible() {
+  local home id
+  home=$(make_home same-task-evidence)
+  id=sample-evidence-review
+  mkdir -p "$home/data/$id"
+  write_origin_meta "$home" "$id"
+  printf 'decisions_reviewed=1\ndecision_keys=route\n' >> "$home/state/$id.meta"
+  printf 'resolved [key=route]: firstmate recorded the compatibility route\n' > "$home/state/$id.status"
+  run_decisions "$home" verify "$id" >/dev/null \
+    || fail "resolved status evidence no longer verified an absent legacy hold"
+  : > "$home/state/$id.status"
+  printf 'Captain decision: use the compatibility route.\n' > "$home/data/$id/route-decision.md"
+  run_decisions "$home" verify "$id" >/dev/null \
+    || fail "keyed decision artifact evidence no longer verified an absent legacy hold"
+  rm "$home/data/$id/route-decision.md"
+  printf 'Captain decision recorded for %s-decision-route.\n' "$id" \
+    > "$home/data/$id/captain-decision.md"
+  run_decisions "$home" verify "$id" >/dev/null \
+    || fail "hold-naming decision artifact evidence no longer verified an absent legacy hold"
+  pass "same-task resolution evidence remains a compatibility fallback"
+}
+
+# One resolved decision must never verify a different unrecorded decision, so a
+# decision artifact that names no hold is not evidence for an arbitrary key.
+test_unkeyed_decision_artifact_is_not_evidence() {
+  local home id
+  home=$(make_home unkeyed-evidence)
+  id=sample-unkeyed-review
+  mkdir -p "$home/data/$id"
+  write_origin_meta "$home" "$id"
+  printf 'decisions_reviewed=1\ndecision_keys=route,scope\n' >> "$home/state/$id.meta"
+  printf 'resolved [key=route]: firstmate recorded the compatibility route\n' > "$home/state/$id.status"
+  printf 'Captain decision: use the compatibility route.\n' > "$home/data/$id/captain-decision.md"
+  if run_decisions "$home" verify "$id" > "$home/unkeyed.out" 2> "$home/unkeyed.err"; then
+    fail "an unkeyed decision artifact verified an unrecorded decision"
+  fi
+  assert_grep "$id-decision-scope is absent from the live backlog and authoritative archive" \
+    "$home/unkeyed.err" "unrecorded second decision did not fail loudly"
+  pass "decision artifacts only verify the hold they name"
+}
+
 test_origin_slug_validation_precedes_path_construction() {
   local home escaped
   home=$(make_home origin-validation)
@@ -912,6 +1002,10 @@ EOF
 test_uninventoried_report_decision_refuses_completion
 
 test_scout_teardown_always_requires_inventory_verification
+test_pruned_resolved_hold_verifies_from_authoritative_archive
+test_unrecorded_decision_fails_after_retention_lookup
+test_same_task_resolution_evidence_remains_compatible
+test_unkeyed_decision_artifact_is_not_evidence
 test_structured_holds_survive_teardown_and_route_resolution
 test_origin_slug_validation_precedes_path_construction
 test_visual_review_uses_shared_completion_owner
