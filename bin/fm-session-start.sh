@@ -39,10 +39,11 @@
 #                       data/captain-shared.md, data/learnings.md: read-only,
 #                       always safe, always runs.
 #   5. fleet digest   - a compact data/backlog.md identity/metadata listing,
-#                       every state/*.meta, a bounded state/*.status tail,
-#                       state/.afk, bounded operations-inbox signals, and a
-#                       cheap per-task endpoint-liveness read:
-#                       read-only, always runs.
+#                       any answered-but-still-open captain decisions reported
+#                       by fm-decision-hold.sh audit, every state/*.meta, a
+#                       bounded state/*.status tail, state/.afk, bounded
+#                       operations-inbox signals, and a cheap per-task
+#                       endpoint-liveness read: read-only, always runs.
 #   6. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
@@ -218,6 +219,31 @@ print_backlog_compact() {
     fi
   else
     printf 'ABSENT\n'
+  fi
+}
+
+# Stderr stays OUT of the success-path compare: a stray warning on an exit-0
+# audit must not fail the `answered-open: none` check and get rendered as a
+# flagged captain decision. On failure both streams reach the operator through
+# the `unavailable:` framing.
+print_answered_open_decisions() {
+  local out err rc errfile detail
+  if ! fm_tasks_axi_backend_available "$CONFIG"; then
+    return 0
+  fi
+  errfile=$(mktemp "${TMPDIR:-/tmp}/fm-session-start-audit.XXXXXX" 2>/dev/null) || errfile=/dev/null
+  out=$(FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-decision-hold.sh" audit 2>"$errfile")
+  rc=$?
+  err=$(cat "$errfile" 2>/dev/null)
+  [ "$errfile" = /dev/null ] || rm -f "$errfile"
+  if [ "$rc" -ne 0 ]; then
+    subsection "ANSWERED-OPEN CAPTAIN DECISIONS"
+    detail=$(printf '%s\n%s\n' "$out" "$err" | sed '/^[[:space:]]*$/d')
+    printf 'unavailable: decision audit failed: %s\n' "$detail"
+  elif [ "$out" != "answered-open: none" ]; then
+    subsection "ANSWERED-OPEN CAPTAIN DECISIONS"
+    printf '%s\n' "$out"
   fi
 }
 
@@ -412,6 +438,7 @@ print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
 # --- 5. fleet-state digest ---------------------------------------------
 section "FLEET STATE"
 print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
+print_answered_open_decisions
 
 subsection "Work under way (state/*.meta)"
 META_FOUND=0

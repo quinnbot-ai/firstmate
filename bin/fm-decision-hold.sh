@@ -11,19 +11,23 @@
 # decision record has been linked to existing dependent work.
 #
 # A hold identity is <origin-id>-decision-<decision-key>. Origin ids and decision
-# keys must already be privacy-safe slugs. Repeating `hold` with the same identity
-# is idempotent. A different decision key creates a different backlog identity.
+# keys must already be privacy-safe slugs. Each new hold also carries a required
+# repo-scoped decision topic, which is the cross-origin identity for one underlying
+# captain choice. Repeating `hold` with the same identity is idempotent. A different
+# decision key creates a different backlog identity only when its decision topic is
+# not already open or resolved in that repository.
 # All backlog mutations run in the active FM_HOME, which keeps main-home and
 # secondmate-home ownership aligned with the work that discovered the decision.
 #
 # Usage:
 #   fm-decision-hold.sh id <origin-id> <decision-key>
 #   fm-decision-hold.sh hold <origin-id> <decision-key> \
-#     --title <title> --reason <reason> [--repo <repo>]
+#     --title <title> --reason <reason> --topic <topic> [--repo <repo>]
 #   fm-decision-hold.sh complete <origin-id> (--none | <decision-key>...)
 #   fm-decision-hold.sh verify <origin-id>
 #   fm-decision-hold.sh resolve <origin-id> <decision-key> \
 #     --decision-file <path> --routed-to <task-id> [--routed-to <task-id>...]
+#   fm-decision-hold.sh audit
 #
 # `complete` is the shared investigation and visual-review completion gate.
 # `--none` is an explicit semantic attestation that the just-reviewed surface has
@@ -119,6 +123,205 @@ origin_exists_here() {  # <origin-id>
   [ -f "$STATE/$1.meta" ] && return 0
   [ -f "$DATA/$1/report.md" ] && return 0
   task_show "$1" >/dev/null 2>&1
+}
+
+# A body is one escaped line whose newlines are the literal two characters \n, in
+# both `tasks-axi show` output and the backlog file. A topic therefore ends at that
+# escape, at the closing quote show adds, or at end of body. Matching the
+# terminator keeps topic `sample` from matching topic `sample.route`.
+body_has_topic() {  # <body> <topic>
+  local needle="Decision topic: $2."
+  case "$1" in
+    *"$needle"'\n'*|*"$needle"'"'|*"$needle") return 0 ;;
+  esac
+  return 1
+}
+
+# The resolution record replaces the whole hold body, so the topic must survive
+# into it or an answered decision would become invisible to the duplicate guard
+# once it leaves the live backlog.
+body_topic() {  # <body>
+  local rest=$1
+  case "$rest" in
+    *"Decision topic: "*) rest=${rest#*"Decision topic: "} ;;
+    *) return 1 ;;
+  esac
+  rest=${rest%%\\n*}
+  rest=${rest%\"}
+  rest=${rest%.}
+  [ -n "$rest" ] || return 1
+  printf '%s\n' "$rest"
+}
+
+# The backlog and the archive share one entry format that already carries every
+# field these scans filter on, so a single awk pass replaces one `tasks-axi show`
+# subprocess per entry. `tasks-axi show` reads only the live backlog anyway, so
+# this is also the only way to see archived decisions. It stays the authority for
+# the free-text title and hold reason, which are re-read for surviving candidates
+# alone. Fields are id, state, kind, repo, held, hold_kind, body. Tab is IFS
+# whitespace, so consecutive tabs would collapse and shift every later field left;
+# every field except the trailing body therefore emits `-` when it is absent.
+#
+# The row, metadata-group, and body grammar mirrors `row_match`, `structured_row`,
+# and `metadata` in bin/fm-fleet-snapshot.sh, which is the canonical backlog parser:
+# a key opens a group with `(` or continues one after `, `, its value ends at the
+# next `,` or `)`, ids may be bulleted with `-` or `*` and written as `**id**` or
+# behind a `[ ]`/`[x]`/`[X]` marker, and any indented line continues the record.
+# A blank line inside a body is part of that body rather than the end of the
+# record, so a resolution record whose captain decision follows an empty line stays
+# whole. Requiring `(` or `, ` immediately before the key is also what keeps
+# `hold-kind` from being read as `kind`.
+scan_hold_entries() {  # <backlog-or-archive-path>
+  [ -f "$1" ] || return 0
+  awk '
+    function reset() {
+      id = ""; state = "-"; kind = "-"; repo = "-"; held = "no"; hold_kind = "-"
+      body = ""; body_lines = 0; pending_blanks = 0
+    }
+    function trim_ws(s) {
+      sub(/^[[:space:]]+/, "", s)
+      sub(/[[:space:]]+$/, "", s)
+      return s
+    }
+    function group_re(key) {
+      return "(\\(|,[[:space:]]*)" key ":"
+    }
+    function has_group(line, key) {
+      return match(line, group_re(key)) > 0
+    }
+    function last_group(line, key,   re, rest, out) {
+      re = group_re(key) "[[:space:]]*"
+      out = ""
+      rest = line
+      while (match(rest, re)) {
+        rest = substr(rest, RSTART + RLENGTH)
+        if (match(rest, /[,)]/)) out = substr(rest, 1, RSTART - 1)
+        else out = rest
+        out = trim_ws(out)
+      }
+      return out
+    }
+    function row_id(line,   s) {
+      if (line ~ /^[-*][[:space:]]+\[[ xX]\][[:space:]]+[^[:space:]]+[[:space:]]+-[[:space:]]+/) {
+        s = line
+        sub(/^[-*][[:space:]]+\[[ xX]\][[:space:]]+/, "", s)
+        sub(/[[:space:]].*$/, "", s)
+        return s
+      }
+      if (line ~ /^[-*][[:space:]]+\*\*[^*]+\*\*[[:space:]]+-[[:space:]]+/) {
+        s = line
+        sub(/^[-*][[:space:]]+\*\*/, "", s)
+        sub(/\*\*.*$/, "", s)
+        return trim_ws(s)
+      }
+      return ""
+    }
+    function add_body(text) {
+      body = body (body_lines == 0 ? "" : "\\n") text
+      body_lines++
+    }
+    function emit() {
+      if (id != "") {
+        print id "\t" state "\t" kind "\t" repo "\t" held "\t" hold_kind "\t" body
+      }
+      reset()
+    }
+    BEGIN { reset(); section = "" }
+    {
+      if ($0 ~ /^##[[:space:]]/) {
+        emit()
+        if ($0 ~ /^##[[:space:]]+In flight/) section = "in_flight"
+        else if ($0 ~ /^##[[:space:]]+Queued/) section = "queued"
+        else if ($0 ~ /^##[[:space:]]+Done/ || $0 ~ /^##[[:space:]]+Archived/) section = "done"
+        else section = ""
+        next
+      }
+      rid = row_id($0)
+      if (rid != "") {
+        emit()
+        id = rid
+        state = section
+        if (state == "") state = "-"
+        kind = last_group($0, "kind")
+        if (kind == "") kind = "-"
+        repo = last_group($0, "repo")
+        if (repo == "") repo = "-"
+        hold_kind = last_group($0, "hold-kind")
+        if (hold_kind == "") hold_kind = "-"
+        held = has_group($0, "hold") ? "yes" : "no"
+        next
+      }
+      if ($0 ~ /^[[:space:]]*$/) {
+        # Held back rather than appended, so trailing separator blank lines before
+        # the next section never grow the body they do not belong to.
+        if (id != "") pending_blanks++
+        next
+      }
+      if ($0 ~ /^[[:space:]]/) {
+        if (id == "") next
+        while (pending_blanks > 0) { add_body(""); pending_blanks-- }
+        line = $0
+        if (substr(line, 1, 2) == "  ") line = substr(line, 3)
+        else sub(/^[[:space:]]+/, "", line)
+        add_body(line)
+        next
+      }
+      emit()
+    }
+    END { emit() }
+  ' "$1"
+}
+
+# Both scanners are consulted only once the identity itself is absent from the
+# live backlog, so a candidate that carries the new hold's own id can only be an
+# archived record of the same decision, and refusing it is always correct.
+same_topic_hold() {  # <repo> <topic>
+  local repo=$1 topic=$2 path cid _cstate ckind crepo _cheld _chold_kind cbody
+  for path in "$DATA/backlog.md" "$DATA/done-archive.md"; do
+    while IFS=$'\t' read -r cid _cstate ckind crepo _cheld _chold_kind cbody; do
+      [ -n "$cid" ] || continue
+      [ "$ckind" = captain ] || continue
+      [ "$crepo" = "$repo" ] || continue
+      if body_has_topic "$cbody" "$topic"; then
+        printf '%s\n' "$cid"
+        return 0
+      fi
+    done <<EOF
+$(scan_hold_entries "$path")
+EOF
+  done
+  return 1
+}
+
+same_legacy_title_hold() {  # <repo> <title>
+  local repo=$1 title=$2 cid cstate ckind crepo cheld chold_kind cbody show
+  while IFS=$'\t' read -r cid cstate ckind crepo cheld chold_kind cbody; do
+    [ -n "$cid" ] || continue
+    [ "$cstate" = queued ] || continue
+    [ "$cheld" = yes ] || continue
+    [ "$ckind" = captain ] || continue
+    [ "$chold_kind" = captain ] || continue
+    [ "$crepo" = "$repo" ] || continue
+    case "$cbody" in *"Decision topic: "*) continue ;; esac
+    show=$(task_show "$cid") || continue
+    [ "$(show_field "$show" title)" = "$title" ] || continue
+    printf '%s\n' "$cid"
+    return 0
+  done <<EOF
+$(scan_hold_entries "$DATA/backlog.md")
+EOF
+  return 1
+}
+
+# A marker must be the past-tense `answered` form and must carry a value, because
+# a pending question labels itself just as naturally as `decision: north or
+# coastal` or `captain answer: needed`, and a recurring false flag would train the
+# reader to skim the one section that exists to stop a re-ask.
+reason_records_answer() {  # <hold-reason>
+  local reason
+  reason=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  printf '%s\n' "$reason" | grep -Eq \
+    '(^|[^[:alnum:]])answered[[:space:]]*[:=][[:space:]]*[^[:space:]]|captain[[:space:]]+(answered|chose|selected|decided|approved|said)'
 }
 
 list_has_key() {  # <comma-list> <key>
@@ -229,13 +432,14 @@ command_id() {
 }
 
 command_hold() {
-  local origin=${1:-} key=${2:-} title='' reason='' repo='' id show state kind existing_title body
+  local origin=${1:-} key=${2:-} title='' reason='' topic='' repo='' id show state kind existing_title body duplicate
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --title) shift; title=${1:-} ;;
       --reason) shift; reason=${1:-} ;;
+      --topic) shift; topic=${1:-} ;;
       --repo) shift; repo=${1:-} ;;
       *) usage >&2; exit 2 ;;
     esac
@@ -245,6 +449,7 @@ command_hold() {
   validate_slug decision-key "$key"
   validate_one_line title "$title"
   validate_one_line reason "$reason"
+  validate_slug decision-topic "$topic"
   case "$reason" in *'('*|*')'*) fail "reason must not contain parentheses (tasks-axi hold contract)" ;; esac
   require_tasks_axi
   origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
@@ -256,6 +461,12 @@ command_hold() {
     [ "$state" != "done" ] || fail "captain decision $id is already durably resolved; use a new decision key for a new decision"
     [ "$kind" = captain ] || fail "existing backlog identity $id is not kind captain"
     [ "$existing_title" = "$title" ] || fail "existing captain hold $id has a different title"
+    body=$(show_field "$show" body)
+    if [ -n "$body" ] && ! body_has_topic "$body" "$topic"; then
+      case "$body" in
+        *"Decision topic: "*) fail "existing captain hold $id has a different decision topic" ;;
+      esac
+    fi
   else
     if [ -z "$repo" ] && [ -f "$STATE/$origin.meta" ]; then
       repo=$(meta_value "$STATE/$origin.meta" project)
@@ -264,7 +475,20 @@ command_hold() {
     fi
     [ -n "$repo" ] || repo=firstmate
     validate_one_line repo "$repo"
-    body=$(printf 'Origin: %s\nDecision key: %s\nState: awaiting captain decision.' "$origin" "$key")
+    if duplicate=$(same_topic_hold "$repo" "$topic"); then
+      if show=$(task_show "$duplicate"); then
+        state=$(show_field "$show" state)
+      else
+        state="done"
+      fi
+      case "$state" in
+        done) fail "captain decision topic $repo/$topic is already resolved as $duplicate; inspect and route that recorded answer instead of minting a duplicate" ;;
+        *) fail "captain decision topic $repo/$topic is already tracked as $duplicate; do not mint a duplicate under $origin" ;;
+      esac
+    elif duplicate=$(same_legacy_title_hold "$repo" "$title"); then
+      fail "possible duplicate captain decision $id shares the exact repository and title of untagged legacy hold $duplicate; if it is the same decision, route $duplicate after adding a 'Decision topic: $topic.' line to its body with tasks-axi update, and otherwise give this decision a title that distinguishes it"
+    fi
+    body=$(printf 'Origin: %s\nDecision key: %s\nDecision topic: %s.\nState: awaiting captain decision.' "$origin" "$key" "$topic")
     tasks_axi add "$id" "$title" --kind captain --repo "$repo" --body "$body" >/dev/null \
       || fail "could not create captain decision item $id"
   fi
@@ -272,6 +496,25 @@ command_hold() {
     || fail "could not activate captain hold $id"
   verify_hold_active "$id"
   printf '%s\n' "$id"
+}
+
+command_audit() {
+  local cid cstate ckind _crepo cheld chold_kind _cbody show reason found=0
+  [ "$#" -eq 0 ] || { usage >&2; exit 2; }
+  require_tasks_axi
+  # Only active holds can still be re-asked, so the archive is out of scope.
+  while IFS=$'\t' read -r cid cstate ckind _crepo cheld chold_kind _cbody; do
+    [ -n "$cid" ] || continue
+    [ "$cstate" = queued ] && [ "$cheld" = yes ] && [ "$ckind" = captain ] && [ "$chold_kind" = captain ] || continue
+    show=$(task_show "$cid") || continue
+    reason=$(show_field "$show" hold_reason)
+    reason_records_answer "$reason" || continue
+    printf 'answered-open: %s: %s\n' "$cid" "$reason"
+    found=1
+  done <<EOF
+$(scan_hold_entries "$DATA/backlog.md")
+EOF
+  [ "$found" = 1 ] || printf 'answered-open: none\n'
 }
 
 command_complete() {
@@ -368,7 +611,7 @@ EOF
 }
 
 command_resolve() {
-  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body resolution_recorded=0
+  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body topic topic_line='' resolution_recorded=0
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -430,7 +673,9 @@ command_resolve() {
     esac
   done
 
-  body=$(printf 'Resolution recorded by fm-decision-hold.\nDecision digest: %s\nRouted identities: %s\n\nCaptain decision:\n%s\n\nRouted work:\n' "$decision_digest" "$routed_csv" "$decision")
+  topic=$(body_topic "$hold_body") || topic=''
+  [ -z "$topic" ] || topic_line="Decision topic: ${topic}."$'\n'
+  body=$(printf 'Resolution recorded by fm-decision-hold.\nDecision digest: %s\nRouted identities: %s\n%s\nCaptain decision:\n%s\n\nRouted work:\n' "$decision_digest" "$routed_csv" "$topic_line" "$decision")
   for dep in $routed; do
     body="${body}- ${dep}"$'\n'
   done
@@ -459,6 +704,7 @@ case "${1:-}" in
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
   resolve) shift; command_resolve "$@" ;;
+  audit) shift; command_audit "$@" ;;
   -h|--help) usage ;;
   *) usage >&2; exit 2 ;;
 esac
