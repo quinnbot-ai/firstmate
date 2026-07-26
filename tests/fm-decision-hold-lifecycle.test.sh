@@ -480,6 +480,74 @@ test_cross_origin_topic_refuses_duplicate_decision() {
   pass "repository-scoped decision topics reject cross-origin duplicates"
 }
 
+test_resolved_topic_refuses_duplicate_decision() {
+  local home first second third rc
+  home=$(make_home resolved-topic)
+  first=sample-first-review
+  second=sample-second-review
+  third=sample-third-review
+  write_origin_meta "$home" "$first"
+  write_origin_meta "$home" "$second"
+  write_origin_meta "$home" "$third"
+
+  run_decisions "$home" hold "$first" route \
+    --title "Choose the sample route" --reason "captain route choice pending" --topic sample-route --repo sample >/dev/null \
+    || fail "could not create the topic-bound hold to resolve"
+  tasks_in "$home" "done" "$first-decision-route" >/dev/null \
+    || fail "could not close the topic-bound hold"
+  grep -E "^- \[x\] $first-decision-route -" "$home/data/backlog.md" >/dev/null \
+    || fail "fixture must leave the resolved hold inline in the backlog Done section"
+
+  set +e
+  run_decisions "$home" hold "$second" route-copy \
+    --title "Choose the sample route again" --reason "captain route choice pending" --topic sample-route --repo sample \
+    > "$home/inline-done.out" 2> "$home/inline-done.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an answered decision topic was re-asked from the backlog Done section"
+  assert_grep "already resolved as $first-decision-route" "$home/inline-done.err" \
+    "resolved-topic refusal did not name the recorded answer"
+
+  tasks_in "$home" "done" "$first-decision-route" --keep 0 >/dev/null 2>&1 || true
+  ! grep -E "^- \[[ x]\] $first-decision-route -" "$home/data/backlog.md" >/dev/null \
+    || fail "fixture must archive the resolved hold out of the live backlog"
+  grep -E "^- \[x\] $first-decision-route -" "$home/data/done-archive.md" >/dev/null \
+    || fail "fixture must archive the resolved hold into done-archive.md"
+
+  set +e
+  run_decisions "$home" hold "$third" route-again \
+    --title "Choose the sample route once more" --reason "captain route choice pending" --topic sample-route --repo sample \
+    > "$home/archived-done.out" 2> "$home/archived-done.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an answered decision topic was re-asked from done-archive.md"
+  assert_grep "already resolved as $first-decision-route" "$home/archived-done.err" \
+    "archived resolved-topic refusal did not name the recorded answer"
+  pass "answered decision topics are refused from both the Done section and the archive"
+}
+
+test_topic_match_does_not_collide_on_prefix() {
+  local home first second nested
+  home=$(make_home topic-prefix)
+  first=sample-first-review
+  second=sample-second-review
+  write_origin_meta "$home" "$first"
+  write_origin_meta "$home" "$second"
+
+  nested=$(run_decisions "$home" hold "$first" route-north \
+    --title "Choose the northern sample route" --reason "captain northern choice pending" \
+    --topic sample-route.north --repo sample) \
+    || fail "could not create the dotted-topic hold"
+  run_decisions "$home" hold "$second" route \
+    --title "Choose the sample route" --reason "captain route choice pending" \
+    --topic sample-route --repo sample >/dev/null \
+    || fail "a distinct topic was suppressed by a longer topic sharing its prefix"
+  assert_grep "$second-decision-route" "$home/data/backlog.md" \
+    "the genuinely distinct captain decision was not registered"
+  [ "$nested" = "$first-decision-route-north" ] || fail "dotted-topic hold identity drifted: $nested"
+  pass "decision topics match on full value, not on a shared prefix"
+}
+
 test_untagged_legacy_title_flags_possible_duplicate() {
   local home origin legacy rc
   home=$(make_home legacy-title-duplicate)
@@ -626,6 +694,8 @@ test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_cross_origin_topic_refuses_duplicate_decision
+test_resolved_topic_refuses_duplicate_decision
+test_topic_match_does_not_collide_on_prefix
 test_untagged_legacy_title_flags_possible_duplicate
 test_answered_open_audit_surfaces_without_closing
 test_resolve_matches_quoted_blocked_by_edges

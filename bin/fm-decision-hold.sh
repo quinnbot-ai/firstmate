@@ -127,28 +127,79 @@ origin_exists_here() {  # <origin-id>
 
 task_ids_in_file() {  # <backlog-or-archive-path>
   [ -f "$1" ] || return 0
-  awk '/^- \[[ x]\] / { print $4 }' "$1"
+  awk '/^- \[[ x]\] / { sub(/^- \[[ x]\] /, ""); print $1 }' "$1"
+}
+
+# tasks-axi renders a body as one quoted line whose newlines are the literal two
+# characters \n, so a topic ends at that escape or at the closing quote. Matching
+# the terminator keeps topic `sample` from matching topic `sample.route`.
+body_has_topic() {  # <body> <topic>
+  case "$1" in
+    *"Decision topic: $2."'\n'*|*"Decision topic: $2."'"') return 0 ;;
+  esac
+  return 1
+}
+
+# tasks-axi show reads only the live backlog, so an archived decision has to be
+# matched by parsing its archive entry, which keeps the same escaped body text.
+archive_topic_hold() {  # <self-id> <repo> <topic>
+  local self=$1 repo=$2 topic=$3 path="$DATA/done-archive.md" match
+  [ -f "$path" ] || return 1
+  match=$(awk -v self="$self" -v repo="$repo" -v topic="$topic" '
+    function ends_with(s, suffix) {
+      return length(s) >= length(suffix) \
+        && substr(s, length(s) - length(suffix) + 1) == suffix
+    }
+    function flush(  needle) {
+      if (found || id == "" || id == self) { reset(); return }
+      needle = "Decision topic: " topic "."
+      if (index(header, "(kind: captain)") > 0 \
+        && index(header, "(repo: " repo ")") > 0 \
+        && (index(body, needle "\\n") > 0 || ends_with(body, needle))) {
+        print id
+        found = 1
+      }
+      reset()
+    }
+    function reset() { id = ""; header = ""; body = "" }
+    /^- \[[ x]\] / {
+      flush()
+      header = $0
+      line = $0
+      sub(/^- \[[ x]\] /, "", line)
+      split(line, fields, " ")
+      id = fields[1]
+      next
+    }
+    /^  / {
+      body = body (body == "" ? "" : "\\n") substr($0, 3)
+      next
+    }
+    { flush() }
+    END { flush() }
+  ' "$path")
+  [ -n "$match" ] || return 1
+  printf '%s\n' "$match"
 }
 
 same_topic_hold() {  # <self-id> <repo> <topic>
-  local self=$1 repo=$2 topic=$3 path candidate show candidate_repo body
-  for path in "$DATA/backlog.md" "$DATA/done-archive.md"; do
-    while IFS= read -r candidate; do
-      [ -n "$candidate" ] || continue
-      [ "$candidate" != "$self" ] || continue
-      show=$(task_show "$candidate") || continue
-      [ "$(show_field "$show" kind)" = captain ] || continue
-      candidate_repo=$(show_field "$show" repo)
-      [ "$candidate_repo" = "$repo" ] || continue
-      body=$(show_field "$show" body)
-      case "$body" in
-        *"Decision topic: $topic."*) printf '%s\n' "$candidate"; return 0 ;;
-      esac
-    done <<EOF
-$(task_ids_in_file "$path")
+  local self=$1 repo=$2 topic=$3 candidate show candidate_repo body
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    [ "$candidate" != "$self" ] || continue
+    show=$(task_show "$candidate") || continue
+    [ "$(show_field "$show" kind)" = captain ] || continue
+    candidate_repo=$(show_field "$show" repo)
+    [ "$candidate_repo" = "$repo" ] || continue
+    body=$(show_field "$show" body)
+    if body_has_topic "$body" "$topic"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done <<EOF
+$(task_ids_in_file "$DATA/backlog.md")
 EOF
-  done
-  return 1
+  archive_topic_hold "$self" "$repo" "$topic"
 }
 
 same_legacy_title_hold() {  # <self-id> <repo> <title>
@@ -158,7 +209,9 @@ same_legacy_title_hold() {  # <self-id> <repo> <title>
     [ "$candidate" != "$self" ] || continue
     show=$(task_show "$candidate") || continue
     [ "$(show_field "$show" state)" = queued ] || continue
+    [ "$(show_field "$show" held)" = yes ] || continue
     [ "$(show_field "$show" kind)" = captain ] || continue
+    [ "$(show_field "$show" hold_kind)" = captain ] || continue
     candidate_repo=$(show_field "$show" repo)
     [ "$candidate_repo" = "$repo" ] || continue
     [ "$(show_field "$show" title)" = "$title" ] || continue
@@ -317,10 +370,11 @@ command_hold() {
     [ "$kind" = captain ] || fail "existing backlog identity $id is not kind captain"
     [ "$existing_title" = "$title" ] || fail "existing captain hold $id has a different title"
     body=$(show_field "$show" body)
-    case "$body" in
-      *"Decision topic: $topic."*|'') : ;;
-      *"Decision topic: "*) fail "existing captain hold $id has a different decision topic" ;;
-    esac
+    if [ -n "$body" ] && ! body_has_topic "$body" "$topic"; then
+      case "$body" in
+        *"Decision topic: "*) fail "existing captain hold $id has a different decision topic" ;;
+      esac
+    fi
   else
     if [ -z "$repo" ] && [ -f "$STATE/$origin.meta" ]; then
       repo=$(meta_value "$STATE/$origin.meta" project)
@@ -330,8 +384,11 @@ command_hold() {
     [ -n "$repo" ] || repo=firstmate
     validate_one_line repo "$repo"
     if duplicate=$(same_topic_hold "$id" "$repo" "$topic"); then
-      show=$(task_show "$duplicate")
-      state=$(show_field "$show" state)
+      if show=$(task_show "$duplicate"); then
+        state=$(show_field "$show" state)
+      else
+        state="done"
+      fi
       case "$state" in
         done) fail "captain decision topic $repo/$topic is already resolved as $duplicate; inspect and route that recorded answer instead of minting a duplicate" ;;
         *) fail "captain decision topic $repo/$topic is already tracked as $duplicate; do not mint a duplicate under $origin" ;;
@@ -350,26 +407,25 @@ command_hold() {
 }
 
 command_audit() {
-  local path candidate show state held kind hold_kind reason found=0
+  local candidate show state held kind hold_kind reason found=0
   [ "$#" -eq 0 ] || { usage >&2; exit 2; }
   require_tasks_axi
-  for path in "$DATA/backlog.md"; do
-    while IFS= read -r candidate; do
-      [ -n "$candidate" ] || continue
-      show=$(task_show "$candidate") || continue
-      state=$(show_field "$show" state)
-      held=$(show_field "$show" held)
-      kind=$(show_field "$show" kind)
-      hold_kind=$(show_field "$show" hold_kind)
-      [ "$state" = queued ] && [ "$held" = yes ] && [ "$kind" = captain ] && [ "$hold_kind" = captain ] || continue
-      reason=$(show_field "$show" hold_reason)
-      reason_records_answer "$reason" || continue
-      printf 'answered-open: %s: %s\n' "$candidate" "$reason"
-      found=1
-    done <<EOF
-$(task_ids_in_file "$path")
+  # Only active holds can still be re-asked, so the archive is out of scope.
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    show=$(task_show "$candidate") || continue
+    state=$(show_field "$show" state)
+    held=$(show_field "$show" held)
+    kind=$(show_field "$show" kind)
+    hold_kind=$(show_field "$show" hold_kind)
+    [ "$state" = queued ] && [ "$held" = yes ] && [ "$kind" = captain ] && [ "$hold_kind" = captain ] || continue
+    reason=$(show_field "$show" hold_reason)
+    reason_records_answer "$reason" || continue
+    printf 'answered-open: %s: %s\n' "$candidate" "$reason"
+    found=1
+  done <<EOF
+$(task_ids_in_file "$DATA/backlog.md")
 EOF
-  done
   [ "$found" = 1 ] || printf 'answered-open: none\n'
 }
 

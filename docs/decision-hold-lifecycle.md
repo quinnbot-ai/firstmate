@@ -13,6 +13,7 @@ The `hold` subcommand maps an originating work id and stable decision key to `<o
 It requires a privacy-safe topic scoped to the repository and refuses a second hold with the same topic, including when the earlier hold came from another origin.
 The topic is an explicit semantic identity supplied by the agent, not a title-similarity heuristic.
 It cannot catch a paraphrased duplicate whose caller chooses a different topic, and it deliberately does not guess from report prose because a false match could suppress a real captain choice.
+The topic scan covers queued holds, the backlog Done section, and `done-archive.md`, but `resolve` replaces the hold body with the resolution record, so a hold closed through `resolve` no longer carries a topic to match.
 For untagged legacy holds, it also flags only an exact repository-and-title match, which is a migration aid rather than semantic matching.
 It creates a kind `captain` backlog item when absent and invokes `tasks-axi hold <id> --reason <reason> --kind captain` on every retry.
 It rejects an identity collision, a changed title, and attempts to reopen an already resolved identity.
