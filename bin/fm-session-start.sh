@@ -219,17 +219,25 @@ print_backlog_compact() {
   fi
 }
 
+# Stderr stays OUT of the success-path compare: a stray warning on an exit-0
+# audit must not fail the `answered-open: none` check and get rendered as a
+# flagged captain decision. On failure both streams reach the operator through
+# the `unavailable:` framing.
 print_answered_open_decisions() {
-  local out rc
+  local out err rc errfile detail
   if ! fm_tasks_axi_backend_available "$CONFIG"; then
     return 0
   fi
+  errfile=$(mktemp "${TMPDIR:-/tmp}/fm-session-start-audit.XXXXXX" 2>/dev/null) || errfile=/dev/null
   out=$(FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-decision-hold.sh" audit 2>&1)
+    FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-decision-hold.sh" audit 2>"$errfile")
   rc=$?
+  err=$(cat "$errfile" 2>/dev/null)
+  [ "$errfile" = /dev/null ] || rm -f "$errfile"
   if [ "$rc" -ne 0 ]; then
     subsection "ANSWERED-OPEN CAPTAIN DECISIONS"
-    printf 'unavailable: decision audit failed: %s\n' "$out"
+    detail=$(printf '%s\n%s\n' "$out" "$err" | sed '/^[[:space:]]*$/d')
+    printf 'unavailable: decision audit failed: %s\n' "$detail"
   elif [ "$out" != "answered-open: none" ]; then
     subsection "ANSWERED-OPEN CAPTAIN DECISIONS"
     printf '%s\n' "$out"
