@@ -6,9 +6,10 @@
 # visual-review, chat, or terminal prose to guess whether a decision exists.
 # The invoking agent inventories unresolved decisions, assigns stable keys, and
 # routes dependent work. This script supplies deterministic identities, creates
-# and verifies structured tasks-axi captain holds, records completion attestation
-# in the originating task's metadata, and closes a hold only after a durable
-# decision record has been linked to existing dependent work.
+# and verifies structured tasks-axi captain holds, including resolved records
+# retained in the configured Done archive after pruning, records completion
+# attestation in the originating task's metadata, and closes a hold only after a
+# durable decision record has been linked to existing dependent work.
 #
 # A hold identity is <origin-id>-decision-<decision-key>. Origin ids and decision
 # keys must already be privacy-safe slugs. Each new hold also carries a required
@@ -36,6 +37,9 @@
 # complete against the surviving report and holds without recreating task state.
 # `verify` is read-only and is called by scout teardown so teardown cannot erase a
 # source before this gate has succeeded.
+# When a pre-archive legacy resolution is absent from both live structured
+# surfaces, its originating status resolution or decision artifact remains a
+# compatibility fallback until that record can be migrated to the archive.
 #
 # `resolve` requires every --routed-to task to exist and to be blocked by the hold.
 # It writes the captain decision and routed identities into the hold body, clears
@@ -374,8 +378,13 @@ verify_hold_active() {  # <hold-id>
 }
 
 verify_hold_resolved() {  # <hold-id>
-  local id=$1 show state kind body
+  local id=$1 show
   show=$(task_show "$id") || return 1
+  hold_show_is_resolved "$show"
+}
+
+hold_show_is_resolved() {  # <tasks-axi-show-output>
+  local show=$1 state kind body
   state=$(show_field "$show" state)
   kind=$(show_field "$show" kind)
   body=$(show_field "$show" body)
@@ -387,9 +396,36 @@ verify_hold_resolved() {  # <hold-id>
   return 1
 }
 
-verify_hold_durable() {  # <hold-id>
-  local id=$1 show state held kind hold_kind body
-  show=$(task_show "$id") || fail "captain decision $id is absent from $FM_HOME/data/backlog.md"
+same_task_resolution_evidence() {  # <origin-id> <hold-id>
+  local origin=$1 id=$2 key status_file artifact
+  key=${id#"$origin-decision-"}
+  status_file="$STATE/$origin.status"
+  if [ -f "$status_file" ] && awk -v id="$id" -v key="$key" '
+    $0 == "resolved: " id || index($0, "resolved: " id " -> ") == 1 { found = 1 }
+    index($0, "resolved [key=" key "]:") == 1 { found = 1 }
+    key == "default" && index($0, "resolved:") == 1 { found = 1 }
+    END { exit(found ? 0 : 1) }
+  ' "$status_file"; then
+    return 0
+  fi
+  [ -d "$DATA/$origin" ] || return 1
+  artifact=$(find "$DATA/$origin" -type f \( -iname '*decision*' -o -iname '*resolution*' \) -print -quit 2>/dev/null || true)
+  [ -n "$artifact" ]
+}
+
+verify_hold_durable() {  # <origin-id> <hold-id>
+  local origin=$1 id=$2 show archive_show state held kind hold_kind body
+  if ! show=$(task_show "$id"); then
+    if archive_show=$(fm_tasks_axi_archive_show "$FM_HOME" "$id"); then
+      hold_show_is_resolved "$archive_show" \
+        || fail "archived captain decision $id is not durably resolved"
+      return 0
+    fi
+    if same_task_resolution_evidence "$origin" "$id"; then
+      return 0
+    fi
+    fail "captain decision $id is absent from the live backlog and authoritative archive"
+  fi
   state=$(show_field "$show" state)
   held=$(show_field "$show" held)
   kind=$(show_field "$show" kind)
@@ -543,7 +579,7 @@ command_complete() {
   if [ -n "$keys" ]; then
     while IFS= read -r key; do
       [ -n "$key" ] || continue
-      verify_hold_durable "$(hold_id "$origin" "$key")"
+      verify_hold_durable "$origin" "$(hold_id "$origin" "$key")"
     done <<EOF
 $(printf '%s\n' "$keys" | tr ',' '\n')
 EOF
@@ -593,7 +629,7 @@ command_verify() {
   if [ -n "$keys" ]; then
     while IFS= read -r key; do
       [ -n "$key" ] || continue
-      verify_hold_durable "$(hold_id "$origin" "$key")"
+      verify_hold_durable "$origin" "$(hold_id "$origin" "$key")"
     done <<EOF
 $(printf '%s\n' "$keys" | tr ',' '\n')
 EOF
@@ -603,7 +639,7 @@ EOF
     [ -n "$key" ] || continue
     list_has_key "$keys" "$key" \
       || fail "open structured decision $origin/$key is outside the reviewed inventory"
-    verify_hold_durable "$(hold_id "$origin" "$key")"
+    verify_hold_durable "$origin" "$(hold_id "$origin" "$key")"
   done <<EOF
 $open
 EOF
