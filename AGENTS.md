@@ -115,7 +115,7 @@ state/               volatile runtime signals; gitignored
   .watch.lock .watch-arm.lease .watch-arm.bound .wake-queue.lock watcher singleton, relay, and queue coordination; never touch (docs/watcher-continuity.md)
   .claude-autoarm.lock .claude-autoarm-epoch .turnend-claude-blocks   Claude Stop auto-arm single-flight, epoch, and guard-budget records; never touch
   .treehouse-lease.lock .<id>.treehouse-lease.* .treehouse-handoff-write.*   transient spawn/teardown Treehouse lease lock and handoff files (bin/fm-treehouse-lease-lib.sh); never touch
-  .hash-* .count-* .stale-* .stale-since-* .paused-* .pause-handoff-* .wedge-escalations-* .busy-progress-* .busy-progress-since-* .busy-progress-escalations-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
+  .hash-* .count-* .ops-inbox-* .stale-* .stale-since-* .paused-* .pause-handoff-* .wedge-escalations-* .busy-progress-* .busy-progress-since-* .busy-progress-escalations-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
   .watch-cycle-exits.log  arm-owned bounded watcher lifecycle ledger; diagnostic only, never touch
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); guard scripts read it
