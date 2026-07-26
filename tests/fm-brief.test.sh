@@ -119,6 +119,39 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
 }
 
+test_pr_capability_preflight_renders_for_pr_delivery_modes() {
+  local home id brief
+  home="$TMP_ROOT/pr-capability-home"
+  write_registry "$home"
+
+  id="brief-pr-capability-nm"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "$ROOT/bin/fm-pr-capability.sh" "$brief" \
+    "no-mistakes brief omitted the PR capability preflight"
+  assert_grep 'Before investing in implementation or the full no-mistakes pipeline' "$brief" \
+    "no-mistakes brief did not run the preflight before expensive validation"
+
+  id="brief-pr-capability-direct"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "$ROOT/bin/fm-pr-capability.sh" "$brief" \
+    "direct-PR brief omitted the PR capability preflight"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'If it prints `BLOCKED:`, append its message as a `blocked:` status and stop' "$brief" \
+    "PR-capability denial was not raised to firstmate as an early blocker"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'If it prints `WARNING:`, record the warning in your work log and continue' "$brief" \
+    "probe uncertainty was incorrectly made blocking"
+
+  id="brief-pr-capability-local"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_no_grep 'fm-pr-capability.sh' "$brief" \
+    "local-only brief must not probe a PR capability it does not require"
+  pass "fm-brief.sh: PR modes preflight capability while local-only stays local"
+}
+
 test_ship_project_memory_wording() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
@@ -418,6 +451,7 @@ test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_pr_capability_preflight_renders_for_pr_delivery_modes
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path

@@ -34,6 +34,11 @@
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                captain approves, firstmate merges to local main
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
+# The two PR-producing modes then add an early setup step that runs
+# bin/fm-pr-capability.sh from the worktree, before implementation and before the
+# no-mistakes pipeline, so a credential that cannot create pull requests becomes a
+# "blocked:" status instead of a late delivery failure; a WARNING from that probe
+# is recorded and the work continues, and local-only briefs omit the step.
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
@@ -295,7 +300,13 @@ EOF
 
 case "$MODE" in
   direct-PR)
-    SETUP2=""
+    SETUP2=$(cat <<EOF
+
+2. Before investing in implementation, run \`$FM_ROOT/bin/fm-pr-capability.sh\` from this worktree.
+   If it prints \`BLOCKED:\`, append its message as a \`blocked:\` status and stop so firstmate can fix the credential permission.
+   If it prints \`WARNING:\`, record the warning in your work log and continue - the probe is not a new blocking gate.
+EOF
+)
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
     DOD=$(cat <<EOF
 # Definition of done
@@ -320,8 +331,14 @@ EOF
 )
     ;;
   *)  # no-mistakes (default)
-    SETUP2="
-2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
+    SETUP2=$(cat <<EOF
+
+2. Before investing in implementation or the full no-mistakes pipeline, run \`$FM_ROOT/bin/fm-pr-capability.sh\` from this worktree.
+   If it prints \`BLOCKED:\`, append its message as a \`blocked:\` status and stop so firstmate can fix the credential permission.
+   If it prints \`WARNING:\`, record the warning in your work log and continue - the probe is not a new blocking gate.
+3. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`.
+EOF
+)
     RULE1='1. Never push to the default branch. Never merge a PR.'
     DOD=$(cat <<EOF
 # Definition of done

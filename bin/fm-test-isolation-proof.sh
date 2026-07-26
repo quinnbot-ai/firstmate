@@ -105,6 +105,9 @@ exclusion_reason() {
     fm-pr-check-security.test.sh)
       printf '%s\n' 'watcher lock / migration / poll security surface; intentional shared-lock class'
       ;;
+    fm-pr-capability.test.sh)
+      printf '%s\n' 'real git fixture plus a fake credential transport; keep serial until a dedicated isolation proof'
+      ;;
     fm-teardown.test.sh)
       printf '%s\n' 'landed-work + lock-race teardown matrix; keep serial with forge/git stress peers'
       ;;
