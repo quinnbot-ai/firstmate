@@ -37,11 +37,12 @@
 # complete against the surviving report and holds without recreating task state.
 # `verify` is read-only and is called by scout teardown so teardown cannot erase a
 # source before this gate has succeeded.
-# When a pre-archive legacy resolution is absent from both live structured
-# surfaces, its originating keyed status resolution, or a decision artifact that
-# names that exact hold identity or decision key, remains a compatibility
-# fallback until that record can be migrated to the archive. Evidence that names
-# no hold never verifies a decision.
+# A resolved hold pruned from the live backlog is proved from the configured Done
+# archive. When a pre-archive legacy resolution is absent from both the live
+# backlog and that archive, its originating keyed status resolution, or a
+# decision artifact that names that exact hold identity or decision key, remains
+# a compatibility fallback until that record can be migrated to the archive.
+# Evidence that names no hold never verifies a decision.
 #
 # `resolve` requires every --routed-to task to exist and to be blocked by the hold.
 # It writes the captain decision and routed identities into the hold body, clears

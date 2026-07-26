@@ -1,6 +1,7 @@
 # shellcheck shell=bash
 # Shared tasks-axi backend selection and compatibility probe for bootstrap,
-# teardown, and secondmate backlog handoff.
+# teardown, and secondmate backlog handoff, plus the exact-id reader for records
+# the configured Done archive retains after retention pruning.
 # Usage: . bin/fm-tasks-axi-lib.sh
 # Compatible means tasks-axi --version reports 0.1.1 or newer,
 # `tasks-axi update --help` exposes --archive-body for recoverable note rewrites,

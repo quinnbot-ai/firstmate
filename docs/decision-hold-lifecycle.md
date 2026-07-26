@@ -32,8 +32,10 @@ For an open keyed status decision, it appends a `captain-held [key=<key>]: ...` 
 
 Scout teardown calls the script's read-only `verify` subcommand after checking for the report and before removing any source state.
 The `--force` path remains the explicit captain-approved discard escape hatch.
-After Done retention pruning removes a resolved hold from `data/backlog.md`, `verify` reads that exact completed `captain` record from the configured tasks-axi archive and requires its resolution and routing markers.
-The archive is checked before the pre-archive compatibility fallback for an originating matching keyed `resolved` status event or a decision or resolution artifact under `data/<origin-id>/`.
+After Done retention pruning removes a resolved hold from `data/backlog.md`, `verify` reads that exact completed `captain` record through `bin/fm-tasks-axi-lib.sh` and requires its resolution and routing markers.
+That read path parses the archive file directly because tasks-axi exposes no archive-read command; [`configuration.md`](configuration.md#backlog-backend-taskstoml--configbacklog-backend) owns the archive setting itself.
+The archive is checked before the pre-archive compatibility fallback for an originating `resolved` status event that names the hold identity or its key, or a decision or resolution artifact under `data/<origin-id>/`.
+Only the `default` key also accepts a bare `resolved:` status line, matching the unkeyed one-open-decision-per-task status vocabulary owned by `bin/fm-classify-lib.sh`.
 That artifact counts only when it names the exact hold, either through its hold identity or its decision key as a whole word in the file name, or through its hold identity or a `[key=<key>]` marker in the file contents, so a resolved decision can never verify a different unrecorded one.
 An absent live record, archive record, and same-task compatibility record remains an explicit verification failure, so a decision that was never recorded cannot pass.
 
