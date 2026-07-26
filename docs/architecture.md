@@ -165,6 +165,10 @@ The helper's header owns the exact signal detection, relocated-home limitation, 
 Ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks leave standalone investigation reports at `data/<id>/report.md` and never push.
 The intake and authority contract in `AGENTS.md` owns when separate scout research is warranted.
 
+Both shapes are dispatched from a scaffolded brief, so no worker is launched without a task: `fm-spawn.sh` refuses a ship or scout launch before any task state, worktree lease, or worker process when the brief is missing or its `# Task` section is absent, empty, or still just the unfilled `{TASK}` placeholder.
+The check is structural rather than a text search, so a genuinely filled task may mention `{TASK}`, and secondmate charters use a `# Charter` section instead and are deliberately exempt; their own placeholder refusal lives on the seeding path in `bin/fm-home-seed.sh`.
+`bin/fm-spawn.sh`'s header owns the exact detection.
+
 ## Dispatch profiles
 
 Crewmate and scout dispatch can stay on the static crewmate harness resolved by `config/crew-harness`, or it can use local dispatch profiles in `config/crew-dispatch.json`.
