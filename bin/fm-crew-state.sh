@@ -39,14 +39,15 @@
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
 #      agree, and are reported as parked.
-#   4. A commit-only done event on a no-mistakes ship with no pipeline run is
-#      delivery pending, not done. No run must be positively established from
-#      the complete branch run list; an unavailable or unclassifiable list falls
-#      through without inventing that state.
-#   5. No run for this crew (pre-validation, or kind=scout): fall back to the
+#   4. No run for this crew (pre-validation, or kind=scout): fall back to the
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
 #      `resolved` never become current state or detail.
+#   5. Between those two log-fallback steps (so live pane evidence still wins): a
+#      commit-only done event on a no-mistakes ship with no pipeline run is
+#      delivery pending, not done. No run must be positively established from
+#      the complete branch run list; an unavailable, truncated, or otherwise
+#      unclassifiable list falls through without inventing that state.
 #   6. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log.
@@ -80,6 +81,14 @@ case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
 # history every call.
 FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
+# How many rows the never-ran proof (nm_branch_has_no_runs, below) scans. That
+# proof needs the listing to be COMPLETE, so it must stay bounded by something
+# the CLI can render inside NM_TIMEOUT: a limit large enough that a real fleet
+# history fits, with the CLI's own truncation notice failing the proof closed
+# when it does not. An unbounded request would instead time out into an empty
+# answer, which reads identically to "no runs" at the command boundary.
+FM_CREW_STATE_RUNS_SCAN_LIMIT=${FM_CREW_STATE_RUNS_SCAN_LIMIT:-5000}
+case "$FM_CREW_STATE_RUNS_SCAN_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_SCAN_LIMIT=5000 ;; esac
 SEP=' · '
 
 # Emit the one canonical line and exit 0. Detail is optional.
@@ -410,13 +419,14 @@ nm_runs_status_for_branch() {  # <branch>
 }
 
 # Return success only when a complete run listing positively proves that this
-# branch has never started a no-mistakes pipeline. A missing command response or
+# branch has never started a no-mistakes pipeline. A missing command response, a
+# listing the CLI truncated (so rows this branch might own were never shown), or
 # an unreadable branch is deliberately unclassifiable, so it cannot turn a done
 # event into a delivery-pending wake by guesswork.
 nm_branch_has_no_runs() {  # <branch>
   local branch=$1 out row rest listed_branch
   [ -n "$branch" ] || return 1
-  out=$(nm_run runs --limit 100000)
+  out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_SCAN_LIMIT")
   [ -n "$out" ] || return 1
   while IFS= read -r row; do
     row=$(trim "$row")
@@ -438,7 +448,7 @@ nm_branch_has_no_runs() {  # <branch>
 # avoids reclassifying a genuine PR completion that happens to mention a commit.
 status_done_names_commit_only() {  # <status-line>
   local line=$1 note
-  [ "$(status_line_verb "$line")" = done ] || return 1
+  [ "$(status_line_verb "$line")" = "done" ] || return 1
   note=$(status_line_note "$line")
   printf '%s\n' "$note" | grep -Eqi '(^|[^[:alnum:]])commit(ted)?([^[:alnum:]]|$)' || return 1
   printf '%s\n' "$note" | grep -Eqi '(^|[^[:alnum:]])[0-9a-f]{7,40}([^[:alnum:]]|$)' || return 1
@@ -644,21 +654,23 @@ fi
 [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
 pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACKEND_TARGET"
 
-# A no-mistakes ship is not delivered at its implementation commit. When the
-# status event contains that exact commit-only shape and the complete run list
-# proves this branch has never started a pipeline, expose delivery as still
-# pending. Direct-PR and local-only tasks retain their normal done status, and an
-# unavailable list deliberately leaves the event unclassified.
-if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ] \
-  && status_done_names_commit_only "$LOG_LINE" \
-  && nm_branch_has_no_runs "$CREW_BRANCH"; then
-  emit working status-log "delivery pending: no-mistakes run not started"
-fi
-
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
 # signature is not meaningful for them; read their state from the status log only.
 if [ "$KIND" != secondmate ] && crew_pane_is_busy "$BACKEND_TARGET"; then
   emit working pane "harness busy"
+fi
+
+# A no-mistakes ship is not delivered at its implementation commit. When the
+# status event contains that exact commit-only shape and the complete run list
+# proves this branch has never started a pipeline, expose delivery as still
+# pending. Direct-PR and local-only tasks retain their normal done status, and an
+# unavailable list deliberately leaves the event unclassified. This sits BELOW the
+# pane check so live pane evidence keeps precedence over the status log: a crew
+# that is at this instant launching its run reads working · pane, not pending.
+if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ] \
+  && status_done_names_commit_only "$LOG_LINE" \
+  && nm_branch_has_no_runs "$CREW_BRANCH"; then
+  emit working status-log "$FM_CLASSIFY_DELIVERY_PENDING_DETAIL"
 fi
 
 # Fall back to the status log's last line, but ONLY when its verb maps to a real

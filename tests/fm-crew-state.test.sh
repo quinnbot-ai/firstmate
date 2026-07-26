@@ -893,8 +893,61 @@ test_no_mistakes_commit_done_without_run_is_delivery_pending() {
   local out; out=$(run_crew_state "$d" feat-delivery-pending)
   assert_contains "$out" "state: working" "commit-only no-mistakes done without a run stays working"
   assert_contains "$out" "source: status-log" "delivery pending retains the status-log source"
-  assert_contains "$out" "delivery pending: no-mistakes run not started" "delivery pending names the required next stage"
+  assert_contains "$out" "$FM_CLASSIFY_DELIVERY_PENDING_DETAIL" "delivery pending names the required next stage"
+  # Drift closure: the REAL emitted line (not a canned literal) must satisfy the
+  # consumer predicate in fm-classify-lib, so producer wording and the semantic
+  # owner cannot diverge without a test failing here.
+  local stub="$d/reader-stub"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "%s"\n' "$out" > "$stub"
+  chmod +x "$stub"
+  FM_CREW_STATE_BIN="$stub" status_done_needs_nomistakes_delivery "$d/state/feat-delivery-pending.status" \
+    || fail "the real reader's delivery-pending line is not recognized by fm-classify-lib"
   pass "commit-only no-mistakes done without a run is delivery pending"
+}
+
+# Live pane evidence outranks the status log: a crew that is at this instant
+# launching its pipeline has no registered run yet, and must still read as
+# provably working rather than as delivery pending.
+test_no_mistakes_commit_done_with_busy_pane_reads_pane() {
+  reset_fakes
+  local d; d=$(new_case nomistakes-delivery-busy)
+  make_repo_on_branch "$d/wt" fm/feat-delivery-busy
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-delivery-busy.meta" "window=fm:fm-feat-delivery-busy" "worktree=$d/wt" "kind=ship" "mode=no-mistakes"
+  printf 'done: committed abc1234 with targeted tests\n' > "$d/state/feat-delivery-busy.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST='running fm/other-crew 1234567 2026-07-25'
+  FM_FAKE_BUSY=1
+  local out; out=$(run_crew_state "$d" feat-delivery-busy)
+  assert_contains "$out" "source: pane" "a busy pane stays the authoritative source over the status log"
+  assert_not_contains "$out" "delivery pending" "a busy pane is not reported as delivery pending"
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-delivery-busy \
+    || fail "a crew launching its no-mistakes run was not provably working"
+  pass "a busy pane outranks the commit-only delivery-pending read"
+}
+
+# The never-ran proof needs a COMPLETE listing. When the CLI truncates the rows it
+# returned, branch rows may be unseen, so the proof must fail closed instead of
+# reading the truncated page as "no run for this branch".
+test_no_mistakes_commit_done_with_truncated_runs_remains_done() {
+  reset_fakes
+  local d; d=$(new_case nomistakes-truncated)
+  make_repo_on_branch "$d/wt" fm/feat-truncated
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-truncated.meta" "window=fm:fm-feat-truncated" "worktree=$d/wt" "kind=ship" "mode=no-mistakes"
+  printf 'done: committed abc1234 with targeted tests\n' > "$d/state/feat-truncated.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<'EOF'
+  running    fm/other-crew aaaaaaa  2026-07-25 23:29
+
+  (67 more runs, use --limit to see more)
+EOF
+)"
+  FM_FAKE_BUSY=0
+  local out; out=$(run_crew_state "$d" feat-truncated)
+  assert_contains "$out" "state: done" "a truncated run listing preserves the reported done state"
+  assert_not_contains "$out" "delivery pending" "a truncated run listing never proves the branch never ran"
+  pass "a truncated run listing fails closed instead of forcing delivery pending"
 }
 
 test_commit_done_direct_pr_and_local_only_remain_done() {
@@ -1346,6 +1399,8 @@ test_no_run_herdr_idle_agent_status_corroborated_by_busy_pane
 test_no_run_herdr_idle_agent_status_and_idle_pane_stays_idle
 test_no_run_idle_pane_uses_log
 test_no_mistakes_commit_done_without_run_is_delivery_pending
+test_no_mistakes_commit_done_with_busy_pane_reads_pane
+test_no_mistakes_commit_done_with_truncated_runs_remains_done
 test_commit_done_direct_pr_and_local_only_remain_done
 test_no_mistakes_pr_done_and_started_run_do_not_read_delivery_pending
 test_no_mistakes_commit_done_with_unclassifiable_runs_remains_done

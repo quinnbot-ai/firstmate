@@ -138,6 +138,12 @@ last_status_line() {
   grep -v '^[[:space:]]*$' "$f" 2>/dev/null | tail -1
 }
 
+# The detail bin/fm-crew-state.sh emits for a no-mistakes ship whose
+# implementation commit exists but whose pipeline never started. This module owns
+# the wording so the producer (fm-crew-state.sh's emit) and the consumers below
+# read the same string and cannot silently drift apart.
+FM_CLASSIFY_DELIVERY_PENDING_DETAIL='delivery pending: no-mistakes run not started'
+
 # 0 if a status event is the no-mistakes implementation-complete shape that still
 # needs delivery. The current-state reader is the authority for the branch run
 # lookup, so this stays fail-closed: an unavailable or unclassifiable reader never
@@ -147,13 +153,13 @@ status_done_needs_nomistakes_delivery() {  # <status-file> [status-line]
   local file=$1 line=${2:-} id state_line
   [ -f "$file" ] || return 1
   [ -n "$line" ] || line=$(last_status_line "$file")
-  [ "$(status_line_verb "$line")" = done ] || return 1
+  [ "$(status_line_verb "$line")" = "done" ] || return 1
   id=$(basename "$file")
   id=${id%.status}
   [ -n "$id" ] || return 1
   state_line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || return 1
   case "$state_line" in
-    'state: working · source: status-log · delivery pending: no-mistakes run not started') return 0 ;;
+    "state: working"*"source: status-log"*"$FM_CLASSIFY_DELIVERY_PENDING_DETAIL") return 0 ;;
     *) return 1 ;;
   esac
 }

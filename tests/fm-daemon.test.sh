@@ -279,19 +279,31 @@ test_stale_terminal_escalates() {
 }
 
 test_no_mistakes_delivery_pending_stale_escalates_for_delivery() {
-  local dir state out reader
+  local dir state out reader last key
   dir=$(make_supercase stale-delivery-pending)
   state="$dir/state"
   reader="$dir/fm-crew-state.sh"
-  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "state: working · source: status-log · delivery pending: no-mistakes run not started"\n' > "$reader"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "state: working · source: status-log · %s"\n' \
+    "$FM_CLASSIFY_DELIVERY_PENDING_DETAIL" > "$reader"
   chmod +x "$reader"
-  printf 'done: committed abc1234 with targeted tests\n' > "$state/pending-t1.status"
+  last='done: committed abc1234 with targeted tests'
+  printf '%s\n' "$last" > "$state/pending-t1.status"
   out=$(FM_CREW_STATE_BIN="$reader" FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-pending-t1" "$state")
   case "$out" in
-    'escalate|delivery pending: no-mistakes run not started:'*) ;;
+    "escalate|$FM_CLASSIFY_DELIVERY_PENDING_DETAIL: "*) ;;
     *) fail "commit-only no-mistakes stale did not surface as delivery pending: $out" ;;
   esac
-  pass "commit-only no-mistakes stale escalates as delivery pending"
+  # Same dedupe contract as any other terminal-shaped status: once the signal path
+  # escalated this exact line, the stale wake must self-handle rather than put a
+  # second entry for one event in the digest.
+  key=$(printf '%s' "$(window_to_task "sess:fm-pending-t1")" | tr ':/.' '___')
+  printf '%s' "$last" > "$state/.subsuper-seen-status-$key"
+  out=$(FM_CREW_STATE_BIN="$reader" FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-pending-t1" "$state")
+  case "$out" in
+    self\|*) ;;
+    *) fail "an already-escalated delivery-pending stale escalated a duplicate: $out" ;;
+  esac
+  pass "commit-only no-mistakes stale escalates as delivery pending, once"
 }
 
 # A DECLARED external-wait pause (paused:) is neither a wedge nor a terminal

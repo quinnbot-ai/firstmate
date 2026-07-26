@@ -366,7 +366,7 @@ classify_signal() {  # <reason-after-colon> <state>
 # first sight of a non-terminal stale it returns "self" and the caller records a
 # timestamp marker; persistence is escalated by housekeeping's recheck, not here.
 classify_stale() {  # <window> <state>
-  local win=$1 state=$2 task last seen
+  local win=$1 state=$2 task last seen delivery
   case "$win" in
     *' (busy but zero progress for '*)
       printf 'escalate|%s' "$win"
@@ -385,21 +385,22 @@ classify_stale() {  # <window> <state>
     return
   fi
   if [ -n "$last" ] && status_is_captain_relevant "$last"; then
-    if status_done_needs_nomistakes_delivery "$state/$task.status" "$last"; then
-      printf 'escalate|delivery pending: no-mistakes run not started: %s' "$last"
-      return
-    fi
     # Independent of free-text captain-relevant matching: a nonterminal progress
     # verb (working:) must never take the terminal stale path. Seen-status dedupe
     # must not permanently suppress or clear possible-wedge aging merely because
     # prose once looked captain-relevant. Real terminal verbs and legacy free-text
     # captain lines without those verbs keep the terminal escalate/dedupe path.
+    # This is the ONE delivery-aware read for the wake (it may cost a bounded
+    # no-mistakes call): a nonterminal `done:` is exactly the commit-only
+    # no-mistakes shape, which is actionable but not a completion.
+    delivery=0
     if ! status_is_terminal_verb "$last" "$state/$task.status"; then
       case "$(status_line_verb "$last")" in
         working|resolved|captain-held)
           printf 'self|transient stale (%s): %s' "$win" "$last"
           return
           ;;
+        done) delivery=1 ;;
       esac
     fi
     # Dedupe against the signal path: if this status was already escalated
@@ -407,6 +408,10 @@ classify_stale() {  # <window> <state>
     seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
     if [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ]; then
       printf 'self|stale + terminal (already escalated by signal): %s' "$last"
+      return
+    fi
+    if [ "$delivery" = 1 ]; then
+      printf 'escalate|%s: %s' "$FM_CLASSIFY_DELIVERY_PENDING_DETAIL" "$last"
       return
     fi
     printf 'escalate|stale + terminal status: %s' "$last"
@@ -1269,10 +1274,13 @@ handle_wake() {  # <reason> <state>
         last=$(last_status_line "$state/$task.status")
         # Clear wedge aging only for terminal (or legacy free-text) captain lines.
         # Nonterminal progress verbs keep possible-wedge markers even if free text
-        # once looked captain-relevant or was written into a seen marker.
+        # once looked captain-relevant or was written into a seen marker. A `done:`
+        # verb clears wedge aging either way (a delivery-pending done was already
+        # escalated as actionable by classify_stale), so this check deliberately
+        # stays verb-only and never pays for a bounded delivery read per wake.
         _clear_wedge=0
         if [ -n "$last" ] && status_is_captain_relevant "$last"; then
-          if status_is_terminal_verb "$last" "$STATE/$task.status"; then
+          if status_is_terminal_verb "$last"; then
             _clear_wedge=1
           else
             case "$(status_line_verb "$last")" in
