@@ -25,8 +25,9 @@
 // a stale source refused. Quota windows are measurements, not financial facts,
 // and attributable crew/session cost stays unavailable unless
 // `fleet_operations.cost_sources` supplies two corroborating private helpers.
-// The daily fleet line also records every quota-axi provider window verbatim as
-// a windowed provider report, rather than treating it as an exact monetary cost.
+// The daily fleet line also records the accepted fields from every fresh
+// quota-axi provider window as a windowed provider report, rather than treating
+// it as an exact monetary cost.
 // Its `fleet_operations.daily_sources` are two or more distinct trusted private
 // command arrays that each print one JSON object with a non-empty `source`,
 // `observedAt`, the ledger `date` (YYYY-MM-DD), `currency`, and `crewSessions`
