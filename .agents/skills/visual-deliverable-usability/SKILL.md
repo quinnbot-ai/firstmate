@@ -19,6 +19,8 @@ bin/fm-visual-deliverable-check.sh <rendered-url> \
   --source <stylesheet.css>
 ```
 
+Serve a local artifact over `http(s)` before running the check because `file://` URLs are deliberately unsupported.
+
 Pass every local HTML and CSS source that contributes to the rendered deliverable.
 
 The rendered probe is the primary check because markup presence cannot establish usability.

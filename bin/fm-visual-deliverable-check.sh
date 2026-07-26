@@ -10,6 +10,7 @@
 #
 # Usage:
 #   fm-visual-deliverable-check.sh <url> --source <html-or-css> [--source <html-or-css> ...]
+#   The URL must be http(s); serve local artifacts instead of passing file:// URLs.
 #
 # The check verifies rendered dimensions and CSS visibility only.  It cannot
 # prove that media can play or be heard, that a control has useful behavior, or
@@ -19,7 +20,7 @@ set -u
 BROWSER=${FM_VISUAL_CHECK_BROWSER:-chrome-devtools-axi}
 
 usage() {
-  sed -n '10,16{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '10,17{s/^# \{0,1\}//;p;}' "$0"
 }
 
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
@@ -30,6 +31,18 @@ fi
 URL=${1:-}
 [ -n "$URL" ] || { usage >&2; exit 2; }
 shift
+
+case "$URL" in
+  http://*|https://*) ;;
+  file://*)
+    echo 'fm-visual-deliverable-check: file:// URLs are unsupported; serve the local artifact over http(s).' >&2
+    exit 2
+    ;;
+  *)
+    echo 'fm-visual-deliverable-check: URL must use http:// or https://.' >&2
+    exit 2
+    ;;
+esac
 
 SOURCES=()
 while [ "$#" -gt 0 ]; do
@@ -124,12 +137,15 @@ RENDER_FAILURES=$(printf '%s\n' "$BROWSER_RESULT" | node -e '
 const fs = require("fs");
 const output = fs.readFileSync(0, "utf8");
 const resultLine = output.split(/\r?\n/).find((line) => line.startsWith("result:"));
-if (!resultLine) {
-  throw new Error("chrome-devtools-axi returned no result line");
+if (!resultLine) process.exit(2);
+let value;
+try {
+  value = JSON.parse(resultLine.slice("result:".length).trim());
+  if (typeof value === "string") value = JSON.parse(value);
+} catch (_) {
+  process.exit(2);
 }
-let value = JSON.parse(resultLine.slice("result:".length).trim());
-if (typeof value === "string") value = JSON.parse(value);
-if (!Array.isArray(value)) throw new Error("browser result was not an element list");
+if (!Array.isArray(value)) process.exit(2);
 let failures = 0;
 for (const element of value) {
   const dimensions = `${element.width}x${element.height}`;
@@ -151,8 +167,16 @@ for (const element of value) {
   }
 }
 process.exitCode = failures === 0 ? 0 : 1;
-')
+') 2>/dev/null
 RENDER_RC=$?
+if [ "$RENDER_RC" -eq 2 ]; then
+  echo "fm-visual-deliverable-check: could not measure rendered elements at $URL because the browser returned an unexpected element result." >&2
+  exit 2
+fi
+if [ "$RENDER_RC" -ne 0 ] && [ "$RENDER_RC" -ne 1 ]; then
+  echo "fm-visual-deliverable-check: could not measure rendered elements at $URL." >&2
+  exit 2
+fi
 if [ -n "$RENDER_FAILURES" ]; then
   printf '%s\n' "$RENDER_FAILURES"
 fi
