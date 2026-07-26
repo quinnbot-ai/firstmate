@@ -125,102 +125,115 @@ origin_exists_here() {  # <origin-id>
   task_show "$1" >/dev/null 2>&1
 }
 
-task_ids_in_file() {  # <backlog-or-archive-path>
-  [ -f "$1" ] || return 0
-  awk '/^- \[[ x]\] / { sub(/^- \[[ x]\] /, ""); print $1 }' "$1"
-}
-
-# tasks-axi renders a body as one quoted line whose newlines are the literal two
-# characters \n, so a topic ends at that escape or at the closing quote. Matching
-# the terminator keeps topic `sample` from matching topic `sample.route`.
+# A body is one escaped line whose newlines are the literal two characters \n, in
+# both `tasks-axi show` output and the backlog file. A topic therefore ends at that
+# escape, at the closing quote show adds, or at end of body. Matching the
+# terminator keeps topic `sample` from matching topic `sample.route`.
 body_has_topic() {  # <body> <topic>
+  local needle="Decision topic: $2."
   case "$1" in
-    *"Decision topic: $2."'\n'*|*"Decision topic: $2."'"') return 0 ;;
+    *"$needle"'\n'*|*"$needle"'"'|*"$needle") return 0 ;;
   esac
   return 1
 }
 
-# tasks-axi show reads only the live backlog, so an archived decision has to be
-# matched by parsing its archive entry, which keeps the same escaped body text.
-archive_topic_hold() {  # <self-id> <repo> <topic>
-  local self=$1 repo=$2 topic=$3 path="$DATA/done-archive.md" match
-  [ -f "$path" ] || return 1
-  match=$(awk -v self="$self" -v repo="$repo" -v topic="$topic" '
-    function ends_with(s, suffix) {
-      return length(s) >= length(suffix) \
-        && substr(s, length(s) - length(suffix) + 1) == suffix
+# The backlog and the archive share one entry format that already carries every
+# field these scans filter on, so a single awk pass replaces one `tasks-axi show`
+# subprocess per entry. `tasks-axi show` reads only the live backlog anyway, so
+# this is also the only way to see archived decisions. It stays the authority for
+# the free-text title and hold reason, which are re-read for surviving candidates
+# alone. Fields are id, state, kind, repo, held, hold_kind, body.
+scan_hold_entries() {  # <backlog-or-archive-path>
+  [ -f "$1" ] || return 0
+  awk '
+    function reset() {
+      id = ""; state = ""; kind = ""; repo = ""; held = "no"; hold_kind = "-"; body = ""
     }
-    function flush(  needle) {
-      if (found || id == "" || id == self) { reset(); return }
-      needle = "Decision topic: " topic "."
-      if (index(header, "(kind: captain)") > 0 \
-        && index(header, "(repo: " repo ")") > 0 \
-        && (index(body, needle "\\n") > 0 || ends_with(body, needle))) {
-        print id
-        found = 1
+    function last_group(line, key,   needle, pos, rest, endpos, out) {
+      needle = "(" key ": "
+      out = ""
+      rest = line
+      while ((pos = index(rest, needle)) > 0) {
+        rest = substr(rest, pos + length(needle))
+        endpos = index(rest, ")")
+        if (endpos > 0) out = substr(rest, 1, endpos - 1)
+      }
+      return out
+    }
+    function emit() {
+      if (id != "") {
+        print id "\t" state "\t" kind "\t" repo "\t" held "\t" hold_kind "\t" body
       }
       reset()
     }
-    function reset() { id = ""; header = ""; body = "" }
+    BEGIN { reset(); section = "" }
+    /^## / {
+      emit()
+      if ($0 ~ /^## In flight/) section = "in_flight"
+      else if ($0 ~ /^## Queued/) section = "queued"
+      else if ($0 ~ /^## Done/ || $0 ~ /^## Archived/) section = "done"
+      else section = ""
+      next
+    }
     /^- \[[ x]\] / {
-      flush()
-      header = $0
+      emit()
       line = $0
       sub(/^- \[[ x]\] /, "", line)
       split(line, fields, " ")
       id = fields[1]
+      state = section
+      kind = last_group($0, "kind")
+      repo = last_group($0, "repo")
+      hold_kind = last_group($0, "hold-kind")
+      if (hold_kind == "") hold_kind = "-"
+      held = (index($0, "(hold: ") > 0) ? "yes" : "no"
       next
     }
     /^  / {
       body = body (body == "" ? "" : "\\n") substr($0, 3)
       next
     }
-    { flush() }
-    END { flush() }
-  ' "$path")
-  [ -n "$match" ] || return 1
-  printf '%s\n' "$match"
+    { emit() }
+    END { emit() }
+  ' "$1"
 }
 
 same_topic_hold() {  # <self-id> <repo> <topic>
-  local self=$1 repo=$2 topic=$3 candidate show candidate_repo body
-  while IFS= read -r candidate; do
-    [ -n "$candidate" ] || continue
-    [ "$candidate" != "$self" ] || continue
-    show=$(task_show "$candidate") || continue
-    [ "$(show_field "$show" kind)" = captain ] || continue
-    candidate_repo=$(show_field "$show" repo)
-    [ "$candidate_repo" = "$repo" ] || continue
-    body=$(show_field "$show" body)
-    if body_has_topic "$body" "$topic"; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  done <<EOF
-$(task_ids_in_file "$DATA/backlog.md")
+  local self=$1 repo=$2 topic=$3 path cid _cstate ckind crepo _cheld _chold_kind cbody
+  for path in "$DATA/backlog.md" "$DATA/done-archive.md"; do
+    while IFS=$'\t' read -r cid _cstate ckind crepo _cheld _chold_kind cbody; do
+      [ -n "$cid" ] || continue
+      [ "$cid" != "$self" ] || continue
+      [ "$ckind" = captain ] || continue
+      [ "$crepo" = "$repo" ] || continue
+      if body_has_topic "$cbody" "$topic"; then
+        printf '%s\n' "$cid"
+        return 0
+      fi
+    done <<EOF
+$(scan_hold_entries "$path")
 EOF
-  archive_topic_hold "$self" "$repo" "$topic"
+  done
+  return 1
 }
 
 same_legacy_title_hold() {  # <self-id> <repo> <title>
-  local self=$1 repo=$2 title=$3 candidate show candidate_repo body state
-  while IFS= read -r candidate; do
-    [ -n "$candidate" ] || continue
-    [ "$candidate" != "$self" ] || continue
-    show=$(task_show "$candidate") || continue
-    [ "$(show_field "$show" state)" = queued ] || continue
-    [ "$(show_field "$show" held)" = yes ] || continue
-    [ "$(show_field "$show" kind)" = captain ] || continue
-    [ "$(show_field "$show" hold_kind)" = captain ] || continue
-    candidate_repo=$(show_field "$show" repo)
-    [ "$candidate_repo" = "$repo" ] || continue
+  local self=$1 repo=$2 title=$3 cid cstate ckind crepo cheld chold_kind cbody show
+  while IFS=$'\t' read -r cid cstate ckind crepo cheld chold_kind cbody; do
+    [ -n "$cid" ] || continue
+    [ "$cid" != "$self" ] || continue
+    [ "$cstate" = queued ] || continue
+    [ "$cheld" = yes ] || continue
+    [ "$ckind" = captain ] || continue
+    [ "$chold_kind" = captain ] || continue
+    [ "$crepo" = "$repo" ] || continue
+    case "$cbody" in *"Decision topic: "*) continue ;; esac
+    show=$(task_show "$cid") || continue
     [ "$(show_field "$show" title)" = "$title" ] || continue
-    body=$(show_field "$show" body)
-    case "$body" in *"Decision topic: "*) continue ;; esac
-    printf '%s\n' "$candidate"
+    printf '%s\n' "$cid"
     return 0
   done <<EOF
-$(task_ids_in_file "$DATA/backlog.md")
+$(scan_hold_entries "$DATA/backlog.md")
 EOF
   return 1
 }
@@ -407,24 +420,20 @@ command_hold() {
 }
 
 command_audit() {
-  local candidate show state held kind hold_kind reason found=0
+  local cid cstate ckind _crepo cheld chold_kind _cbody show reason found=0
   [ "$#" -eq 0 ] || { usage >&2; exit 2; }
   require_tasks_axi
   # Only active holds can still be re-asked, so the archive is out of scope.
-  while IFS= read -r candidate; do
-    [ -n "$candidate" ] || continue
-    show=$(task_show "$candidate") || continue
-    state=$(show_field "$show" state)
-    held=$(show_field "$show" held)
-    kind=$(show_field "$show" kind)
-    hold_kind=$(show_field "$show" hold_kind)
-    [ "$state" = queued ] && [ "$held" = yes ] && [ "$kind" = captain ] && [ "$hold_kind" = captain ] || continue
+  while IFS=$'\t' read -r cid cstate ckind _crepo cheld chold_kind _cbody; do
+    [ -n "$cid" ] || continue
+    [ "$cstate" = queued ] && [ "$cheld" = yes ] && [ "$ckind" = captain ] && [ "$chold_kind" = captain ] || continue
+    show=$(task_show "$cid") || continue
     reason=$(show_field "$show" hold_reason)
     reason_records_answer "$reason" || continue
-    printf 'answered-open: %s: %s\n' "$candidate" "$reason"
+    printf 'answered-open: %s: %s\n' "$cid" "$reason"
     found=1
   done <<EOF
-$(task_ids_in_file "$DATA/backlog.md")
+$(scan_hold_entries "$DATA/backlog.md")
 EOF
   [ "$found" = 1 ] || printf 'answered-open: none\n'
 }

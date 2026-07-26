@@ -61,6 +61,7 @@ It begins with a completed investigation and visual review whose genuine unresol
 The initial Bearings snapshot correctly has no open decision, and the new teardown gate refuses to erase the source.
 A later regression covers tasks-axi's quoted multi-entry `blocked_by` output so `resolve` matches the first, middle, and last ids and rejects a genuinely absent id.
 The current regressions also reject a duplicate repository-scoped topic from a second origin and surface an answered-but-open hold without closing it.
+They further refuse an already-answered topic from both the backlog Done section and `done-archive.md`, and confirm that a topic matches on its full value rather than on a prefix shared with a longer topic.
 
 The final verification commands and their exact summarized outputs follow.
 
@@ -75,6 +76,8 @@ ok - resolved findings and decision-like prose do not create false holds
 ok - terminal single-owner stale status decisions do not block empty inventory
 ok - main-home and secondmate-home captain holds remain correctly routed
 ok - repository-scoped decision topics reject cross-origin duplicates
+ok - answered decision topics are refused from both the Done section and the archive
+ok - decision topics match on full value, not on a shared prefix
 ok - untagged legacy exact-title matches are clearly flagged
 ok - answered-open captain holds are surfaced without heuristic closure
 ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
