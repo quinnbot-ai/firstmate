@@ -60,6 +60,7 @@ Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
 Cross-origin topic and answered-open audit verification date: 2026-07-25.
 Repo-less scan, labelled-pending audit, and resolved-topic carry verification date: 2026-07-25.
+Complete-regression inventory re-verification date: 2026-07-26.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
@@ -119,3 +120,28 @@ $ git diff --check
 $ for test_script in tests/*.test.sh; do bash "$test_script"; done
 ALL 71 TEST SCRIPTS PASSED
 ```
+
+That `ALL 71 TEST SCRIPTS PASSED` line is left exactly as its own dated run reported it and is superseded by the re-verification below.
+It was already stale when it merged: the line entered the repo in `cd218f2` on 2026-07-15, and that commit's own tree already carried 73 `tests/*.test.sh` scripts.
+Nothing synchronizes a hand-written total, so read each recorded count as evidence from its own dated run rather than as the current inventory.
+`bin/fm-test-run.sh --check-coverage` is the current inventory owner because it derives the total from the tree and fails when the lanes stop partitioning it.
+
+## Complete-regression re-verification, 2026-07-26
+
+```text
+$ bin/fm-test-run.sh --check-coverage
+FM_TEST_COVERAGE ok total=101 parallel=30 serial=62 herdr=9
+
+$ bin/fm-test-run.sh --all
+FM_TEST_SUMMARY total=101 failed=1 skipped_gate=10 duration_ms=2246698
+FM_TEST_SUMMARY_FAMILY family=real-herdr-gated count=9 duration_ms=290477 failed=1
+FM_TEST_END 2026-07-26T06:34:00Z tests/fm-backend-herdr-presentation-e2e.test.sh exit=1 duration_ms=187949 gate_skip=false
+not ok - concurrent primary recovery failed: error: herdr presentation recovery could not acquire its session lock; refusing a concurrent resume
+
+$ bash tests/fm-backend-herdr-presentation-e2e.test.sh
+ok - real Herdr lab validation completed on Herdr 0.7.3 with the default-session tripwire intact
+(exit 0)
+```
+
+The walk collected 101 scripts, and every script named in the verification record above passed inside it, including `tests/fm-decision-hold-lifecycle.test.sh`.
+The one failure is host contention rather than a defect: the `real-herdr-gated` family serializes on a single Herdr session lock, another firstmate checkout on the same machine was exercising real-Herdr scripts during the walk, and the script passes on its own once no competing Herdr run holds that lock.
