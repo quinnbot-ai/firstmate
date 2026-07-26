@@ -42,8 +42,9 @@
 #                       any answered-but-still-open captain decisions reported
 #                       by fm-decision-hold.sh audit, every state/*.meta, a
 #                       bounded state/*.status tail, state/.afk, bounded
-#                       operations-inbox signals, and a cheap per-task
-#                       endpoint-liveness read: read-only, always runs.
+#                       operations-inbox signals with suppression evidence and
+#                       occurrence history, and a cheap per-task endpoint-
+#                       liveness read: read-only, always runs.
 #   6. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
@@ -264,13 +265,14 @@ print_ops_inbox_suppression_records() {
   done < <(tail -n "$OPS_INBOX_LIMIT" "$file" 2>/dev/null)
 }
 
-# Current suppression evidence stands until the failure it withheld clears, so
-# it describes the events listed below.  The occurrence history is reported
-# alongside it rather than instead of it, because the case worth seeing is a
-# failure that cleared and came back: without the earlier occurrences a fresh
-# unresolved record reads as a first sight rather than as a recurrence.  Once
-# the failure clears the watcher drops the unresolved records and the history
-# is reported as history, so a cleared record is never read as a live one.
+# Current suppression evidence stands until the watcher observes no genuine
+# failure, so it describes the unresolved inbox episode listed below.
+# The occurrence history is reported alongside it rather than instead of it.
+# Without the earlier occurrences, a fresh unresolved record after a clear
+# reads as a first sight rather than as a recurrence.
+# Once the inbox has no genuine failure the watcher drops the unresolved
+# records and reports the history as past, so a cleared episode is never read
+# as a live one.
 print_ops_inbox_suppression() {
   local current history total unresolved=0
   current="$STATE/.ops-inbox-suppressed"

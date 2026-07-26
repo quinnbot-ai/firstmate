@@ -769,9 +769,9 @@ heartbeat_scan_finds_actionable() {
 # decisions can disagree about what the inbox held. A change that withholds a
 # genuine failure records why before it updates the same baseline; a change
 # with no genuine failure behind it is absorbed into the baseline alone.
-# Current suppression evidence is retained until the underlying failure itself
-# clears, never merely because a wake was delivered, and a bounded occurrence
-# history outlives the clear so clear-and-recur flapping stays visible in the
+# Current suppression evidence is retained until no genuine failure remains,
+# never merely because a wake was delivered, and a bounded occurrence history
+# outlives the clear so clear-and-recur flapping stays visible in the
 # session-start OPS INBOX digest. A configured critical count collapses while
 # it stays at or below the escalation level of the last baseline, and wakes
 # again the first time it rises above it.
@@ -882,8 +882,8 @@ append_bounded_record() {
 # Per Firstmate's retention rule, only a withheld genuine failure is evidence:
 # a healthy inbox suppressed nothing, so its absorbed changes leave no record
 # to crowd real occurrences out of either bounded artifact. The unresolved
-# record survives the wake path and every later cycle until the failure itself
-# clears (mark_ops_inbox_seen drops it once the inbox is no longer genuine).
+# record survives the wake path and every later cycle until no genuine failure
+# remains (mark_ops_inbox_seen drops it once the inbox is no longer genuine).
 # That clear is also a recurrence boundary: repeats collapse only while they
 # belong to the episode the unresolved file still holds, so the same failure
 # seen again after a clear lands as its own occurrence and the bounded history

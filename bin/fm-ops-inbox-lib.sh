@@ -261,9 +261,10 @@ fm_ops_inbox_event_signal() {
 # command is configured, otherwise `configured\t<class>\t<count>\t<rc>\t<identity>`.
 # The class is `ok` for a trustworthy zero count, `critical` for a trustworthy
 # nonzero count, and `invalid` when the listing itself cannot be believed - a
-# malformed listing, or a firstmate-internal timeout (124) or output-cap kill
-# (125) rather than the command's own routine nonzero convention.  The identity
-# is empty for the counted classes because their fingerprint identity depends
+# malformed listing, or reserved status 124 or 125.
+# Those statuses represent Firstmate's timeout and output-cap kill, so they fail
+# closed even when the configured command itself returns one.
+# The identity is empty for the counted classes because their fingerprint depends
 # on the caller's escalation watermark.  Every derived value - the cheap
 # fingerprint segment, the genuineness decision, the escalation identity - is
 # computed from one reading, so a supervision cycle can neither mix two
@@ -325,11 +326,11 @@ fm_ops_inbox_critical_level() {
 # signal set: a home overflow, any retained home event that does not declare
 # itself routine (including one whose sample cannot be read), or an external
 # listing that is critical or untrustworthy.  The hash covers only those
-# identities, so copied event records with the same body collapse to one wake
-# until the inbox clears.  The external listing contributes its escalation
-# level rather than its raw count: a burst or a falling count stays one
-# identity, while a count above the watermark raises the level and wakes once
-# for that escalation.
+# identities, so copied event records with the same sampled body collapse to
+# one wake until the inbox clears.
+# The external listing contributes its escalation level rather than its raw
+# count: a burst or a falling count stays one identity, while a count above the
+# watermark raises the level and wakes once for that escalation.
 fm_ops_inbox_actionable_fingerprint() {
   local home=$1 config=$2 watermark=${3:-0} reading=${4:-}
   local record path signal header class='none' count=0 identity='' level=0

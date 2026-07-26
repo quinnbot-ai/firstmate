@@ -31,29 +31,30 @@ Each home may receive operational-failure event files directly in its local `ops
 Write each event once or atomically replace it so the watcher can detect the event or source marker without rescanning retained event files.
 Deeper paths are outside the monitored layout.
 An event that represents an expected non-failure outcome must declare `classification: routine` or `disposition: routine` within its first 4096 bytes.
-All other retained home events fail closed as genuine failures, while identical event bodies collapse to one wake until the inbox clears.
+All other retained home events fail closed as genuine failures, while identical sampled bodies collapse to one wake until the inbox clears.
 An event whose sample cannot be read is a genuine failure under its own path identity, so an unreadable event is never mistaken for a repeat of an event already surfaced.
 `bin/fm-session-start.sh` reports a bounded count and newest full paths from that directory without changing any event or acknowledgement state.
 Set the local, gitignored `config/ops-inbox-cmd` to one list-only shell command when this machine also has a durable machine-level inbox.
 The first non-empty, non-comment line is the command, and firstmate runs it through `bash -c` with combined stdout and stderr.
-The command must be trusted local code and print only its current unhandled critical listing, starting with `unacked_criticals: <count>`; a zero count suppresses a routine nonzero exit, while a malformed listing, a timeout, or an output-cap kill still wakes because reporting health is uncertain.
+The command must be trusted local code and print only its current unhandled critical listing, starting with `unacked_criticals: <count>`; a zero count suppresses an ordinary nonzero exit.
+Exit statuses 124 and 125 are reserved for Firstmate's timeout and output-cap failures and fail closed even when the configured command itself returns one; a malformed listing also wakes because reporting health is uncertain.
 The command is intentionally operator-owned and generic, so firstmate does not encode a machine-specific inbox path or acknowledgement implementation.
 The watcher fingerprints both sources, wakes immediately for a new genuine failure while a regular task is in flight, and checks the same fingerprint on its existing heartbeat cadence otherwise.
 A nonzero critical count opens an escalation window recorded in `state/.ops-inbox-critical-level`: further counts at or below that level collapse into the wake already delivered, a count above it wakes once more for that escalation, and a zero count closes the window so the next nonzero count wakes again.
-A duplicate change records the suppression reason, the observed critical count, and the escalation level before advancing the baseline; a change with no genuine failure behind it stays in the inbox digest and is absorbed into the baseline alone.
+A duplicate change records the suppression reason before advancing the baseline and, for a configured listing, includes its observed critical count and escalation level; a change with no genuine failure behind it stays in the inbox digest and is absorbed into the baseline alone.
 Per Firstmate's retention rule, only a withheld genuine failure is evidence, so healthy routine changes write no record and cannot crowd real occurrences out of either bounded artifact, and a reason repeated inside one unresolved episode is re-dated in place rather than appended so distinct count movements keep their slots.
 A clear is a recurrence boundary: the same reason seen again after it is a separate occurrence rather than a re-dating of the one before it.
-`state/.ops-inbox-suppressed` holds the bounded records of failures withheld from firstmate and is cleared only when the underlying failure itself clears, never merely because a wake was delivered; `state/.ops-inbox-suppression-log` keeps the same bounded records across that clear, so a failure that clears and recurs reads as flapping.
-`bin/fm-session-start.sh` reports the unresolved records at the top of the OPS INBOX digest and the retained history alongside them, marks the history as past occurrences once nothing is unresolved, and discloses how many records each bounded listing dropped.
+`state/.ops-inbox-suppressed` holds bounded records from the unresolved inbox episode and is cleared only when the watcher observes no genuine failure, never merely because a wake was delivered; `state/.ops-inbox-suppression-log` keeps the same bounded records across that clear, so a failure that clears and recurs reads as flapping.
+`bin/fm-session-start.sh` reports the unresolved records at the top of the OPS INBOX digest and the retained history alongside them, marks the history as past occurrences once nothing is unresolved, and discloses how many older records each displayed listing omits.
 `bin/fm-ops-inbox-lib.sh`'s header owns the discovery and fingerprint mechanics; the tunables below bound them.
-`FM_SESSION_START_OPS_INBOX_LIMIT` bounds both the home-event paths and configured-command output lines in the digest, defaulting to 5.
+`FM_SESSION_START_OPS_INBOX_LIMIT` bounds the home-event paths, suppression records per listing, and configured-command output lines in the digest, defaulting to 5.
 `FM_SESSION_START_OPS_INBOX_SCAN_LIMIT` bounds retained home-event records inspected at startup, defaulting to 256, and reports an explicit sampled overflow when reached.
 `FM_OPS_INBOX_TIMEOUT` bounds each configured command invocation to 10 seconds by default.
 `FM_OPS_INBOX_OUTPUT_MAX_BYTES` bounds each configured command capture to 32768 bytes by default.
 `FM_OPS_INBOX_EVENT_SAMPLE_BYTES` bounds home-event classification and duplicate fingerprints to 4096 bytes by default.
 `FM_OPS_INBOX_SUPPRESSION_LIMIT` bounds both suppression artifacts to their 10 most recent records by default.
 `FM_OPS_INBOX_MARKER_LIMIT` bounds home-event records selected for each watcher fingerprint, defaulting to 64.
-`FM_OPS_INBOX_MARKER_SCAN_LIMIT` bounds the home-event records considered before that selection, defaulting to 256.
+`FM_OPS_INBOX_MARKER_SCAN_LIMIT` bounds the home-event records considered for watcher fingerprints and genuine-failure classification, defaulting to 256.
 When either limit is exceeded, the fingerprint records an overflow sentinel and the inbox must be retained below both limits before individual changes can be surfaced again.
 
 ## Pi Calm preference (config/calm)
