@@ -88,6 +88,9 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   Ship/scout spawns also refuse before task-state creation when the brief's
+#   # Task section is absent, empty, or only the unfilled {TASK} placeholder.
+#   Secondmate charters use # Charter instead and are exempt.
 #   Every ship/scout task worktree receives a pinned worktree-local author identity.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
@@ -631,6 +634,39 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+
+# Ship and scout briefs are scaffolded with a # Task section whose only body is
+# the {TASK} placeholder until firstmate fills it in. Secondmate charters use a
+# distinct # Charter shape, so they are deliberately excluded from this guard.
+validate_task_brief() {  # <brief-path>
+  local brief=$1 task_body compact
+  [ -f "$brief" ] || { echo "error: no brief at $brief" >&2; return 1; }
+  if ! task_body=$(awk '
+    /^# Task[[:space:]]*$/ { found = 1; in_task = 1; next }
+    in_task && /^# / { exit }
+    in_task { print }
+    END { if (!found) exit 1 }
+  ' "$brief"); then
+    echo "error: brief at $brief has no # Task section" >&2
+    return 1
+  fi
+  compact=$(printf '%s' "$task_body" | tr -d '[:space:]')
+  if [ -z "$compact" ]; then
+    echo "error: brief at $brief has an empty # Task section" >&2
+    return 1
+  fi
+  if [ "$compact" = '{TASK}' ]; then
+    echo "error: brief at $brief has a # Task section containing only the {TASK} placeholder" >&2
+    return 1
+  fi
+}
+
+# Validate ordinary task briefs before taking the per-task lock or allocating
+# task state, a worktree lease, or a worker process.
+if [ "$KIND" != secondmate ]; then
+  validate_task_brief "$DATA/$ID/brief.md" || exit 1
+fi
+
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
 if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   echo "error: another spawn is already creating task $ID" >&2
