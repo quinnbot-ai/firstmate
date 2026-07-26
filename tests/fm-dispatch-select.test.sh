@@ -574,6 +574,20 @@ ROWS
   pass "malformed arrays stay actionable validation errors and never enter random fallback"
 }
 
+test_kimi_profile_is_verified_without_effort() {
+  local out status
+  out=$("$ROOT/bin/fm-dispatch-select.sh" '{"harness":"kimi","model":"kimi-code/kimi-for-coding"}')
+  assert_profile "$out" '{"harness":"kimi","model":"kimi-code/kimi-for-coding"}' \
+    "verified Kimi profile should survive selector validation"
+
+  out=$("$ROOT/bin/fm-dispatch-select.sh" '{"harness":"kimi","effort":"high"}' 2>&1)
+  status=$?
+  expect_code 2 "$status" "Kimi effort should remain unsupported by the selector"
+  assert_contains "$out" "unsupported harness/effort pair" \
+    "Kimi effort rejection should explain the unsupported pair"
+  pass "Kimi is a verified selector harness and carries no effort axis"
+}
+
 test_implicit_array_picks_higher_min_provider
 test_rule_array_without_select_invokes_quota_axi
 test_legacy_explicit_selector_stays_compatible
@@ -596,5 +610,6 @@ test_account_change_during_quota_lookup_drops_claude_before_fallback
 test_unavailable_claude_only_candidates_fail_loudly
 test_non_claude_harness_keeps_its_anthropic_route
 test_quota_json_fixture_ignores_crew_profile
+test_kimi_profile_is_verified_without_effort
 
 echo "# all fm-dispatch-select tests passed"

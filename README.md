@@ -58,7 +58,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 ### Requirements
 
-- A verified agent harness: Claude Code, Grok, Pi, Codex, or OpenCode.
+- A verified primary agent harness: Claude Code, Grok, Pi, Codex, or OpenCode.
 - Git and the GitHub CLI, authenticated through `gh auth login`.
 - The CLI and dependencies for your selected runtime backend; tmux is the reference default.
 
@@ -68,7 +68,7 @@ Backend-specific setup is linked in [Documentation](#documentation).
 ### Recommended harnesses
 
 **Claude Code, Grok, and Pi are equal co-primary recommendations** for running the primary firstmate session.
-Claude Code and Grok use background-notify wake cycles; Pi uses its tracked primary watcher extension.
+Claude Code uses a tracked Stop hook for tokenless watcher re-arm and rewake, Grok uses background-notify wake cycles, and Pi uses its tracked primary watcher extension.
 All three have verified turn-end guard paths when launched with their documented setup.
 Pick whichever one matches your subscription and workflow.
 

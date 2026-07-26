@@ -87,9 +87,6 @@ now_ms() {
 # evidence; do not re-add a basename without clearing its reason.
 exclusion_reason() {
   case "$1" in
-    fm-continuity-pretool-check.test.sh)
-      printf '%s\n' 'background sleep 300 holder process for live-lock identity; process-leak risk under concurrent load'
-      ;;
     fm-test-isolation-proof.test.sh)
       printf '%s\n' 'isolation-proof harness contract itself; must not re-enter concurrent matrix'
       ;;
@@ -102,6 +99,12 @@ exclusion_reason() {
     fm-spawn-dispatch-profile.test.sh|fm-spawn-worktree-settle.test.sh)
       printf '%s\n' 'real isolated git worktrees plus spawn settle loops; gray zone until dedicated proof'
       ;;
+    fm-dispatch-select.test.sh)
+      printf '%s\n' 'retained fork selector changed during upstream reconciliation; serial until its concurrent proof is refreshed'
+      ;;
+    fm-continuity-pretool-check.test.sh)
+      printf '%s\n' 'retained watcher-status gate uses process and lock fixtures; keep serial until dedicated concurrent proof'
+      ;;
     fm-pr-check-security.test.sh)
       printf '%s\n' 'watcher lock / migration / poll security surface; intentional shared-lock class'
       ;;
@@ -110,6 +113,9 @@ exclusion_reason() {
       ;;
     fm-teardown.test.sh)
       printf '%s\n' 'landed-work + lock-race teardown matrix; keep serial with forge/git stress peers'
+      ;;
+    fm-herdr-session-cleanup.test.sh)
+      printf '%s\n' 'session-start task/presentation lock matrix; keep serial until dedicated concurrent proof'
       ;;
     fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-pi-watch-extension.test.sh|\
     fm-supervision-events.test.sh|fm-turnend-guard.test.sh|fm-wake-daemon-lifecycle-e2e.test.sh|\
@@ -121,7 +127,8 @@ exclusion_reason() {
     fm-afk-launch.test.sh)
       printf '%s\n' 'AFK lifecycle / inject path; exclusive daemon and pane control'
       ;;
-    fm-afk-pi-herdr-return-e2e.test.sh|fm-claude-continuity-live-e2e.test.sh|\
+    fm-afk-pi-herdr-return-e2e.test.sh|\
+    fm-claude-continuity-live-e2e.test.sh|fm-claude-stop-autoarm-live-e2e.test.sh|\
     fm-codex-continuity-live-e2e.test.sh|fm-grok-continuity-live-e2e.test.sh|\
     fm-opencode-primary-live-e2e.test.sh|fm-pi-primary-live-e2e.test.sh|\
     fm-send-secondmate-marker-herdr-e2e.test.sh)
@@ -130,7 +137,7 @@ exclusion_reason() {
     fm-backend-autodetect-smoke.test.sh|fm-backend-herdr-eventwait-smoke.test.sh|\
     fm-backend-herdr-presentation-e2e.test.sh|fm-backend-herdr-prune-safety-e2e.test.sh|\
     fm-backend-herdr-respawn-idem-e2e.test.sh|fm-backend-herdr-smoke.test.sh|\
-    fm-backend-herdr-workspace-per-home-e2e.test.sh)
+    fm-backend-herdr-workspace-per-home-e2e.test.sh|fm-herdr-session-cleanup-e2e.test.sh)
       printf '%s\n' 'real Herdr-gated; Herdr lane is a later phase'
       ;;
     fm-backend-cmux.test.sh|fm-backend-cmux-smoke.test.sh)
@@ -161,7 +168,6 @@ tests/fm-composer-ghost.test.sh
 tests/fm-composer-lib.test.sh
 tests/fm-crew-state.test.sh
 tests/fm-decision-hold-lifecycle.test.sh
-tests/fm-dispatch-select.test.sh
 tests/fm-ensure-agents-md.test.sh
 tests/fm-grok-harness.test.sh
 tests/fm-herdr-lab.test.sh
@@ -194,19 +200,23 @@ list_exclusions_for_report() {
       printf '%s\t%s\n' "$base" "$reason"
     fi
   done <<'EOF'
-fm-continuity-pretool-check.test.sh
 fm-test-isolation-proof.test.sh
 fm-backend-tmux-smoke.test.sh
 fm-backend.test.sh
 fm-spawn-dispatch-profile.test.sh
 fm-spawn-worktree-settle.test.sh
+fm-dispatch-select.test.sh
+fm-continuity-pretool-check.test.sh
 fm-pr-check-security.test.sh
+fm-pr-capability.test.sh
 fm-teardown.test.sh
 fm-watcher-lock.test.sh
 fm-wake-queue.test.sh
 fm-afk-inject-e2e.test.sh
 fm-backend-herdr-smoke.test.sh
 fm-backend-cmux-smoke.test.sh
+fm-claude-continuity-live-e2e.test.sh
+fm-claude-stop-autoarm-live-e2e.test.sh
 fm-pi-primary-live-e2e.test.sh
 EOF
 }

@@ -29,6 +29,7 @@ zsh
 
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
 Claude, Codex, OpenCode, and Grok were observed under their own process names.
+Kimi Code CLI 0.29.1 was observed under `kimi` on 2026-07-25.
 Pi remained a generic `node` process and is intentionally inconclusive.
 
 The OpenCode 1.18.4 busy-queue behavior and the tmux fallback are pinned by:
@@ -172,6 +173,15 @@ ok - real Herdr lab: concurrent cross-home recoveries replace exact husks under 
 ok - real Herdr lab: missing, renamed, and duplicate tokens trigger zero destructive or adoptive calls, and live duplicate risk refuses launch
 ok - real Herdr lab validation completed on Herdr 0.7.5 with the default-session tripwire intact
 ```
+
+The restored-shell session-start cleanup ran on 2026-07-24 against Herdr 0.7.5 protocol 17:
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
+  tests/fm-herdr-session-cleanup-e2e.test.sh
+```
+
+Observed guarantee: one exact home-local, journal-correlated, one-tab and one-pane childless idle shell was closed after restoration while the exact non-target focus and default fleet session remained unchanged, and a repeat run was a no-op.
 
 ### Composer and operational input
 

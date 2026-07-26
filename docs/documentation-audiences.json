@@ -316,6 +316,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/upstream-sync-2026-07-25-guard-audit.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/watcher-continuity.md",
       "audience": "operator-current"
     },

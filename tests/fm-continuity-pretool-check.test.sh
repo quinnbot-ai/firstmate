@@ -120,9 +120,11 @@ test_claude_hook_registration_preserves_stop_backstop() {
       | any(contains("fm-continuity-pretool-check.sh"))
   ' "$ROOT/.claude/settings.json" >/dev/null || fail "Claude settings omit the continuity PreToolUse hook"
   jq -e '
-    .hooks.Stop == [{"hooks":[{"type":"command","command":"\"$CLAUDE_PROJECT_DIR\"/bin/fm-turnend-guard.sh"}]}]
+    [.hooks.Stop[] | .hooks[].command]
+      | any(contains("fm-turnend-guard.sh --claude"))
+      and any(contains("fm-claude-stop-autoarm.sh"))
   ' "$ROOT/.claude/settings.json" >/dev/null || fail "Claude Stop turn-end backstop changed"
-  pass "Claude wires the continuity gate while preserving the existing Stop backstop byte-for-byte"
+  pass "Claude wires the continuity gate alongside the cooperative Stop guard and auto-arm"
 }
 
 test_gate_scope_and_recovery_exceptions

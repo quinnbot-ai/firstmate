@@ -49,7 +49,7 @@ The deeper tmux agent-liveness probe first verifies exact window membership, the
 A `session:window` target is checked against that session's `tmux list-windows -F '#{window_name}'` inventory.
 A recorded `tmux_window_id=` target (`@<window-id>`) is checked instead against the all-session `tmux list-windows -a -F '#{window_id} #{window_name}'` inventory, and because tmux recycles window ids the verdict is decided on the task's pinned `fm-<id>` label rather than the id alone: a present id whose label no longer matches is a reused window, an absent id whose label is still live means only that the recorded id went stale, and both are `unreadable`.
 An absent id is `missing` only when the pinned label is absent from that same inventory too, so a recycled or stale id never authorizes recovery on its own.
-It classifies recognized Claude, Codex, OpenCode, and Grok process names as `alive`, common shells as `dead`, an authoritatively absent window as `missing`, unreadable state as `unreadable`, and every other process as `ambiguous`.
+It classifies recognized Claude, Codex, OpenCode, Grok, and Kimi process names as `alive`, common shells as `dead`, an authoritatively absent window as `missing`, unreadable state as `unreadable`, and every other process as `ambiguous`.
 Only `dead` and `missing` authorize recovery because a false dead result could launch a duplicate agent.
 
 Pi runs through a generic `node` process name and cannot be attributed confidently from the tmux foreground-process field.
@@ -59,6 +59,10 @@ This is the active tmux liveness limitation.
 Agent liveness and composer safety are separate checks.
 The shared classifier in `bin/fm-composer-lib.sh` accepts a shell glyph as an empty agent composer only inside a verified bordered composer.
 A bare shell prompt is `unknown`, so away-mode escalation is never injected into a dead shell.
+
+Rendered busy detection is also harness-scoped.
+Task metadata selects only that harness's verified signature, so output from one harness cannot make another harness appear busy.
+The exact selection contract and safety rationale live in [architecture](architecture.md#runtime-session-backends), while the signatures live in [the harness-adapters skill](../.agents/skills/harness-adapters/SKILL.md).
 
 `bin/fm-tmux-lib.sh` owns exact type-and-submit mechanics.
 It types a message once and retries Enter only until the composer clears.
