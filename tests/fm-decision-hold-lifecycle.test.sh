@@ -325,7 +325,7 @@ test_pruned_resolved_hold_verifies_from_authoritative_archive() {
     || fail "could not create archived-resolution origin"
   write_origin_meta "$home" "$id"
   hold=$(run_decisions "$home" hold "$id" route \
-    --title "Choose the archive route" --reason "captain archive choice pending" --repo sample) \
+    --title "Choose the archive route" --reason "captain archive choice pending" --topic sample-archive-route --repo sample) \
     || fail "could not create archived-resolution hold"
   tasks_in "$home" add sample-archive-implementation "Apply the archive route" --kind ship --repo sample >/dev/null \
     || fail "could not create archived-resolution dependent"
