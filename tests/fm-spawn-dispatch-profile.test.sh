@@ -142,7 +142,7 @@ make_spawn_case() {
   touch "$home/state/.last-watcher-beat"
   for id in "$@"; do
     mkdir -p "$home/data/$id"
-    printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+    printf '# Task\nRun fixture task %s.\n' "$id" > "$home/data/$id/brief.md"
   done
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$launchlog"
 }
@@ -1749,6 +1749,83 @@ test_batch_forwards_shared_profile_flags() {
   pass "batch dispatch forwards shared --harness, --model, and --effort to every pair"
 }
 
+test_task_brief_guard_refuses_unfilled_or_empty_sections_without_task_state() {
+  local rec id brief kind out status
+  id='brief-guard-unfilled-z19'
+  rec=$(make_spawn_case brief-guard-unfilled codex "$id")
+  read_case_record "$rec"
+  brief="$HOME_DIR/data/$id/brief.md"
+
+  printf '# Task\n{TASK}\n\n# Setup\nFixture setup.\n' > "$brief"
+  for kind in ship scout; do
+    if [ "$kind" = scout ]; then
+      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+    else
+      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    fi
+    status=$?
+    expect_code 1 "$status" "a placeholder $kind brief must be refused"
+    assert_contains "$out" "error: brief at $brief has a # Task section containing only the {TASK} placeholder" \
+      "placeholder $kind refusal did not name the exact brief path and problem"
+    assert_absent "$HOME_DIR/state/$id.meta" "placeholder $kind refusal left task metadata"
+    assert_absent "$HOME_DIR/state/.spawn-$id.lock" "placeholder $kind refusal took a task lock"
+    [ ! -s "$LAUNCH_LOG" ] || fail "placeholder $kind refusal launched a worker"
+  done
+
+  printf '# Task\n \t\n\n# Setup\nFixture setup.\n' > "$brief"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "an empty task section must be refused"
+  assert_contains "$out" "error: brief at $brief has an empty # Task section" \
+    "empty-task refusal did not name the exact brief path and problem"
+  assert_absent "$HOME_DIR/state/$id.meta" "empty-task refusal left task metadata"
+  assert_absent "$HOME_DIR/state/.spawn-$id.lock" "empty-task refusal took a task lock"
+  [ ! -s "$LAUNCH_LOG" ] || fail "empty-task refusal launched a worker"
+  pass "unfilled and empty task briefs fail before task state or worker launch"
+}
+
+test_task_brief_guard_allows_filled_task_that_mentions_placeholder() {
+  local rec id brief out status
+  id='brief-guard-filled-z20'
+  rec=$(make_spawn_case brief-guard-filled codex "$id")
+  read_case_record "$rec"
+  brief="$HOME_DIR/data/$id/brief.md"
+  printf '# Task\nDocument why the literal {TASK} token is rejected only when it is the whole section body.\n\n# Setup\nFixture setup.\n' > "$brief"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "a filled task that mentions {TASK} must launch"
+  assert_contains "$out" "spawned $id harness=codex" "filled task brief did not launch"
+  assert_present "$HOME_DIR/state/$id.meta" "filled task brief did not write metadata"
+  pass "a filled task brief can mention {TASK} without being refused"
+}
+
+test_task_brief_guard_exempts_unfilled_secondmate_charter() {
+  local rec id sm brief out status
+  id='brief-guard-charter-z21'
+  rec=$(make_spawn_case brief-guard-charter codex "$id")
+  read_case_record "$rec"
+  brief="$HOME_DIR/data/$id/brief.md"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  rm -f "$brief"
+  FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_DATA_OVERRIDE="$HOME_DIR/data" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null \
+    || fail "secondmate charter scaffold failed"
+  grep -qxF '# Charter' "$brief" || fail "scaffolded charter lost its # Charter section"
+  grep -qxF '{TASK}' "$brief" || fail "scaffolded charter is not the unfilled shape this exemption covers"
+  ! grep -qE '^# Task[[:space:]]*$' "$brief" || fail "scaffolded charter unexpectedly carries a # Task section"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "a secondmate charter must be exempt from the # Task brief guard"
+  assert_contains "$out" "spawned $id harness=codex kind=secondmate" "exempt secondmate charter did not launch"
+  assert_present "$HOME_DIR/state/$id.meta" "exempt secondmate charter did not write metadata"
+  pass "an unfilled secondmate charter is exempt from the ship/scout task-brief guard"
+}
+
 test_active_dispatch_profile_does_not_block_secondmate_launch() {
   local rec id sm out status
   id=profile-secondmate-z16
@@ -2155,6 +2232,9 @@ test_opencode_threads_model_and_ignores_effort_axis
 test_pi_threads_model_and_max_effort
 test_quota_selected_default_array_reaches_spawn
 test_batch_forwards_shared_profile_flags
+test_task_brief_guard_refuses_unfilled_or_empty_sections_without_task_state
+test_task_brief_guard_allows_filled_task_that_mentions_placeholder
+test_task_brief_guard_exempts_unfilled_secondmate_charter
 test_active_dispatch_profile_does_not_block_secondmate_launch
 test_claude_crewmate_home_used_when_profile_ready
 test_claude_crewmate_home_absent_profile_matches_default_behavior

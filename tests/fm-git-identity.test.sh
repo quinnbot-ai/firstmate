@@ -60,7 +60,7 @@ make_spawn_fixture() {  # <name> <project>
   id="identity-$name"
   mkdir -p "$home/data/$id" "$home/state" "$home/config" "$projects" "$captain_home"
   printf '%s\n' claude > "$home/config/crew-harness"
-  printf 'brief\n' > "$home/data/$id/brief.md"
+  printf '# Task\nbrief\n' > "$home/data/$id/brief.md"
   touch "$home/state/.last-watcher-beat"
   git config --file "$global_config" user.name 'Captain Personal'
   git config --file "$global_config" user.email 'captain@example.invalid'

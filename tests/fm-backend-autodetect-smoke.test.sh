@@ -79,7 +79,7 @@ trap on_exit EXIT
 
 STATE="$TMP_ROOT/state"; DATA="$TMP_ROOT/data"; CONFIG="$TMP_ROOT/config"
 mkdir -p "$STATE" "$DATA/$ID" "$CONFIG"
-printf 'trivial autodetect-smoke brief: nothing to do.\n' > "$DATA/$ID/brief.md"
+printf '# Task\ntrivial autodetect-smoke brief: nothing to do.\n' > "$DATA/$ID/brief.md"
 
 PROJ="$TMP_ROOT/scratch-project"
 mkdir -p "$PROJ"
