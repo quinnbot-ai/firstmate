@@ -103,7 +103,7 @@ test_stale_and_failed_cross_check_are_refused() {
   jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .source_freshness=="stale source refused")' "$out" >/dev/null || fail "stale financial source was not refused"
   write_source "$one" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"pipeline_cost\":{\"amount\":1,\"unit\":\"USD\",\"status\":\"measured\"},\"realized_revenue\":{\"amount\":2,\"unit\":\"USD\",\"status\":\"measured\"}}}"
   run_ledger "$config" "$out" "$quota"
-  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .cross_check=="failed")' "$out" >/dev/null || fail "failed cross-check was presented as fact"
+  jq -e '.lanes[] | select(.id=="weho" and .source_freshness=="fresh") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .source_freshness=="fresh" and .cross_check=="failed")' "$out" >/dev/null || fail "failed cross-check was presented as fact or reported as a freshness failure"
   pass "stale and disagreeing financial sources are refused"
 }
 
@@ -237,6 +237,27 @@ test_stale_quota_provider_state_is_refused() {
   run_ledger "$config" "$out" "$quota"
   jq -e '[.lanes[] | select(.id=="fleet_operations") | .metrics[] | select((.name=="claude_quota_window" or .name=="codex_quota_window") and .amount==null and .source_freshness=="stale source refused")] | length==2' "$out" >/dev/null || fail "stale provider state or refresh time was published"
   pass "quota provider state and refresh time must be fresh"
+}
+
+test_stale_third_provider_window_reaches_the_lane_header() {
+  local old='2000-01-01T00:00:00Z' cost_one="$TMP_ROOT/quota-third/cost-one" cost_two="$TMP_ROOT/quota-third/cost-two"
+  local daily_one="$TMP_ROOT/quota-third/daily-one" daily_two="$TMP_ROOT/quota-third/daily-two"
+  local config="$TMP_ROOT/quota-third/config.json" out="$TMP_ROOT/quota-third/out.json" quota="$TMP_ROOT/quota-third/quota" date
+  date=$(date -u +%Y-%m-%d)
+  write_source "$cost_one" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"attributable_crew_session_cost\":{\"amount\":7,\"unit\":\"USD\",\"status\":\"measured\"}}}"
+  write_source "$cost_two" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"attributable_crew_session_cost\":{\"amount\":7,\"unit\":\"USD\",\"status\":\"measured\"}}}"
+  write_source "$daily_one" "{\"source\":\"billing-export\",\"observedAt\":\"$NOW\",\"date\":\"$date\",\"currency\":\"USD\",\"crewSessions\":[]}"
+  write_source "$daily_two" "{\"source\":\"run-audit\",\"observedAt\":\"$NOW\",\"date\":\"$date\",\"currency\":\"USD\",\"crewSessions\":[]}"
+  mkdir -p "$(dirname "$config")"
+  cat > "$config" <<JSON
+{"maxAgeSeconds":900,"lanes":{"fleet_operations":{"cost_sources":[{"command":["$cost_one"]},{"command":["$cost_two"]}],"daily_sources":[{"command":["$daily_one"]},{"command":["$daily_two"]}]}}}
+JSON
+  write_source "$quota" "{\"generatedAt\":\"$NOW\",\"providers\":[{\"provider\":\"claude\",\"state\":{\"status\":\"fresh\",\"stale\":false,\"refreshedAt\":\"$NOW\"},\"windows\":[{\"percentRemaining\":80}]},{\"provider\":\"codex\",\"state\":{\"status\":\"fresh\",\"stale\":false,\"refreshedAt\":\"$NOW\"},\"windows\":[{\"percentRemaining\":60}]},{\"provider\":\"gemini\",\"state\":{\"status\":\"fresh\",\"stale\":false,\"refreshedAt\":\"$old\"},\"windows\":[{\"percentRemaining\":40}]}]}"
+  run_ledger "$config" "$out" "$quota"
+  jq -e '[.lanes[] | select(.id=="fleet_operations") | .metrics[] | select(.source_freshness=="fresh")] | length == 3' "$out" >/dev/null || fail "the fleet metrics were not all fresh before the quota-window check"
+  jq -e '[.lanes[] | select(.id=="fleet_operations") | .daily_fleet_line.quota_windows[] | select(.provider=="gemini" and .status=="unavailable" and .source_freshness=="stale source refused")] | length == 1' "$out" >/dev/null || fail "a stale third-provider window was published as a measurement"
+  jq -e '.lanes[] | select(.id=="fleet_operations" and .source_freshness=="stale source refused")' "$out" >/dev/null || fail "the fleet lane header read fresh over a refused quota window"
+  pass "a refused quota window outside the named pair reaches the lane header"
 }
 
 test_malformed_source_containers_render_unavailable() {
@@ -433,6 +454,7 @@ test_live_helper_timestamps_are_fresh
 test_untrusted_metric_states_and_duplicate_sources_are_refused
 test_stale_quota_provider_state_is_refused
 test_malformed_source_containers_render_unavailable
+test_stale_third_provider_window_reaches_the_lane_header
 test_observations_are_rechecked_at_publication
 test_quota_percentages_must_be_in_range
 test_malformed_source_timeouts_render_unavailable

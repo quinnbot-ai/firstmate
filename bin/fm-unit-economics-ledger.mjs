@@ -36,8 +36,11 @@
 // unit says `source metric untrusted`. A diagnosed source failure is
 // reported ahead of an insufficient source count, so a single broken helper
 // stays distinguishable from an unconfigured pair. Each lane's own
-// `source_freshness` repeats the first non-fresh reason among the figures it
-// publishes, so no lane header reads fresh over a refused metric or daily line.
+// `source_freshness` repeats the first non-fresh reason among the source states
+// it publishes - its metrics, its daily line, and its quota windows - so no lane
+// header reads fresh over a refused one. Corroboration over sources that were
+// all fresh is a disagreement rather than a freshness failure, so it is carried
+// by `cross_check` and leaves both the metric and its lane header fresh.
 // The fixed fleet_operations lane reads quota-axi --json fresh at invocation
 // time and publishes the lowest in-range (0-100) percentRemaining of a provider
 // whose own reported state is fresh; a provider without a `state.refreshedAt`
@@ -347,12 +350,13 @@ function fleetLane(input, maxAgeSeconds, publicationTime, date, dateIsToday) {
     corroboratedMetric('attributable_crew_session_cost', 'USD', costSources, input.costSourceFailure),
   ];
   const daily = dailyFleetLine(dailySources, date, input.dailySourceFailure);
+  const windows = quotaWindows(body, maxAgeSeconds, publicationTime, dateIsToday);
   return {
     id: 'fleet_operations',
     label: laneSpecs.fleet_operations.label,
-    source_freshness: laneFreshness([...metrics, daily]),
+    source_freshness: laneFreshness([...metrics, daily, ...windows]),
     metrics,
-    daily_fleet_line: { date, quota_windows: quotaWindows(body, maxAgeSeconds, publicationTime, dateIsToday), ...daily },
+    daily_fleet_line: { date, quota_windows: windows, ...daily },
   };
 }
 function markdown(artifact) {
