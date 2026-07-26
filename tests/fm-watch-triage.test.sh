@@ -150,7 +150,7 @@ test_scan_captain_relevant_statuses_classifier() {
 }
 
 test_classifier_primitives() {
-  local dir state open activity
+  local dir state open activity line
   dir=$(make_case classify-primitives); state="$dir/state"
   printf 'working: a\n\ndone: b\n\n' > "$state/x.status"
   [ "$(last_status_line "$state/x.status")" = "done: b" ] || fail "last_status_line did not return the last non-blank line"
@@ -193,6 +193,25 @@ test_classifier_primitives() {
     && fail "a drifted delivery detail was still recognized as delivery pending"
   FM_CREW_STATE_BIN="$dir/drifted-state" status_is_terminal_verb "done: committed abc1234 with targeted tests" "$state/pending.status" \
     || fail "a drifted delivery detail did not fail closed to terminal"
+  # The commit-only shape is the cheap pre-filter: a done that cannot possibly read
+  # as delivery pending must never reach the bounded reader at all. This stub would
+  # claim delivery pending for ANY id, so the assertions below hold only if the
+  # short-circuit happens before the exec.
+  printf '#!/usr/bin/env bash\ntouch "%s"\nprintf "%%s\\n" "state: working · source: status-log · %s"\n' \
+    "$dir/reader-ran" "$FM_CLASSIFY_DELIVERY_PENDING_DETAIL" > "$dir/tattling-state"
+  chmod +x "$dir/tattling-state"
+  for line in "done: PR https://x/pull/76 checks green" "done: merged upstream" \
+              "done: committed the docs pass" "working: committed abc1234 so far"; do
+    printf '%s\n' "$line" > "$state/prefilter.status"
+    FM_CREW_STATE_BIN="$dir/tattling-state" status_done_needs_nomistakes_delivery "$state/prefilter.status" \
+      && fail "a non commit-only status read as delivery pending: $line"
+    [ ! -e "$dir/reader-ran" ] || fail "the bounded reader was exec'd for a status the shape gate rejects: $line"
+  done
+  printf 'done: committed abc1234 with targeted tests\n' > "$state/prefilter.status"
+  FM_CREW_STATE_BIN="$dir/tattling-state" status_done_needs_nomistakes_delivery "$state/prefilter.status" \
+    || fail "the commit-only shape did not reach the reader"
+  [ -e "$dir/reader-ran" ] || fail "the commit-only shape never exec'd the bounded reader"
+  rm -f "$dir/reader-ran"
   status_is_captain_relevant "merged" || fail "legacy bare merged free-text not captain-relevant"
   status_is_captain_relevant "PR ready https://x/pull/2" \
     || fail "legacy bare PR ready free-text not captain-relevant"

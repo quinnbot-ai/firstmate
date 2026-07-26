@@ -443,17 +443,9 @@ nm_branch_has_no_runs() {  # <branch>
   return 0
 }
 
-# The implementation-complete status used by ship briefs is deliberately narrow:
-# a done note must explicitly name a commit SHA and must not carry a URL. This
-# avoids reclassifying a genuine PR completion that happens to mention a commit.
-status_done_names_commit_only() {  # <status-line>
-  local line=$1 note
-  [ "$(status_line_verb "$line")" = "done" ] || return 1
-  note=$(status_line_note "$line")
-  printf '%s\n' "$note" | grep -Eqi '(^|[^[:alnum:]])commit(ted)?([^[:alnum:]]|$)' || return 1
-  printf '%s\n' "$note" | grep -Eqi '(^|[^[:alnum:]])[0-9a-f]{7,40}([^[:alnum:]]|$)' || return 1
-  ! printf '%s\n' "$note" | grep -Eqi 'https?://'
-}
+# status_done_names_commit_only (the commit-only done shape) is owned by
+# bin/fm-classify-lib.sh, sourced above: it is the same shape gate the classifier
+# uses as its pre-filter, so the producer here and that consumer cannot diverge.
 
 # CREW_BRANCH is empty at detached HEAD (a just-spawned crew, or a scout's
 # scratch worktree); with no branch there is no run to attribute to this crew.

@@ -144,20 +144,41 @@ last_status_line() {
 # read the same string and cannot silently drift apart.
 FM_CLASSIFY_DELIVERY_PENDING_DETAIL='delivery pending: no-mistakes run not started'
 
+# The implementation-complete status used by ship briefs is deliberately narrow:
+# a done note must explicitly name a commit SHA and must not carry a URL. This
+# avoids reclassifying a genuine PR completion that happens to mention a commit.
+# Pure (no subprocess beyond grep), and the exact shape gate bin/fm-crew-state.sh
+# applies to the same last line before it can report delivery pending, so it also
+# serves as this module's cheap pre-filter below.
+status_done_names_commit_only() {  # <status-line>
+  local line=$1 note
+  [ "$(status_line_verb "$line")" = "done" ] || return 1
+  note=$(status_line_note "$line")
+  printf '%s\n' "$note" | grep -Eqi '(^|[^[:alnum:]])commit(ted)?([^[:alnum:]]|$)' || return 1
+  printf '%s\n' "$note" | grep -Eqi '(^|[^[:alnum:]])[0-9a-f]{7,40}([^[:alnum:]]|$)' || return 1
+  ! printf '%s\n' "$note" | grep -Eqi 'https?://'
+}
+
 # 0 if a status event is the no-mistakes implementation-complete shape that still
 # needs delivery. The current-state reader is the authority for the branch run
 # lookup, so this stays fail-closed: an unavailable or unclassifiable reader never
 # changes a terminal done event. Callers pass the status file so mode metadata and
 # task identity remain bound to the same durable record.
+# Cost ladder, cheapest first: only a done verb whose note is the commit-only shape
+# can ever read as delivery pending, so the bounded reader exec is reached solely
+# for that shape - a PR-bearing completion, the dominant done, never pays for it.
+# The reader gets no stdin: callers invoke this from `while read` loops fed by a
+# pipe, and a subprocess reading that pipe would silently truncate the loop.
 status_done_needs_nomistakes_delivery() {  # <status-file> [status-line]
   local file=$1 line=${2:-} id state_line
   [ -f "$file" ] || return 1
   [ -n "$line" ] || line=$(last_status_line "$file")
   [ "$(status_line_verb "$line")" = "done" ] || return 1
+  status_done_names_commit_only "$line" || return 1
   id=$(basename "$file")
   id=${id%.status}
   [ -n "$id" ] || return 1
-  state_line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || return 1
+  state_line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null </dev/null) || return 1
   case "$state_line" in
     "state: working"*"source: status-log"*"$FM_CLASSIFY_DELIVERY_PENDING_DETAIL") return 0 ;;
     *) return 1 ;;
@@ -483,7 +504,7 @@ crew_absorb_class_from_line() {  # <id> <line>
 crew_absorb_class() {  # <id>
   local id=$1 line
   [ -n "$id" ] || { printf 'none'; return; }
-  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null </dev/null) || true
   crew_absorb_class_from_line "$id" "$line"
 }
 

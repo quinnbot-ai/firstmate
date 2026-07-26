@@ -364,6 +364,32 @@ test_delivered_done_signal_keeps_plain_framing() {
   pass "a delivered no-mistakes done keeps its plain completion framing"
 }
 
+# The catch-all scan's loop is fed by process substitution, so its body inherits
+# that pipe as stdin. The bounded reader now runs inside that body, and a reader
+# (or a CLI beneath it) that reads stdin would swallow the remaining rows and
+# silently drop every later crew from the digest.
+test_catchall_scan_survives_a_stdin_reading_reader() {
+  local dir state reader task
+  dir=$(make_supercase scan-stdin-drain)
+  state="$dir/state"
+  reader="$dir/fm-crew-state.sh"
+  printf '#!/usr/bin/env bash\ncat >/dev/null\nprintf "%%s\\n" "state: working · source: status-log · %s"\n' \
+    "$FM_CLASSIFY_DELIVERY_PENDING_DETAIL" > "$reader"
+  chmod +x "$reader"
+  for task in drain-a drain-b drain-c; do
+    printf 'done: committed abc1234 with targeted tests\n' > "$state/$task.status"
+  done
+  rm -f "$state/.subsuper-last-scan"
+  FM_CREW_STATE_BIN="$reader" FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  for task in drain-a drain-b drain-c; do
+    grep -qF "$task.status" "$state/.subsuper-escalations" \
+      || fail "the catch-all scan lost $task after a reader consumed stdin"
+    [ -e "$state/.subsuper-seen-status-$(printf '%s' "$task" | tr ':/.' '___')" ] \
+      || fail "the catch-all scan never marked $task seen"
+  done
+  pass "the catch-all scan escalates every crew even when the reader drains stdin"
+}
+
 # A DECLARED external-wait pause (paused:) is neither a wedge nor a terminal
 # escalation: classify_stale returns the `pause` action so handle_wake records a
 # pause marker (long re-surface cadence) rather than a wedge stale marker.
@@ -1979,6 +2005,7 @@ test_stale_terminal_escalates
 test_no_mistakes_delivery_pending_stale_escalates_for_delivery
 test_no_mistakes_delivery_pending_first_escalation_carries_framing
 test_delivered_done_signal_keeps_plain_framing
+test_catchall_scan_survives_a_stdin_reading_reader
 test_stale_paused_classifies_pause
 test_handle_wake_paused_records_pause_marker
 test_handle_wake_batched_stale_rechecks_dispatch_per_lane
