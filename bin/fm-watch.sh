@@ -762,7 +762,9 @@ heartbeat_scan_finds_actionable() {
 # Poll their compact fingerprint every cycle while a regular task is in flight,
 # then at the existing heartbeat cadence otherwise.  A changed fingerprint is
 # only marked seen after its durable wake record is appended, preventing both a
-# missed event on interruption and a hot loop on an unchanged inbox.
+# missed event on interruption and a hot loop on an unchanged inbox. Routine
+# and duplicate changes update the same baseline without waking and leave a
+# current suppression record for the next session-start inspection.
 ops_inbox_tasks_in_flight() {
   local meta kind
   for meta in "$STATE"/*.meta; do
@@ -775,27 +777,49 @@ ops_inbox_tasks_in_flight() {
 }
 
 ops_inbox_changed() {
-  local fingerprint previous
+  local fingerprint previous actionable previous_action config
+  config=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
   fingerprint=$(fm_ops_inbox_fingerprint "$FM_HOME" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}")
   previous=$(cat "$STATE/.hash-ops-inbox" 2>/dev/null || true)
+  actionable=$(fm_ops_inbox_actionable_fingerprint "$FM_HOME" "$config")
+  previous_action=$(cat "$STATE/.hash-ops-inbox-actionable" 2>/dev/null || true)
+  FM_OPS_INBOX_FINGERPRINT=$fingerprint
+  FM_OPS_INBOX_ACTIONABLE_FINGERPRINT=$actionable
   if [ -z "$previous" ]; then
-    # A watcher first armed against an empty inbox establishes its baseline
-    # silently.  Existing events or a broken configured command still surface,
-    # while normal task tests and an empty new home do not manufacture a wake.
-    FM_OPS_INBOX_FINGERPRINT=$fingerprint
-    if ! fm_ops_inbox_has_events "$FM_HOME" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"; then
+    # A watcher first armed against a routine or empty inbox establishes its
+    # baseline silently. Existing genuine failures or a broken configured
+    # command still surface, while normal task tests do not manufacture a wake.
+    if ! fm_ops_inbox_has_genuine_failures "$FM_HOME" "$config"; then
       mark_ops_inbox_seen
       return 1
     fi
     return 0
   fi
   [ "$fingerprint" != "$previous" ] || return 1
-  FM_OPS_INBOX_FINGERPRINT=$fingerprint
+  if ! fm_ops_inbox_has_genuine_failures "$FM_HOME" "$config"; then
+    FM_OPS_INBOX_SUPPRESSION='routine event'
+    mark_ops_inbox_seen
+    record_ops_inbox_suppression
+    return 1
+  fi
+  if [ "$actionable" = "$previous_action" ]; then
+    FM_OPS_INBOX_SUPPRESSION='duplicate genuine failure'
+    mark_ops_inbox_seen
+    record_ops_inbox_suppression
+    return 1
+  fi
   return 0
 }
 
 mark_ops_inbox_seen() {
   printf '%s\n' "$FM_OPS_INBOX_FINGERPRINT" > "$STATE/.hash-ops-inbox"
+  printf '%s\n' "$FM_OPS_INBOX_ACTIONABLE_FINGERPRINT" > "$STATE/.hash-ops-inbox-actionable"
+}
+
+record_ops_inbox_suppression() {
+  [ -n "${FM_OPS_INBOX_SUPPRESSION:-}" ] || return 0
+  printf '%s\t%s\n' "$(date +%s)" "$FM_OPS_INBOX_SUPPRESSION" > "$STATE/.ops-inbox-suppressed"
+  unset FM_OPS_INBOX_SUPPRESSION
 }
 
 surface_ops_inbox_change() {

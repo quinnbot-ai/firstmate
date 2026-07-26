@@ -77,6 +77,8 @@ FM_OPS_INBOX_MARKER_LIMIT=${FM_OPS_INBOX_MARKER_LIMIT:-64}
 case "$FM_OPS_INBOX_MARKER_LIMIT" in ''|*[!0-9]*|0) FM_OPS_INBOX_MARKER_LIMIT=64 ;; esac
 FM_OPS_INBOX_MARKER_SCAN_LIMIT=${FM_OPS_INBOX_MARKER_SCAN_LIMIT:-256}
 case "$FM_OPS_INBOX_MARKER_SCAN_LIMIT" in ''|*[!0-9]*|0) FM_OPS_INBOX_MARKER_SCAN_LIMIT=256 ;; esac
+FM_OPS_INBOX_EVENT_SAMPLE_BYTES=${FM_OPS_INBOX_EVENT_SAMPLE_BYTES:-4096}
+case "$FM_OPS_INBOX_EVENT_SAMPLE_BYTES" in ''|*[!0-9]*|0) FM_OPS_INBOX_EVENT_SAMPLE_BYTES=4096 ;; esac
 fm_ops_inbox_external_run() {
   local command=$1
   perl -e '
@@ -230,30 +232,77 @@ fm_ops_inbox_home_marker() {
   fi
 }
 
-fm_ops_inbox_home_has_events() {
-  local home=$1 dir marker
-  dir=$(fm_ops_inbox_home_dir "$home")
-  marker=$(fm_ops_inbox_home_marker_path "$home")
-  [ -d "$dir" ] || return 1
-  [ -n "$(find "$dir" -mindepth 1 -maxdepth 2 -type f ! -path "$marker" -print -quit 2>/dev/null)" ]
+fm_ops_inbox_event_is_routine() {
+  local path=$1
+  dd if="$path" bs="$FM_OPS_INBOX_EVENT_SAMPLE_BYTES" count=1 2>/dev/null \
+    | awk '
+        /^[[:space:]]*(classification|disposition):[[:space:]]*routine[[:space:]]*$/ { found=1; exit }
+        END { exit !found }
+      '
 }
 
-# fm_ops_inbox_has_events <home> <config-dir>
-# The configured list-command contract starts with `unacked_criticals: <n>`.
-# A malformed or failed configured command is treated as an event so its one
-# durable wake cannot be hidden by a bad local seam.
-fm_ops_inbox_has_events() {
-  local home=$1 config=$2 output rc count
-  fm_ops_inbox_home_has_events "$home" && return 0
+fm_ops_inbox_event_signal() {
+  local path=$1 sample
+  fm_ops_inbox_event_is_routine "$path" && return 1
+  sample=$(dd if="$path" bs="$FM_OPS_INBOX_EVENT_SAMPLE_BYTES" count=1 2>/dev/null) || return 1
+  printf 'home:'
+  printf '%s' "$sample" | fm_ops_inbox_hash
+}
+
+# fm_ops_inbox_has_genuine_failures <home> <config-dir>
+# Routine home events declare `classification: routine` or `disposition:
+# routine` within their first sample. The configured list-command contract
+# starts with `unacked_criticals: <n>`; its status is not a failure signal when
+# the count is zero. A malformed list result still surfaces because the local
+# failure-reporting seam is no longer trustworthy.
+fm_ops_inbox_has_genuine_failures() {
+  local home=$1 config=$2 record path output rc count
+  while IFS= read -r record; do
+    [ "$record" = '__FM_OPS_INBOX_OVERFLOW__' ] && return 0
+    path=${record#*$'\t'}
+    fm_ops_inbox_event_is_routine "$path" || return 0
+  done < <(fm_ops_inbox_home_records "$home" "$FM_OPS_INBOX_MARKER_SCAN_LIMIT")
+
   fm_ops_inbox_external_command "$config" >/dev/null || return 1
   output=$(fm_ops_inbox_external_output "$config")
   rc=$?
   count=$(printf '%s\n' "$output" | awk '/^unacked_criticals:[[:space:]]*[0-9]+$/ { sub(/^unacked_criticals:[[:space:]]*/, ""); print; exit }')
   case "$count" in
     ''|*[!0-9]*) return 0 ;;
-    0) [ "$rc" -eq 0 ] && return 1; return 0 ;;
+    0) return 1 ;;
     *) return 0 ;;
   esac
+}
+
+# fm_ops_inbox_actionable_fingerprint <home> <config-dir>
+# Hashes only genuine failure identities, so copied event records with the same
+# body collapse to one wake until the inbox clears. The external listing has a
+# single identity while its critical count is nonzero, which coalesces a burst
+# of list updates into the first actionable wake.
+fm_ops_inbox_actionable_fingerprint() {
+  local home=$1 config=$2 record path signal command output rc count
+  {
+    while IFS= read -r record; do
+      if [ "$record" = '__FM_OPS_INBOX_OVERFLOW__' ]; then
+        printf '%s\n' 'home:overflow'
+        continue
+      fi
+      path=${record#*$'\t'}
+      signal=$(fm_ops_inbox_event_signal "$path") || continue
+      printf '%s\n' "$signal"
+    done < <(fm_ops_inbox_home_records "$home" "$FM_OPS_INBOX_MARKER_SCAN_LIMIT")
+
+    if command=$(fm_ops_inbox_external_command "$config"); then
+      output=$(fm_ops_inbox_external_output "$config")
+      rc=$?
+      count=$(printf '%s\n' "$output" | awk '/^unacked_criticals:[[:space:]]*[0-9]+$/ { sub(/^unacked_criticals:[[:space:]]*/, ""); print; exit }')
+      case "$count" in
+        ''|*[!0-9]*) printf 'external:invalid:%s:' "$rc"; printf '%s' "$output" | fm_ops_inbox_hash ;;
+        0) ;;
+        *) printf '%s\n' 'external:critical' ;;
+      esac
+    fi
+  } | LC_ALL=C sort -u | fm_ops_inbox_hash
 }
 
 # fm_ops_inbox_fingerprint <home> <config-dir>

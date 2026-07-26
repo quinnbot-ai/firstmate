@@ -1637,6 +1637,65 @@ test_ops_inbox_new_event_wakes_on_heartbeat_without_tasks() {
   pass "a new operations-inbox event wakes on heartbeat when no task is in flight"
 }
 
+test_ops_inbox_routine_nonzero_exit_is_suppressed() {
+  local dir state fakebin out home command pid
+  dir=$(make_case ops-inbox-routine-nonzero); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  home="$dir/home"; command="$dir/routine-inbox"
+  mkdir -p "$home/ops-inbox" "$home/config"
+  printf 'project=firstmate\nkind=ship\n' > "$state/ops.meta"
+  seed_ops_inbox_fingerprint "$home" "$state"
+  cat > "$command" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'unacked_criticals: 0' 'parked download exited 18 as designed'
+exit 18
+SH
+  chmod +x "$command"
+  printf '%s\n' "$command" > "$home/config/ops-inbox-cmd"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 30 || fail "routine nonzero exit woke the watcher: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "routine nonzero exit queued a wake"; }
+  grep -F $'\troutine event' "$state/.ops-inbox-suppressed" >/dev/null \
+    || { reap "$pid"; fail "routine nonzero exit suppression was not observable"; }
+  [ -f "$home/config/ops-inbox-cmd" ] || { reap "$pid"; fail "routine inbox listing was not retained for the digest"; }
+  reap "$pid"
+  pass "a routine nonzero-exit inbox listing is suppressed but remains observable"
+}
+
+test_ops_inbox_duplicate_burst_collapses_to_one_wake() {
+  local dir state fakebin out home pid
+  dir=$(make_case ops-inbox-duplicate-burst); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  home="$dir/home"
+  mkdir -p "$home/ops-inbox" "$home/config"
+  printf 'project=firstmate\nkind=ship\n' > "$state/ops.meta"
+  seed_ops_inbox_fingerprint "$home" "$state"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 15 || { reap "$pid"; fail "watcher exited before the first failure event: $(cat "$out")"; }
+  printf 'replica download failure\n' > "$home/ops-inbox/first.event"
+  wait_for_exit "$pid" 40 || fail "first genuine failure did not wake the watcher"
+
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_live "$pid" 15 || { reap "$pid"; fail "watcher exited before duplicate burst event: $(cat "$out")"; }
+  printf 'replica download failure\n' > "$home/ops-inbox/repeated.event"
+  wait_live "$pid" 30 || fail "duplicate failure burst produced a second wake: $(cat "$out")"
+  grep -F $'\tduplicate genuine failure' "$state/.ops-inbox-suppressed" >/dev/null \
+    || { reap "$pid"; fail "duplicate suppression was not observable"; }
+  [ -f "$home/ops-inbox/repeated.event" ] || { reap "$pid"; fail "duplicate event was removed instead of retained"; }
+  reap "$pid"
+  pass "a duplicate operations-inbox burst collapses to one wake and retains evidence"
+}
+
 test_ops_inbox_fingerprint_distinguishes_same_second_same_size_rewrite() {
   local dir home before after
   dir=$(make_case ops-inbox-subsecond); home="$dir/home"
@@ -2316,6 +2375,8 @@ test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_ops_inbox_new_event_wakes_with_task_in_flight
 test_ops_inbox_new_event_wakes_on_heartbeat_without_tasks
+test_ops_inbox_routine_nonzero_exit_is_suppressed
+test_ops_inbox_duplicate_burst_collapses_to_one_wake
 test_ops_inbox_fingerprint_distinguishes_same_second_same_size_rewrite
 test_ops_inbox_fingerprint_uses_bounded_two_level_file_markers
 test_ops_inbox_marker_scan_counts_discovered_paths
