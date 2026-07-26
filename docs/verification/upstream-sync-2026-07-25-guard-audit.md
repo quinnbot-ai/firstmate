@@ -2,11 +2,12 @@
 
 Audience: maintainer verification.
 
-This audit covers the merge of upstream `4d6992a293bc584381b4c746023a6d49a94b12cf` into current fork main `485ae998dbdf3cd91059dd55ec3b38ba42c4ce40`.
+Last verified: 2026-07-26.
+This audit covers the merge of upstream `4d6992a293bc584381b4c746023a6d49a94b12cf` into current fork main `0fe999bcc7f89b7598602aadf84ae514be9e4195`.
 
 ## Mechanical preservation checks
 
-- `git diff --name-status 485ae998dbdf3cd91059dd55ec3b38ba42c4ce40 -- bin` reports no deleted fork-side `bin/` path in the merged tree.
+- `git diff --name-status 0fe999bcc7f89b7598602aadf84ae514be9e4195 -- bin` reports no deleted fork-side `bin/` path in the merged tree.
 - A sorted shell-function inventory compared every fork-base `bin/` file with the merged worktree and found no removed function except `harness_pid` and `holder_alive` from `bin/fm-lock.sh`.
 - The two lock functions were preserved under the shared names `fm_harness_ancestry_pid` and `fm_harness_pid_alive` in upstream's new `bin/fm-session-lock-lib.sh`.
 - The merged lock path adds atomic acquisition, malformed-path refusal, write probes, and ownership verification without weakening the fork's live-harness ownership test.
@@ -25,6 +26,7 @@ This audit covers the merge of upstream `4d6992a293bc584381b4c746023a6d49a94b12c
 - `tests/fm-merge-local.test.sh` remains present as the regression proof for landed PR 35.
 - `tests/fm-pr-capability.test.sh` remains present as the regression proof for landed PR 36.
 - `bin/fm-pr-capability.sh` and its early no-mistakes delivery gate remain present.
+- PR 37's commit-only no-mistakes delivery-pending classification remains present in its supervision code, documentation, and existing test files.
 
 ## Deferred upstream deletions
 
