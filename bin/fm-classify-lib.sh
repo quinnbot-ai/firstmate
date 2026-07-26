@@ -138,15 +138,67 @@ last_status_line() {
   grep -v '^[[:space:]]*$' "$f" 2>/dev/null | tail -1
 }
 
+# The detail bin/fm-crew-state.sh emits for a no-mistakes ship whose
+# implementation commit exists but whose pipeline never started. This module owns
+# the wording so the producer (fm-crew-state.sh's emit) and the consumers below
+# read the same string and cannot silently drift apart.
+FM_CLASSIFY_DELIVERY_PENDING_DETAIL='delivery pending: no-mistakes run not started'
+
+# The implementation-complete status used by ship briefs is deliberately narrow:
+# a done note must explicitly name a commit SHA and must not carry a URL. This
+# avoids reclassifying a genuine PR completion that happens to mention a commit.
+# Pure (no subprocess beyond grep), and the exact shape gate bin/fm-crew-state.sh
+# applies to the same last line before it can report delivery pending, so it also
+# serves as this module's cheap pre-filter below.
+status_done_names_commit_only() {  # <status-line>
+  local line=$1 note
+  [ "$(status_line_verb "$line")" = "done" ] || return 1
+  note=$(status_line_note "$line")
+  printf '%s\n' "$note" | grep -Eqi '(^|[^[:alnum:]])commit(ted)?([^[:alnum:]]|$)' || return 1
+  printf '%s\n' "$note" | grep -Eqi '(^|[^[:alnum:]])[0-9a-f]{7,40}([^[:alnum:]]|$)' || return 1
+  ! printf '%s\n' "$note" | grep -Eqi 'https?://'
+}
+
+# 0 if a status event is the no-mistakes implementation-complete shape that still
+# needs delivery. The current-state reader is the authority for the branch run
+# lookup, so this stays fail-closed: an unavailable or unclassifiable reader never
+# changes a terminal done event. Callers pass the status file so mode metadata and
+# task identity remain bound to the same durable record.
+# Cost ladder, cheapest first: status_done_names_commit_only (pure, and the sole
+# owner of the done-verb precondition) must hold before the bounded reader exec is
+# reached at all, so a PR-bearing completion - the dominant done - never pays for it.
+# The reader gets no stdin: callers invoke this from `while read` loops fed by a
+# pipe, and a subprocess reading that pipe would silently truncate the loop.
+status_done_needs_nomistakes_delivery() {  # <status-file> [status-line]
+  local file=$1 line=${2:-} id state_line
+  [ -f "$file" ] || return 1
+  [ -n "$line" ] || line=$(last_status_line "$file")
+  status_done_names_commit_only "$line" || return 1
+  id=$(basename "$file")
+  id=${id%.status}
+  [ -n "$id" ] || return 1
+  state_line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null </dev/null) || return 1
+  case "$state_line" in
+    "state: working"*"source: status-log"*"$FM_CLASSIFY_DELIVERY_PENDING_DETAIL") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # 0 if the given (last) status line's leading verb is a real terminal captain verb
-# (done, needs-decision, blocked, failed). Free-text tokens alone never count here;
-# callers that need legacy free-text matching use status_is_captain_relevant.
-status_is_terminal_verb() {
-  local line=$1 verb
+# (done, needs-decision, blocked, failed). A commit-only no-mistakes done event
+# with no started pipeline is supervisor-actionable but not terminal. Free-text
+# tokens alone never count here; callers that need legacy free-text matching use
+# status_is_captain_relevant.
+status_is_terminal_verb() {  # <status-line> [status-file]
+  local line=$1 file=${2:-} verb
   [ -n "$line" ] || return 1
   verb=$(status_line_verb "$line")
   case "$verb" in
-    done|needs-decision|blocked|failed) return 0 ;;
+    done)
+      [ -z "$file" ] || ! status_done_needs_nomistakes_delivery "$file" "$line" || return 1
+      return 0
+      ;;
+    needs-decision|blocked|failed) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -451,7 +503,7 @@ crew_absorb_class_from_line() {  # <id> <line>
 crew_absorb_class() {  # <id>
   local id=$1 line
   [ -n "$id" ] || { printf 'none'; return; }
-  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null </dev/null) || true
   crew_absorb_class_from_line "$id" "$line"
 }
 
@@ -501,8 +553,10 @@ signal_crew_provably_working() {  # <file> ...
 # "non-terminal"; the always-on watcher then applies crew_is_provably_working,
 # while the away-mode daemon applies its persistence recheck.
 stale_is_terminal() {  # <window> <state>
-  local win=$1 state=$2 last
-  last=$(last_status_line "$state/$(window_to_task "$win" "$state").status")
+  local win=$1 state=$2 task file last
+  task=$(window_to_task "$win" "$state")
+  file="$state/$task.status"
+  last=$(last_status_line "$file")
   [ -n "$last" ] && status_is_captain_relevant "$last"
 }
 

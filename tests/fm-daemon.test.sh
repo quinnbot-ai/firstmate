@@ -278,6 +278,118 @@ test_stale_terminal_escalates() {
   pass "stale + terminal status escalates immediately"
 }
 
+test_no_mistakes_delivery_pending_stale_escalates_for_delivery() {
+  local dir state out reader last key
+  dir=$(make_supercase stale-delivery-pending)
+  state="$dir/state"
+  reader="$dir/fm-crew-state.sh"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "state: working · source: status-log · %s"\n' \
+    "$FM_CLASSIFY_DELIVERY_PENDING_DETAIL" > "$reader"
+  chmod +x "$reader"
+  last='done: committed abc1234 with targeted tests'
+  printf '%s\n' "$last" > "$state/pending-t1.status"
+  out=$(FM_CREW_STATE_BIN="$reader" FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-pending-t1" "$state")
+  case "$out" in
+    "escalate|$FM_CLASSIFY_DELIVERY_PENDING_DETAIL: "*) ;;
+    *) fail "commit-only no-mistakes stale did not surface as delivery pending: $out" ;;
+  esac
+  # Same dedupe contract as any other terminal-shaped status: once the signal path
+  # escalated this exact line, the stale wake must self-handle rather than put a
+  # second entry for one event in the digest.
+  key=$(printf '%s' "$(window_to_task "sess:fm-pending-t1")" | tr ':/.' '___')
+  printf '%s' "$last" > "$state/.subsuper-seen-status-$key"
+  out=$(FM_CREW_STATE_BIN="$reader" FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-pending-t1" "$state")
+  case "$out" in
+    self\|*) ;;
+    *) fail "an already-escalated delivery-pending stale escalated a duplicate: $out" ;;
+  esac
+  pass "commit-only no-mistakes stale escalates as delivery pending, once"
+}
+
+# The watcher emits the signal wake on the status APPEND, while a stale wake needs
+# two identical idle pane hashes, so the signal path is normally the FIRST (and
+# because of the seen-marker dedupe, the ONLY) escalation of a commit-only
+# no-mistakes done. Every first-escalation producer - signal and the heartbeat
+# catch-all scan - must therefore carry the delivery framing, or the away digest's
+# single entry for the event reads to the operator as a completion.
+test_no_mistakes_delivery_pending_first_escalation_carries_framing() {
+  local dir state reader out last key
+  dir=$(make_supercase signal-delivery-pending)
+  state="$dir/state"
+  reader="$dir/fm-crew-state.sh"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "state: working · source: status-log · %s"\n' \
+    "$FM_CLASSIFY_DELIVERY_PENDING_DETAIL" > "$reader"
+  chmod +x "$reader"
+  last='done: committed abc1234 with targeted tests'
+  printf '%s\n' "$last" > "$state/pending-s1.status"
+  out=$(FM_CREW_STATE_BIN="$reader" FM_STATE_OVERRIDE="$state" classify_signal "$state/pending-s1.status" "$state")
+  case "$out" in
+    "escalate|"*"$FM_CLASSIFY_DELIVERY_PENDING_DETAIL"*"$last") ;;
+    *) fail "the first (signal) escalation did not carry the delivery framing: $out" ;;
+  esac
+  # An already-escalated status still self-handles, and its informational distilled
+  # line stays the plain event (no delivery read is paid for a deduped wake).
+  key=$(printf '%s' "pending-s1" | tr ':/.' '___')
+  printf '%s' "$last" > "$state/.subsuper-seen-status-$key"
+  out=$(FM_CREW_STATE_BIN="$reader" FM_STATE_OVERRIDE="$state" classify_signal "$state/pending-s1.status" "$state")
+  case "$out" in
+    self\|*) ;;
+    *) fail "an already-escalated delivery-pending signal escalated a duplicate: $out" ;;
+  esac
+  # The heartbeat catch-all is the third producer of a status entry; when it is the
+  # first to see the event it must frame it identically.
+  rm -f "$state/.subsuper-seen-status-$key" "$state/.subsuper-last-scan"
+  FM_CREW_STATE_BIN="$reader" FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  grep -qF "$FM_CLASSIFY_DELIVERY_PENDING_DETAIL" "$state/.subsuper-escalations" \
+    || fail "the catch-all scan framed a commit-only no-mistakes done as a plain completion"
+  pass "every first-escalation path frames a commit-only no-mistakes done as delivery pending"
+}
+
+# The framing is driven by the authoritative reader, not by the `done:` verb: a
+# completion the reader still reports as done must escalate unchanged.
+test_delivered_done_signal_keeps_plain_framing() {
+  local dir state reader out
+  dir=$(make_supercase signal-delivered-done)
+  state="$dir/state"
+  reader="$dir/fm-crew-state.sh"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "state: done · source: run-step · checks green"\n' > "$reader"
+  chmod +x "$reader"
+  printf 'done: PR https://x/y/pull/3 checks green\n' > "$state/pr-s2.status"
+  out=$(FM_CREW_STATE_BIN="$reader" FM_STATE_OVERRIDE="$state" classify_signal "$state/pr-s2.status" "$state")
+  case "$out" in
+    *"$FM_CLASSIFY_DELIVERY_PENDING_DETAIL"*) fail "a delivered done was framed as delivery pending: $out" ;;
+    escalate\|*) ;;
+    *) fail "a delivered done signal did not escalate: $out" ;;
+  esac
+  pass "a delivered no-mistakes done keeps its plain completion framing"
+}
+
+# The catch-all scan's loop is fed by process substitution, so its body inherits
+# that pipe as stdin. The bounded reader now runs inside that body, and a reader
+# (or a CLI beneath it) that reads stdin would swallow the remaining rows and
+# silently drop every later crew from the digest.
+test_catchall_scan_survives_a_stdin_reading_reader() {
+  local dir state reader task
+  dir=$(make_supercase scan-stdin-drain)
+  state="$dir/state"
+  reader="$dir/fm-crew-state.sh"
+  printf '#!/usr/bin/env bash\ncat >/dev/null\nprintf "%%s\\n" "state: working · source: status-log · %s"\n' \
+    "$FM_CLASSIFY_DELIVERY_PENDING_DETAIL" > "$reader"
+  chmod +x "$reader"
+  for task in drain-a drain-b drain-c; do
+    printf 'done: committed abc1234 with targeted tests\n' > "$state/$task.status"
+  done
+  rm -f "$state/.subsuper-last-scan"
+  FM_CREW_STATE_BIN="$reader" FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  for task in drain-a drain-b drain-c; do
+    grep -qF "$task.status" "$state/.subsuper-escalations" \
+      || fail "the catch-all scan lost $task after a reader consumed stdin"
+    [ -e "$state/.subsuper-seen-status-$(printf '%s' "$task" | tr ':/.' '___')" ] \
+      || fail "the catch-all scan never marked $task seen"
+  done
+  pass "the catch-all scan escalates every crew even when the reader drains stdin"
+}
+
 # A DECLARED external-wait pause (paused:) is neither a wedge nor a terminal
 # escalation: classify_stale returns the `pause` action so handle_wake records a
 # pause marker (long re-surface cadence) rather than a wedge stale marker.
@@ -1890,6 +2002,10 @@ test_classify_check_and_unknown_escalate
 test_busy_progress_stale_escalates_immediately
 test_stale_transient_self_records_marker
 test_stale_terminal_escalates
+test_no_mistakes_delivery_pending_stale_escalates_for_delivery
+test_no_mistakes_delivery_pending_first_escalation_carries_framing
+test_delivered_done_signal_keeps_plain_framing
+test_catchall_scan_survives_a_stdin_reading_reader
 test_stale_paused_classifies_pause
 test_handle_wake_paused_records_pause_marker
 test_handle_wake_batched_stale_rechecks_dispatch_per_lane

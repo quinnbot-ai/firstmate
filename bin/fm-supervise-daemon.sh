@@ -332,22 +332,45 @@ _collapse_newlines() {  # <text>
 # field for "self" is informational (logged); for "escalate" it is the pre-read
 # summary firstmate would otherwise have to re-read.
 
+# Render the digest entry for ONE status file the daemon is about to escalate.
+# A commit-only no-mistakes done is nonterminal work, so its entry carries the
+# delivery framing (fm-classify-lib owns the wording) instead of reading to the
+# operator as a completion. Every file-list escalation path - the per-wake signal
+# and the heartbeat catch-all scan - renders through here so the digest cannot
+# frame the same event two different ways.
+# NOT a pure read: the delivery predicate may cost a bounded no-mistakes call for
+# a `done:` verb, so callers must first establish that this entry is actually
+# being escalated (its seen marker does not already match).
+_distill_status_event() {  # <status-file> <last-line>
+  local f=$1 last=$2
+  if status_done_needs_nomistakes_delivery "$f" "$last"; then
+    printf '%s: %s: %s' "$(basename "$f")" "$FM_CLASSIFY_DELIVERY_PENDING_DETAIL" "$last"
+    return
+  fi
+  printf '%s: %s' "$(basename "$f")" "$last"
+}
+
 classify_signal() {  # <reason-after-colon> <state>
-  local reason=$1 state=$2 f last distilled="" rel="" all_seen=1 task seen
+  local reason=$1 state=$2 f last distilled="" rel="" all_seen=1 task seen entry
   for f in $reason; do
     [ -e "$f" ] || continue
     last=$(last_status_line "$f")
     [ -n "$last" ] || continue
-    distilled="${distilled}$(basename "$f"): ${last} | "
-    status_is_captain_relevant "$last" || continue
-    rel=1
-    # Dedupe against the catch-all scan: if this status was already escalated
-    # (seen marker matches), skip escalating again. The seen marker is the
-    # single source of truth shared between the per-wake signal path and the
-    # heartbeat scan. all_seen stays 1 only if EVERY relevant file was seen.
-    task=$(basename "$f"); task="${task%.status}"
-    seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
-    [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] || all_seen=0
+    entry="$(basename "$f"): ${last}"
+    if status_is_captain_relevant "$last"; then
+      rel=1
+      # Dedupe against the catch-all scan: if this status was already escalated
+      # (seen marker matches), skip escalating again. The seen marker is the
+      # single source of truth shared between the per-wake signal path and the
+      # heartbeat scan. all_seen stays 1 only if EVERY relevant file was seen.
+      task=$(basename "$f"); task="${task%.status}"
+      seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
+      if [ "$(cat "$seen" 2>/dev/null || true)" != "$last" ]; then
+        all_seen=0
+        entry=$(_distill_status_event "$f" "$last")
+      fi
+    fi
+    distilled="${distilled}${entry} | "
   done
   # strip a trailing " | " separator so the distilled line is clean
   distilled="${distilled% | }"
@@ -366,7 +389,7 @@ classify_signal() {  # <reason-after-colon> <state>
 # first sight of a non-terminal stale it returns "self" and the caller records a
 # timestamp marker; persistence is escalated by housekeeping's recheck, not here.
 classify_stale() {  # <window> <state>
-  local win=$1 state=$2 task last seen
+  local win=$1 state=$2 task last seen delivery
   case "$win" in
     *' (busy but zero progress for '*)
       printf 'escalate|%s' "$win"
@@ -390,12 +413,17 @@ classify_stale() {  # <window> <state>
     # must not permanently suppress or clear possible-wedge aging merely because
     # prose once looked captain-relevant. Real terminal verbs and legacy free-text
     # captain lines without those verbs keep the terminal escalate/dedupe path.
-    if ! status_is_terminal_verb "$last"; then
+    # This is the ONE delivery-aware read for the wake (it may cost a bounded
+    # no-mistakes call): a nonterminal `done:` is exactly the commit-only
+    # no-mistakes shape, which is actionable but not a completion.
+    delivery=0
+    if ! status_is_terminal_verb "$last" "$state/$task.status"; then
       case "$(status_line_verb "$last")" in
         working|resolved|captain-held)
           printf 'self|transient stale (%s): %s' "$win" "$last"
           return
           ;;
+        done) delivery=1 ;;
       esac
     fi
     # Dedupe against the signal path: if this status was already escalated
@@ -403,6 +431,10 @@ classify_stale() {  # <window> <state>
     seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
     if [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ]; then
       printf 'self|stale + terminal (already escalated by signal): %s' "$last"
+      return
+    fi
+    if [ "$delivery" = 1 ]; then
+      printf 'escalate|%s: %s' "$FM_CLASSIFY_DELIVERY_PENDING_DETAIL" "$last"
       return
     fi
     printf 'escalate|stale + terminal status: %s' "$last"
@@ -1059,7 +1091,7 @@ housekeeping() {  # <state>
       [ -n "$f" ] || continue
       seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
       [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] && continue
-      escalate_add "$state" "$(basename "$f"): $last (catch-all scan)"
+      escalate_add "$state" "$(_distill_status_event "$f" "$last") (catch-all scan)"
       mark_status_seen "$state" "$task" "$last"
     done < <(scan_captain_relevant_statuses "$state")
   fi
@@ -1265,7 +1297,10 @@ handle_wake() {  # <reason> <state>
         last=$(last_status_line "$state/$task.status")
         # Clear wedge aging only for terminal (or legacy free-text) captain lines.
         # Nonterminal progress verbs keep possible-wedge markers even if free text
-        # once looked captain-relevant or was written into a seen marker.
+        # once looked captain-relevant or was written into a seen marker. A `done:`
+        # verb clears wedge aging either way (a delivery-pending done was already
+        # escalated as actionable by classify_stale), so this check deliberately
+        # stays verb-only and never pays for a bounded delivery read per wake.
         _clear_wedge=0
         if [ -n "$last" ] && status_is_captain_relevant "$last"; then
           if status_is_terminal_verb "$last"; then

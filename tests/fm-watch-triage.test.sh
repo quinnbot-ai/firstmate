@@ -150,7 +150,7 @@ test_scan_captain_relevant_statuses_classifier() {
 }
 
 test_classifier_primitives() {
-  local dir state open activity
+  local dir state open activity line
   dir=$(make_case classify-primitives); state="$dir/state"
   printf 'working: a\n\ndone: b\n\n' > "$state/x.status"
   [ "$(last_status_line "$state/x.status")" = "done: b" ] || fail "last_status_line did not return the last non-blank line"
@@ -172,6 +172,46 @@ test_classifier_primitives() {
     || fail "done: not a terminal verb"
   status_is_terminal_verb "working: rebased onto merged #76" \
     && fail "working: wrongly classed as terminal verb"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "state: working · source: status-log · %s"\n' \
+    "$FM_CLASSIFY_DELIVERY_PENDING_DETAIL" > "$dir/pending-state"
+  chmod +x "$dir/pending-state"
+  printf 'done: committed abc1234 with targeted tests\n' > "$state/pending.status"
+  FM_CREW_STATE_BIN="$dir/pending-state" status_done_needs_nomistakes_delivery "$state/pending.status" \
+    || fail "delivery-pending no-mistakes done was not recognized"
+  FM_CREW_STATE_BIN="$dir/pending-state" status_is_terminal_verb "done: committed abc1234 with targeted tests" "$state/pending.status" \
+    && fail "delivery-pending no-mistakes done was classed terminal"
+  # Supervisor-actionable is a property of the line alone (status_is_captain_relevant
+  # takes no file), so it must hold with no reader available at all; the actionable
+  # ESCALATION itself is pinned end-to-end in tests/fm-daemon.test.sh via classify_stale.
+  status_is_captain_relevant "done: committed abc1234 with targeted tests" \
+    || fail "delivery-pending no-mistakes done was not supervisor-actionable"
+  # A reader whose detail drifts from FM_CLASSIFY_DELIVERY_PENDING_DETAIL must fail
+  # closed (terminal), never silently keep matching a stale literal.
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "state: working · source: status-log · delivery pending: reworded"\n' > "$dir/drifted-state"
+  chmod +x "$dir/drifted-state"
+  FM_CREW_STATE_BIN="$dir/drifted-state" status_done_needs_nomistakes_delivery "$state/pending.status" \
+    && fail "a drifted delivery detail was still recognized as delivery pending"
+  FM_CREW_STATE_BIN="$dir/drifted-state" status_is_terminal_verb "done: committed abc1234 with targeted tests" "$state/pending.status" \
+    || fail "a drifted delivery detail did not fail closed to terminal"
+  # The commit-only shape is the cheap pre-filter: a done that cannot possibly read
+  # as delivery pending must never reach the bounded reader at all. This stub would
+  # claim delivery pending for ANY id, so the assertions below hold only if the
+  # short-circuit happens before the exec.
+  printf '#!/usr/bin/env bash\ntouch "%s"\nprintf "%%s\\n" "state: working · source: status-log · %s"\n' \
+    "$dir/reader-ran" "$FM_CLASSIFY_DELIVERY_PENDING_DETAIL" > "$dir/tattling-state"
+  chmod +x "$dir/tattling-state"
+  for line in "done: PR https://x/pull/76 checks green" "done: merged upstream" \
+              "done: committed the docs pass" "working: committed abc1234 so far"; do
+    printf '%s\n' "$line" > "$state/prefilter.status"
+    FM_CREW_STATE_BIN="$dir/tattling-state" status_done_needs_nomistakes_delivery "$state/prefilter.status" \
+      && fail "a non commit-only status read as delivery pending: $line"
+    [ ! -e "$dir/reader-ran" ] || fail "the bounded reader was exec'd for a status the shape gate rejects: $line"
+  done
+  printf 'done: committed abc1234 with targeted tests\n' > "$state/prefilter.status"
+  FM_CREW_STATE_BIN="$dir/tattling-state" status_done_needs_nomistakes_delivery "$state/prefilter.status" \
+    || fail "the commit-only shape did not reach the reader"
+  [ -e "$dir/reader-ran" ] || fail "the commit-only shape never exec'd the bounded reader"
+  rm -f "$dir/reader-ran"
   status_is_captain_relevant "merged" || fail "legacy bare merged free-text not captain-relevant"
   status_is_captain_relevant "PR ready https://x/pull/2" \
     || fail "legacy bare PR ready free-text not captain-relevant"

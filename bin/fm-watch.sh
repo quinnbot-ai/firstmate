@@ -502,7 +502,7 @@ pause_state_class() {  # <window> <task>
     printf 'paused'
     return
   fi
-  crew_line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || true
+  crew_line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null </dev/null) || true
   class=$(crew_absorb_class_from_line "$task" "$crew_line")
   if [ "$class" = working ]; then
     rm -f "$recheck_file"
