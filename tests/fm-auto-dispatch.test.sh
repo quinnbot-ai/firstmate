@@ -258,18 +258,25 @@ fixture_env() {
   export PATH="$FAKEBIN:$ORIGINAL_PATH"
 }
 
+# Wait for a path to appear. Staging spans several node, bash, and jq processes,
+# so this budget is generous enough to survive a loaded machine while still
+# returning the instant the path exists.
+wait_for_path() {
+  local path=$1 message=$2 _
+  for _ in {1..600}; do
+    [ -e "$path" ] && return 0
+    sleep 0.05
+  done
+  fail "$message"
+}
+
 start_owner() {
   local result=$1
   shift
   node "$OWNER_JS" "$HOME_DIR/state/.lock" "$result" "$@" &
   OWNER_PID=$!
   PIDS+=("$OWNER_PID")
-  local _
-  for _ in {1..100}; do
-    [ -f "$result" ] && return 0
-    sleep 0.02
-  done
-  fail "owner wrapper did not finish its command"
+  wait_for_path "$result" "owner wrapper did not finish its command"
 }
 
 stage_task() {
@@ -328,10 +335,7 @@ add_task author-boundary
 node "$OWNER_JS" "$HOME_DIR/state/.lock" "$FIXTURE/idle-result" /usr/bin/true &
 owner=$!
 PIDS+=("$owner")
-for _ in {1..100}; do
-  [ -f "$HOME_DIR/state/.lock" ] && break
-  sleep 0.02
-done
+wait_for_path "$HOME_DIR/state/.lock" "owner wrapper did not publish a session lock"
 if "$ROOT/bin/fm-dispatch-stage.sh" author-boundary \
   --repo alpha --kind ship --harness codex --herdr-lifecycle none \
   >"$FIXTURE/unauthorized.out" 2>"$FIXTURE/unauthorized.err"; then
@@ -432,10 +436,7 @@ jq '
 mv "$tmp" "$TASKS_STATE"
 node "$OWNER_JS" "$HOME_DIR/state/.lock" "$FIXTURE/queue-owner-result" /usr/bin/true &
 PIDS+=("$!")
-for _ in {1..100}; do
-  [ -f "$HOME_DIR/state/.lock" ] && break
-  sleep 0.02
-done
+wait_for_path "$HOME_DIR/state/.lock" "owner wrapper did not publish a session lock"
 start_runtime
 run_once
 [ "$(jq -r .claim_count "$TASKS_STATE")" = 0 ] \
@@ -448,10 +449,7 @@ fixture_env
 add_task cap-indeterminate
 node "$OWNER_JS" "$HOME_DIR/state/.lock" "$FIXTURE/cap-owner-result" /usr/bin/true &
 PIDS+=("$!")
-for _ in {1..100}; do
-  [ -f "$HOME_DIR/state/.lock" ] && break
-  sleep 0.02
-done
+wait_for_path "$HOME_DIR/state/.lock" "owner wrapper did not publish a session lock"
 start_runtime
 jq '.target_running = "unknown"' "$HOME_DIR/config/auto-dispatch.json" > "$FIXTURE/bad-config"
 mv "$FIXTURE/bad-config" "$HOME_DIR/config/auto-dispatch.json"
@@ -515,10 +513,7 @@ fixture_env
 add_task missing-api
 node "$OWNER_JS" "$HOME_DIR/state/.lock" "$FIXTURE/api-owner-result" /usr/bin/true &
 PIDS+=("$!")
-for _ in {1..100}; do
-  [ -f "$HOME_DIR/state/.lock" ] && break
-  sleep 0.02
-done
+wait_for_path "$HOME_DIR/state/.lock" "owner wrapper did not publish a session lock"
 start_runtime
 export FM_FAKE_API_UNSUPPORTED=1
 for _ in 1 2; do
@@ -762,6 +757,92 @@ run_once >"$FIXTURE/capacity-again.out" 2>"$FIXTURE/capacity-again.err" || true
 [ "$(status_verb_count working)" = 2 ] \
   || fail "a recurrence after recovery was permanently suppressed"
 pass "capacity holds report without waking firstmate and re-report after recovery"
+
+# The refill pass reads watcher identity through the same helper that recorded
+# it, so a rewritten identity is a supervision failure rather than a match.
+make_fixture supervision-identity
+fixture_env
+add_task supervision-identity
+stage_task supervision-identity
+start_runtime
+recorded_identity=$(cat "$HOME_DIR/state/.watch.lock/pid-identity")
+[ -n "$recorded_identity" ] \
+  || fail "fm_pid_identity recorded no watcher identity"
+printf '%s\n' "$recorded_identity mutated" > "$HOME_DIR/state/.watch.lock/pid-identity"
+if run_once >"$FIXTURE/identity.out" 2>"$FIXTURE/identity.err"; then
+  fail "a mismatched watcher identity did not stop refill"
+fi
+[ "$(jq -r .claim_count "$TASKS_STATE")" = 0 ] \
+  || fail "a mismatched watcher identity reached atomic claim"
+assert_contains "$(cat "$HOME_DIR/state/auto-dispatch.status")" \
+  "supervision loop is not healthy" \
+  "a mismatched watcher identity was not reported"
+printf '%s\n' "$recorded_identity" > "$HOME_DIR/state/.watch.lock/pid-identity"
+run_once >/dev/null
+[ "$(jq -r .claim_count "$TASKS_STATE")" = 1 ] \
+  || fail "the identity recorded by fm_pid_identity was not accepted by refill"
+pass "watcher identity is compared through its recording helper, not a restatement"
+
+# Being past the hard cap is an invariant breach, not the routine at-capacity
+# path, so it keeps its own captain-actionable wording.
+make_fixture breached-cap
+fixture_env
+add_task breached-cap
+stage_task breached-cap
+start_runtime
+jq '.tasks = [
+  {id:"open-one",kind:"ship",current_state:{state:"done"},endpoint:{exists:false},hints:{pending_decision:false,blocked_event:false}},
+  {id:"open-two",kind:"ship",current_state:{state:"done"},endpoint:{exists:false},hints:{pending_decision:false,blocked_event:false}},
+  {id:"open-three",kind:"ship",current_state:{state:"done"},endpoint:{exists:false},hints:{pending_decision:false,blocked_event:false}}
+]' "$SNAPSHOT" > "$FIXTURE/breached-snapshot"
+mv "$FIXTURE/breached-snapshot" "$SNAPSHOT"
+if run_once >"$FIXTURE/breach.out" 2>"$FIXTURE/breach.err"; then
+  fail "a breached lane cap did not stop refill"
+fi
+[ "$(jq -r .claim_count "$TASKS_STATE")" = 0 ] \
+  || fail "a breached lane cap reached atomic claim"
+[ "$(status_verb_count blocked)" = 1 ] \
+  || fail "a breached lane cap was not reported as captain-actionable"
+assert_contains "$(cat "$HOME_DIR/state/auto-dispatch.status")" \
+  "stopped on a breached lane cap" \
+  "a breached lane cap was not distinguished from the routine at-capacity path"
+[ "$(status_verb_count working)" = 0 ] \
+  || fail "a breached lane cap was downgraded to routine capacity reporting"
+pass "a breached lane cap stays loud and distinct from being at capacity"
+
+# Disabling breaks the run of failing passes an episode represents, so the same
+# condition reports again after the home is re-enabled.
+make_fixture episode-disable
+fixture_env
+add_task episode-disable
+stage_task episode-disable
+start_runtime
+jq '.tasks = [{
+  id:"parked-crew",
+  kind:"ship",
+  current_state:{state:"parked"},
+  endpoint:{exists:true},
+  hints:{pending_decision:true,blocked_event:false}
+}]' "$SNAPSHOT" > "$FIXTURE/parked-snapshot"
+mv "$FIXTURE/parked-snapshot" "$SNAPSHOT"
+for _ in 1 2; do
+  run_once >"$FIXTURE/episode.out" 2>"$FIXTURE/episode.err" || true
+done
+[ "$(status_verb_count working)" = 1 ] \
+  || fail "the failure episode did not suppress its own repeat"
+[ -f "$HOME_DIR/state/.auto-dispatch-episode.json" ] \
+  || fail "an active failure episode was not persisted"
+jq '.enabled = false' "$HOME_DIR/config/auto-dispatch.json" > "$FIXTURE/off-config"
+mv "$FIXTURE/off-config" "$HOME_DIR/config/auto-dispatch.json"
+run_once
+[ ! -e "$HOME_DIR/state/.auto-dispatch-episode.json" ] \
+  || fail "disabling auto-dispatch left the failure episode active"
+jq '.enabled = true' "$HOME_DIR/config/auto-dispatch.json" > "$FIXTURE/on-config"
+mv "$FIXTURE/on-config" "$HOME_DIR/config/auto-dispatch.json"
+run_once >"$FIXTURE/episode-again.out" 2>"$FIXTURE/episode-again.err" || true
+[ "$(status_verb_count working)" = 2 ] \
+  || fail "re-enabling a home kept its unchanged condition suppressed"
+pass "a disable interval ends the failure episode while a not-due tick preserves it"
 
 # The existing watcher loop owns invocation, with no new daemon entrypoint.
 assert_contains "$(cat "$ROOT/bin/fm-watch.sh")" \

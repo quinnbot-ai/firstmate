@@ -384,7 +384,11 @@ The one-shot verifies session and watcher ownership, reads `fm-fleet-snapshot.sh
 Terminal metadata still occupies open capacity until the normal guarded cleanup path removes it.
 Unknown state, unexpected dead endpoints, unresolved failures, contradictory inventory, ownership changes, and exceeded caps stop refill and produce one actionable `blocked:` event.
 A fleet that merely needs supervision before more work is reported with the non-captain-actionable `working:` verb, because the watcher already surfaces the underlying parked, blocked, failed, or pending-decision task on its own.
+Simply being at the cap is quieter still: refill has no available lane, so it returns without an event at all.
+Being past the hard cap is deliberately not treated that way, because bounded refill cannot produce it, and a breached lane cap means the cap was bypassed or miscomputed rather than merely reached.
+That case keeps its own captain-actionable `blocked: auto-dispatch stopped on a breached lane cap ...` wording so it cannot be mistaken for the routine at-capacity path.
 Failure events are deduplicated per episode in `state/.auto-dispatch-episode.json`: a repeat inside one unbroken run of failing passes stays silent, a pass that no longer reports the condition clears the episode, and a genuine recurrence later reports again.
+A not-due tick preserves the active episode because it belongs to the same run, while an absent or disabled config ends it, so re-enabling a home reports its blocking condition again.
 
 An invalid main inventory reports the snapshot's own reason.
 Its most common cause is a report-only claim that was interrupted between the atomic claim and the compensating reopen, which leaves the task `in_flight` with no worker metadata.
@@ -394,6 +398,20 @@ Recover by confirming no worker exists for that id, running `tasks-axi reopen <i
 Report-only refill requires a machine-readable `tasks-axi ready --json` contract and an atomic `tasks-axi claim <id> --if-ready --json` transition.
 Manual backlog mode and `tasks-axi` versions without both capabilities are unsupported and fail closed.
 The helper never scrapes human ready output and never substitutes `tasks-axi start`.
+
+Both capabilities are external prerequisites, so this is the contract an implementation must satisfy.
+
+`ready --json` must exit 0 and print one object of the form `{"ok": true, "action": "ready", "ready": [...]}`, optionally carrying a `count` that equals `ready.length`.
+Each ready record must be a JSON object, and every id in the list must be distinct.
+The required fields are `id` matching `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`, non-empty single-line strings for `state`, `title`, and `repo`, a string or null `body`, a string or null `kind`, an array `deps`, booleans `blocked` and `held`, and an array `blocked_by`.
+A record missing or mistyping any of those is a broken machine contract and stops the whole pass, while an eligible-looking record whose `state` is not `queued`, whose `kind` is `public-followup`, whose `public_followup` is set, whose `hold` is non-null, or whose `blocked`, `held`, or `blocked_by` say the task is not dispatchable is ordinary ineligibility that skips only that candidate.
+
+`claim <id> --if-ready --json` must exit 0 and print `{"ok": true, "action": "claim", "task": {...}}` when it wins the claim, where `task` satisfies the same record schema and reports `state` `in_flight`.
+When another queue writer already took the task, it must exit non-zero and print `{"ok": false, "error": "not-ready"}` on stdout or stderr.
+That exact result is the one claim failure treated as a benign lost race that skips the candidate and continues.
+Any other non-zero claim result is an unexplained backend failure and stops refill with a captain-actionable event, so an implementation that reports the race with different wording will produce a false alarm on every race.
+
+`reopen <id> --json` must exit 0 and print `{"ok": true, "action": "reopen", "task": {...}}` with `state` back to `queued`, because report-only refill always compensates its own claim.
 
 Queue-level ineligibility such as a hold, a blocked or held task, an active blocker, or a public-followup obligation skips that one candidate; only a structurally malformed backend record stops the whole pass.
 Losing the conditional claim to another queue writer is the benign outcome `--if-ready` exists to produce, so that candidate is skipped and refill continues.

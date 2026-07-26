@@ -39,6 +39,7 @@ const DEFAULT_SUPERVISION_GRACE_SECONDS = 300;
 const MAX_EPISODE_KEYS = 64;
 const VERIFIED_HARNESSES = new Set(["claude", "codex", "opencode", "grok", "kimi", "pi"]);
 const SESSION_LOCK_LIB = join(SCRIPT_DIR, "fm-session-lock-lib.sh");
+const WAKE_LIB = join(SCRIPT_DIR, "fm-wake-lib.sh");
 
 class DispatchError extends Error {
   constructor(message, code = "DISPATCH_INVALID") {
@@ -390,16 +391,22 @@ function reopenTask(context, id) {
 }
 
 /**
- * bin/fm-session-lock-lib.sh is the ONE owner of verified-harness identity and
- * ancestry. Calling it keeps this consumer from drifting into a second, subtly
- * different definition of the same decision.
+ * Runtime-identity decisions belong to the shell libraries that own them:
+ * bin/fm-session-lock-lib.sh for verified-harness identity and ancestry, and
+ * bin/fm-wake-lib.sh for the pid identity the watcher itself records. Calling
+ * them keeps this consumer from drifting into a second, subtly different
+ * definition of the same decision.
  */
-function sessionLockHelper(fn, args = []) {
+function shellHelper(lib, fn, args = []) {
   return spawnSync(
     "bash",
-    ["-c", `. "$1" || exit 1; shift; ${fn} "$@"`, "_", SESSION_LOCK_LIB, ...args],
+    ["-c", `. "$1" || exit 1; shift; ${fn} "$@"`, "_", lib, ...args],
     { encoding: "utf8", maxBuffer: 65536, env: process.env },
   );
+}
+
+function sessionLockHelper(fn, args = []) {
+  return shellHelper(SESSION_LOCK_LIB, fn, args);
 }
 
 function isAliveHarness(pid) {
@@ -791,27 +798,15 @@ function readAutoDispatchConfig(context) {
   };
 }
 
+/**
+ * The watcher records its own identity with fm_pid_identity, so this reader
+ * must ask that same helper rather than restate its /proc preference, its
+ * readability gate, its ps fallback, or FM_PROC_ROOT_OVERRIDE.
+ */
 function pidIdentity(pid) {
-  if (process.platform === "linux") {
-    try {
-      const statLine = readFileSync(`/proc/${pid}/stat`, "utf8");
-      const close = statLine.lastIndexOf(")");
-      const fields = statLine.slice(close + 1).trim().split(/\s+/);
-      const starttime = fields[19];
-      const command = readFileSync(`/proc/${pid}/cmdline`).toString("hex");
-      if (!/^[0-9]+$/.test(starttime) || command === "") {
-        return null;
-      }
-      return `linux-starttime=${starttime} cmdline-hex=${command}`;
-    } catch {
-      return null;
-    }
-  }
-  const result = spawnSync("ps", ["-p", String(pid), "-o", "lstart=", "-o", "command="], {
-    encoding: "utf8",
-    env: { ...process.env, LC_ALL: "C" },
-  });
-  return result.status === 0 && result.stdout.trim() !== "" ? result.stdout.trim() : null;
+  const result = shellHelper(WAKE_LIB, "fm_pid_identity", [String(pid)]);
+  const value = result.stdout?.trim() ?? "";
+  return result.status === 0 && value !== "" ? value : null;
 }
 
 function fileAgeSeconds(path) {
@@ -911,8 +906,16 @@ function fleetCapacity(snapshotValue, config) {
   if (!Number.isSafeInteger(open) || !Number.isSafeInteger(running)) {
     fail("fleet capacity cannot be determined safely", "CAP_INDETERMINATE");
   }
+  // Being AT the cap is ordinary and self-clearing: refill simply has no
+  // available lane this pass and returns quietly further down. Being PAST the
+  // hard cap is a different thing entirely - the bounded refill path cannot
+  // produce it, so it means the cap logic failed or something bypassed it.
+  // Keep the two apart; do not fold this into the routine at-capacity path.
   if (open > config.maxOpen) {
-    fail(`open worker count ${open} exceeds hard cap ${config.maxOpen}`, "CAP_EXCEEDED");
+    fail(
+      `open worker count ${open} is past the hard cap ${config.maxOpen}, which bounded refill cannot produce, so the cap was bypassed or miscomputed`,
+      "CAP_EXCEEDED",
+    );
   }
   return { running, open };
 }
@@ -983,6 +986,10 @@ function reportFailure(context, error) {
     appendNotice(context, "working", `auto-dispatch is waiting on supervision capacity: ${error.message}`);
     return;
   }
+  if (error.code === "CAP_EXCEEDED") {
+    appendNotice(context, "blocked", `auto-dispatch stopped on a breached lane cap: ${error.message}`);
+    return;
+  }
   appendNotice(context, "blocked", `auto-dispatch stopped: ${error.message}`);
 }
 
@@ -1012,7 +1019,15 @@ function once(args) {
     endNoticeEpisode(context);
     throw error;
   }
-  if (config === null || !due(context, config.interval, options.force === true)) {
+  if (config === null) {
+    // An absent or disabled config breaks the run of failing passes that an
+    // episode represents, so the marker must not outlive it.
+    endNoticeEpisode(context);
+    return;
+  }
+  // A not-due tick is part of the same run, so it deliberately preserves the
+  // active key set instead of ending the episode.
+  if (!due(context, config.interval, options.force === true)) {
     return;
   }
   // Mark the attempt before the gate checks. A home whose ownership, fleet, or
@@ -1083,7 +1098,7 @@ function once(args) {
         if (taskFingerprint(claimedTask) !== manifest.task_fingerprint) {
           fail(`task ${id} changed during its atomic claim`, "ENVELOPE_STALE");
         }
-        verifyManifest(context, { ...claimedTask, state: "queued" }, manifestPath);
+        verifyManifest(context, claimedTask, manifestPath);
         if (existsSync(join(context.state, `${id}.meta`))) {
           fail(`task ${id} acquired worker metadata during report-only claim`, "FLEET_INVALID");
         }

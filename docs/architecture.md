@@ -123,6 +123,8 @@ Backend records are checked against the machine contract, which is a hard stop w
 The per-home lock serializes refill passes, and the backend's conditional transition protects the ready-to-claim race against other queue writers.
 A lost conditional claim is that protection working, so it skips the candidate instead of stopping refill.
 `bin/fm-session-lock-lib.sh` remains the one owner of verified-harness identity and ancestry, and the staging authority calls it rather than restating that decision.
+`bin/fm-wake-lib.sh` likewise remains the one owner of pid identity, so the refill pass compares watcher identity through the same helper that recorded it.
+docs/configuration.md pins the exact ready-record schema and the conditional-claim result shape that an upstream queue implementation must satisfy.
 
 This phase is deliberately report-only.
 A selected task is atomically claimed, revalidated, reopened, and recorded once as a would-dispatch receipt.
