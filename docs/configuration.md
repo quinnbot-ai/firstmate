@@ -345,6 +345,7 @@ An absent, stale, malformed, incomplete, or disagreeing source renders its figur
 The ledger date is today in UTC, and the optional `FM_UNIT_ECONOMICS_LEDGER_DATE` environment variable overrides it for tests and backfills with a valid `YYYY-MM-DD` date that also selects the dated default output file.
 Any other value for that variable is rejected with a non-zero exit before any ledger is written.
 Because quota-axi only ever reports the present, a ledger date other than today in UTC refuses every quota window and quota metric as a backfilled window instead of filling that day with the present day's live measurements.
+This repository proposes no `kdp` sources, so the lane stays unavailable until an independent pair is installed: the KDP payment-telemetry artifact is itself imported from the monthly finance reports, so reading both is one provenance, not the two independent readings the lane requires, and no independent daily KDP source exists yet.
 The script header owns the source schema, freshness, corroboration, output, and status contract so this setup reference does not duplicate it.
 
 ## Toolchain
