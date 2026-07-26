@@ -103,13 +103,18 @@ jobs:
           if-no-files-found: warn
 
   # Required portable serial remainder: watcher, lock, AFK, tmux, daemon,
-  # ambiguous, and other stateful tests. Real Herdr stays in tests-herdr.
+  # live/global-state, and other unproven tests. Real Herdr stays in tests-herdr.
   tests-portable-serial:
     name: Behavior portable serial
     runs-on: ubuntu-latest
-    # Measured serial remainder is ~13 min wall without Herdr. Cap is a hang
-    # tripwire above observed p99 script cost and suite wall, not the expected
-    # healthy end (interim 25m full-suite slack reduced after sharding).
+    # GitHub FM_TEST_SUMMARY records from 2026-07-26 measured the former
+    # 70-script runner at 19:13.511-19:38.870, while one 20:00.758 completion
+    # lost the whole-job deadline race. Run 30197229441's per-script artifact
+    # measures the 31 redistributed scripts at 6:34.566, leaving a same-run
+    # 13:04.304 serial baseline. An exact local timeout/tee replay on
+    # 2026-07-26 completed the new 39-script runner in 16:12.965 and its outer
+    # command in 16:13, leaving 2:47 before the named 19m diagnostic and 3:47
+    # before the unchanged 20m job tripwire for checkout/install/shell overhead.
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
@@ -135,10 +140,50 @@ jobs:
           tasks-axi --version
       - name: Run portable serial remainder
         run: |
-          set -eu
+          set -u
           mkdir -p "$RUNNER_TEMP/fm-test"
-          bin/fm-test-run.sh --lane portable-serial \
-            --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-serial.json"
+          run_log="$RUNNER_TEMP/fm-test/portable-serial.log"
+          run_started=$(date +%s)
+          set +e
+          timeout --signal=TERM --kill-after=5s --verbose 19m \
+            bin/fm-test-run.sh --lane portable-serial \
+              --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-serial.json" \
+            2>&1 | tee "$run_log"
+          pipeline_status=("${PIPESTATUS[@]}")
+          set -e
+          runner_status=${pipeline_status[0]:-1}
+          tee_status=${pipeline_status[1]:-1}
+          deadline_fired=0
+          if [ "$runner_status" -eq 124 ] || [ "$runner_status" -eq 137 ] \
+            || grep -Fq 'timeout: sending signal TERM to command' "$run_log"; then
+            deadline_fired=1
+          fi
+          if [ "$deadline_fired" -eq 1 ]; then
+            elapsed=$(($(date +%s) - run_started))
+            active_script=$(
+              awk '
+                $1 == "FM_TEST_BEGIN" { active = $3 }
+                $1 == "FM_TEST_END" && $3 == active { active = "" }
+                END { print active }
+              ' "$run_log"
+            )
+            active_script=${active_script:-unknown}
+            echo "FM_TEST_DEADLINE lane=portable-serial active_script=$active_script elapsed_s=$elapsed command_deadline_s=1140 job_timeout_min=20"
+            echo "::error title=Behavior portable serial deadline tripwire::active_script=$active_script elapsed_s=$elapsed command_deadline_s=1140 job_timeout_min=20"
+            {
+              echo "## Behavior portable serial deadline tripwire"
+              echo
+              echo "Active script: \`$active_script\`"
+              echo
+              echo "Elapsed: ${elapsed}s (command deadline 1140s; job tripwire 20m)."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 124
+          fi
+          if [ "$tee_status" -ne 0 ]; then
+            echo "::error title=Behavior portable serial log capture failed::tee exited $tee_status"
+            exit "$tee_status"
+          fi
+          exit "$runner_status"
       - name: Upload portable serial timing artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -277,18 +322,50 @@ jobs:
     if: always()
     steps:
       - uses: actions/checkout@v6
-      - name: Download lane timing artifacts
+      - name: Download portable lane timing artifacts
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          pattern: fm-test-timing-*
+          pattern: fm-test-timing-portable-*
+          path: ${{ runner.temp }}/fm-test-aggregate
+          merge-multiple: true
+      - name: Download Herdr timing artifact
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: fm-test-timing-herdr
           path: ${{ runner.temp }}/fm-test-aggregate
           merge-multiple: true
       - name: Build aggregate timing summary
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          shopt -s nullglob
-          inputs=("$RUNNER_TEMP"/fm-test-aggregate/fm-test-timing-*.json)
+          inputs=()
+          missing=()
+          for name in \
+            fm-test-timing-portable-parallel-1 \
+            fm-test-timing-portable-parallel-2 \
+            fm-test-timing-portable-serial \
+            fm-test-timing-herdr; do
+            input="$RUNNER_TEMP/fm-test-aggregate/$name.json"
+            if [ -f "$input" ]; then
+              inputs+=("$input")
+            else
+              missing+=("$name")
+            fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            missing_csv=$(IFS=,; echo "${missing[*]}")
+            echo "FM_TEST_AGGREGATE_INCOMPLETE missing=$missing_csv"
+            echo "::warning title=Behavior timing aggregate incomplete::missing lane artifact(s): $missing_csv"
+            {
+              echo "## Behavior timing aggregate incomplete"
+              echo
+              echo "Missing lane artifact(s): \`$missing_csv\`."
+              echo
+              echo "Available lane timings were still aggregated; this is not a timing regression."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
           if [ "${#inputs[@]}" -eq 0 ]; then
             echo "::warning::no per-lane timing JSON found to aggregate"
             exit 0

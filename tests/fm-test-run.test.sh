@@ -354,6 +354,7 @@ test_exclude_family() {
 }
 
 test_ci_and_docs_call_the_owner() {
+  local shard job_body serial_job aggregate_job behavior_job
   assert_present "$CI" "ci.yml missing"
   assert_present "$CONTRIB" "CONTRIBUTING.md missing"
   grep -Fq 'tests-portable-parallel-1:' "$CI" \
@@ -366,7 +367,6 @@ test_ci_and_docs_call_the_owner() {
     || fail "CI shard 1 must invoke --lane portable-parallel-1"
   grep -Fq 'bin/fm-test-run.sh --lane portable-parallel-2' "$CI" \
     || fail "CI shard 2 must invoke --lane portable-parallel-2"
-  local shard job_body
   for shard in 1 2; do
     job_body=$(awk -v job="  tests-portable-parallel-$shard:" '
       $0 == job { in_job=1; next }
@@ -380,6 +380,19 @@ test_ci_and_docs_call_the_owner() {
   done
   grep -Fq 'bin/fm-test-run.sh --lane portable-serial' "$CI" \
     || fail "CI portable serial must invoke --lane portable-serial"
+  serial_job=$(awk '
+    $0 == "  tests-portable-serial:" { in_job=1; next }
+    in_job && /^  [a-zA-Z0-9_-]+:/ { exit }
+    in_job { print }
+  ' "$CI")
+  printf '%s\n' "$serial_job" | grep -Fq 'timeout --signal=TERM --kill-after=5s --verbose 19m' \
+    || fail "portable serial must emit its diagnostic deadline before the 20m job tripwire"
+  printf '%s\n' "$serial_job" | grep -Fq "grep -Fq 'timeout: sending signal TERM to command'" \
+    || fail "portable serial must recognize GNU timeout diagnostics even when the killed runner exits 1"
+  printf '%s\n' "$serial_job" | grep -Fq 'FM_TEST_DEADLINE lane=portable-serial' \
+    || fail "portable serial deadline must identify the active script and elapsed time"
+  printf '%s\n' "$serial_job" | grep -Fq '::error title=Behavior portable serial deadline tripwire::' \
+    || fail "portable serial deadline must emit a conspicuous GitHub annotation"
   grep -Fq 'bin/fm-test-run.sh --check-coverage' "$CI" \
     || fail "CI must run the coverage guard"
   grep -Fq 'tests-herdr:' "$CI" \
@@ -396,6 +409,17 @@ test_ci_and_docs_call_the_owner() {
     || fail "Herdr CI job must use bounded lab cleanup"
   grep -Fq 'tests-timing-aggregate:' "$CI" \
     || fail "CI must aggregate per-lane timing artifacts"
+  aggregate_job=$(awk '
+    $0 == "  tests-timing-aggregate:" { in_job=1; next }
+    in_job && /^  [a-zA-Z0-9_-]+:/ { exit }
+    in_job { print }
+  ' "$CI")
+  printf '%s\n' "$aggregate_job" | grep -Fq 'pattern: fm-test-timing-portable-*' \
+    || fail "timing aggregate must download only portable input artifacts, not its prior output"
+  printf '%s\n' "$aggregate_job" | grep -Fq 'name: fm-test-timing-herdr' \
+    || fail "timing aggregate must download the Herdr input artifact explicitly"
+  printf '%s\n' "$aggregate_job" | grep -Fq 'FM_TEST_AGGREGATE_INCOMPLETE' \
+    || fail "timing aggregate must distinguish a missing input from a timing regression"
   grep -Fq 'timeout-minutes: 20' "$CI" \
     || fail "portable serial hang tripwire must be timeout-minutes: 20"
   grep -Fq 'timeout-minutes: 10' "$CI" \
@@ -408,10 +432,24 @@ test_ci_and_docs_call_the_owner() {
   if grep -Eq '2-3 minutes' "$CI"; then
     fail "CI workflow still claims the suite finishes in ~2-3 minutes"
   fi
-  # No retry-green strategy on Behavior lanes.
-  if grep -Eqi 'retry:|max-attempts:|continue-on-error:\s*true' "$CI"; then
-    fail "CI must not use retries or continue-on-error as a green strategy"
-  fi
+  grep -Fq 'Measured serial remainder is ~13 min' "$CI" \
+    && fail "CI workflow retained the stale ~13 minute serial premise"
+  # No retry-green strategy on Behavior lanes. The timing aggregate may degrade
+  # when an input artifact is absent because that is a diagnostic, not coverage.
+  for behavior_job in \
+    tests-portable-parallel-1 \
+    tests-portable-parallel-2 \
+    tests-portable-serial \
+    tests-herdr; do
+    job_body=$(awk -v job="  $behavior_job:" '
+      $0 == job { in_job=1; next }
+      in_job && /^  [a-zA-Z0-9_-]+:/ { exit }
+      in_job { print }
+    ' "$CI")
+    if printf '%s\n' "$job_body" | grep -Eqi 'retry:|max-attempts:|continue-on-error:[[:space:]]*true'; then
+      fail "CI Behavior job $behavior_job uses a retry or continue-on-error green strategy"
+    fi
+  done
   grep -Fq 'fm-test-timing' "$CI" \
     || fail "CI must upload timing artifacts"
   grep -Fq 'bin/fm-test-run.sh --all' "$CONTRIB" \
@@ -462,7 +500,7 @@ test_portable_shard_union_and_coverage_guard() {
     || fail "lanes must not duplicate scripts"
   # LPT order: first script of shard 1 is the longest proven script.
   first=$(printf '%s\n' "$s1" | head -n 1)
-  [ "$first" = "tests/fm-arm-pretool-check.test.sh" ] \
+  [ "$first" = "tests/fm-spawn-dispatch-profile.test.sh" ] \
     || fail "shard 1 must start with longest proven script, got $first"
   pass "portable shard union, disjointness, and coverage guard hold"
 }
@@ -512,7 +550,7 @@ test_jobs_requires_proven_isolated() {
   set -e
   [ "$rc" -eq 2 ] || fail "--jobs on watcher-lock must refuse, got $rc"
   rm -rf "$tmp"
-  pass "--jobs refuses non-proven / stateful selections"
+  pass "--jobs refuses non-proven / live-state selections"
 }
 
 test_jobs_parallel_scheduler_and_failure_propagation() {

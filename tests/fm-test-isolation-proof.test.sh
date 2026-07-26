@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Contract tests for bin/fm-test-isolation-proof.sh - the Phase 2 pre-shard
+# Contract tests for bin/fm-test-isolation-proof.sh, the archived concurrent
 # isolation proof harness.
 #
 # These tests assert the candidate-set contract, serial exclusions, aggregate
@@ -56,7 +56,6 @@ test_candidates_exclude_serial_classes() {
     tests/fm-watcher-lock.test.sh \
     tests/fm-wake-queue.test.sh \
     tests/fm-continuity-pretool-check.test.sh \
-    tests/fm-dispatch-select.test.sh \
     tests/fm-backend-herdr-smoke.test.sh \
     tests/fm-afk-inject-e2e.test.sh \
     tests/fm-pi-primary-live-e2e.test.sh \
@@ -83,8 +82,13 @@ test_extra_hermetic_candidates_present() {
   listed=$("$PROOF" --list)
   for want in \
     tests/fm-backend-herdr.test.sh \
+    tests/fm-backend-orca.test.sh \
+    tests/fm-bearings-snapshot.test.sh \
+    tests/fm-secondmate-harness.test.sh \
+    tests/fm-secondmate-safety.test.sh \
     tests/fm-send-strict.test.sh \
     tests/fm-spawn-batch.test.sh \
+    tests/fm-spawn-dispatch-profile.test.sh \
     tests/fm-pr-merge.test.sh \
     tests/fm-review-diff.test.sh \
     tests/fm-x-mode.test.sh; do
@@ -104,8 +108,8 @@ test_list_exclusions_documents_reasons() {
     || fail "exclusions must document real-herdr serial reason"
   printf '%s\n' "$out" | grep -Fq 'fm-continuity-pretool-check.test.sh' \
     || fail "exclusions must document retained continuity-gate serial reason"
-  printf '%s\n' "$out" | grep -Fq 'fm-dispatch-select.test.sh' \
-    || fail "exclusions must document retained selector serial reason"
+  printf '%s\n' "$out" | grep -Fq 'fm-pr-check-security.test.sh' \
+    || fail "exclusions must document PR poll lock/migration serial reason"
   pass "exclusion list documents serial reasons"
 }
 

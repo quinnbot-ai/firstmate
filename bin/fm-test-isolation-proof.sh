@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # fm-test-isolation-proof.sh - bounded concurrent isolation proof for portable
-# behavior-test candidates (Phase 2 pre-shard gate).
+# behavior-test candidates.
 #
 # This is the single owner of the proven parallel candidate set, the concurrent
 # proof run, and the isolation checks that admitted that set. Production
@@ -93,23 +93,11 @@ exclusion_reason() {
     fm-backend-tmux-smoke.test.sh)
       printf '%s\n' 'real tmux on a private socket; keep exclusive of default-server contention class'
       ;;
-    fm-backend.test.sh)
-      printf '%s\n' 'old-vs-new main checkout diff fixture; gray-zone concurrent git/worktree cost'
-      ;;
-    fm-spawn-dispatch-profile.test.sh|fm-spawn-worktree-settle.test.sh)
-      printf '%s\n' 'real isolated git worktrees plus spawn settle loops; gray zone until dedicated proof'
-      ;;
-    fm-dispatch-select.test.sh)
-      printf '%s\n' 'retained fork selector changed during upstream reconciliation; serial until its concurrent proof is refreshed'
-      ;;
     fm-continuity-pretool-check.test.sh)
       printf '%s\n' 'retained watcher-status gate uses process and lock fixtures; keep serial until dedicated concurrent proof'
       ;;
     fm-pr-check-security.test.sh)
       printf '%s\n' 'watcher lock / migration / poll security surface; intentional shared-lock class'
-      ;;
-    fm-pr-capability.test.sh)
-      printf '%s\n' 'real git fixture plus a fake credential transport; keep serial until a dedicated isolation proof'
       ;;
     fm-teardown.test.sh)
       printf '%s\n' 'landed-work + lock-race teardown matrix; keep serial with forge/git stress peers'
@@ -143,11 +131,8 @@ exclusion_reason() {
     fm-backend-cmux.test.sh|fm-backend-cmux-smoke.test.sh)
       printf '%s\n' 'cmux GUI backend; never parallel with another cmux mutator'
       ;;
-    fm-backend-zellij.test.sh|fm-backend-zellij-smoke.test.sh)
-      printf '%s\n' 'zellij optional backend; keep out of pure parallel pool'
-      ;;
-    fm-backend-orca.test.sh)
-      printf '%s\n' 'orca backend surface; keep serial until dedicated isolation proof'
+    fm-backend-zellij-smoke.test.sh)
+      printf '%s\n' 'real optional zellij smoke; keep out of the hermetic parallel pool'
       ;;
     *)
       return 1
@@ -160,34 +145,65 @@ exclusion_reason() {
 list_parallel_candidates() {
   cat <<'EOF'
 tests/fm-arm-pretool-check.test.sh
+tests/fm-ask-user-authority.test.sh
 tests/fm-backend-herdr.test.sh
+tests/fm-backend-orca.test.sh
+tests/fm-backend-zellij.test.sh
+tests/fm-backend.test.sh
+tests/fm-backlog-handoff.test.sh
+tests/fm-bearings-snapshot.test.sh
 tests/fm-brief.test.sh
+tests/fm-calm-pi-extension.test.sh
 tests/fm-captain-translation-contract.test.sh
 tests/fm-cd-pretool-check.test.sh
+tests/fm-claude-auth.test.sh
+tests/fm-claude-home.test.sh
 tests/fm-composer-ghost.test.sh
 tests/fm-composer-lib.test.sh
 tests/fm-crew-state.test.sh
 tests/fm-decision-hold-lifecycle.test.sh
+tests/fm-dispatch-select.test.sh
+tests/fm-documentation-audiences.test.sh
 tests/fm-ensure-agents-md.test.sh
+tests/fm-fleet-snapshot-view.test.sh
+tests/fm-git-identity.test.sh
 tests/fm-grok-harness.test.sh
 tests/fm-herdr-lab.test.sh
+tests/fm-install-herdr.test.sh
 tests/fm-instruction-owners.test.sh
+tests/fm-kimi-harness.test.sh
 tests/fm-lint.test.sh
 tests/fm-nm-test-contract.test.sh
 tests/fm-no-mistakes-ownership.test.sh
+tests/fm-operational-input.test.sh
+tests/fm-pending-reply.test.sh
 tests/fm-pi-primary-types.test.sh
+tests/fm-pr-capability.test.sh
 tests/fm-pr-merge.test.sh
 tests/fm-review-diff.test.sh
+tests/fm-secondmate-harness.test.sh
+tests/fm-secondmate-lifecycle-e2e.test.sh
+tests/fm-secondmate-liveness.test.sh
+tests/fm-secondmate-safety.test.sh
+tests/fm-secondmate-sync.test.sh
 tests/fm-send-popup-settle.test.sh
+tests/fm-send-secondmate-marker.test.sh
 tests/fm-send-settle.test.sh
 tests/fm-send-strict.test.sh
+tests/fm-shared-captain-inheritance.test.sh
 tests/fm-spawn-batch.test.sh
+tests/fm-spawn-dispatch-profile.test.sh
+tests/fm-spawn-worktree-settle.test.sh
 tests/fm-stow-contract.test.sh
+tests/fm-subagent-pretool-check.test.sh
 tests/fm-supervision-instructions.test.sh
 tests/fm-test-run.test.sh
 tests/fm-tmux-submit-busy.test.sh
 tests/fm-transition-lib.test.sh
+tests/fm-unit-economics-ledger.test.sh
+tests/fm-visual-deliverable-check.test.sh
 tests/fm-x-mode.test.sh
+tests/no-mistakes-required-workflow.test.sh
 EOF
 }
 
@@ -202,13 +218,8 @@ list_exclusions_for_report() {
   done <<'EOF'
 fm-test-isolation-proof.test.sh
 fm-backend-tmux-smoke.test.sh
-fm-backend.test.sh
-fm-spawn-dispatch-profile.test.sh
-fm-spawn-worktree-settle.test.sh
-fm-dispatch-select.test.sh
 fm-continuity-pretool-check.test.sh
 fm-pr-check-security.test.sh
-fm-pr-capability.test.sh
 fm-teardown.test.sh
 fm-watcher-lock.test.sh
 fm-wake-queue.test.sh

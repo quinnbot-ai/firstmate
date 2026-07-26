@@ -38,9 +38,9 @@
 #                   silently pass as a gate skip.
 #   --jobs N        run the selected scripts with up to N concurrent workers.
 #                   Default is 1 (serial). N>1 is allowed only when every
-#                   selected script is in the Phase 2 proven-isolated set
-#                   (bin/fm-test-isolation-proof.sh --list). Cap is 8. Stateful
-#                   families never schedule under --jobs.
+#                   selected script is in the archived proven-isolated set
+#                   (bin/fm-test-isolation-proof.sh --list). Cap is 8. Tests
+#                   that touch live or global state never schedule under --jobs.
 #   -h, --help      print this header
 #
 # Per-script machine-parseable markers (stdout):
@@ -229,83 +229,144 @@ real-herdr-gated
 EOF
 }
 
-# Exact Phase 2 proven-isolated candidate set (same paths as
+# Exact proven-isolated candidate set (same paths as
 # bin/fm-test-isolation-proof.sh --list). Do not expand without a new concurrent
 # isolation proof archive.
 list_proven_isolated() {
   cat <<'EOF'
 tests/fm-arm-pretool-check.test.sh
+tests/fm-ask-user-authority.test.sh
 tests/fm-backend-herdr.test.sh
+tests/fm-backend-orca.test.sh
+tests/fm-backend-zellij.test.sh
+tests/fm-backend.test.sh
+tests/fm-backlog-handoff.test.sh
+tests/fm-bearings-snapshot.test.sh
 tests/fm-brief.test.sh
+tests/fm-calm-pi-extension.test.sh
 tests/fm-captain-translation-contract.test.sh
 tests/fm-cd-pretool-check.test.sh
+tests/fm-claude-auth.test.sh
+tests/fm-claude-home.test.sh
 tests/fm-composer-ghost.test.sh
 tests/fm-composer-lib.test.sh
 tests/fm-crew-state.test.sh
 tests/fm-decision-hold-lifecycle.test.sh
+tests/fm-dispatch-select.test.sh
+tests/fm-documentation-audiences.test.sh
 tests/fm-ensure-agents-md.test.sh
+tests/fm-fleet-snapshot-view.test.sh
+tests/fm-git-identity.test.sh
 tests/fm-grok-harness.test.sh
 tests/fm-herdr-lab.test.sh
+tests/fm-install-herdr.test.sh
 tests/fm-instruction-owners.test.sh
+tests/fm-kimi-harness.test.sh
 tests/fm-lint.test.sh
 tests/fm-nm-test-contract.test.sh
 tests/fm-no-mistakes-ownership.test.sh
+tests/fm-operational-input.test.sh
+tests/fm-pending-reply.test.sh
 tests/fm-pi-primary-types.test.sh
+tests/fm-pr-capability.test.sh
 tests/fm-pr-merge.test.sh
 tests/fm-review-diff.test.sh
+tests/fm-secondmate-harness.test.sh
+tests/fm-secondmate-lifecycle-e2e.test.sh
+tests/fm-secondmate-liveness.test.sh
+tests/fm-secondmate-safety.test.sh
+tests/fm-secondmate-sync.test.sh
 tests/fm-send-popup-settle.test.sh
+tests/fm-send-secondmate-marker.test.sh
 tests/fm-send-settle.test.sh
 tests/fm-send-strict.test.sh
+tests/fm-shared-captain-inheritance.test.sh
 tests/fm-spawn-batch.test.sh
+tests/fm-spawn-dispatch-profile.test.sh
+tests/fm-spawn-worktree-settle.test.sh
 tests/fm-stow-contract.test.sh
+tests/fm-subagent-pretool-check.test.sh
 tests/fm-supervision-instructions.test.sh
 tests/fm-test-run.test.sh
 tests/fm-tmux-submit-busy.test.sh
 tests/fm-transition-lib.test.sh
+tests/fm-unit-economics-ledger.test.sh
+tests/fm-visual-deliverable-check.test.sh
 tests/fm-x-mode.test.sh
+tests/no-mistakes-required-workflow.test.sh
 EOF
 }
 
-# Portable parallel shard 1: LPT balance of the proven-isolated set using
-# Phase 1 serial duration averages from CI timing artifacts on main after
-# #825/#832/#834 (docs/fm-test-portable-shards.md). Execution order is longest
-# first so wall-clock stays near the balanced sum.
+# Portable parallel shard 1: LPT balance of the proven-isolated set using the
+# 2026-07-26 main timing artifacts recorded in docs/fm-test-portable-shards.md.
+# Execution order is longest first.
 list_portable_parallel_1() {
   cat <<'EOF'
+tests/fm-spawn-dispatch-profile.test.sh
 tests/fm-arm-pretool-check.test.sh
-tests/fm-cd-pretool-check.test.sh
 tests/fm-backend-herdr.test.sh
-tests/fm-pr-merge.test.sh
+tests/fm-secondmate-safety.test.sh
+tests/fm-backend-orca.test.sh
+tests/fm-backend.test.sh
+tests/fm-secondmate-sync.test.sh
+tests/fm-fleet-snapshot-view.test.sh
+tests/fm-secondmate-liveness.test.sh
+tests/fm-crew-state.test.sh
 tests/fm-test-run.test.sh
+tests/fm-pr-merge.test.sh
+tests/fm-spawn-worktree-settle.test.sh
+tests/fm-dispatch-select.test.sh
+tests/fm-grok-harness.test.sh
+tests/fm-documentation-audiences.test.sh
 tests/fm-send-popup-settle.test.sh
-tests/fm-review-diff.test.sh
+tests/fm-claude-home.test.sh
+tests/fm-claude-auth.test.sh
+tests/fm-tmux-submit-busy.test.sh
 tests/fm-brief.test.sh
-tests/fm-ensure-agents-md.test.sh
+tests/fm-spawn-batch.test.sh
+tests/fm-operational-input.test.sh
+tests/fm-calm-pi-extension.test.sh
 tests/fm-instruction-owners.test.sh
+tests/fm-supervision-instructions.test.sh
 tests/fm-pi-primary-types.test.sh
+tests/fm-nm-test-contract.test.sh
 tests/fm-transition-lib.test.sh
 tests/fm-composer-lib.test.sh
-tests/fm-stow-contract.test.sh
 EOF
 }
 
 # Portable parallel shard 2: the complementary LPT half of the proven set.
 list_portable_parallel_2() {
   cat <<'EOF'
+tests/fm-secondmate-harness.test.sh
+tests/fm-bearings-snapshot.test.sh
 tests/fm-decision-hold-lifecycle.test.sh
 tests/fm-x-mode.test.sh
+tests/fm-cd-pretool-check.test.sh
+tests/fm-kimi-harness.test.sh
+tests/fm-pending-reply.test.sh
+tests/fm-git-identity.test.sh
 tests/fm-herdr-lab.test.sh
-tests/fm-crew-state.test.sh
-tests/fm-grok-harness.test.sh
-tests/fm-spawn-batch.test.sh
+tests/fm-secondmate-lifecycle-e2e.test.sh
+tests/fm-backend-zellij.test.sh
+tests/fm-backlog-handoff.test.sh
+tests/fm-shared-captain-inheritance.test.sh
+tests/fm-send-secondmate-marker.test.sh
+tests/fm-unit-economics-ledger.test.sh
+tests/fm-visual-deliverable-check.test.sh
+tests/fm-lint.test.sh
+tests/fm-review-diff.test.sh
+tests/fm-subagent-pretool-check.test.sh
 tests/fm-send-strict.test.sh
-tests/fm-tmux-submit-busy.test.sh
 tests/fm-composer-ghost.test.sh
 tests/fm-send-settle.test.sh
-tests/fm-supervision-instructions.test.sh
-tests/fm-lint.test.sh
-tests/fm-nm-test-contract.test.sh
+tests/fm-pr-capability.test.sh
+tests/fm-ensure-agents-md.test.sh
+tests/fm-ask-user-authority.test.sh
 tests/fm-captain-translation-contract.test.sh
+tests/fm-install-herdr.test.sh
+tests/no-mistakes-required-workflow.test.sh
+tests/fm-stow-contract.test.sh
 tests/fm-no-mistakes-ownership.test.sh
 EOF
 }
@@ -345,7 +406,7 @@ select_lane() {
       ;;
     portable-serial)
       # Everything in the complete suite that is not proven-isolated and not
-      # real-herdr-gated. Watcher/lock/AFK/tmux/daemon/ambiguous/stateful work
+      # real-herdr-gated. Watcher/lock/AFK/tmux/daemon/live-global-state work
       # stays here, serial only.
       while IFS= read -r s; do
         [ -n "$s" ] || continue
@@ -1140,11 +1201,11 @@ for s in "${SCRIPTS[@]}"; do
   [ -x "$s" ] || [ -r "$s" ] || die "test script not readable: $s"
 done
 
-# --jobs N>1 only for the proven-isolated set. Stateful families stay serial.
+# --jobs N>1 only for the proven-isolated set. Live/global-state tests stay serial.
 if [ "$JOBS" -gt 1 ]; then
   for s in "${SCRIPTS[@]}"; do
     if ! is_proven_isolated_script "$s"; then
-      die "--jobs $JOBS refused: $s is not in the proven-isolated set (see bin/fm-test-isolation-proof.sh --list). Stateful families stay serial."
+      die "--jobs $JOBS refused: $s is not in the proven-isolated set (see bin/fm-test-isolation-proof.sh --list). Live/global-state tests stay serial."
     fi
   done
 fi
