@@ -15,6 +15,8 @@ The topic is an explicit semantic identity supplied by the agent, not a title-si
 It cannot catch a paraphrased duplicate whose caller chooses a different topic, and it deliberately does not guess from report prose because a false match could suppress a real captain choice.
 The topic scan covers queued holds, the backlog Done section, and `done-archive.md`, and `resolve` carries the topic into the resolution record it writes, so a decision answered through the tool stays matchable after it is archived.
 Only a hold whose body never carried a topic, such as one written before this contract, is invisible to the topic scan.
+For that claim to hold, the scan reads the same backlog grammar as the canonical parser in `bin/fm-fleet-snapshot.sh`: a metadata key opens a group with `(` or continues one after `, ` and its value ends at the next `,` or `)`, a row may be bulleted with `-` or `*` and carry an emphasized `**id**` or a `[ ]`, `[x]`, or `[X]` marker, and a blank line inside a body continues that record rather than ending it.
+Requiring `(` or `, ` immediately before a key is also what keeps `hold-kind` from being read as `kind`.
 The scan does not exempt the requested identity itself, because `tasks-axi show` cannot see the archive and `tasks-axi add` re-adds an archived id as fresh queued work, so the original origin and key re-asking their own answered decision is the easiest way to resurrect it.
 For untagged legacy holds, it also flags only an exact repository-and-title match, which is a migration aid rather than semantic matching.
 That refusal names the manual `tasks-axi update` body edit that gives the legacy hold a topic, because the script mints identities from an origin and key and cannot address an arbitrary legacy id.
@@ -61,6 +63,7 @@ Plural blocker-readiness and mixed-home projection verification date: 2026-07-22
 Cross-origin topic and answered-open audit verification date: 2026-07-25.
 Repo-less scan, labelled-pending audit, and resolved-topic carry verification date: 2026-07-25.
 Complete-regression inventory re-verification date: 2026-07-26.
+Canonical backlog-grammar scan verification date: 2026-07-26.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
@@ -70,6 +73,7 @@ The current regressions also reject a duplicate repository-scoped topic from a s
 They further refuse an already-answered topic from both the backlog Done section and `done-archive.md`, and confirm that a topic matches on its full value rather than on a prefix shared with a longer topic.
 One regression drives the whole session-start digest so the flagged decision is proven to reach the reader, while a genuinely pending choice keeps that section silent.
 Three further regressions hold the guards to their weakest cases: a captain hold with no repo group still reaches the audit, a pending question that labels itself `decision:` or `captain answer:` stays out of it, and a decision answered through `resolve` still blocks a re-ask once it has been archived, from its own origin and key as well as from a second origin.
+A later regression drives the canonical backlog grammar directly, so a comma-continued `(repo: sample, since ...)` group, an uppercase `[X]` marker, an emphasized `**id**` row, and an archived record whose topic sits below a blank body line each still refuse the duplicate they would otherwise mint.
 
 The final verification commands and their exact summarized outputs follow.
 
@@ -144,4 +148,25 @@ ok - real Herdr lab validation completed on Herdr 0.7.3 with the default-session
 ```
 
 The walk collected 101 scripts, and every script named in the verification record above passed inside it, including `tests/fm-decision-hold-lifecycle.test.sh`.
-The one failure is host contention rather than a defect: the `real-herdr-gated` family serializes on a single Herdr session lock, another firstmate checkout on the same machine was exercising real-Herdr scripts during the walk, and the script passes on its own once no competing Herdr run holds that lock.
+The one failure is host contention rather than a defect: the `real-herdr-gated` family serializes on a single Herdr session lock, and another firstmate checkout on the same machine was exercising real-Herdr scripts during the walk.
+The standalone rerun above passed while that live fleet was still running; the only thing that had changed was that no competing real-Herdr test held the single host lock at that moment.
+
+## Coverage and focused re-verification, 2026-07-26T21:00Z
+
+This block is a separate, later run from the 101-script walk recorded above, not a correction of it.
+It re-derives the collected count from the current tree and re-runs the regression that owns the changed code, after the duplicate scanner was widened to the canonical backlog grammar.
+
+```text
+$ bin/fm-test-run.sh --check-coverage
+FM_TEST_COVERAGE ok total=103 parallel=30 serial=64 herdr=9
+
+$ bash tests/fm-decision-hold-lifecycle.test.sh
+ok - the hold scan accepts the canonical backlog row, group, and body grammar
+(19 cases, all ok; the other 18 are the case list recorded above)
+
+$ shellcheck -x bin/fm-decision-hold.sh tests/fm-decision-hold-lifecycle.test.sh
+(no output)
+```
+
+The current tree therefore collects 103 scripts, two more than the 101 the earlier walk collected, which is why each dated block is read as evidence from its own run rather than as the standing inventory.
+The complete `--all` walk was not repeated here, so the only full-suite result on record remains the contended 101-script run above.

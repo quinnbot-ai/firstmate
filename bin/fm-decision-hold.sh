@@ -161,22 +161,64 @@ body_topic() {  # <body>
 # alone. Fields are id, state, kind, repo, held, hold_kind, body. Tab is IFS
 # whitespace, so consecutive tabs would collapse and shift every later field left;
 # every field except the trailing body therefore emits `-` when it is absent.
+#
+# The row, metadata-group, and body grammar mirrors `row_match`, `structured_row`,
+# and `metadata` in bin/fm-fleet-snapshot.sh, which is the canonical backlog parser:
+# a key opens a group with `(` or continues one after `, `, its value ends at the
+# next `,` or `)`, ids may be bulleted with `-` or `*` and written as `**id**` or
+# behind a `[ ]`/`[x]`/`[X]` marker, and any indented line continues the record.
+# A blank line inside a body is part of that body rather than the end of the
+# record, so a resolution record whose captain decision follows an empty line stays
+# whole. Requiring `(` or `, ` immediately before the key is also what keeps
+# `hold-kind` from being read as `kind`.
 scan_hold_entries() {  # <backlog-or-archive-path>
   [ -f "$1" ] || return 0
   awk '
     function reset() {
-      id = ""; state = "-"; kind = "-"; repo = "-"; held = "no"; hold_kind = "-"; body = ""
+      id = ""; state = "-"; kind = "-"; repo = "-"; held = "no"; hold_kind = "-"
+      body = ""; body_lines = 0; pending_blanks = 0
     }
-    function last_group(line, key,   needle, pos, rest, endpos, out) {
-      needle = "(" key ": "
+    function trim_ws(s) {
+      sub(/^[[:space:]]+/, "", s)
+      sub(/[[:space:]]+$/, "", s)
+      return s
+    }
+    function group_re(key) {
+      return "(\\(|,[[:space:]]*)" key ":"
+    }
+    function has_group(line, key) {
+      return match(line, group_re(key)) > 0
+    }
+    function last_group(line, key,   re, rest, out) {
+      re = group_re(key) "[[:space:]]*"
       out = ""
       rest = line
-      while ((pos = index(rest, needle)) > 0) {
-        rest = substr(rest, pos + length(needle))
-        endpos = index(rest, ")")
-        if (endpos > 0) out = substr(rest, 1, endpos - 1)
+      while (match(rest, re)) {
+        rest = substr(rest, RSTART + RLENGTH)
+        if (match(rest, /[,)]/)) out = substr(rest, 1, RSTART - 1)
+        else out = rest
+        out = trim_ws(out)
       }
       return out
+    }
+    function row_id(line,   s) {
+      if (line ~ /^[-*][[:space:]]+\[[ xX]\][[:space:]]+[^[:space:]]+[[:space:]]+-[[:space:]]+/) {
+        s = line
+        sub(/^[-*][[:space:]]+\[[ xX]\][[:space:]]+/, "", s)
+        sub(/[[:space:]].*$/, "", s)
+        return s
+      }
+      if (line ~ /^[-*][[:space:]]+\*\*[^*]+\*\*[[:space:]]+-[[:space:]]+/) {
+        s = line
+        sub(/^[-*][[:space:]]+\*\*/, "", s)
+        sub(/\*\*.*$/, "", s)
+        return trim_ws(s)
+      }
+      return ""
+    }
+    function add_body(text) {
+      body = body (body_lines == 0 ? "" : "\\n") text
+      body_lines++
     }
     function emit() {
       if (id != "") {
@@ -185,36 +227,47 @@ scan_hold_entries() {  # <backlog-or-archive-path>
       reset()
     }
     BEGIN { reset(); section = "" }
-    /^## / {
+    {
+      if ($0 ~ /^##[[:space:]]/) {
+        emit()
+        if ($0 ~ /^##[[:space:]]+In flight/) section = "in_flight"
+        else if ($0 ~ /^##[[:space:]]+Queued/) section = "queued"
+        else if ($0 ~ /^##[[:space:]]+Done/ || $0 ~ /^##[[:space:]]+Archived/) section = "done"
+        else section = ""
+        next
+      }
+      rid = row_id($0)
+      if (rid != "") {
+        emit()
+        id = rid
+        state = section
+        if (state == "") state = "-"
+        kind = last_group($0, "kind")
+        if (kind == "") kind = "-"
+        repo = last_group($0, "repo")
+        if (repo == "") repo = "-"
+        hold_kind = last_group($0, "hold-kind")
+        if (hold_kind == "") hold_kind = "-"
+        held = has_group($0, "hold") ? "yes" : "no"
+        next
+      }
+      if ($0 ~ /^[[:space:]]*$/) {
+        # Held back rather than appended, so trailing separator blank lines before
+        # the next section never grow the body they do not belong to.
+        if (id != "") pending_blanks++
+        next
+      }
+      if ($0 ~ /^[[:space:]]/) {
+        if (id == "") next
+        while (pending_blanks > 0) { add_body(""); pending_blanks-- }
+        line = $0
+        if (substr(line, 1, 2) == "  ") line = substr(line, 3)
+        else sub(/^[[:space:]]+/, "", line)
+        add_body(line)
+        next
+      }
       emit()
-      if ($0 ~ /^## In flight/) section = "in_flight"
-      else if ($0 ~ /^## Queued/) section = "queued"
-      else if ($0 ~ /^## Done/ || $0 ~ /^## Archived/) section = "done"
-      else section = ""
-      next
     }
-    /^- \[[ x]\] / {
-      emit()
-      line = $0
-      sub(/^- \[[ x]\] /, "", line)
-      split(line, fields, " ")
-      id = fields[1]
-      state = section
-      if (state == "") state = "-"
-      kind = last_group($0, "kind")
-      if (kind == "") kind = "-"
-      repo = last_group($0, "repo")
-      if (repo == "") repo = "-"
-      hold_kind = last_group($0, "hold-kind")
-      if (hold_kind == "") hold_kind = "-"
-      held = (index($0, "(hold: ") > 0) ? "yes" : "no"
-      next
-    }
-    /^  / {
-      body = body (body == "" ? "" : "\\n") substr($0, 3)
-      next
-    }
-    { emit() }
     END { emit() }
   ' "$1"
 }

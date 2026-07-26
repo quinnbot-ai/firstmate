@@ -829,6 +829,84 @@ test_resolve_matches_quoted_blocked_by_edges() {
   pass "resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id"
 }
 
+# The guard reads the backlog and the archive as text, so it has to accept every
+# row and group form bin/fm-fleet-snapshot.sh already parses. A narrower grammar
+# reads `sample, since 2026-07-14` as the whole repo value, stops an archived
+# record at the blank line above its own topic, and skips an emphasized or
+# uppercase-checked row outright, and each of those misses mints exactly the
+# duplicate the guard exists to refuse.
+test_scan_accepts_the_canonical_backlog_grammar() {
+  local home origin rc
+  home=$(make_home canonical-grammar-comma)
+  origin=sample-grammar-review
+  write_origin_meta "$home" "$origin"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] sample-legacy-route - Choose the sample route (repo: sample, since 2026-07-14) (kind: captain) (hold: captain route choice pending) (hold-kind: captain)
+
+## Done
+EOF
+  set +e
+  run_decisions "$home" hold "$origin" route \
+    --title "Choose the sample route" --reason "captain route choice pending" \
+    --topic sample-route --repo sample > "$home/comma.out" 2> "$home/comma.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a comma-continued repo group hid an untagged legacy captain hold"
+  assert_grep "possible duplicate captain decision" "$home/comma.err" \
+    "the comma-grouped legacy hold was not flagged as a possible duplicate"
+  assert_no_grep "$origin-decision-route" "$home/data/backlog.md" \
+    "the refused re-ask still minted a duplicate captain decision"
+
+  home=$(make_home canonical-grammar-archive)
+  origin=sample-archive-review
+  write_origin_meta "$home" "$origin"
+  cat > "$home/data/done-archive.md" <<'EOF'
+## Archived 2026-07-14
+- [X] sample-old-route-decision - Choose the sample route (repo: sample, kind: captain)
+  Resolution recorded by fm-decision-hold.
+  Decision digest: 0000
+
+  Decision topic: sample-route.
+  Captain decision:
+  Use route north.
+
+  Routed work:
+  - sample-route-work
+- **sample-old-access-decision** - Choose the sample access level (repo: sample) (kind: captain)
+  Resolution recorded by fm-decision-hold.
+  Decision digest: 1111
+
+  Decision topic: sample-access.
+  Captain decision:
+  Use read-only access.
+EOF
+  set +e
+  run_decisions "$home" hold "$origin" route \
+    --title "Choose the sample route" --reason "captain route choice pending" \
+    --topic sample-route --repo sample > "$home/archive.out" 2> "$home/archive.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an archived resolution record was invisible past its blank body line"
+  assert_grep "already resolved as sample-old-route-decision" "$home/archive.err" \
+    "the uppercase-checked archived record did not match its topic after a blank body line"
+
+  set +e
+  run_decisions "$home" hold "$origin" access \
+    --title "Choose the sample access level" --reason "captain access choice pending" \
+    --topic sample-access --repo sample > "$home/emphasis.out" 2> "$home/emphasis.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an emphasized-id archived resolution record was skipped by the topic scan"
+  assert_grep "already resolved as sample-old-access-decision" "$home/emphasis.err" \
+    "the emphasized-id archived record did not match its topic"
+  assert_no_grep "$origin-decision-" "$home/data/backlog.md" \
+    "a refused archived re-ask still minted a duplicate captain decision"
+  pass "the hold scan accepts the canonical backlog row, group, and body grammar"
+}
+
 test_uninventoried_report_decision_refuses_completion
 
 test_scout_teardown_always_requires_inventory_verification
@@ -842,6 +920,7 @@ test_cross_origin_topic_refuses_duplicate_decision
 test_resolved_topic_refuses_duplicate_decision
 test_topic_match_does_not_collide_on_prefix
 test_untagged_legacy_title_flags_possible_duplicate
+test_scan_accepts_the_canonical_backlog_grammar
 test_repoless_captain_hold_still_reaches_the_audit
 test_pending_decision_label_stays_out_of_the_audit
 test_resolved_hold_keeps_its_topic_for_the_duplicate_guard
