@@ -19,12 +19,13 @@ named, because degrading to a credential file on disk is exactly the
 exposure this helper exists to remove.
 It clones only the managed profile's per-config-dir Keychain credential
 into the new home's derived Keychain service, and removes that service
-entry on abort cleanup and teardown, even when the home directory itself
-is already gone.
+entry on teardown, even when the home directory itself is already gone;
+abort cleanup removes only a service this attempt positively created, so
+a failure never deletes an entry it cannot prove it owns.
 Both the clone and the removal disable Keychain authentication UI and
-are confirmed by reading the target entry back, so an empty, truncated,
-or leftover credential, or an item that would need interactive
-authorization, fails instead of producing a home that cannot
+are confirmed by reading the target entry back, so a missing, empty,
+truncated, or leftover credential, or an item that would need
+interactive authorization, fails instead of producing a home that cannot
 authenticate or an unattended task that waits on a prompt.
 Nothing here reads a runtime flag, environment variable, or argument
 that could select a fake, relax a check, or reach a disk fallback; a
@@ -91,18 +92,31 @@ def keychain_service(home, legacy=False):
     return f"{prefix}-{digest}"
 
 
+def keychain_operation_failed(operation, service, status, detail=None):
+    message = (
+        f"Keychain {operation} failed for service {service} with OSStatus {status}"
+    )
+    if status == MacOSKeychain.INTERACTION_NOT_ALLOWED:
+        detail = (
+            "interactive authorization is disabled; run the documented "
+            "profile provisioning flow"
+        )
+    if detail:
+        message += f": {detail}"
+    die(message)
+
+
 class MacOSKeychain:
     """Minimal generic-password access through Security.framework.
 
     Credential bytes stay in this process. They are never encoded as text or
     passed through a child process's argv, environment, stdin, or output.
-    Every lookup, creation, update, and removal disables authentication UI, so
+    Every lookup, creation, and removal disables authentication UI, so
     an operation that would need authorization fails the unattended task
     instead of raising a Keychain prompt or blocking on one.
     """
 
     SUCCESS = 0
-    DUPLICATE_ITEM = -25299
     ITEM_NOT_FOUND = -25300
     INTERACTION_NOT_ALLOWED = -25308
     UTF8 = 0x08000100
@@ -124,8 +138,6 @@ class MacOSKeychain:
             ctypes.POINTER(ctypes.c_void_p),
         ]
         self.security.SecItemAdd.restype = ctypes.c_int32
-        self.security.SecItemUpdate.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-        self.security.SecItemUpdate.restype = ctypes.c_int32
         self.security.SecItemDelete.argtypes = [ctypes.c_void_p]
         self.security.SecItemDelete.restype = ctypes.c_int32
         self.core.CFDictionaryCreateMutable.argtypes = [
@@ -225,29 +237,41 @@ class MacOSKeychain:
             )
         return self.dictionary(values), account, service_value
 
-    def require_unattended(self, status):
-        if status == self.INTERACTION_NOT_ALLOWED:
-            die(
-                "managed Claude Keychain item requires interactive authorization; "
-                "run the documented profile provisioning flow"
-            )
+    def operation_failed(self, operation, service, status, detail=None):
+        keychain_operation_failed(operation, service, status, detail)
 
     def read(self, service):
         query, account, service_value = self.attributes(service, include_data=True)
         result = ctypes.c_void_p()
         try:
             status = self.security.SecItemCopyMatching(query, ctypes.byref(result))
-            self.require_unattended(status)
             if status == self.ITEM_NOT_FOUND:
                 return None
-            if status != self.SUCCESS or not result.value:
-                die("could not read managed Claude Keychain credential")
+            if status != self.SUCCESS:
+                self.operation_failed("SecItemCopyMatching", service, status)
+            if not result.value:
+                self.operation_failed(
+                    "SecItemCopyMatching",
+                    service,
+                    status,
+                    "no credential data was returned",
+                )
             length = self.core.CFDataGetLength(result)
             if length <= 0:
-                die("managed Claude Keychain credential is empty")
+                self.operation_failed(
+                    "SecItemCopyMatching",
+                    service,
+                    status,
+                    "the credential is empty",
+                )
             pointer = self.core.CFDataGetBytePtr(result)
             if not pointer:
-                die("could not read managed Claude Keychain credential")
+                self.operation_failed(
+                    "SecItemCopyMatching",
+                    service,
+                    status,
+                    "the credential data is unreadable",
+                )
             return ctypes.string_at(pointer, length)
         finally:
             self.release(result.value)
@@ -258,20 +282,17 @@ class MacOSKeychain:
     def write(self, service, value):
         query, account, service_value = self.attributes(service)
         secret = self.data(value)
-        additions = self.dictionary([(self.constants["kSecValueData"], secret)])
         try:
-            status = self.security.SecItemUpdate(query, additions)
-            self.require_unattended(status)
-            if status == self.ITEM_NOT_FOUND:
-                self.core.CFDictionarySetValue(
-                    query, self.constants["kSecValueData"], secret
-                )
-                status = self.security.SecItemAdd(query, None)
-                self.require_unattended(status)
-            if status not in (self.SUCCESS, self.DUPLICATE_ITEM):
-                die("could not seed isolated Claude Keychain credential")
+            # A target service belongs to a newly created home and must not
+            # already exist. Updating or accepting a duplicate would claim a
+            # credential this creation attempt did not create.
+            self.core.CFDictionarySetValue(
+                query, self.constants["kSecValueData"], secret
+            )
+            status = self.security.SecItemAdd(query, None)
+            if status != self.SUCCESS:
+                self.operation_failed("SecItemAdd", service, status)
         finally:
-            self.release(additions)
             self.release(secret)
             self.release(query)
             self.release(account)
@@ -281,9 +302,8 @@ class MacOSKeychain:
         query, account, service_value = self.attributes(service)
         try:
             status = self.security.SecItemDelete(query)
-            self.require_unattended(status)
             if status not in (self.SUCCESS, self.ITEM_NOT_FOUND):
-                die("could not remove isolated Claude Keychain credential")
+                self.operation_failed("SecItemDelete", service, status)
         finally:
             self.release(query)
             self.release(account)
@@ -300,7 +320,7 @@ def macos_keychain():
 def clone_keychain_credential(data, source, home):
     managed_profile = os.path.join(os.path.realpath(data), "claude-crewmate", "profile")
     if os.path.realpath(source) != managed_profile:
-        return False
+        die("isolated Claude homes require the managed Claude crewmate profile")
     keychain = macos_keychain()
     for legacy in (False, True):
         source_secret = keychain.read(keychain_service(source, legacy))
@@ -308,9 +328,26 @@ def clone_keychain_credential(data, source, home):
             continue
         target_service = keychain_service(home)
         keychain.write(target_service, source_secret)
-        if keychain.read(target_service) != source_secret:
-            die("isolated Claude Keychain credential did not match its source")
-        return True
+        try:
+            target_secret = keychain.read(target_service)
+            if target_secret is None:
+                keychain_operation_failed(
+                    "SecItemCopyMatching",
+                    target_service,
+                    MacOSKeychain.ITEM_NOT_FOUND,
+                    "the newly created credential was not found during verification",
+                )
+            if target_secret != source_secret:
+                die("isolated Claude Keychain credential did not match its source")
+        except BaseException:
+            try:
+                keychain.delete(target_service)
+                if keychain.read(target_service) is not None:
+                    die("could not verify isolated Claude Keychain credential removal")
+            except (OSError, SystemExit):
+                pass
+            raise
+        return target_service
     die(
         "managed Claude profile has no path-bound Keychain credential; "
         "run the documented profile provisioning flow"
@@ -570,6 +607,7 @@ def create_home(args):
             die(f"could not prepare isolated Claude home: {error.strerror}")
         try:
             home_created = False
+            credential_service = None
             name = None
             home_path = None
             try:
@@ -595,7 +633,9 @@ def create_home(args):
                     require_directory(home_fd, "isolated Claude home")
                     os.fchmod(home_fd, 0o700)
                     copy_tree(source_fd, home_fd, top_level=True)
-                    clone_keychain_credential(args.data, args.source, home_path)
+                    credential_service = clone_keychain_credential(
+                        args.data, args.source, home_path
+                    )
                     write_file(home_fd, ownership_marker_name(task_id), b"")
                 finally:
                     os.close(home_fd)
@@ -603,7 +643,10 @@ def create_home(args):
             except BaseException:
                 if home_created:
                     try:
-                        if home_path is not None:
+                        if (
+                            credential_service is not None
+                            and home_path is not None
+                        ):
                             remove_keychain_credential(home_path)
                     except (OSError, SystemExit):
                         pass
