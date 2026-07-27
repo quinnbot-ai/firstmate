@@ -12,18 +12,8 @@ The direct closeout-and-refill behavior was reverified on 2026-07-27 against cur
 That upstream tree has no auto-dispatch implementation, staging envelope, receipt loop, or report-only selector.
 Its task lifecycle keeps the primary agent responsible for standing `yolo` authority, guarded merge through `bin/fm-pr-merge.sh`, landed-work cleanup through `bin/fm-teardown.sh`, and ready-queue reevaluation.
 
-The pre-change reproduction passed the old report-only subsystem's own assertions:
-
-```text
-ok - concurrent refill passes claim once, reopen, report, and never spawn
-ok - auto-dispatch remains fully inert when absent or disabled
-```
-
-The home had no `config/auto-dispatch.json`, so the watcher path was inert and could neither close completed work nor replenish the ready queue.
-Even with that config present, its regression required that the path never spawn, confirming that it could not provide Kun's direct lifecycle.
-
-The correction makes each mutable wake one primary-agent-owned transaction before the next wait or turn boundary.
-It retains the existing guarded merge, teardown, and spawn owners and removes the conflicting report-only path instead of adding another daemon or lifecycle owner.
+Each mutable wake is one primary-agent-owned transaction before the next wait or turn boundary.
+The lifecycle retains the existing guarded merge, teardown, and spawn owners and has no report-only selector, staging envelope, receipt loop, or additional daemon.
 
 The deterministic end-to-end regression drives each real guard script through one transaction, selecting `fm-pr-merge.sh` for PR modes and `fm-merge-local.sh` for local-only mode before landed-work teardown and capacity-bound refill:
 
@@ -44,7 +34,7 @@ ok - direct lifecycle capacity accepts 1-64 and rejects invalid forms without di
 ```
 
 The PR fixture updates the bare origin's default branch and asserts its exact landed commit before accepting teardown.
-Refill is invoked inside the same closeout coordinator and reads the rendered `config/supervision-capacity` value, so the regression cannot pass by separately spawning a replacement or by satisfying teardown with a remote task branch.
+The fixture invokes refill inside the same closeout coordinator and reads the rendered `config/supervision-capacity` value, so the regression cannot pass by separately spawning a replacement or by satisfying teardown with a remote task branch.
 
 The supervision renderer was checked for Claude, Codex, OpenCode, Pi, Pi Signed, Grok, Kimi, and the unknown-harness fallback.
 Current `upstream/main` also maps `pi-signed` to the Pi protocol, and the new lifecycle instruction is emitted after harness selection so that adapter receives the same transaction on integration.
@@ -54,7 +44,7 @@ Pi, Grok, and Kimi binaries were unavailable in this task environment, so their 
 The tmux, Herdr, Zellij, Orca, and cmux session-provider adapters were source-reviewed.
 No session-provider adapter changed because merge and teardown already route through their shared backend owner and refill already routes through `bin/fm-spawn.sh`.
 The reference end-to-end fixture uses the tmux adapter, while the existing deterministic backend families cover all five providers.
-Herdr was source-reviewed only, and no Herdr lifecycle command was issued because this task's launch brief did not enable the Herdr lab.
+Herdr was source-reviewed only; the guarded Herdr lab was not enabled and no Herdr lifecycle command was issued.
 The installed provider evidence was tmux 3.6b and Herdr 0.7.3; Zellij and Orca were unavailable, while the installed cmux launcher could not report a supported version and its optional smoke test skipped as older than the verified minimum.
 
 The final local validation used the repository-owned entry points:
@@ -68,12 +58,10 @@ tests/fm-documentation-audiences.test.sh
 bin/fm-test-run.sh --check-coverage
 ```
 
-The changed-path run selected 92 tests across every affected contract family.
-Ninety-one passed in the initial sweep, with three declared optional-binary skips.
-The only initial failure was the documentation audience checker observing the intentionally deleted skill through the still-unstaged Git index; it passed against the exact staged candidate.
+The exact staged candidate passed all 92 changed-path tests, with three declared optional-binary skips.
 The canonical lint passed with ShellCheck 0.11.0, and the coverage owner confirmed that every test remains assigned to the portable or gated lanes.
 
-The focused review-fix validation reran the affected lifecycle, supervision, instruction-owner, and documentation-owner tests plus ShellCheck on the touched shell files:
+Focused validation covered the affected lifecycle, supervision, instruction-owner, and documentation-owner tests plus ShellCheck on the touched shell files:
 
 ```sh
 bin/fm-test-run.sh \
