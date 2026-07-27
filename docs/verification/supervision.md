@@ -25,7 +25,7 @@ Even with that config present, its regression required that the path never spawn
 The correction makes each mutable wake one primary-agent-owned transaction before the next wait or turn boundary.
 It retains the existing guarded merge, teardown, and spawn owners and removes the conflicting report-only path instead of adding another daemon or lifecycle owner.
 
-The deterministic end-to-end regression drives the real guard scripts in order:
+The deterministic end-to-end regression drives each real guard script through one transaction, selecting `fm-pr-merge.sh` for PR modes and `fm-merge-local.sh` for local-only mode before landed-work teardown and capacity-bound refill:
 
 ```sh
 tests/fm-direct-lifecycle.test.sh
@@ -35,11 +35,16 @@ tests/fm-supervision-instructions.test.sh
 Observed results:
 
 ```text
-ok - routine complete work lands, proves cleanup safety, and visibly refills the open slot
+ok - routine PR work lands on default, cleans safely, and visibly refills in one transaction
+ok - local-only yolo work uses its guarded owner and refills to configured capacity
 ok - unlanded work fails closed and remains recoverable
 ok - captain-gated completed work remains parked without merge or cleanup
 ok - every primary harness and fallback render one direct guarded closeout-and-refill transaction
+ok - invalid direct lifecycle capacity blocks refill without stranding safe closeout
 ```
+
+The PR fixture updates the bare origin's default branch and asserts its exact landed commit before accepting teardown.
+Refill is invoked inside the same closeout coordinator and reads the rendered `config/supervision-capacity` value, so the regression cannot pass by separately spawning a replacement or by satisfying teardown with a remote task branch.
 
 The supervision renderer was checked for Claude, Codex, OpenCode, Pi, Pi Signed, Grok, Kimi, and the unknown-harness fallback.
 Current `upstream/main` also maps `pi-signed` to the Pi protocol, and the new lifecycle instruction is emitted after harness selection so that adapter receives the same transaction on integration.
@@ -67,6 +72,23 @@ The changed-path run selected 92 tests across every affected contract family.
 Ninety-one passed in the initial sweep, with three declared optional-binary skips.
 The only initial failure was the documentation audience checker observing the intentionally deleted skill through the still-unstaged Git index; it passed against the exact staged candidate.
 The canonical lint passed with ShellCheck 0.11.0, and the coverage owner confirmed that every test remains assigned to the portable or gated lanes.
+
+The focused review-fix validation reran the affected lifecycle, supervision, instruction-owner, and documentation-owner tests plus ShellCheck on the touched shell files:
+
+```sh
+bin/fm-test-run.sh \
+  tests/fm-direct-lifecycle.test.sh \
+  tests/fm-supervision-instructions.test.sh \
+  tests/fm-instruction-owners.test.sh \
+  tests/fm-documentation-audiences.test.sh &&
+shellcheck -x \
+  bin/fm-supervision-instructions.sh \
+  tests/fm-direct-lifecycle.test.sh \
+  tests/fm-supervision-instructions.test.sh \
+  tests/fm-instruction-owners.test.sh
+```
+
+The four focused test scripts passed with zero failures, and ShellCheck produced no findings.
 
 ## Native session-start delivery
 

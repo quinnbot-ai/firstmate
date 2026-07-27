@@ -5,8 +5,9 @@
 # The primary agent remains the one lifecycle owner; there is intentionally no
 # production coordinator to test here.
 # This test stitches together the existing guarded owners exactly as that agent
-# must: standing yolo authority gates fm-pr-merge, fm-teardown proves landing
-# before cleanup, and fm-spawn fills the newly open visible slot.
+# must: standing yolo authority selects the existing merge owner by task mode,
+# fm-teardown proves landing before cleanup, and fm-spawn fills the newly open
+# visible slot in the same transaction.
 # It also proves that unlanded and captain-gated lanes remain intact.
 set -u
 
@@ -15,8 +16,10 @@ set -u
 fm_git_identity fmtest fmtest@example.invalid
 
 PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
+LOCAL_MERGE="$ROOT/bin/fm-merge-local.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
+RENDER="$ROOT/bin/fm-supervision-instructions.sh"
 TMP_ROOT=$(fm_test_tmproot fm-direct-lifecycle)
 CASE="$TMP_ROOT/case"
 HOME_DIR="$CASE/home"
@@ -24,6 +27,8 @@ PROJECT="$HOME_DIR/projects/project"
 ORIGIN="$CASE/origin.git"
 COMPLETED_WT="$CASE/completed-wt"
 READY_WT="$CASE/ready-wt"
+READY_WT2="$CASE/ready-wt-2"
+LOCAL_WT="$CASE/local-wt"
 UNLANDED_WT="$CASE/unlanded-wt"
 GATED_WT="$CASE/gated-wt"
 FAKEBIN="$CASE/fakebin"
@@ -33,6 +38,8 @@ TMUX_LOG="$CASE/tmux.log"
 HEAD_FILE="$CASE/completed-head"
 BASE_PATH=$PATH
 REAL_GIT=$(command -v git)
+ACTIVE_READY_ID=ready-r1
+ACTIVE_READY_WT=$READY_WT
 
 mkdir -p "$HOME_DIR/data" "$HOME_DIR/state" "$HOME_DIR/config" \
   "$HOME_DIR/projects" "$FAKEBIN"
@@ -57,6 +64,7 @@ git -C "$PROJECT" worktree add -q -b fm/ready-r1 "$READY_WT" main
 
 printf '%s\n' '- project [direct-PR +yolo] - lifecycle fixture (added 2026-07-27)' \
   > "$HOME_DIR/data/projects.md"
+printf '%s\n' 1 > "$HOME_DIR/config/supervision-capacity"
 mkdir -p "$HOME_DIR/data/ready-r1"
 printf '%s\n' '# Task' 'Run the ready lifecycle fixture.' \
   > "$HOME_DIR/data/ready-r1/brief.md"
@@ -68,7 +76,7 @@ printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 case "${1:-} ${2:-}" in
   "pr merge")
     "$FM_TEST_REAL_GIT" -C "$FM_TEST_COMPLETED_WT" \
-      push -q origin HEAD:refs/heads/fm/completed-y1
+      push -q origin HEAD:refs/heads/main
     exit 0
     ;;
   "pr list")
@@ -150,7 +158,11 @@ if [ "${1:-}" = display-message ]; then
 fi
 case "${1:-}" in
   new-window)
-    printf '%s\n' '@17'
+    case "$FM_TEST_READY_ID" in
+      ready-r1) printf '%s\n' '@17' ;;
+      ready-r2) printf '%s\n' '@18' ;;
+      *) exit 1 ;;
+    esac
     exit 0
     ;;
   list-windows|has-session|new-session|set-window-option|kill-window|send-keys)
@@ -171,13 +183,13 @@ fixture_cmd() {
     FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 \
     FM_TEST_COMPLETED_WT="$COMPLETED_WT" \
-    FM_TEST_READY_WT="$READY_WT" \
+    FM_TEST_READY_WT="$ACTIVE_READY_WT" \
     FM_TEST_PROJECT="$PROJECT" \
     FM_TEST_HEAD_FILE="$HEAD_FILE" \
     FM_TEST_GH_AXI_LOG="$GH_AXI_LOG" \
     FM_TEST_TREEHOUSE_LOG="$TREEHOUSE_LOG" \
     FM_TEST_TMUX_LOG="$TMUX_LOG" \
-    FM_TEST_READY_ID=ready-r1 \
+    FM_TEST_READY_ID="$ACTIVE_READY_ID" \
     FM_TEST_REAL_GIT="$REAL_GIT" \
     TMUX="fake,1,0" \
     PATH="$FAKEBIN:$BASE_PATH" \
@@ -185,7 +197,7 @@ fixture_cmd() {
 }
 
 write_ship_meta() {
-  local id=$1 worktree=$2 yolo=$3
+  local id=$1 worktree=$2 yolo=$3 mode=$4
   fm_write_meta "$HOME_DIR/state/$id.meta" \
     "window=firstmate:fm-$id" \
     "worktree=$worktree" \
@@ -193,42 +205,116 @@ write_ship_meta() {
     "harness=opencode" \
     "kind=ship" \
     "treehouse_lease=1" \
-    "mode=direct-PR" \
+    "mode=$mode" \
     "yolo=$yolo" \
     "model=default" \
     "effort=default"
   chmod 0600 "$HOME_DIR/state/$id.meta"
 }
 
-# The policy check belongs to the primary agent's AGENTS.md transaction.
-# The guard scripts below remain the only merge, cleanup, and launch owners.
+configured_capacity() {
+  local capacity rendered
+  rendered=$(fixture_cmd "$RENDER" --harness codex)
+  capacity=$(printf '%s\n' "$rendered" \
+    | sed -n 's/.*configured capacity \([1-9][0-9]*\) .*/\1/p')
+  [ -n "$capacity" ] || {
+    echo "configured capacity unavailable" >&2
+    return 1
+  }
+  printf '%s\n' "$capacity"
+}
+
+ordinary_lane_count() {
+  local count=0 kind meta
+  for meta in "$HOME_DIR"/state/*.meta; do
+    [ -f "$meta" ] || continue
+    kind=$(sed -n 's/^kind=//p' "$meta" | tail -1)
+    [ "$kind" = secondmate ] || count=$(( count + 1 ))
+  done
+  printf '%s\n' "$count"
+}
+
+select_ready_fixture() {
+  ACTIVE_READY_ID=$1
+  case "$1" in
+    ready-r1) ACTIVE_READY_WT=$READY_WT ;;
+    ready-r2) ACTIVE_READY_WT=$READY_WT2 ;;
+    *) return 1 ;;
+  esac
+}
+
+refill_to_configured_capacity() {
+  local candidate capacity count out
+  capacity=$(configured_capacity) || return
+  for candidate in "$@"; do
+    count=$(ordinary_lane_count)
+    [ "$count" -lt "$capacity" ] || break
+    select_ready_fixture "$candidate" || return
+    out=$(fixture_cmd "$SPAWN" "$candidate" "$PROJECT" --harness opencode) \
+      || return
+    printf '%s\n' "$out"
+  done
+  count=$(ordinary_lane_count)
+  [ "$count" -eq "$capacity" ] || {
+    printf 'refill-incomplete: running=%s capacity=%s\n' "$count" "$capacity" >&2
+    return 5
+  }
+}
+
 closeout_with_standing_authority() {
-  local id=$1 url=$2 meta="$HOME_DIR/state/$1.meta" kind status yolo
+  local id=$1 url=$2 meta="$HOME_DIR/state/$1.meta" kind mode status yolo
+  shift 2
   kind=$(sed -n 's/^kind=//p' "$meta" | tail -1)
+  mode=$(sed -n 's/^mode=//p' "$meta" | tail -1)
   yolo=$(sed -n 's/^yolo=//p' "$meta" | tail -1)
   status=$(tail -1 "$HOME_DIR/state/$id.status" 2>/dev/null || true)
-  if [ "$kind" != ship ] || ! printf '%s\n' "$status" \
-    | grep -Fq 'done: PR checks green'; then
+  if [ "$kind" != ship ]; then
     printf 'ambiguous-or-incomplete: %s\n' "$id"
     return 4
   fi
+  case "$mode" in
+    local-only)
+      printf '%s\n' "$status" | grep -Fq 'done: local branch ready' || {
+        printf 'ambiguous-or-incomplete: %s\n' "$id"
+        return 4
+      }
+      ;;
+    no-mistakes|direct-PR)
+      printf '%s\n' "$status" | grep -Fq 'done: PR checks green' || {
+        printf 'ambiguous-or-incomplete: %s\n' "$id"
+        return 4
+      }
+      ;;
+    *)
+      printf 'ambiguous-mode: %s\n' "$id"
+      return 4
+      ;;
+  esac
   if [ "$yolo" != on ]; then
     printf 'captain-gated: %s\n' "$id"
     return 3
   fi
-  fixture_cmd "$PR_MERGE" "$id" "$url" || return
-  fixture_cmd "$TEARDOWN" "$id"
+  case "$mode" in
+    local-only)
+      fixture_cmd "$LOCAL_MERGE" "$id" || return
+      ;;
+    no-mistakes|direct-PR)
+      fixture_cmd "$PR_MERGE" "$id" "$url" || return
+      ;;
+  esac
+  fixture_cmd "$TEARDOWN" "$id" || return
+  refill_to_configured_capacity "$@"
 }
 
 test_complete_land_cleanup_and_visible_refill() {
   local id=completed-y1 out rc
-  write_ship_meta "$id" "$COMPLETED_WT" on
+  write_ship_meta "$id" "$COMPLETED_WT" on direct-PR
   printf '%s\n' 'done: PR checks green; routine change complete' \
     > "$HOME_DIR/state/$id.status"
 
   set +e
   out=$(closeout_with_standing_authority \
-    "$id" https://github.com/example/project/pull/41 2>&1)
+    "$id" https://github.com/example/project/pull/41 ready-r1 2>&1)
   rc=$?
   set -e
   expect_code 0 "$rc" "routine yolo closeout should land and clean up"
@@ -236,6 +322,9 @@ test_complete_land_cleanup_and_visible_refill() {
     "successful closeout did not run the guarded teardown owner"
   assert_grep 'pr merge 41 --repo example/project --squash' "$GH_AXI_LOG" \
     "successful closeout did not run the guarded merge owner"
+  [ "$("$REAL_GIT" --git-dir="$ORIGIN" rev-parse refs/heads/main)" \
+      = "$(cat "$HEAD_FILE")" ] \
+    || fail "successful PR closeout did not land work on the default branch"
   assert_absent "$HOME_DIR/state/$id.meta" \
     "landed work retained task metadata after safe teardown"
   assert_absent "$COMPLETED_WT" \
@@ -243,20 +332,64 @@ test_complete_land_cleanup_and_visible_refill() {
   assert_grep "return --force $COMPLETED_WT" "$TREEHOUSE_LOG" \
     "safe teardown did not return the exact landed worktree"
 
-  set +e
-  out=$(fixture_cmd "$SPAWN" ready-r1 "$PROJECT" --harness opencode 2>&1)
-  rc=$?
-  set -e
-  expect_code 0 "$rc" "ready refill should launch into the newly open slot"
   assert_contains "$out" "spawned ready-r1" \
-    "ready refill was not surfaced as a visible worker"
+    "same-transaction ready refill was not surfaced as a visible worker"
   assert_grep "worktree=$READY_WT" "$HOME_DIR/state/ready-r1.meta" \
     "refill did not record the isolated ready worktree"
   assert_grep 'yolo=on' "$HOME_DIR/state/ready-r1.meta" \
     "refill did not inherit standing project authority"
   assert_grep ' -n fm-ready-r1 ' "$TMUX_LOG" \
     "refill did not create a visible task window"
-  pass "routine complete work lands, proves cleanup safety, and visibly refills the open slot"
+  pass "routine PR work lands on default, cleans safely, and visibly refills in one transaction"
+}
+
+test_local_only_uses_local_merge_owner_and_refills_to_capacity() {
+  local before id=local-y2 local_head out rc
+  git -C "$PROJECT" fetch -q origin main
+  git -C "$PROJECT" merge -q --ff-only origin/main
+  git -C "$PROJECT" worktree add -q -b fm/local-y2 "$LOCAL_WT" main
+  printf '%s\n' "local-only work" > "$LOCAL_WT/local.txt"
+  git -C "$LOCAL_WT" add local.txt
+  git -C "$LOCAL_WT" commit -qm "complete local-only work"
+  local_head=$(git -C "$LOCAL_WT" rev-parse HEAD)
+  git -C "$PROJECT" worktree add -q -b fm/ready-r2 "$READY_WT2" main
+  printf '%s\n' '- project [local-only +yolo] - lifecycle fixture (added 2026-07-27)' \
+    > "$HOME_DIR/data/projects.md"
+  mkdir -p "$HOME_DIR/data/ready-r2"
+  printf '%s\n' '# Task' 'Run the second ready lifecycle fixture.' \
+    > "$HOME_DIR/data/ready-r2/brief.md"
+  printf '%s\n' 2 > "$HOME_DIR/config/supervision-capacity"
+  write_ship_meta "$id" "$LOCAL_WT" on local-only
+  printf '%s\n' 'done: local branch ready; routine local change complete' \
+    > "$HOME_DIR/state/$id.status"
+  before=$(wc -l < "$GH_AXI_LOG")
+
+  set +e
+  out=$(closeout_with_standing_authority "$id" "" ready-r2 2>&1)
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "local-only yolo closeout should land and refill"
+  assert_contains "$out" "merged fm/$id into local main" \
+    "local-only closeout did not run the guarded local merge owner"
+  assert_contains "$out" "teardown $id complete" \
+    "local-only closeout did not run guarded teardown"
+  assert_contains "$out" "spawned ready-r2" \
+    "local-only closeout did not visibly refill in the same transaction"
+  [ "$(git -C "$PROJECT" rev-parse main)" = "$local_head" ] \
+    || fail "local-only closeout did not land on local main"
+  [ "$(wc -l < "$GH_AXI_LOG")" -eq "$before" ] \
+    || fail "local-only closeout called the PR merge owner"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "local-only landed work retained task metadata"
+  assert_absent "$LOCAL_WT" \
+    "local-only landed worktree was not returned"
+  assert_grep "return --force $LOCAL_WT" "$TREEHOUSE_LOG" \
+    "local-only safe teardown did not return the exact worktree"
+  assert_grep 'mode=local-only' "$HOME_DIR/state/ready-r2.meta" \
+    "capacity refill did not inherit the local-only project mode"
+  assert_grep ' -n fm-ready-r2 ' "$TMUX_LOG" \
+    "capacity refill did not create the second visible task window"
+  pass "local-only yolo work uses its guarded owner and refills to configured capacity"
 }
 
 test_unlanded_work_is_preserved() {
@@ -265,7 +398,7 @@ test_unlanded_work_is_preserved() {
   printf '%s\n' "unlanded work" > "$UNLANDED_WT/unlanded.txt"
   git -C "$UNLANDED_WT" add unlanded.txt
   git -C "$UNLANDED_WT" commit -qm "unlanded routine work"
-  write_ship_meta "$id" "$UNLANDED_WT" on
+  write_ship_meta "$id" "$UNLANDED_WT" on direct-PR
   before=$(wc -l < "$TREEHOUSE_LOG")
 
   set +e
@@ -292,7 +425,7 @@ test_captain_gated_work_is_untouched() {
   printf '%s\n' "captain-gated work" > "$GATED_WT/gated.txt"
   git -C "$GATED_WT" add gated.txt
   git -C "$GATED_WT" commit -qm "captain-gated work"
-  write_ship_meta "$id" "$GATED_WT" off
+  write_ship_meta "$id" "$GATED_WT" off direct-PR
   printf '%s\n' 'done: PR checks green; waiting for captain authority' \
     > "$HOME_DIR/state/$id.status"
   before=$(wc -l < "$GH_AXI_LOG")
@@ -315,6 +448,7 @@ test_captain_gated_work_is_untouched() {
 }
 
 test_complete_land_cleanup_and_visible_refill
+test_local_only_uses_local_merge_owner_and_refills_to_capacity
 test_unlanded_work_is_preserved
 test_captain_gated_work_is_untouched
 

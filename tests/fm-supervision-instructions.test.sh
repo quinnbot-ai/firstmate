@@ -116,24 +116,27 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
 }
 
 test_cross_harness_direct_lifecycle_matrix() {
-  local harness lifecycle out
+  local harness home lifecycle out
+  home="$TMP_ROOT/direct-lifecycle-home"
+  mkdir -p "$home/config" "$home/state"
+  printf '%s\n' 3 > "$home/config/supervision-capacity"
 
   for harness in claude codex opencode pi pi-signed grok kimi unknown; do
-    out=$("$RENDER" --harness "$harness")
+    out=$(FM_HOME="$home" "$RENDER" --harness "$harness")
     lifecycle=$(printf '%s\n' "$out" | grep -F -- '- Direct lifecycle:')
     assert_contains "$lifecycle" "before the next wait or turn boundary" \
       "$harness direct lifecycle can lapse at a primary-turn boundary"
-    assert_contains "$lifecycle" "guarded standing merge authority" \
-      "$harness direct lifecycle lost the guarded merge owner"
+    assert_contains "$lifecycle" "select the guarded merge owner by task mode" \
+      "$harness direct lifecycle lost mode-specific guarded landing"
     assert_contains "$lifecycle" "teardown only after landed proof" \
       "$harness direct lifecycle lost the landed-work cleanup gate"
-    assert_contains "$lifecycle" "launch eligible ready work to capacity" \
+    assert_contains "$lifecycle" "launch eligible ready work to configured capacity 3" \
       "$harness direct lifecycle lost immediate ready-work refill"
     assert_contains "$lifecycle" "preserving every gated or ambiguous lane" \
       "$harness direct lifecycle lost the captain-gated preservation rule"
   done
 
-  out=$("$RENDER" --harness codex --read-only 1)
+  out=$(FM_HOME="$home" "$RENDER" --harness codex --read-only 1)
   lifecycle=$(printf '%s\n' "$out" | grep -F -- '- Direct lifecycle:')
   assert_contains "$lifecycle" "unavailable in this read-only session" \
     "read-only supervision did not disable lifecycle mutation"
@@ -143,6 +146,29 @@ test_cross_harness_direct_lifecycle_matrix() {
     "read-only supervision printed mutable closeout instructions"
 
   pass "every primary harness and fallback render one direct guarded closeout-and-refill transaction"
+}
+
+test_direct_lifecycle_capacity_fails_closed() {
+  local home lifecycle out
+  home="$TMP_ROOT/invalid-capacity-home"
+  mkdir -p "$home/config" "$home/state"
+  printf '%s\n' unlimited > "$home/config/supervision-capacity"
+  out=$(FM_HOME="$home" "$RENDER" --harness codex)
+  lifecycle=$(printf '%s\n' "$out" | grep -F -- '- Direct lifecycle:')
+  assert_contains "$lifecycle" "$home/config/supervision-capacity is invalid" \
+    "invalid configured capacity was not identified"
+  assert_contains "$lifecycle" "do not refill" \
+    "invalid configured capacity did not block refill"
+  assert_contains "$lifecycle" "complete guarded closeout" \
+    "invalid configured capacity blocked safe closeout"
+  rm "$home/config/supervision-capacity"
+  out=$(FM_HOME="$home" "$RENDER" --harness codex)
+  lifecycle=$(printf '%s\n' "$out" | grep -F -- '- Direct lifecycle:')
+  assert_contains "$lifecycle" "applicable captain-recorded capacity" \
+    "absent capacity source lost an explicit captain capacity"
+  assert_contains "$lifecycle" "no arbitrary cap when none applies" \
+    "absent capacity source imposed an arbitrary default cap"
+  pass "invalid direct lifecycle capacity blocks refill without stranding safe closeout"
 }
 
 test_grok_is_background_notify() {
@@ -191,6 +217,7 @@ test_conditional_stanzas
 test_repair_lines
 test_cross_harness_ordinary_continuation_and_repair_matrix
 test_cross_harness_direct_lifecycle_matrix
+test_direct_lifecycle_capacity_fails_closed
 test_grok_is_background_notify
 test_grok_command_sources_effective_config
 test_pi_snippet_uses_effective_extension_path

@@ -369,6 +369,15 @@ Because quota-axi only ever reports the present, a ledger date other than today 
 [`unit-economics-source-readiness.md`](unit-economics-source-readiness.md) owns the public generic source-readiness contract, including which lanes have sources configured, while the active home's ignored `data/unit-economics-source-readiness.md` holds the operator-specific audit and follow-up evidence.
 The script header owns the source schema, freshness, corroboration, output, and status contract so this setup reference does not duplicate it.
 
+## Direct supervision capacity (config/supervision-capacity)
+
+`config/supervision-capacity` is the optional local, gitignored capacity source for the primary agent's direct closeout-and-refill transaction.
+It contains one decimal integer from 1 through 64 and is not inherited by secondmate homes.
+Every ordinary task metadata record occupies one slot until guarded teardown removes it, including terminal, parked, ambiguous, and captain-gated lanes.
+An absent file leaves section 7's no-arbitrary-cap rule and any explicit captain-recorded capacity in force.
+An unreadable, empty, non-integer, or out-of-range file blocks refill without authorizing cleanup or mutation of an existing lane.
+The capacity file provides only a bound for the existing primary-agent transaction; it does not select work, stage an envelope, launch a daemon, or own any lifecycle action.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
