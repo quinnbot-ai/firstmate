@@ -40,7 +40,7 @@ ok - local-only yolo work uses its guarded owner and refills to configured capac
 ok - unlanded work fails closed and remains recoverable
 ok - captain-gated completed work remains parked without merge or cleanup
 ok - every primary harness and fallback render one direct guarded closeout-and-refill transaction
-ok - invalid direct lifecycle capacity blocks refill without stranding safe closeout
+ok - direct lifecycle capacity accepts 1-64 and rejects invalid forms without diagnostics
 ```
 
 The PR fixture updates the bare origin's default branch and asserts its exact landed commit before accepting teardown.

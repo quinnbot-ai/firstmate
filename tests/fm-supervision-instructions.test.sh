@@ -149,18 +149,30 @@ test_cross_harness_direct_lifecycle_matrix() {
 }
 
 test_direct_lifecycle_capacity_fails_closed() {
-  local home lifecycle out
+  local capacity error_file home lifecycle out
   home="$TMP_ROOT/invalid-capacity-home"
   mkdir -p "$home/config" "$home/state"
-  printf '%s\n' unlimited > "$home/config/supervision-capacity"
+  printf '%s\n' 64 > "$home/config/supervision-capacity"
   out=$(FM_HOME="$home" "$RENDER" --harness codex)
   lifecycle=$(printf '%s\n' "$out" | grep -F -- '- Direct lifecycle:')
-  assert_contains "$lifecycle" "$home/config/supervision-capacity is invalid" \
-    "invalid configured capacity was not identified"
-  assert_contains "$lifecycle" "do not refill" \
-    "invalid configured capacity did not block refill"
-  assert_contains "$lifecycle" "complete guarded closeout" \
-    "invalid configured capacity blocked safe closeout"
+  assert_contains "$lifecycle" "configured capacity 64" \
+    "valid upper capacity boundary was rejected"
+
+  for capacity in unlimited 0 65 999999999999999999999999999999999999999999; do
+    printf '%s\n' "$capacity" > "$home/config/supervision-capacity"
+    error_file="$home/capacity-$capacity.err"
+    out=$(FM_HOME="$home" "$RENDER" --harness codex 2>"$error_file")
+    lifecycle=$(printf '%s\n' "$out" | grep -F -- '- Direct lifecycle:')
+    assert_contains "$lifecycle" "$home/config/supervision-capacity is invalid" \
+      "invalid configured capacity $capacity was not identified"
+    assert_contains "$lifecycle" "do not refill" \
+      "invalid configured capacity $capacity did not block refill"
+    assert_contains "$lifecycle" "complete guarded closeout" \
+      "invalid configured capacity $capacity blocked safe closeout"
+    [ ! -s "$error_file" ] \
+      || fail "invalid configured capacity $capacity emitted an arithmetic diagnostic"
+  done
+
   rm "$home/config/supervision-capacity"
   out=$(FM_HOME="$home" "$RENDER" --harness codex)
   lifecycle=$(printf '%s\n' "$out" | grep -F -- '- Direct lifecycle:')
@@ -168,7 +180,7 @@ test_direct_lifecycle_capacity_fails_closed() {
     "absent capacity source lost an explicit captain capacity"
   assert_contains "$lifecycle" "no arbitrary cap when none applies" \
     "absent capacity source imposed an arbitrary default cap"
-  pass "invalid direct lifecycle capacity blocks refill without stranding safe closeout"
+  pass "direct lifecycle capacity accepts 1-64 and rejects invalid forms without diagnostics"
 }
 
 test_grok_is_background_notify() {

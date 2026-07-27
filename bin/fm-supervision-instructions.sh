@@ -190,15 +190,13 @@ direct_lifecycle_line() {
       return 0
     fi
     case "$capacity" in
-      ''|*[!0-9]*)
+      [1-9]|[1-5][0-9]|6[0-4])
+        ;;
+      *)
         printf '%s%s%s\n' '- Direct lifecycle: ' "$capacity_file" ' is invalid; complete guarded closeout before the next wait or turn boundary, but do not refill until the capacity source contains one integer from 1 through 64.'
         return 0
         ;;
     esac
-    if [ "$capacity" -lt 1 ] || [ "$capacity" -gt 64 ]; then
-      printf '%s%s%s\n' '- Direct lifecycle: ' "$capacity_file" ' is invalid; complete guarded closeout before the next wait or turn boundary, but do not refill until the capacity source contains one integer from 1 through 64.'
-      return 0
-    fi
     printf '%s%s%s\n' '- Direct lifecycle: before the next wait or turn boundary, complete the AGENTS.md section 8 transaction: reconcile terminal work, select the guarded merge owner by task mode, teardown only after landed proof, and launch eligible ready work to configured capacity ' "$capacity" ' while preserving every gated or ambiguous lane.'
     return 0
   fi
