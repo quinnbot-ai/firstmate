@@ -18,5 +18,6 @@ It is not a tracked repository artifact.
 ## Source requirement
 
 Every published financial metric requires two distinct trusted read-only helpers with independent provenance.
-The helpers must emit matching fresh values in the generator's schema before the ledger may publish a measured or estimated value.
-Any missing, unreadable, malformed, incomplete, stale, or disagreeing source remains unavailable rather than being inferred or replaced with zero.
+The helpers must emit matching values within that metric's declared freshness window before the ledger may publish a measured or estimated value.
+Only the captain-authorized KDP royalties metric may use the explicit `allowSingleSource` exemption, because its authoritative source cannot be independently corroborated, and its output is then visibly `single_source_uncorroborated`; the exemption is scoped in code, so no other metric can declare its way out of corroboration.
+Any absent, unreadable, malformed, incomplete, stale, single-source, shared-provenance, or disagreeing source remains unavailable under its named reason rather than being inferred or replaced with zero.

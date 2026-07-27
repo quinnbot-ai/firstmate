@@ -53,7 +53,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-claude-home.py`      | Create and safely remove task-private Claude crew homes, including in-process macOS Keychain provisioning |
 | `fm-claude-crew-lib.sh`  | Resolve the Claude crew profile path and run fail-closed disposable and actual-home readiness checks |
 | `fm-dispatch-select.sh`  | Resolve a dispatch rule/default to one profile, owning quota-aware arrays and random fallback |
-| `fm-unit-economics-ledger.mjs` | Render the private daily fleet unit-economics ledger from fresh, corroborated sources |
+| `fm-unit-economics-ledger.mjs` | Render the private daily fleet unit-economics ledger under its configured freshness and corroboration policy |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
 | `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab and cmux workspace titles |
 | `fm-composer-lib.sh`     | Single fleet-wide owner of composer-content classification for all backends          |
