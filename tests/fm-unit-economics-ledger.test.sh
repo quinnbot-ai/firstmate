@@ -130,6 +130,19 @@ JSON
   pass "fleet cost requires independent sources"
 }
 
+test_fleet_operations_keeps_its_operational_window() {
+  local one="$TMP_ROOT/fleet-window/one" config="$TMP_ROOT/fleet-window/config.json" out="$TMP_ROOT/fleet-window/out.json" quota="$TMP_ROOT/fleet-window/quota"
+  write_source "$one" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"attributable_crew_session_cost\":{\"amount\":7,\"unit\":\"USD\",\"status\":\"measured\"}}}"
+  mkdir -p "$(dirname "$config")"
+  cat > "$config" <<JSON
+{"maxAgeSeconds":900,"lanes":{"fleet_operations":{"cost_sources":[{"command":["$one"]}],"metrics":{"attributable_crew_session_cost":{"maxAgeSeconds":3024000,"allowSingleSource":true}}}}}
+JSON
+  write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="fleet_operations") | .metrics[] | select(.name=="attributable_crew_session_cost" and .amount==null and .unavailable_reason=="single-source refused" and .max_age_seconds==900)' "$out" >/dev/null || fail "a fleet metric declaration relaxed the operational window or the two-source rule"
+  jq -e '[.lanes[] | select(.id=="fleet_operations") | .metrics[] | select(.max_age_seconds==900)] | length == 3' "$out" >/dev/null || fail "fleet quota windows did not keep the operational default"
+  pass "fleet_operations ignores per-metric declarations and keeps its operational window"
+}
+
 test_daily_fleet_line_requires_readable_sources() {
   local config="$TMP_ROOT/daily-unavailable/config.json" out="$TMP_ROOT/daily-unavailable/out.json" quota="$TMP_ROOT/daily-unavailable/quota" date
   date=$(date -u +%Y-%m-%d)
@@ -544,6 +557,7 @@ test_daily_sources_require_independent_provenance
 test_stale_and_failed_cross_check_are_refused
 test_currency_and_units_are_preserved
 test_fleet_cost_requires_independent_sources
+test_fleet_operations_keeps_its_operational_window
 test_daily_fleet_line_requires_readable_sources
 test_daily_fleet_line_cross_checks_per_crew_cost_and_validation_runs
 test_live_helper_timestamps_are_fresh

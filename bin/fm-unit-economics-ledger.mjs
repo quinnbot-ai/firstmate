@@ -5,11 +5,15 @@
 // The private config defaults to $FM_HOME/config/unit-economics-ledger.json and
 // contains optional lane definitions for weho, content_accounts, trading, and
 // kdp, plus an optional `maxAgeSeconds` freshness window (default 900). Each
-// metric can instead declare `metrics.<metric>.maxAgeSeconds`, so slow-moving
-// financial evidence need not inherit an operational polling window. A
-// `metrics` container that is not an object, a metric declaration that is not an
-// object, a `maxAgeSeconds` that is not a non-negative finite number, or a
-// non-boolean `allowSingleSource` says `metric configuration malformed`. A
+// metric of those four financial lanes can instead declare
+// `metrics.<metric>.maxAgeSeconds`, so slow-moving financial evidence need not
+// inherit an operational polling window. Within a financial lane, a `metrics`
+// container that is not an object, a metric declaration that is not an object, a
+// `maxAgeSeconds` that is not a non-negative finite number, or a non-boolean
+// `allowSingleSource` says `metric configuration malformed`. The fixed
+// fleet_operations lane reads no per-metric declarations at all, so its quota
+// and cost windows always keep the operational default and no configuration can
+// widen or exempt them. A
 // lane's `sources` are trusted private command arrays, each with an optional
 // `timeoutMs` (default 30000). Each command is run fresh with $FM_HOME as its
 // working directory - the current directory stands in only when FM_HOME is
@@ -41,7 +45,7 @@
 // independently corroborated. Its one readable, trusted, fresh source then
 // renders with the explicit `single_source_uncorroborated` status and
 // `single-source uncorroborated` cross-check label. The exemption is scoped in
-// code, so declaring it on any other lane or metric publishes nothing and says
+// code, so declaring it on any other financial metric publishes nothing and says
 // `single-source exemption unauthorized`; every other metric retains the
 // two-source rule.
 // A configured command that cannot be read says `source unreadable`, malformed
@@ -216,7 +220,7 @@ function metricShape(metric, maxAgeSeconds) {
 function sourcesAtPublication(sources, maxAgeSeconds, publicationTime) {
   return sources.map((source) => {
     if (!source.ok || isoFresh(source.body.observedAt, maxAgeSeconds, publicationTime)) return source;
-    return { ok: false, reason: Number.isFinite(Date.parse(source.body.observedAt || '')) ? 'stale source refused' : SOURCE_MALFORMED };
+    return { ok: false, reason: Number.isFinite(Date.parse(source.body.observedAt || '')) ? 'stale source refused' : SOURCE_MALFORMED, provenance: source.provenance };
   });
 }
 function trustedMetric(container, metric, unit) {
