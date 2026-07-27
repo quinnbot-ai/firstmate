@@ -88,7 +88,7 @@ test_unavailable_and_partial_lanes_render() {
   local config="$TMP_ROOT/unavailable/config.json" out="$TMP_ROOT/unavailable/out.json" quota="$TMP_ROOT/unavailable/quota"
   mkdir -p "$(dirname "$config")"; printf '{}\n' > "$config"; printf 'old\n' > "$out"; printf 'old\n' > "${out%.json}.md"; chmod 0644 "$out" "${out%.json}.md"; write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
   jq -e '[.lanes[].id] | length == 5 and index("weho") and index("fleet_operations")' "$out" >/dev/null || fail "all lanes did not render"
-  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .status=="unavailable" and .source_freshness=="source configuration absent")' "$out" >/dev/null || fail "missing source configuration was not identified"
+  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .status=="unavailable" and .source_freshness=="source configuration absent" and .unavailable_reason=="source configuration absent")' "$out" >/dev/null || fail "missing source configuration was not identified"
   jq -e '.lanes[] | select(.id=="fleet_operations") | .metrics[] | select(.name=="claude_quota_window" and .amount==80 and .unit=="percent")' "$out" >/dev/null || fail "available lane did not render beside unavailable lanes"
   [ -f "${out%.json}.md" ] || fail "captain-readable companion artifact was not written"
   [ "$(file_mode "$out")" = 600 ] && [ "$(file_mode "${out%.json}.md")" = 600 ] || fail "existing ledger artifacts were not made private"
@@ -100,7 +100,7 @@ test_stale_and_failed_cross_check_are_refused() {
   write_source "$one" "{\"observedAt\":\"$old\",\"currency\":\"USD\",\"metrics\":{\"pipeline_cost\":{\"amount\":1,\"unit\":\"USD\",\"status\":\"measured\"},\"realized_revenue\":{\"amount\":2,\"unit\":\"USD\",\"status\":\"measured\"}}}"
   write_source "$two" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"pipeline_cost\":{\"amount\":1,\"unit\":\"USD\",\"status\":\"measured\"},\"realized_revenue\":{\"amount\":3,\"unit\":\"USD\",\"status\":\"measured\"}}}"
   write_config "$config" weho "$one" "$two"; write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
-  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .source_freshness=="stale source refused")' "$out" >/dev/null || fail "stale financial source was not refused"
+  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .source_freshness=="stale source refused" and .unavailable_reason=="stale source refused")' "$out" >/dev/null || fail "stale financial source was not refused"
   write_source "$one" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"pipeline_cost\":{\"amount\":1,\"unit\":\"USD\",\"status\":\"measured\"},\"realized_revenue\":{\"amount\":2,\"unit\":\"USD\",\"status\":\"measured\"}}}"
   run_ledger "$config" "$out" "$quota"
   jq -e '.lanes[] | select(.id=="weho" and .source_freshness=="fresh") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .source_freshness=="fresh" and .cross_check=="failed")' "$out" >/dev/null || fail "failed cross-check was presented as fact or reported as a freshness failure"
@@ -164,7 +164,7 @@ test_source_configuration_and_count_failures_are_named() {
 {"maxAgeSeconds":900,"lanes":{"weho":{"sources":[{"command":["$one"]}]},"trading":{"sources":[{"command":"$one"}]}}}
 JSON
   write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
-  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .source_freshness=="independent source count insufficient")' "$out" >/dev/null || fail "a single configured helper was not named an insufficient independent source count"
+  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .source_freshness=="single-source refused" and .unavailable_reason=="single-source refused")' "$out" >/dev/null || fail "a single configured helper was not named a single-source refusal"
   jq -e '.lanes[] | select(.id=="trading") | .metrics[] | select(.name=="realized_pnl" and .amount==null and .source_freshness=="source configuration malformed")' "$out" >/dev/null || fail "a malformed source entry was not named malformed configuration"
   printf '%s\n' '{"lanes":{"weho":{"sources":{}}}}' > "$config"; run_ledger "$config" "$out" "$quota"
   jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .source_freshness=="source configuration malformed")' "$out" >/dev/null || fail "a malformed sources container was not named malformed configuration"
@@ -186,7 +186,7 @@ JSON
 {"maxAgeSeconds":900,"lanes":{"fleet_operations":{"daily_sources":[{"command":["$one"]}]}}}
 JSON
   run_ledger "$config" "$out" "$quota"
-  jq -e '.lanes[] | select(.id=="fleet_operations") | .daily_fleet_line | select(.session_cost.amount==null and .source_freshness=="independent source count insufficient")' "$out" >/dev/null || fail "a single readable daily helper was not named an insufficient independent source count"
+  jq -e '.lanes[] | select(.id=="fleet_operations") | .daily_fleet_line | select(.session_cost.amount==null and .source_freshness=="single-source refused")' "$out" >/dev/null || fail "a single readable daily helper was not named a single-source refusal"
   write_source "$two" "{\"source\":\"run-audit\",\"observedAt\":\"$NOW\",\"date\":\"$date\",\"currency\":\"USD\",\"crewSessions\":[]}"
   cat > "$config" <<JSON
 {"maxAgeSeconds":900,"lanes":{"fleet_operations":{"daily_sources":[{"command":["$one"]},{"command":["$two"]}]}}}
@@ -194,7 +194,7 @@ JSON
   FM_UNIT_ECONOMICS_LEDGER_DATE="$past" FM_UNIT_ECONOMICS_QUOTA_AXI="$quota" node "$BIN" --config "$config" --output "$out" --format json >/dev/null
   jq -e '.lanes[] | select(.id=="fleet_operations") | .daily_fleet_line | select(.session_cost.amount==null and .source_freshness=="ledger date not covered")' "$out" >/dev/null || fail "a backfilled date no helper covers was reported as malformed helper output"
   grep -F 'unavailable (ledger date not covered)' "${out%.json}.md" >/dev/null || fail "the uncovered ledger date was hidden in Markdown"
-  pass "daily helper failures are diagnosed ahead of the independent source count"
+  pass "daily helper failures are diagnosed ahead of the single-source refusal"
 }
 
 test_daily_fleet_line_cross_checks_per_crew_cost_and_validation_runs() {
@@ -226,7 +226,7 @@ test_untrusted_metric_states_and_duplicate_sources_are_refused() {
   jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .status=="unavailable" and .source_freshness=="source metric untrusted")' "$out" >/dev/null || fail "a present but untrusted metric was published or reported as a missing metric"
   write_source "$one" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"pipeline_cost\":{\"amount\":4,\"unit\":\"USD\",\"status\":\"measured\"},\"realized_revenue\":{\"amount\":8,\"unit\":\"USD\",\"status\":\"measured\"}}}"
   write_config "$config" weho "$one" "$one"; run_ledger "$config" "$out" "$quota"
-  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .cross_check=="unavailable" and .source_freshness=="independent source count insufficient")' "$out" >/dev/null || fail "duplicate command arrays satisfied independent corroboration"
+  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .cross_check=="unavailable" and .source_freshness=="single-source refused")' "$out" >/dev/null || fail "duplicate command arrays satisfied independent corroboration"
   pass "metric states and source identity gate corroboration"
 }
 
@@ -439,12 +439,55 @@ test_relative_source_commands_resolve_against_fm_home() {
   pass "relative source commands resolve against FM_HOME, not the invoking cwd"
 }
 
+test_metrics_use_individual_freshness_windows() {
+  local one="$TMP_ROOT/metric-freshness/one" two="$TMP_ROOT/metric-freshness/two" config="$TMP_ROOT/metric-freshness/config.json" out="$TMP_ROOT/metric-freshness/out.json" quota="$TMP_ROOT/metric-freshness/quota" old
+  old=$(node -p 'new Date(Date.now() - 600000).toISOString()')
+  write_source "$one" "{\"observedAt\":\"$old\",\"currency\":\"USD\",\"metrics\":{\"royalties\":{\"amount\":31.25,\"unit\":\"USD\",\"status\":\"measured\"}}}"
+  write_source "$two" "{\"observedAt\":\"$old\",\"currency\":\"USD\",\"metrics\":{\"royalties\":{\"amount\":31.25,\"unit\":\"USD\",\"status\":\"measured\"}}}"
+  mkdir -p "$(dirname "$config")"
+  cat > "$config" <<JSON
+{"maxAgeSeconds":30,"lanes":{"kdp":{"sources":[{"command":["$one"]},{"command":["$two"]}],"metrics":{"royalties":{"maxAgeSeconds":3024000}}}}}
+JSON
+  write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="kdp") | .metrics[] | select(.name=="royalties" and .amount==31.25 and .status=="independently_cross_checked" and .max_age_seconds==3024000)' "$out" >/dev/null || fail "a slow-moving metric inherited the operational freshness window"
+  cat > "$config" <<JSON
+{"maxAgeSeconds":30,"lanes":{"kdp":{"sources":[{"command":["$one"]},{"command":["$two"]}],"metrics":{"royalties":{"maxAgeSeconds":60}}}}}
+JSON
+  run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="kdp") | .metrics[] | select(.name=="royalties" and .amount==null and .unavailable_reason=="stale source refused" and .max_age_seconds==60)' "$out" >/dev/null || fail "a metric-specific stale reading did not name its reason"
+  grep -F 'stale source refused' "${out%.json}.md" >/dev/null || fail "the metric-specific stale reason was hidden in Markdown"
+  pass "financial metrics use their own freshness windows"
+}
+
+test_shared_provenance_refuses_and_authorized_single_source_labels() {
+  local one="$TMP_ROOT/provenance/one" two="$TMP_ROOT/provenance/two" config="$TMP_ROOT/provenance/config.json" out="$TMP_ROOT/provenance/out.json" quota="$TMP_ROOT/provenance/quota"
+  write_source "$one" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"royalties\":{\"amount\":31.25,\"unit\":\"USD\",\"status\":\"measured\"}}}"
+  write_source "$two" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"royalties\":{\"amount\":31.25,\"unit\":\"USD\",\"status\":\"measured\"}}}"
+  mkdir -p "$(dirname "$config")"
+  cat > "$config" <<JSON
+{"lanes":{"kdp":{"sources":[{"command":["$one"],"provenance":"monthly-report-feed"},{"command":["$two"],"provenance":"monthly-report-feed"}]}}}
+JSON
+  write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="kdp") | .metrics[] | select(.name=="royalties" and .amount==null and .unavailable_reason=="shared provenance refused")' "$out" >/dev/null || fail "shared provenance was accepted as corroboration"
+  grep -F 'shared provenance refused' "${out%.json}.md" >/dev/null || fail "the shared-provenance refusal was hidden in Markdown"
+  cat > "$config" <<JSON
+{"lanes":{"kdp":{"sources":[{"command":["$one"],"provenance":"monthly-report-feed"}],"metrics":{"royalties":{"maxAgeSeconds":3024000,"allowSingleSource":true}}}}}
+JSON
+  run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="kdp") | .metrics[] | select(.name=="royalties" and .amount==31.25 and .status=="single_source_uncorroborated" and .cross_check=="single-source uncorroborated")' "$out" >/dev/null || fail "the authorized KDP-style single source was not visibly labeled in JSON"
+  grep -F 'single_source_uncorroborated' "${out%.json}.md" >/dev/null || fail "the authorized single source was not visibly labeled in Markdown"
+  grep -F 'single-source uncorroborated' "${out%.json}.md" >/dev/null || fail "Markdown hid the absence of corroboration"
+  pass "shared provenance is refused and authorized single sources stay labeled"
+}
+
 test_zero_revenue_is_explicit_and_cross_checked
 test_unavailable_and_partial_lanes_render
 test_unreadable_malformed_and_unmapped_sources_stay_unavailable
 test_source_configuration_and_count_failures_are_named
 test_daily_fleet_line_names_helper_failures_before_source_count
 test_relative_source_commands_resolve_against_fm_home
+test_metrics_use_individual_freshness_windows
+test_shared_provenance_refuses_and_authorized_single_source_labels
 test_stale_and_failed_cross_check_are_refused
 test_currency_and_units_are_preserved
 test_fleet_cost_requires_independent_sources
