@@ -134,7 +134,7 @@ test_daily_fleet_line_requires_readable_sources() {
   local config="$TMP_ROOT/daily-unavailable/config.json" out="$TMP_ROOT/daily-unavailable/out.json" quota="$TMP_ROOT/daily-unavailable/quota" date
   date=$(date -u +%Y-%m-%d)
   mkdir -p "$(dirname "$config")"; printf '{}\n' > "$config"; write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
-  jq -e --arg date "$date" '(.schema == "fleet-unit-economics-ledger.v2") and ([.lanes[] | select(.id=="fleet_operations") | .daily_fleet_line | select(.date==$date and .session_cost.amount==null and .session_cost.status=="unavailable" and .validation_run_volume.amount==null and .validation_run_volume.status=="unavailable")] | length == 1)' "$out" >/dev/null || fail "missing daily sources were rendered as a number instead of unavailable"
+  jq -e --arg date "$date" '(.schema == "fleet-unit-economics-ledger.v3") and ([.lanes[] | select(.id=="fleet_operations") | .daily_fleet_line | select(.date==$date and .session_cost.amount==null and .session_cost.status=="unavailable" and .validation_run_volume.amount==null and .validation_run_volume.status=="unavailable")] | length == 1)' "$out" >/dev/null || fail "missing daily sources were rendered as a number instead of unavailable"
   grep -F 'unavailable (source configuration absent)' "${out%.json}.md" >/dev/null || fail "daily Markdown line hid the unavailable source"
   pass "daily fleet line renders missing sources as unavailable rather than zero"
 }
@@ -477,7 +477,58 @@ JSON
   jq -e '.lanes[] | select(.id=="kdp") | .metrics[] | select(.name=="royalties" and .amount==31.25 and .status=="single_source_uncorroborated" and .cross_check=="single-source uncorroborated")' "$out" >/dev/null || fail "the authorized KDP-style single source was not visibly labeled in JSON"
   grep -F 'single_source_uncorroborated' "${out%.json}.md" >/dev/null || fail "the authorized single source was not visibly labeled in Markdown"
   grep -F 'single-source uncorroborated' "${out%.json}.md" >/dev/null || fail "Markdown hid the absence of corroboration"
-  pass "shared provenance is refused and authorized single sources stay labeled"
+  cat > "$config" <<JSON
+{"lanes":{"kdp":{"sources":[{"command":["$one"],"provenance":"monthly-report-feed"}],"metrics":{"attributable_costs":{"allowSingleSource":true}}}}}
+JSON
+  run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="kdp") | .metrics[] | select(.name=="attributable_costs" and .amount==null and .unavailable_reason=="single-source exemption unauthorized")' "$out" >/dev/null || fail "an unauthorized single-source exemption was honored"
+  jq -e '.lanes[] | select(.id=="kdp") | .metrics[] | select(.name=="royalties" and .amount==null and .unavailable_reason=="single-source refused")' "$out" >/dev/null || fail "an undeclared metric lost the default two-source rule"
+  cat > "$config" <<JSON
+{"lanes":{"trading":{"sources":[{"command":["$one"],"provenance":"broker-feed"}],"metrics":{"realized_pnl":{"allowSingleSource":true}}}}}
+JSON
+  run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="trading") | .metrics[] | select(.name=="realized_pnl" and .amount==null and .unavailable_reason=="single-source exemption unauthorized")' "$out" >/dev/null || fail "a non-KDP lane declared its way out of corroboration"
+  grep -F 'single-source exemption unauthorized' "${out%.json}.md" >/dev/null || fail "the unauthorized exemption was hidden in Markdown"
+  pass "shared provenance is refused and only authorized single sources publish"
+}
+
+test_malformed_metric_declarations_are_named() {
+  local one="$TMP_ROOT/metric-config/one" two="$TMP_ROOT/metric-config/two" config="$TMP_ROOT/metric-config/config.json" out="$TMP_ROOT/metric-config/out.json" quota="$TMP_ROOT/metric-config/quota"
+  write_source "$one" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"royalties\":{\"amount\":31.25,\"unit\":\"USD\",\"status\":\"measured\"}}}"
+  write_source "$two" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"royalties\":{\"amount\":31.25,\"unit\":\"USD\",\"status\":\"measured\"}}}"
+  mkdir -p "$(dirname "$config")"
+  cat > "$config" <<JSON
+{"lanes":{"kdp":{"sources":[{"command":["$one"]},{"command":["$two"]}],"metrics":{"royalties":{"maxAgeSeconds":"35d"}}}}}
+JSON
+  write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="kdp") | .metrics[] | select(.name=="royalties" and .amount==null and .unavailable_reason=="metric configuration malformed" and .max_age_seconds==null)' "$out" >/dev/null || fail "a non-numeric freshness window published or hid its cause"
+  grep -F 'metric configuration malformed' "${out%.json}.md" >/dev/null || fail "the malformed metric declaration was hidden in Markdown"
+  cat > "$config" <<JSON
+{"lanes":{"kdp":{"sources":[{"command":["$one"]},{"command":["$two"]}],"metrics":[{"royalties":{}}]}}}
+JSON
+  run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="kdp") | .metrics[] | select(.name=="royalties" and .amount==null and .unavailable_reason=="metric configuration malformed")' "$out" >/dev/null || fail "a malformed metrics container was not named"
+  pass "malformed metric declarations refuse publication under a named reason"
+}
+
+test_daily_sources_require_independent_provenance() {
+  local one="$TMP_ROOT/daily-provenance/one" two="$TMP_ROOT/daily-provenance/two" config="$TMP_ROOT/daily-provenance/config.json" out="$TMP_ROOT/daily-provenance/out.json" quota="$TMP_ROOT/daily-provenance/quota" date
+  date=$(date -u +%Y-%m-%d)
+  write_source "$one" "{\"source\":\"billing-export\",\"observedAt\":\"$NOW\",\"date\":\"$date\",\"currency\":\"USD\",\"crewSessions\":[{\"crew\":\"alpha\",\"sessionCost\":{\"amount\":2,\"unit\":\"USD\",\"status\":\"measured\"},\"validationRuns\":{\"amount\":3,\"unit\":\"runs\",\"status\":\"measured\"}}]}"
+  write_source "$two" "{\"source\":\"run-audit\",\"observedAt\":\"$NOW\",\"date\":\"$date\",\"currency\":\"USD\",\"crewSessions\":[{\"crew\":\"alpha\",\"sessionCost\":{\"amount\":2,\"unit\":\"USD\",\"status\":\"measured\"},\"validationRuns\":{\"amount\":3,\"unit\":\"runs\",\"status\":\"measured\"}}]}"
+  mkdir -p "$(dirname "$config")"
+  cat > "$config" <<JSON
+{"maxAgeSeconds":900,"lanes":{"fleet_operations":{"daily_sources":[{"command":["$one"],"provenance":"monthly-report-feed"},{"command":["$two"],"provenance":"monthly-report-feed"}]}}}
+JSON
+  write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="fleet_operations") | .daily_fleet_line | select(.session_cost.amount==null and .session_cost.unavailable_reason=="shared provenance refused" and .source_freshness=="shared provenance refused")' "$out" >/dev/null || fail "two daily helpers over one feed were accepted as corroboration"
+  grep -F 'unavailable (shared provenance refused)' "${out%.json}.md" >/dev/null || fail "the daily shared-provenance refusal was hidden in Markdown"
+  cat > "$config" <<JSON
+{"maxAgeSeconds":900,"lanes":{"fleet_operations":{"daily_sources":[{"command":["$one"],"provenance":"billing-export"},{"command":["$two"],"provenance":"run-audit"}]}}}
+JSON
+  run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="fleet_operations") | .daily_fleet_line | select(.session_cost.amount==2 and .session_cost.status=="independently_cross_checked")' "$out" >/dev/null || fail "independently sourced daily helpers were refused"
+  pass "the daily fleet money line requires independent provenance"
 }
 
 test_zero_revenue_is_explicit_and_cross_checked
@@ -488,6 +539,8 @@ test_daily_fleet_line_names_helper_failures_before_source_count
 test_relative_source_commands_resolve_against_fm_home
 test_metrics_use_individual_freshness_windows
 test_shared_provenance_refuses_and_authorized_single_source_labels
+test_malformed_metric_declarations_are_named
+test_daily_sources_require_independent_provenance
 test_stale_and_failed_cross_check_are_refused
 test_currency_and_units_are_preserved
 test_fleet_cost_requires_independent_sources
