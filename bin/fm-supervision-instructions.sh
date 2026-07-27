@@ -177,6 +177,14 @@ ordinary_wake_line() {
   esac
 }
 
+direct_lifecycle_line() {
+  if [ "$READ_ONLY" -eq 1 ]; then
+    printf '%s\n' '- Direct lifecycle: unavailable in this read-only session; preserve every lane without merge, teardown, or refill.'
+    return 0
+  fi
+  printf '%s\n' '- Direct lifecycle: before the next wait or turn boundary, complete the AGENTS.md section 8 transaction: reconcile terminal work, use guarded standing merge authority, teardown only after landed proof, and launch eligible ready work to capacity while preserving every gated or ambiguous lane.'
+}
+
 if [ "$REPAIR_LINE" -eq 1 ]; then
   repair_line
   exit 0
@@ -203,6 +211,7 @@ else
   printf '%s\n' '- X mode: inactive; use the default watcher cadence.'
 fi
 ordinary_wake_line
+direct_lifecycle_line
 printf '\n'
 render_snippet
 printf '\n'

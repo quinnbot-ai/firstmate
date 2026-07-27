@@ -1030,10 +1030,6 @@ event_wait_or_sleep() {
   esac
 }
 
-fm_auto_dispatch_tick() {
-  "$SCRIPT_DIR/fm-auto-dispatch-once.sh" || true
-}
-
 # --- Main entry: the runtime below runs only when this file is executed as a
 # script. When sourced (unit tests loading the functions above), return here
 # before acquiring the singleton lock or entering the blocking loop.
@@ -1129,11 +1125,6 @@ while :; do
   if ops_inbox_tasks_in_flight && ops_inbox_changed; then
     surface_ops_inbox_change
   fi
-
-  # Auto-dispatch is a bounded one-shot inside the existing supervision loop.
-  # Its persisted cadence and lock keep event-heavy cycles and duplicate
-  # watcher attempts from multiplying claims.
-  fm_auto_dispatch_tick
 
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated
   # parent reports, observe backend busy/idle turn completion, send one recovery

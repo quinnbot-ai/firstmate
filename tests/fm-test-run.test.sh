@@ -106,6 +106,8 @@ init_changed_fixture_repo() {
     fm-session-start.test.sh \
     fm-afk-pi-herdr-return-e2e.test.sh \
     fm-backend.test.sh \
+    fm-direct-lifecycle.test.sh \
+    fm-auto-dispatch.test.sh \
     fm-pr-merge.test.sh \
     fm-pi-watch-extension.test.sh \
     fm-afk-return.test.sh \
@@ -119,6 +121,9 @@ init_changed_fixture_repo() {
   : >"$repo/tests/lib.sh"
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
+  : >"$repo/bin/fm-auto-dispatch-once.sh"
+  : >"$repo/bin/fm-auto-dispatch.mjs"
+  : >"$repo/bin/fm-dispatch-stage.sh"
   : >"$repo/bin/unmapped-source.sh"
   printf '# .claude/settings.json\n# .pi/extensions/fm-primary-turnend-guard.ts\n' \
     >>"$repo/tests/fm-cd-pretool-check.test.sh"
@@ -172,6 +177,16 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-pi-watch-extension.test.sh" "Pi source selects watcher coverage"
   git -C "$repo" add .agents .claude .pi
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm non-bin-source-change
+
+  rm "$repo/bin/fm-auto-dispatch-once.sh" \
+    "$repo/bin/fm-auto-dispatch.mjs" \
+    "$repo/bin/fm-dispatch-stage.sh" \
+    "$repo/tests/fm-auto-dispatch.test.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-direct-lifecycle.test.sh" \
+    "removed report-only lifecycle selects direct replacement coverage"
+  git -C "$repo" add -u
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm auto-dispatch-removal
 
   printf '\n' >>"$repo/src/unmapped.ts"
   set +e

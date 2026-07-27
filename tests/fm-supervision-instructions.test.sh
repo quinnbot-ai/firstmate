@@ -115,6 +115,36 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
   pass "renderer preserves every harness ordinary-continuation and missing-cycle repair path"
 }
 
+test_cross_harness_direct_lifecycle_matrix() {
+  local harness lifecycle out
+
+  for harness in claude codex opencode pi pi-signed grok kimi unknown; do
+    out=$("$RENDER" --harness "$harness")
+    lifecycle=$(printf '%s\n' "$out" | grep -F -- '- Direct lifecycle:')
+    assert_contains "$lifecycle" "before the next wait or turn boundary" \
+      "$harness direct lifecycle can lapse at a primary-turn boundary"
+    assert_contains "$lifecycle" "guarded standing merge authority" \
+      "$harness direct lifecycle lost the guarded merge owner"
+    assert_contains "$lifecycle" "teardown only after landed proof" \
+      "$harness direct lifecycle lost the landed-work cleanup gate"
+    assert_contains "$lifecycle" "launch eligible ready work to capacity" \
+      "$harness direct lifecycle lost immediate ready-work refill"
+    assert_contains "$lifecycle" "preserving every gated or ambiguous lane" \
+      "$harness direct lifecycle lost the captain-gated preservation rule"
+  done
+
+  out=$("$RENDER" --harness codex --read-only 1)
+  lifecycle=$(printf '%s\n' "$out" | grep -F -- '- Direct lifecycle:')
+  assert_contains "$lifecycle" "unavailable in this read-only session" \
+    "read-only supervision did not disable lifecycle mutation"
+  assert_contains "$lifecycle" "preserve every lane without merge, teardown, or refill" \
+    "read-only supervision did not preserve all lanes"
+  assert_not_contains "$lifecycle" "guarded standing merge authority" \
+    "read-only supervision printed mutable closeout instructions"
+
+  pass "every primary harness and fallback render one direct guarded closeout-and-refill transaction"
+}
+
 test_grok_is_background_notify() {
   local out
   out=$("$RENDER" --harness grok)
@@ -160,6 +190,7 @@ test_unknown_fallback
 test_conditional_stanzas
 test_repair_lines
 test_cross_harness_ordinary_continuation_and_repair_matrix
+test_cross_harness_direct_lifecycle_matrix
 test_grok_is_background_notify
 test_grok_command_sources_effective_config
 test_pi_snippet_uses_effective_extension_path

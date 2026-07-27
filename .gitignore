@@ -12,7 +12,6 @@ __pycache__/
 .env
 config/crew-harness
 config/crew-dispatch.json
-config/auto-dispatch.json
 config/secondmate-harness
 config/backlog-backend
 config/backend
