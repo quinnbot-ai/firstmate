@@ -70,10 +70,11 @@ test_create_strips_mcp_servers_from_claude_json() {
   local case_dir data source home out status
   case_dir="$TMP_ROOT/create-strips-mcp"
   data="$case_dir/data"
-  source="$case_dir/profile"
-  mkdir -p "$data" "$source"
+  source="$data/claude-crewmate/profile"
+  mkdir -p "$source"
   printf '%s\n' '{"hasCompletedOnboarding":true,"mcpServers":{"inherited":{"command":"x"}},"projects":{"/tmp/p":{"mcpServers":{"inherited2":{"command":"x"}},"nested":[{"mcpServers":{"inherited3":{"command":"x"}}}],"hasTrustDialogAccepted":true}}}' \
     > "$source/.claude.json"
+  fm_fake_claude_keychain_seed "$FAKE_KEYCHAIN" "$source"
 
   home=$(python3 "$HELPER" --data "$data" --source "$source" --task-id mcp --create)
   python3 - "$home" <<'PY'
@@ -107,6 +108,26 @@ PY
   expect_code 1 "$status" "create must refuse a profile whose .claude.json is not a JSON object"
   assert_contains "$out" "not a JSON object" "create did not explain the .claude.json refusal"
   pass "create strips every mcpServers section from the copied .claude.json"
+}
+
+test_create_refuses_an_unmanaged_profile() {
+  local case_dir data source out status
+  case_dir="$TMP_ROOT/create-unmanaged-profile"
+  data="$case_dir/data"
+  source="$case_dir/profile"
+  mkdir -p "$data"
+  make_profile "$source"
+
+  out=$(python3 "$HELPER" --data "$data" --source "$source" \
+    --task-id unmanaged --create 2>&1)
+  status=$?
+  expect_code 1 "$status" "create must refuse a source outside the managed profile"
+  assert_contains "$out" "require the managed Claude crewmate profile" \
+    "create did not explain the unmanaged-profile refusal"
+  find "$data/claude-crewmate" -maxdepth 1 -name '.fm-claude-home.*' 2>/dev/null \
+    | grep -q . \
+    && fail "an unmanaged profile produced a credential-less home"
+  pass "create refuses a source that cannot own the managed Keychain credential"
 }
 
 test_managed_keychain_credential_is_cloned_and_removed() {
@@ -182,7 +203,131 @@ PY
   pass "path-bound Keychain credentials are cloned in process and removed with task homes"
 }
 
-test_managed_keychain_short_write_is_rejected() {
+test_keychain_add_failure_names_its_osstatus() {
+  local out
+
+  out=$(python3 - "$HELPER" 2>&1 <<'PY'
+import contextlib
+import importlib.util
+import io
+import sys
+
+spec = importlib.util.spec_from_file_location("fm_claude_home", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+class FailingSecurity:
+    def SecItemAdd(self, query, result):
+        return -25299
+
+class FakeCore:
+    def CFDictionarySetValue(self, query, key, value):
+        return None
+
+keychain = module.MacOSKeychain.__new__(module.MacOSKeychain)
+keychain.security = FailingSecurity()
+keychain.core = FakeCore()
+keychain.constants = {"kSecValueData": 1}
+keychain.attributes = lambda service: (2, 3, 4)
+keychain.data = lambda value: 5
+keychain.release = lambda value: None
+service = "Claude Code-credentials-status-test"
+error_output = io.StringIO()
+with contextlib.redirect_stderr(error_output):
+    try:
+        keychain.write(service, bytes(1))
+    except SystemExit as error:
+        if error.code != 1:
+            raise
+    else:
+        raise AssertionError("SecItemAdd OSStatus -25299 was accepted as success")
+message = error_output.getvalue()
+if "SecItemAdd" not in message or "OSStatus -25299" not in message:
+    raise AssertionError("Keychain failure omitted its operation or OSStatus")
+if service not in message:
+    raise AssertionError("Keychain failure omitted its service name")
+PY
+)
+  expect_code 0 "$?" "a failed SecItemAdd must be loud and non-zero"
+  [ -z "$out" ] || fail "Keychain status test emitted unexpected output: $out"
+  pass "SecItemAdd failure names its operation, service, and OSStatus"
+}
+
+test_missing_cloned_credential_refuses_and_cleans_home() {
+  local case_dir data source out status
+  case_dir="$TMP_ROOT/keychain-missing-clone"
+  data="$case_dir/data"
+  source="$data/claude-crewmate/profile"
+  mkdir -p "$data"
+  make_profile "$source"
+
+  out=$(python3 - "$HELPER" "$data" "$source" 2>&1 <<'PY'
+import contextlib
+import importlib.util
+import io
+import os
+import sys
+from types import SimpleNamespace
+
+helper, data, source = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("fm_claude_home", helper)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+class MissingCloneKeychain:
+    def __init__(self):
+        self.source_service = module.keychain_service(source)
+        self.deleted = []
+
+    def read(self, service):
+        if service == self.source_service:
+            return bytes(range(1, 9))
+        return None
+
+    def write(self, service, value):
+        if value != bytes(range(1, 9)):
+            raise AssertionError("clone received unexpected credential bytes")
+
+    def delete(self, service):
+        self.deleted.append(service)
+
+module.require_macos = lambda: None
+keychain = MissingCloneKeychain()
+module.macos_keychain = lambda: keychain
+stdout = io.StringIO()
+stderr = io.StringIO()
+with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+    try:
+        module.create_home(
+            SimpleNamespace(data=data, source=source, task_id="missing-clone")
+        )
+    except SystemExit as error:
+        if error.code != 1:
+            raise
+    else:
+        raise AssertionError("a missing cloned credential was accepted")
+if stdout.getvalue():
+    raise AssertionError("failed creation printed a home path")
+message = stderr.getvalue()
+if "SecItemCopyMatching" not in message or "OSStatus -25300" not in message:
+    raise AssertionError("missing read-back omitted its operation or OSStatus")
+base = os.path.join(data, "claude-crewmate")
+leftovers = [
+    name for name in os.listdir(base) if name.startswith(".fm-claude-home.")
+]
+if leftovers:
+    raise AssertionError(f"missing clone left a partial home behind: {leftovers}")
+if len(keychain.deleted) != 1:
+    raise AssertionError("missing clone cleanup did not remove the created target")
+PY
+)
+  status=$?
+  expect_code 0 "$status" "missing clone verification must fail closed without leftovers"
+  [ -z "$out" ] || fail "missing-clone test emitted unexpected output: $out"
+  pass "a missing cloned credential fails loudly and leaves no home or Keychain target"
+}
+
+test_managed_keychain_partial_and_empty_writes_are_rejected() {
   local case_dir data source
   case_dir="$TMP_ROOT/keychain-short-write"
   data="$case_dir/data"
@@ -204,35 +349,43 @@ source_service = module.keychain_service(source)
 target_service = module.keychain_service(home)
 
 class ShortWriteKeychain:
+    def __init__(self, target_value):
+        self.deleted = []
+        self.target_value = target_value
+
     def read(self, service):
         if service == source_service:
-            return b"source-secret"
+            return bytes(range(1, 9))
         if service == target_service:
-            return b"source"
+            return self.target_value
         return None
 
     def write(self, service, value):
-        if service != target_service or value != b"source-secret":
+        if service != target_service or value != bytes(range(1, 9)):
             raise AssertionError("credential write did not use the expected bytes")
 
     def delete(self, service):
-        raise AssertionError("clone must not delete during verification")
+        self.deleted.append(service)
 
 module.require_macos = lambda: None
-module.macos_keychain = ShortWriteKeychain
-with contextlib.redirect_stderr(io.StringIO()):
-    try:
-        module.clone_keychain_credential(data, source, home)
-    except SystemExit as error:
-        if error.code != 1:
-            raise
-    else:
-        raise AssertionError("a short successful Keychain write was accepted")
+for target_value in (bytes(0), bytes(range(1, 4))):
+    keychain = ShortWriteKeychain(target_value)
+    module.macos_keychain = lambda: keychain
+    with contextlib.redirect_stderr(io.StringIO()):
+        try:
+            module.clone_keychain_credential(data, source, home)
+        except SystemExit as error:
+            if error.code != 1:
+                raise
+        else:
+            raise AssertionError("an incomplete successful Keychain write was accepted")
+    if keychain.deleted != [target_service]:
+        raise AssertionError("a rejected incomplete write did not remove the created target")
 if target_service == source_service:
     raise AssertionError("test requires distinct source and target services")
 PY
-  expect_code 0 "$?" "a zero-exit short Keychain write must fail verification"
-  pass "a short in-process Keychain write is rejected by read-back verification"
+  expect_code 0 "$?" "partial and empty Keychain writes must fail verification"
+  pass "partial and empty Keychain writes are rejected by read-back verification"
 }
 
 test_managed_keychain_missing_source_refuses_and_cleans_home() {
@@ -294,8 +447,8 @@ leftovers = [
 ]
 if leftovers:
     raise AssertionError(f"missing source left a partial home behind: {leftovers}")
-if not keychain.deleted:
-    raise AssertionError("missing source cleanup did not target the derived task service")
+if keychain.deleted:
+    raise AssertionError("missing source cleanup deleted a service this attempt did not create")
 PY
 )
   expect_code 0 "$?" "missing managed Keychain auth must fail closed without leftovers"
@@ -361,9 +514,10 @@ test_create_refuses_symlink_in_profile() {
   local case_dir data source out status
   case_dir="$TMP_ROOT/create-symlink-source"
   data="$case_dir/data"
-  source="$case_dir/profile"
+  source="$data/claude-crewmate/profile"
   mkdir -p "$data"
   make_profile "$source"
+  fm_fake_claude_keychain_seed "$FAKE_KEYCHAIN" "$source"
   ln -s /etc/passwd "$source/evil-link"
 
   out=$(python3 "$HELPER" --data "$data" --source "$source" --task-id t2 --create 2>&1)
@@ -379,10 +533,11 @@ test_remove_refuses_when_owned_by_another_task() {
   local case_dir data source state home out status
   case_dir="$TMP_ROOT/remove-wrong-owner"
   data="$case_dir/data"
-  source="$case_dir/profile"
+  source="$data/claude-crewmate/profile"
   state="$case_dir/state"
   mkdir -p "$data" "$state"
   make_profile "$source"
+  fm_fake_claude_keychain_seed "$FAKE_KEYCHAIN" "$source"
   home=$(python3 "$HELPER" --data "$data" --source "$source" --task-id owner-a --create)
 
   out=$(python3 "$HELPER" --data "$data" --state "$state" --task-id owner-b --home "$home" --remove 2>&1)
@@ -402,10 +557,11 @@ test_remove_preserves_home_referenced_by_another_task() {
   local case_dir data source state home out status
   case_dir="$TMP_ROOT/remove-referenced"
   data="$case_dir/data"
-  source="$case_dir/profile"
+  source="$data/claude-crewmate/profile"
   state="$case_dir/state"
   mkdir -p "$data" "$state"
   make_profile "$source"
+  fm_fake_claude_keychain_seed "$FAKE_KEYCHAIN" "$source"
   home=$(python3 "$HELPER" --data "$data" --source "$source" --task-id ref-a --create)
   printf 'claude_crewmate_home=%s\n' "$home" > "$state/ref-b.meta"
 
@@ -436,10 +592,11 @@ test_remove_preserves_a_replacement_after_validation() {
   local case_dir data source state home status
   case_dir="$TMP_ROOT/remove-replaced"
   data="$case_dir/data"
-  source="$case_dir/profile"
+  source="$data/claude-crewmate/profile"
   state="$case_dir/state"
   mkdir -p "$data" "$state"
   make_profile "$source"
+  fm_fake_claude_keychain_seed "$FAKE_KEYCHAIN" "$source"
   home=$(python3 "$HELPER" --data "$data" --source "$source" --task-id owner --create)
 
   python3 - "$HELPER" "$data" "$state" "$home" <<'PY'
@@ -496,9 +653,10 @@ test_create_generates_fresh_names_across_calls() {
   local case_dir data source home1 home2
   case_dir="$TMP_ROOT/create-fresh-names"
   data="$case_dir/data"
-  source="$case_dir/profile"
+  source="$data/claude-crewmate/profile"
   mkdir -p "$data"
   make_profile "$source"
+  fm_fake_claude_keychain_seed "$FAKE_KEYCHAIN" "$source"
   home1=$(python3 "$HELPER" --data "$data" --source "$source" --task-id a --create)
   home2=$(python3 "$HELPER" --data "$data" --source "$source" --task-id b --create)
   [ "$home1" != "$home2" ] || fail "two creations produced the same private home name"
@@ -622,8 +780,11 @@ PY
 
 test_create_excludes_customization_surface_and_every_credential_file
 test_create_strips_mcp_servers_from_claude_json
+test_create_refuses_an_unmanaged_profile
 test_managed_keychain_credential_is_cloned_and_removed
-test_managed_keychain_short_write_is_rejected
+test_keychain_add_failure_names_its_osstatus
+test_missing_cloned_credential_refuses_and_cleans_home
+test_managed_keychain_partial_and_empty_writes_are_rejected
 test_managed_keychain_missing_source_refuses_and_cleans_home
 test_create_abort_cleanup_survives_keychain_failure
 test_remove_deletes_keychain_entry_for_absent_home
