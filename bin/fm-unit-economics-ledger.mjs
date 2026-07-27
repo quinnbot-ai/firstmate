@@ -22,8 +22,8 @@
 // one JSON object:
 //   {"observedAt":"<ISO-8601>","currency":"USD","metrics":{
 //     "metric_name":{"amount":12.3,"unit":"USD","status":"measured"}}}
-// A financial fact is published only when every source configured for its lane
-// returned a fresh reading, at least two of them ran distinct commands
+// By default a financial fact is published only when every source configured for
+// its lane returned a fresh reading, at least two of them ran distinct commands
 // (identical command arrays collapse to one and corroborate nothing), carry
 // distinct provenance (a source's optional non-empty `provenance` string,
 // otherwise its command array), and agree exactly on amount, unit, and
@@ -53,8 +53,8 @@
 // requested metric says `source metric missing`, and one whose requested metric
 // is present but carries an untrusted status, a non-finite amount, or the wrong
 // unit says `source metric untrusted`. A diagnosed source failure is
-// reported ahead of an insufficient source count, so a single broken helper
-// stays distinguishable from an unconfigured pair. Each lane's own
+// reported ahead of a single-source or absent-configuration refusal, so a single
+// broken helper stays distinguishable from an unconfigured pair. Each lane's own
 // `source_freshness` repeats the first non-fresh reason among the source states
 // it publishes - its metrics, its daily line, and its quota windows - so no lane
 // header reads fresh over a refused one. Corroboration over sources that were
@@ -93,9 +93,11 @@
 // The ledger date is today in UTC unless
 // `FM_UNIT_ECONOMICS_LEDGER_DATE` overrides it with a valid `YYYY-MM-DD` date
 // for tests and backfills; any other value is rejected before anything is
-// written. Every published metric object carries `unavailable_reason` (null
-// when the reading is available) and the `max_age_seconds` window it was judged
-// against, under schema `fleet-unit-economics-ledger.v3`.
+// written. Every lane metric and both daily-line totals carry
+// `unavailable_reason` (null when the reading is available) and the
+// `max_age_seconds` window they were judged against (null when no window
+// applied), under schema `fleet-unit-economics-ledger.v3`; the Markdown lane
+// table prints that reason in its own column.
 // Because quota-axi only ever reports the present, a ledger date other
 // than today in UTC refuses every quota window and quota metric as a backfilled
 // window rather than filling that day with present-day evidence. The command
