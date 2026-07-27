@@ -17,10 +17,30 @@
 // returned a fresh reading, at least two of them ran distinct commands
 // (identical command arrays collapse to one and corroborate nothing), and they
 // agree exactly on amount, unit, and top-level currency. Freshness is judged
-// against the artifact's own publication timestamp, so an `observedAt` in the
-// future or older than the window is refused. A source can mark a value
+// against the artifact's own publication timestamp, so a parsable `observedAt`
+// in the future or older than the window says `stale source refused`, while
+// output whose `observedAt` is absent or unparsable is malformed rather than
+// stale. A source can mark a value
 // `estimated`; it remains estimated even when corroborated. Missing, stale,
 // malformed, or disagreeing inputs are rendered unavailable, never as zero.
+// A lane without any configured sources says `source configuration absent`, a
+// `sources` container that is not an array, or an entry without a non-empty
+// array of string command words, or one whose optional `timeoutMs` is present
+// but not a positive number, says `source configuration malformed`, and fewer
+// than two surviving distinct commands says `independent source count
+// insufficient`.
+// A configured command that cannot be read says `source unreadable`, malformed
+// command output says `source malformed`, a valid source which omits the
+// requested metric says `source metric missing`, and one whose requested metric
+// is present but carries an untrusted status, a non-finite amount, or the wrong
+// unit says `source metric untrusted`. A diagnosed source failure is
+// reported ahead of an insufficient source count, so a single broken helper
+// stays distinguishable from an unconfigured pair. Each lane's own
+// `source_freshness` repeats the first non-fresh reason among the source states
+// it publishes - its metrics, its daily line, and its quota windows - so no lane
+// header reads fresh over a refused one. Corroboration over sources that were
+// all fresh is a disagreement rather than a freshness failure, so it is carried
+// by `cross_check` and leaves both the metric and its lane header fresh.
 // The fixed fleet_operations lane reads quota-axi --json fresh at invocation
 // time and publishes the lowest in-range (0-100) percentRemaining of a provider
 // whose own reported state is fresh; a provider without a `state.refreshedAt`
@@ -44,7 +64,12 @@
 // and where corroborating helpers label one agreed amount differently the
 // weakest label wins, so a `measured`/`estimated` pair publishes as estimated.
 // An explicit corroborated empty roster is a rendered zero, while every missing
-// or unreadable source is unavailable. The ledger date is today in UTC unless
+// or unreadable source is unavailable. Readable helpers that disagree on the
+// crew roster, on the top-level currency, or on any amount all say `source
+// disagreement refused`. A daily helper whose own `date` is a
+// valid calendar date other than the ledger date says `ledger date not
+// covered`, so a backfill can tell an uncovered day from broken helper output.
+// The ledger date is today in UTC unless
 // `FM_UNIT_ECONOMICS_LEDGER_DATE` overrides it with a valid `YYYY-MM-DD` date
 // for tests and backfills; any other value is rejected before anything is
 // written. Because quota-axi only ever reports the present, a ledger date other
@@ -76,6 +101,15 @@ const laneSpecs = {
 };
 
 const BACKFILLED_WINDOW_REFUSED = 'backfilled window refused';
+const SOURCE_CONFIGURATION_ABSENT = 'source configuration absent';
+const SOURCE_CONFIGURATION_MALFORMED = 'source configuration malformed';
+const SOURCE_UNREADABLE = 'source unreadable';
+const SOURCE_MALFORMED = 'source malformed';
+const SOURCE_METRIC_MISSING = 'source metric missing';
+const SOURCE_METRIC_UNTRUSTED = 'source metric untrusted';
+const INDEPENDENT_SOURCE_COUNT_INSUFFICIENT = 'independent source count insufficient';
+const LEDGER_DATE_NOT_COVERED = 'ledger date not covered';
+const SOURCE_DISAGREEMENT_REFUSED = 'source disagreement refused';
 
 function fail(message) { process.stderr.write(`error: ${message}\n`); process.exit(2); }
 function isCalendarDate(value) {
@@ -108,44 +142,51 @@ function unavailable(name, unit, reason = 'source unavailable') {
   return { name, amount: null, unit, currency: unit === 'USD' ? 'USD' : null, status: 'unavailable', source_freshness: reason, cross_check: 'unavailable' };
 }
 function runSource(source) {
-  if (!source || !Array.isArray(source.command) || source.command.length === 0 || source.command.some((item) => typeof item !== 'string')) return { ok: false, reason: 'source unavailable' };
+  if (!source || !Array.isArray(source.command) || source.command.length === 0 || source.command.some((item) => typeof item !== 'string')) return { ok: false, reason: SOURCE_CONFIGURATION_MALFORMED };
+  if (source.timeoutMs !== undefined && (!Number.isFinite(source.timeoutMs) || source.timeoutMs <= 0)) return { ok: false, reason: SOURCE_CONFIGURATION_MALFORMED };
   let result;
   try {
     result = spawnSync(source.command[0], source.command.slice(1), { cwd: fmHome, encoding: 'utf8', timeout: source.timeoutMs || 30000, env: process.env });
   } catch {
-    return { ok: false, reason: 'source unavailable' };
+    return { ok: false, reason: SOURCE_UNREADABLE };
   }
-  if (result.status !== 0 || result.error) return { ok: false, reason: 'source unavailable' };
+  if (result.status !== 0 || result.error) return { ok: false, reason: SOURCE_UNREADABLE };
   const body = parseJson(result.stdout, 'source');
-  if (!body || typeof body !== 'object') return { ok: false, reason: 'source unavailable' };
+  if (!body || typeof body !== 'object') return { ok: false, reason: SOURCE_MALFORMED };
   return { ok: true, body };
 }
 function runSources(definitions) {
-  if (!Array.isArray(definitions)) return [];
+  if (definitions === undefined) return { sources: [], reason: SOURCE_CONFIGURATION_ABSENT };
+  if (!Array.isArray(definitions)) return { sources: [], reason: SOURCE_CONFIGURATION_MALFORMED };
   const commands = new Set();
-  return definitions.flatMap((source) => {
+  const sources = definitions.flatMap((source) => {
     const identity = Array.isArray(source?.command) ? JSON.stringify(source.command) : null;
     if (identity && commands.has(identity)) return [];
     if (identity) commands.add(identity);
     return [runSource(source)];
   });
+  return { sources, reason: sources.length ? null : SOURCE_CONFIGURATION_ABSENT };
 }
 function sourcesAtPublication(sources, maxAgeSeconds, publicationTime) {
   return sources.map((source) => {
     if (!source.ok || isoFresh(source.body.observedAt, maxAgeSeconds, publicationTime)) return source;
-    return { ok: false, reason: source.body.observedAt ? 'stale source refused' : 'source unavailable' };
+    return { ok: false, reason: Number.isFinite(Date.parse(source.body.observedAt || '')) ? 'stale source refused' : SOURCE_MALFORMED };
   });
 }
-function sourceMetric(source, metric) {
-  const value = source.body.metrics?.[metric];
-  if (!value || !['measured', 'estimated'].includes(value.status) || !Number.isFinite(value.amount) || typeof value.unit !== 'string') return null;
-  return value;
+function trustedMetric(container, metric, unit) {
+  const value = container?.[metric];
+  if (value === undefined || value === null) return { ok: false, reason: SOURCE_METRIC_MISSING };
+  if (typeof value !== 'object' || !['measured', 'estimated'].includes(value.status) || !Number.isFinite(value.amount)) return { ok: false, reason: SOURCE_METRIC_UNTRUSTED };
+  if (unit === null ? typeof value.unit !== 'string' : value.unit !== unit) return { ok: false, reason: SOURCE_METRIC_UNTRUSTED };
+  return { ok: true, value };
 }
-function corroboratedMetric(name, unit, sources) {
+function corroboratedMetric(name, unit, sources, missingReason) {
   const failed = sources.find((source) => !source.ok);
-  if (failed || sources.length < 2) return unavailable(name, unit, failed?.reason || 'source unavailable');
-  const values = sources.map((source) => sourceMetric(source, name));
-  if (values.some((value) => !value)) return unavailable(name, unit);
+  if (failed || sources.length < 2) return unavailable(name, unit, failed?.reason || missingReason || INDEPENDENT_SOURCE_COUNT_INSUFFICIENT);
+  const readings = sources.map((source) => trustedMetric(source.body.metrics, name, null));
+  const rejected = readings.find((reading) => !reading.ok);
+  if (rejected) return unavailable(name, unit, rejected.reason);
+  const values = readings.map((reading) => reading.value);
   const [first, ...rest] = values;
   const currency = sources[0].body.currency;
   if (typeof currency !== 'string' || rest.some((value, index) => value.amount !== first.amount || value.unit !== first.unit || sources[index + 1].body.currency !== currency)) {
@@ -157,18 +198,19 @@ function corroboratedMetric(name, unit, sources) {
     status: estimated ? 'estimated' : 'independently_cross_checked', source_freshness: 'fresh', cross_check: 'passed',
   };
 }
+function laneFreshness(published) {
+  return published.find((entry) => entry.source_freshness !== 'fresh')?.source_freshness || 'fresh';
+}
 function collectFinancialLane(id, config) {
-  return { id, sources: runSources(config?.sources) };
+  const configured = runSources(config?.sources);
+  return { id, sources: configured.sources, sourceFailure: configured.reason };
 }
 function financialLane(input, maxAgeSeconds, publicationTime) {
-  const { id } = input;
+  const { id, sourceFailure } = input;
   const spec = laneSpecs[id];
   const sources = sourcesAtPublication(input.sources, maxAgeSeconds, publicationTime);
-  const metrics = spec.metrics.map(([name, unit]) => corroboratedMetric(name, unit, sources));
-  const sourceFreshness = metrics.find((metric) => metric.source_freshness === 'stale source refused')?.source_freshness
-    || metrics.find((metric) => metric.source_freshness === 'source unavailable')?.source_freshness
-    || 'fresh';
-  return { id, label: spec.label, source_freshness: sourceFreshness, metrics };
+  const metrics = spec.metrics.map(([name, unit]) => corroboratedMetric(name, unit, sources, sourceFailure));
+  return { id, label: spec.label, source_freshness: laneFreshness(metrics), metrics };
 }
 function findProvider(value, wanted) {
   if (Array.isArray(value)) return value.map((item) => findProvider(item, wanted)).find(Boolean);
@@ -224,20 +266,18 @@ function quotaWindows(body, maxAgeSeconds, publicationTime, dateIsToday) {
     };
   });
 }
-function dailyMetric(row, name, unit) {
-  const value = row?.[name];
-  if (!value || !['measured', 'estimated'].includes(value.status) || !Number.isFinite(value.amount) || value.unit !== unit) return null;
-  return value;
-}
 function dailyCrewSource(source, date) {
-  if (!source.ok || typeof source.body.source !== 'string' || !source.body.source || source.body.date !== date || typeof source.body.currency !== 'string' || !Array.isArray(source.body.crewSessions)) return { ok: false, reason: source.reason || 'source unavailable' };
+  if (!source.ok) return { ok: false, reason: source.reason || SOURCE_UNREADABLE };
+  if (typeof source.body.source !== 'string' || !source.body.source || !isCalendarDate(source.body.date) || typeof source.body.currency !== 'string' || !Array.isArray(source.body.crewSessions)) return { ok: false, reason: SOURCE_MALFORMED };
+  if (source.body.date !== date) return { ok: false, reason: LEDGER_DATE_NOT_COVERED };
   const rows = new Map();
   for (const row of source.body.crewSessions) {
-    if (typeof row?.crew !== 'string' || !row.crew || rows.has(row.crew)) return { ok: false, reason: 'source unavailable' };
-    const sessionCost = dailyMetric(row, 'sessionCost', 'USD');
-    const validationRuns = dailyMetric(row, 'validationRuns', 'runs');
-    if (!sessionCost || !validationRuns) return { ok: false, reason: 'source unavailable' };
-    rows.set(row.crew, { sessionCost, validationRuns });
+    if (typeof row?.crew !== 'string' || !row.crew || rows.has(row.crew)) return { ok: false, reason: SOURCE_MALFORMED };
+    const sessionCost = trustedMetric(row, 'sessionCost', 'USD');
+    const validationRuns = trustedMetric(row, 'validationRuns', 'runs');
+    const rejected = [sessionCost, validationRuns].find((reading) => !reading.ok);
+    if (rejected) return { ok: false, reason: rejected.reason };
+    rows.set(row.crew, { sessionCost: sessionCost.value, validationRuns: validationRuns.value });
   }
   return { ok: true, source: source.body.source, currency: source.body.currency, rows };
 }
@@ -250,16 +290,15 @@ function unavailableDaily(reason = 'source unavailable') {
     source_freshness: reason,
   };
 }
-function dailyFleetLine(sources, date) {
-  if (sources.length < 2) return unavailableDaily();
+function dailyFleetLine(sources, date, missingReason) {
   const parsed = sources.map((source) => dailyCrewSource(source, date));
   const failed = parsed.find((source) => !source.ok);
-  if (failed) return unavailableDaily(failed.reason);
+  if (failed || sources.length < 2) return unavailableDaily(failed?.reason || missingReason || INDEPENDENT_SOURCE_COUNT_INSUFFICIENT);
   const currency = parsed[0].currency;
-  if (parsed.some((source) => source.currency !== currency)) return unavailableDaily('source disagreement refused');
+  if (parsed.some((source) => source.currency !== currency)) return unavailableDaily(SOURCE_DISAGREEMENT_REFUSED);
   if (currency !== 'USD') return unavailableDaily('unsupported currency refused');
   const roster = [...parsed[0].rows.keys()].sort();
-  if (parsed.some((source) => source.rows.size !== roster.length || roster.some((crew) => !source.rows.has(crew)))) return unavailableDaily('source unavailable');
+  if (parsed.some((source) => source.rows.size !== roster.length || roster.some((crew) => !source.rows.has(crew)))) return unavailableDaily(SOURCE_DISAGREEMENT_REFUSED);
   const crewSessions = [];
   for (const crew of roster) {
     const rows = parsed.map((source) => source.rows.get(crew));
@@ -267,7 +306,7 @@ function dailyFleetLine(sources, date) {
     const validationRuns = rows.map((row) => row.validationRuns);
     const sameCost = sessionCost.every((value) => value.amount === sessionCost[0].amount);
     const sameRuns = validationRuns.every((value) => value.amount === validationRuns[0].amount);
-    if (!sameCost || !sameRuns) return unavailableDaily('source disagreement refused');
+    if (!sameCost || !sameRuns) return unavailableDaily(SOURCE_DISAGREEMENT_REFUSED);
     crewSessions.push({
       crew,
       session_cost: { ...sessionCost[0], status: sessionCost.some((value) => value.status === 'estimated') ? 'estimated' : 'independently_cross_checked', cross_check: 'passed' },
@@ -287,7 +326,16 @@ function dailyFleetLine(sources, date) {
 function collectFleetLane(config) {
   const quota = spawnSync(process.env.FM_UNIT_ECONOMICS_QUOTA_AXI || 'quota-axi', ['--json'], { cwd: fmHome, encoding: 'utf8', timeout: 30000, env: process.env });
   const body = quota.status === 0 ? parseJson(quota.stdout, 'quota') : null;
-  return { id: 'fleet_operations', body, costSources: runSources(config?.cost_sources), dailySources: runSources(config?.daily_sources) };
+  const costSources = runSources(config?.cost_sources);
+  const dailySources = runSources(config?.daily_sources);
+  return {
+    id: 'fleet_operations',
+    body,
+    costSources: costSources.sources,
+    costSourceFailure: costSources.reason,
+    dailySources: dailySources.sources,
+    dailySourceFailure: dailySources.reason,
+  };
 }
 function fleetLane(input, maxAgeSeconds, publicationTime, date, dateIsToday) {
   const { body } = input;
@@ -296,19 +344,20 @@ function fleetLane(input, maxAgeSeconds, publicationTime, date, dateIsToday) {
   const codex = findProvider(body?.providers, ['codex', 'openai']);
   const costSources = sourcesAtPublication(input.costSources, maxAgeSeconds, publicationTime);
   const dailySources = sourcesAtPublication(input.dailySources, maxAgeSeconds, publicationTime);
-  const quotaMetrics = [
+  const metrics = [
     quotaMetric('claude_quota_window', claude, generatedAt, maxAgeSeconds, publicationTime, dateIsToday),
     quotaMetric('codex_quota_window', codex, generatedAt, maxAgeSeconds, publicationTime, dateIsToday),
+    corroboratedMetric('attributable_crew_session_cost', 'USD', costSources, input.costSourceFailure),
   ];
-  const metrics = [
-    ...quotaMetrics,
-    corroboratedMetric('attributable_crew_session_cost', 'USD', costSources),
-  ];
-  const sourceFreshness = quotaMetrics.find((metric) => metric.source_freshness === BACKFILLED_WINDOW_REFUSED)?.source_freshness
-    || quotaMetrics.find((metric) => metric.source_freshness === 'stale source refused')?.source_freshness
-    || quotaMetrics.find((metric) => metric.source_freshness === 'source unavailable')?.source_freshness
-    || 'fresh';
-  return { id: 'fleet_operations', label: laneSpecs.fleet_operations.label, source_freshness: sourceFreshness, metrics, daily_fleet_line: { date, quota_windows: quotaWindows(body, maxAgeSeconds, publicationTime, dateIsToday), ...dailyFleetLine(dailySources, date) } };
+  const daily = dailyFleetLine(dailySources, date, input.dailySourceFailure);
+  const windows = quotaWindows(body, maxAgeSeconds, publicationTime, dateIsToday);
+  return {
+    id: 'fleet_operations',
+    label: laneSpecs.fleet_operations.label,
+    source_freshness: laneFreshness([...metrics, daily, ...windows]),
+    metrics,
+    daily_fleet_line: { date, quota_windows: windows, ...daily },
+  };
 }
 function markdown(artifact) {
   const fleet = artifact.lanes.find((lane) => lane.id === 'fleet_operations');

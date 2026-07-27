@@ -88,7 +88,7 @@ test_unavailable_and_partial_lanes_render() {
   local config="$TMP_ROOT/unavailable/config.json" out="$TMP_ROOT/unavailable/out.json" quota="$TMP_ROOT/unavailable/quota"
   mkdir -p "$(dirname "$config")"; printf '{}\n' > "$config"; printf 'old\n' > "$out"; printf 'old\n' > "${out%.json}.md"; chmod 0644 "$out" "${out%.json}.md"; write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
   jq -e '[.lanes[].id] | length == 5 and index("weho") and index("fleet_operations")' "$out" >/dev/null || fail "all lanes did not render"
-  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .status=="unavailable")' "$out" >/dev/null || fail "unavailable lane was not honest"
+  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .status=="unavailable" and .source_freshness=="source configuration absent")' "$out" >/dev/null || fail "missing source configuration was not identified"
   jq -e '.lanes[] | select(.id=="fleet_operations") | .metrics[] | select(.name=="claude_quota_window" and .amount==80 and .unit=="percent")' "$out" >/dev/null || fail "available lane did not render beside unavailable lanes"
   [ -f "${out%.json}.md" ] || fail "captain-readable companion artifact was not written"
   [ "$(file_mode "$out")" = 600 ] && [ "$(file_mode "${out%.json}.md")" = 600 ] || fail "existing ledger artifacts were not made private"
@@ -103,7 +103,7 @@ test_stale_and_failed_cross_check_are_refused() {
   jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .source_freshness=="stale source refused")' "$out" >/dev/null || fail "stale financial source was not refused"
   write_source "$one" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"pipeline_cost\":{\"amount\":1,\"unit\":\"USD\",\"status\":\"measured\"},\"realized_revenue\":{\"amount\":2,\"unit\":\"USD\",\"status\":\"measured\"}}}"
   run_ledger "$config" "$out" "$quota"
-  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .cross_check=="failed")' "$out" >/dev/null || fail "failed cross-check was presented as fact"
+  jq -e '.lanes[] | select(.id=="weho" and .source_freshness=="fresh") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .source_freshness=="fresh" and .cross_check=="failed")' "$out" >/dev/null || fail "failed cross-check was presented as fact or reported as a freshness failure"
   pass "stale and disagreeing financial sources are refused"
 }
 
@@ -135,8 +135,66 @@ test_daily_fleet_line_requires_readable_sources() {
   date=$(date -u +%Y-%m-%d)
   mkdir -p "$(dirname "$config")"; printf '{}\n' > "$config"; write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
   jq -e --arg date "$date" '(.schema == "fleet-unit-economics-ledger.v2") and ([.lanes[] | select(.id=="fleet_operations") | .daily_fleet_line | select(.date==$date and .session_cost.amount==null and .session_cost.status=="unavailable" and .validation_run_volume.amount==null and .validation_run_volume.status=="unavailable")] | length == 1)' "$out" >/dev/null || fail "missing daily sources were rendered as a number instead of unavailable"
-  grep -F 'unavailable (source unavailable)' "${out%.json}.md" >/dev/null || fail "daily Markdown line hid the unavailable source"
+  grep -F 'unavailable (source configuration absent)' "${out%.json}.md" >/dev/null || fail "daily Markdown line hid the unavailable source"
   pass "daily fleet line renders missing sources as unavailable rather than zero"
+}
+
+test_unreadable_malformed_and_unmapped_sources_stay_unavailable() {
+  local good="$TMP_ROOT/source-diagnosis/good" bad="$TMP_ROOT/source-diagnosis/bad" config="$TMP_ROOT/source-diagnosis/config.json" out="$TMP_ROOT/source-diagnosis/out.json" quota="$TMP_ROOT/source-diagnosis/quota"
+  write_source "$good" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"pipeline_cost\":{\"amount\":4,\"unit\":\"USD\",\"status\":\"measured\"},\"realized_revenue\":{\"amount\":8,\"unit\":\"USD\",\"status\":\"measured\"}}}"
+  write_config "$config" weho "$TMP_ROOT/source-diagnosis/missing" "$good"; write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .source_freshness=="source unreadable")' "$out" >/dev/null || fail "an unreadable helper was not identified"
+  write_source "$bad" 'not-json'
+  write_config "$config" weho "$bad" "$good"; run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .source_freshness=="source malformed")' "$out" >/dev/null || fail "malformed helper output was not identified"
+  write_source "$bad" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"pipeline_cost\":{\"amount\":4,\"unit\":\"USD\",\"status\":\"measured\"}}}"
+  write_config "$config" weho "$bad" "$good"; run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .source_freshness=="source metric missing")' "$out" >/dev/null || fail "an unmapped metric was not identified"
+  write_source "$bad" '{"currency":"USD","metrics":{"pipeline_cost":{"amount":4,"unit":"USD","status":"measured"},"realized_revenue":{"amount":8,"unit":"USD","status":"measured"}}}'
+  write_config "$config" weho "$bad" "$good"; run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .source_freshness=="source malformed")' "$out" >/dev/null || fail "helper output without a parsable observedAt was not identified as malformed"
+  pass "unreadable malformed and unmapped sources remain unavailable with reasons"
+}
+
+test_source_configuration_and_count_failures_are_named() {
+  local one="$TMP_ROOT/source-contract/one" config="$TMP_ROOT/source-contract/config.json" out="$TMP_ROOT/source-contract/out.json" quota="$TMP_ROOT/source-contract/quota"
+  write_source "$one" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"pipeline_cost\":{\"amount\":4,\"unit\":\"USD\",\"status\":\"measured\"},\"realized_revenue\":{\"amount\":8,\"unit\":\"USD\",\"status\":\"measured\"}}}"
+  mkdir -p "$(dirname "$config")"
+  cat > "$config" <<JSON
+{"maxAgeSeconds":900,"lanes":{"weho":{"sources":[{"command":["$one"]}]},"trading":{"sources":[{"command":"$one"}]}}}
+JSON
+  write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .source_freshness=="independent source count insufficient")' "$out" >/dev/null || fail "a single configured helper was not named an insufficient independent source count"
+  jq -e '.lanes[] | select(.id=="trading") | .metrics[] | select(.name=="realized_pnl" and .amount==null and .source_freshness=="source configuration malformed")' "$out" >/dev/null || fail "a malformed source entry was not named malformed configuration"
+  printf '%s\n' '{"lanes":{"weho":{"sources":{}}}}' > "$config"; run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .source_freshness=="source configuration malformed")' "$out" >/dev/null || fail "a malformed sources container was not named malformed configuration"
+  pass "malformed source configuration and insufficient source counts are named"
+}
+
+test_daily_fleet_line_names_helper_failures_before_source_count() {
+  local one="$TMP_ROOT/daily-diagnosis/one" two="$TMP_ROOT/daily-diagnosis/two" missing="$TMP_ROOT/daily-diagnosis/missing"
+  local config="$TMP_ROOT/daily-diagnosis/config.json" out="$TMP_ROOT/daily-diagnosis/out.json" quota="$TMP_ROOT/daily-diagnosis/quota" date past
+  date=$(date -u +%Y-%m-%d); past=$(node -p 'new Date(Date.now() - 86400000).toISOString().slice(0, 10)')
+  mkdir -p "$(dirname "$config")"
+  cat > "$config" <<JSON
+{"maxAgeSeconds":900,"lanes":{"fleet_operations":{"daily_sources":[{"command":["$missing"]}]}}}
+JSON
+  write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="fleet_operations") | .daily_fleet_line | select(.session_cost.amount==null and .source_freshness=="source unreadable")' "$out" >/dev/null || fail "a single unreadable daily helper was reported as an insufficient source count"
+  write_source "$one" "{\"source\":\"billing-export\",\"observedAt\":\"$NOW\",\"date\":\"$date\",\"currency\":\"USD\",\"crewSessions\":[]}"
+  cat > "$config" <<JSON
+{"maxAgeSeconds":900,"lanes":{"fleet_operations":{"daily_sources":[{"command":["$one"]}]}}}
+JSON
+  run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="fleet_operations") | .daily_fleet_line | select(.session_cost.amount==null and .source_freshness=="independent source count insufficient")' "$out" >/dev/null || fail "a single readable daily helper was not named an insufficient independent source count"
+  write_source "$two" "{\"source\":\"run-audit\",\"observedAt\":\"$NOW\",\"date\":\"$date\",\"currency\":\"USD\",\"crewSessions\":[]}"
+  cat > "$config" <<JSON
+{"maxAgeSeconds":900,"lanes":{"fleet_operations":{"daily_sources":[{"command":["$one"]},{"command":["$two"]}]}}}
+JSON
+  FM_UNIT_ECONOMICS_LEDGER_DATE="$past" FM_UNIT_ECONOMICS_QUOTA_AXI="$quota" node "$BIN" --config "$config" --output "$out" --format json >/dev/null
+  jq -e '.lanes[] | select(.id=="fleet_operations") | .daily_fleet_line | select(.session_cost.amount==null and .source_freshness=="ledger date not covered")' "$out" >/dev/null || fail "a backfilled date no helper covers was reported as malformed helper output"
+  grep -F 'unavailable (ledger date not covered)' "${out%.json}.md" >/dev/null || fail "the uncovered ledger date was hidden in Markdown"
+  pass "daily helper failures are diagnosed ahead of the independent source count"
 }
 
 test_daily_fleet_line_cross_checks_per_crew_cost_and_validation_runs() {
@@ -165,10 +223,10 @@ test_untrusted_metric_states_and_duplicate_sources_are_refused() {
   write_source "$one" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"pipeline_cost\":{\"amount\":4,\"unit\":\"USD\",\"status\":\"unavailable\"},\"realized_revenue\":{\"amount\":8,\"unit\":\"USD\",\"status\":\"unavailable\"}}}"
   write_source "$two" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"pipeline_cost\":{\"amount\":4,\"unit\":\"USD\",\"status\":\"stale\"},\"realized_revenue\":{\"amount\":8,\"unit\":\"USD\",\"status\":\"stale\"}}}"
   write_config "$config" weho "$one" "$two"; write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
-  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .status=="unavailable")' "$out" >/dev/null || fail "untrusted metric statuses were published"
+  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .status=="unavailable" and .source_freshness=="source metric untrusted")' "$out" >/dev/null || fail "a present but untrusted metric was published or reported as a missing metric"
   write_source "$one" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"pipeline_cost\":{\"amount\":4,\"unit\":\"USD\",\"status\":\"measured\"},\"realized_revenue\":{\"amount\":8,\"unit\":\"USD\",\"status\":\"measured\"}}}"
   write_config "$config" weho "$one" "$one"; run_ledger "$config" "$out" "$quota"
-  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .cross_check=="unavailable")' "$out" >/dev/null || fail "duplicate command arrays satisfied independent corroboration"
+  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .cross_check=="unavailable" and .source_freshness=="independent source count insufficient")' "$out" >/dev/null || fail "duplicate command arrays satisfied independent corroboration"
   pass "metric states and source identity gate corroboration"
 }
 
@@ -181,13 +239,36 @@ test_stale_quota_provider_state_is_refused() {
   pass "quota provider state and refresh time must be fresh"
 }
 
+test_stale_third_provider_window_reaches_the_lane_header() {
+  local old='2000-01-01T00:00:00Z' cost_one="$TMP_ROOT/quota-third/cost-one" cost_two="$TMP_ROOT/quota-third/cost-two"
+  local daily_one="$TMP_ROOT/quota-third/daily-one" daily_two="$TMP_ROOT/quota-third/daily-two"
+  local config="$TMP_ROOT/quota-third/config.json" out="$TMP_ROOT/quota-third/out.json" quota="$TMP_ROOT/quota-third/quota" date
+  date=$(date -u +%Y-%m-%d)
+  write_source "$cost_one" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"attributable_crew_session_cost\":{\"amount\":7,\"unit\":\"USD\",\"status\":\"measured\"}}}"
+  write_source "$cost_two" "{\"observedAt\":\"$NOW\",\"currency\":\"USD\",\"metrics\":{\"attributable_crew_session_cost\":{\"amount\":7,\"unit\":\"USD\",\"status\":\"measured\"}}}"
+  write_source "$daily_one" "{\"source\":\"billing-export\",\"observedAt\":\"$NOW\",\"date\":\"$date\",\"currency\":\"USD\",\"crewSessions\":[]}"
+  write_source "$daily_two" "{\"source\":\"run-audit\",\"observedAt\":\"$NOW\",\"date\":\"$date\",\"currency\":\"USD\",\"crewSessions\":[]}"
+  mkdir -p "$(dirname "$config")"
+  cat > "$config" <<JSON
+{"maxAgeSeconds":900,"lanes":{"fleet_operations":{"cost_sources":[{"command":["$cost_one"]},{"command":["$cost_two"]}],"daily_sources":[{"command":["$daily_one"]},{"command":["$daily_two"]}]}}}
+JSON
+  write_source "$quota" "{\"generatedAt\":\"$NOW\",\"providers\":[{\"provider\":\"claude\",\"state\":{\"status\":\"fresh\",\"stale\":false,\"refreshedAt\":\"$NOW\"},\"windows\":[{\"percentRemaining\":80}]},{\"provider\":\"codex\",\"state\":{\"status\":\"fresh\",\"stale\":false,\"refreshedAt\":\"$NOW\"},\"windows\":[{\"percentRemaining\":60}]},{\"provider\":\"gemini\",\"state\":{\"status\":\"fresh\",\"stale\":false,\"refreshedAt\":\"$old\"},\"windows\":[{\"percentRemaining\":40}]}]}"
+  run_ledger "$config" "$out" "$quota"
+  jq -e '[.lanes[] | select(.id=="fleet_operations") | .metrics[] | select(.source_freshness=="fresh")] | length == 3' "$out" >/dev/null || fail "the fleet metrics were not all fresh before the quota-window check"
+  jq -e '[.lanes[] | select(.id=="fleet_operations") | .daily_fleet_line.quota_windows[] | select(.provider=="gemini" and .status=="unavailable" and .source_freshness=="stale source refused")] | length == 1' "$out" >/dev/null || fail "a stale third-provider window was published as a measurement"
+  jq -e '.lanes[] | select(.id=="fleet_operations" and .source_freshness=="stale source refused")' "$out" >/dev/null || fail "the fleet lane header read fresh over a refused quota window"
+  pass "a refused quota window outside the named pair reaches the lane header"
+}
+
 test_malformed_source_containers_render_unavailable() {
   local config="$TMP_ROOT/malformed/config.json" out="$TMP_ROOT/malformed/out.json" quota="$TMP_ROOT/malformed/quota"
   mkdir -p "$(dirname "$config")"
   printf '%s\n' '{"lanes":{"weho":{"sources":{}},"fleet_operations":{"cost_sources":"invalid"}}}' > "$config"
   write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
   jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null)' "$out" >/dev/null || fail "malformed lane sources prevented unavailable rendering"
-  jq -e '.lanes[] | select(.id=="fleet_operations") | .metrics[] | select(.name=="attributable_crew_session_cost" and .amount==null)' "$out" >/dev/null || fail "malformed cost sources prevented unavailable rendering"
+  jq -e '.lanes[] | select(.id=="fleet_operations") | .metrics[] | select(.name=="attributable_crew_session_cost" and .amount==null and .source_freshness=="source configuration malformed")' "$out" >/dev/null || fail "malformed cost sources prevented unavailable rendering"
+  jq -e '.lanes[] | select(.id=="fleet_operations" and .source_freshness=="source configuration malformed")' "$out" >/dev/null || fail "the fleet lane header read fresh over a malformed cost source"
+  jq -e '.lanes[] | select(.id=="weho" and .source_freshness=="source configuration malformed")' "$out" >/dev/null || fail "the financial lane header read fresh over a malformed source container"
   pass "malformed source containers render unavailable"
 }
 
@@ -224,7 +305,7 @@ test_malformed_source_timeouts_render_unavailable() {
 {"lanes":{"weho":{"sources":[{"command":["$one"],"timeoutMs":"invalid"},{"command":["$two"],"timeoutMs":-1}]}}}
 JSON
   write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
-  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .status=="unavailable")' "$out" >/dev/null || fail "malformed source timeouts were not rendered unavailable"
+  jq -e '.lanes[] | select(.id=="weho") | .metrics[] | select(.name=="realized_revenue" and .amount==null and .status=="unavailable" and .source_freshness=="source configuration malformed")' "$out" >/dev/null || fail "malformed source timeouts were not rendered unavailable"
   jq -e '.lanes[] | select(.id=="fleet_operations") | .metrics[] | select(.name=="claude_quota_window" and .amount==80 and .status=="measured")' "$out" >/dev/null || fail "malformed source timeout prevented partial rendering"
   [ -f "${out%.json}.md" ] || fail "malformed source timeout prevented artifact publication"
   pass "malformed source timeouts render unavailable"
@@ -262,6 +343,21 @@ JSON
   write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
   jq -e '.lanes[] | select(.id=="fleet_operations") | .daily_fleet_line | select(.session_cost.amount==null and .session_cost.status=="unavailable" and .source_freshness=="source disagreement refused")' "$out" >/dev/null || fail "disagreeing currencies were published as a cross-checked USD figure"
   pass "daily helpers disagreeing on currency render unavailable"
+}
+
+test_daily_fleet_line_refuses_roster_disagreement() {
+  local one="$TMP_ROOT/daily-roster/one" two="$TMP_ROOT/daily-roster/two" config="$TMP_ROOT/daily-roster/config.json" out="$TMP_ROOT/daily-roster/out.json" quota="$TMP_ROOT/daily-roster/quota" date
+  date=$(date -u +%Y-%m-%d)
+  write_source "$one" "{\"source\":\"billing-export\",\"observedAt\":\"$NOW\",\"date\":\"$date\",\"currency\":\"USD\",\"crewSessions\":[{\"crew\":\"alpha\",\"sessionCost\":{\"amount\":2,\"unit\":\"USD\",\"status\":\"measured\"},\"validationRuns\":{\"amount\":3,\"unit\":\"runs\",\"status\":\"measured\"}},{\"crew\":\"bravo\",\"sessionCost\":{\"amount\":1,\"unit\":\"USD\",\"status\":\"measured\"},\"validationRuns\":{\"amount\":1,\"unit\":\"runs\",\"status\":\"measured\"}}]}"
+  write_source "$two" "{\"source\":\"run-audit\",\"observedAt\":\"$NOW\",\"date\":\"$date\",\"currency\":\"USD\",\"crewSessions\":[{\"crew\":\"alpha\",\"sessionCost\":{\"amount\":2,\"unit\":\"USD\",\"status\":\"measured\"},\"validationRuns\":{\"amount\":3,\"unit\":\"runs\",\"status\":\"measured\"}}]}"
+  mkdir -p "$(dirname "$config")"
+  cat > "$config" <<JSON
+{"maxAgeSeconds":900,"lanes":{"fleet_operations":{"daily_sources":[{"command":["$one"]},{"command":["$two"]}]}}}
+JSON
+  write_quota "$quota" "$NOW"; run_ledger "$config" "$out" "$quota"
+  jq -e '.lanes[] | select(.id=="fleet_operations") | .daily_fleet_line | select(.session_cost.amount==null and .session_cost.status=="unavailable" and .source_freshness=="source disagreement refused")' "$out" >/dev/null || fail "a crew-roster disagreement was not named a source disagreement"
+  grep -F 'unavailable (source disagreement refused)' "${out%.json}.md" >/dev/null || fail "the roster disagreement was hidden in Markdown"
+  pass "daily helpers disagreeing on the crew roster render a named disagreement"
 }
 
 test_daily_fleet_line_renders_corroborated_empty_roster_as_zero() {
@@ -345,6 +441,9 @@ test_relative_source_commands_resolve_against_fm_home() {
 
 test_zero_revenue_is_explicit_and_cross_checked
 test_unavailable_and_partial_lanes_render
+test_unreadable_malformed_and_unmapped_sources_stay_unavailable
+test_source_configuration_and_count_failures_are_named
+test_daily_fleet_line_names_helper_failures_before_source_count
 test_relative_source_commands_resolve_against_fm_home
 test_stale_and_failed_cross_check_are_refused
 test_currency_and_units_are_preserved
@@ -355,12 +454,14 @@ test_live_helper_timestamps_are_fresh
 test_untrusted_metric_states_and_duplicate_sources_are_refused
 test_stale_quota_provider_state_is_refused
 test_malformed_source_containers_render_unavailable
+test_stale_third_provider_window_reaches_the_lane_header
 test_observations_are_rechecked_at_publication
 test_quota_percentages_must_be_in_range
 test_malformed_source_timeouts_render_unavailable
 test_empty_quota_provider_list_is_unavailable
 test_quota_provider_without_refresh_time_is_unavailable
 test_daily_fleet_line_refuses_currency_disagreement
+test_daily_fleet_line_refuses_roster_disagreement
 test_daily_fleet_line_renders_corroborated_empty_roster_as_zero
 test_malformed_ledger_date_is_refused
 test_backfilled_ledger_date_refuses_quota_windows

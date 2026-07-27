@@ -356,11 +356,11 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 `bin/fm-unit-economics-ledger.mjs` reads this optional gitignored configuration and writes its generated JSON and Markdown ledgers under the active home's ignored `data/unit-economics-ledger/` directory.
 Each financial lane names two or more distinct trusted local read-only helper command arrays under `sources`, while `fleet_operations.cost_sources` optionally supplies the same corroboration for attributable crew/session cost.
 `fleet_operations.daily_sources` optionally supplies the same corroboration for the dated per-crew session-cost and validation-run line.
-An absent, stale, malformed, incomplete, or disagreeing source renders its figures unavailable rather than zero, while quota-axi windows remain provider-reported windowed measurements rather than exact monetary costs.
+Any absent, malformed, unreadable, incomplete, stale, or disagreeing source renders its figures unavailable under a named reason rather than zero, while quota-axi windows remain provider-reported windowed measurements rather than exact monetary costs.
 The ledger date is today in UTC, and the optional `FM_UNIT_ECONOMICS_LEDGER_DATE` environment variable overrides it for tests and backfills with a valid `YYYY-MM-DD` date that also selects the dated default output file.
 Any other value for that variable is rejected with a non-zero exit before any ledger is written.
 Because quota-axi only ever reports the present, a ledger date other than today in UTC refuses every quota window and quota metric as a backfilled window instead of filling that day with the present day's live measurements.
-This repository proposes no `kdp` sources, so the lane stays unavailable until an independent pair is installed: the KDP payment-telemetry artifact is itself imported from the monthly finance reports, so reading both is one provenance, not the two independent readings the lane requires, and no independent daily KDP source exists yet.
+[`unit-economics-source-readiness.md`](unit-economics-source-readiness.md) owns the public generic source-readiness contract, including which lanes have sources configured, while the active home's ignored `data/unit-economics-source-readiness.md` holds the operator-specific audit and follow-up evidence.
 The script header owns the source schema, freshness, corroboration, output, and status contract so this setup reference does not duplicate it.
 
 ## Report-only auto-dispatch (config/auto-dispatch.json)
