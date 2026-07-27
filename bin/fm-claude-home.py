@@ -19,12 +19,13 @@ named, because degrading to a credential file on disk is exactly the
 exposure this helper exists to remove.
 It clones only the managed profile's per-config-dir Keychain credential
 into the new home's derived Keychain service, and removes that service
-entry on abort cleanup and teardown, even when the home directory itself
-is already gone.
+entry on teardown, even when the home directory itself is already gone;
+abort cleanup removes only a service this attempt positively created, so
+a failure never deletes an entry it cannot prove it owns.
 Both the clone and the removal disable Keychain authentication UI and
-are confirmed by reading the target entry back, so an empty, truncated,
-or leftover credential, or an item that would need interactive
-authorization, fails instead of producing a home that cannot
+are confirmed by reading the target entry back, so a missing, empty,
+truncated, or leftover credential, or an item that would need
+interactive authorization, fails instead of producing a home that cannot
 authenticate or an unattended task that waits on a prompt.
 Nothing here reads a runtime flag, environment variable, or argument
 that could select a fake, relax a check, or reach a disk fallback; a

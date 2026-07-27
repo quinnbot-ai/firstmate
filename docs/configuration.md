@@ -289,9 +289,11 @@ Firstmate repairs that path binding by reading the managed profile service and w
 Credential bytes never enter a child process, argv, environment variable, stdin, stdout, stderr, log, or disk file.
 The task-home copy skips `.credentials.json` and every name derived from it at any depth of the profile tree, so Keychain is the only credential transfer surface and no run can leave plaintext credentials in a task home.
 That makes the macOS Keychain a requirement rather than a preference: on a host without it, isolated Claude homes refuse with the missing requirement named instead of falling back to a credential file, so Claude ship and scout crewmates are unavailable there while every other harness is unaffected.
-The helper reads the target item back in process, refuses an empty or mismatched result, and removes the exact task service during abort cleanup or normal teardown.
-Every read, write, and removal disables Keychain authentication UI, so an item that would need interactive authorization fails the unattended task instead of raising a prompt or blocking on one.
-If Security.framework is unavailable, an item requires interactive authorization, or the managed profile has no matching Keychain item, provisioning fails with an operator error and no worker starts.
+The target item is always created as a new entry, then read back in process and matched byte for byte against the source, so a missing, empty, partial, or mismatched result refuses the home rather than returning one that cannot authenticate.
+Every read, creation, and removal disables Keychain authentication UI, so an item that would need interactive authorization fails the unattended task instead of raising a prompt or blocking on one.
+A Keychain operation that does not succeed fails the task with an operator error naming the `SecItem` call, the affected service, and its `OSStatus`.
+A failed creation leaves no task home behind and removes only the Keychain target that attempt positively created, never an entry it cannot prove it created; normal teardown removes the exact task service.
+If Security.framework is unavailable, an item requires interactive authorization, the requested source is not the managed crewmate profile, or that profile has no matching Keychain item, provisioning fails with an operator error and no worker starts.
 It never reads from or writes to the captain's default Claude home.
 
 Before spawn records metadata or sends a launch command, it verifies the actual task home against the profile attestation.

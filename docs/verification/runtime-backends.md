@@ -52,7 +52,7 @@ Version-scoped binary inspection established that a Claude.ai session reports `l
 The implementation requires the Claude.ai and first-party values plus non-empty email and organization identifiers, then compares only a profile-local SHA-256 digest.
 
 The macOS credential bridge is exercised through an in-memory Security.framework fake.
-The fake proves distinct source and target path services, exact byte transfer, read-back mismatch refusal, missing-source refusal, creation-abort cleanup, normal teardown cleanup, and cleanup when the task-home base is already absent.
+The fake proves distinct source and target path services, exact byte transfer, unmanaged-profile refusal, read-back refusal of a mismatched, missing, partial, or empty target, a nonzero creation failure that names its `SecItem` operation, service, and `OSStatus` and leaves no home or Keychain target, missing-source refusal, creation-abort cleanup, normal teardown cleanup, and cleanup when the task-home base is already absent.
 No regression test calls the `security` command, opens the live Keychain, starts OAuth, or launches a real Claude worker.
 
 The tools under test carry no test mode of their own, so neither the Keychain surface nor the identity check can be redirected by anything a real spawn inherits.
