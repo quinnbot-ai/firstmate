@@ -59,7 +59,7 @@ usage() {
   printf '  %s,%s\n' \
     "$(toon_quote "upstream-ref")" \
     "$(toon_quote "Fetched upstream ref to compare against.")"
-  printf 'examples[2]: %s,%s\n' \
+  printf 'examples[2]: %s,%s' \
     "$(toon_quote "bin/fm-convergence-scoreboard.sh fork/main origin/main")" \
     "$(toon_quote "bin/fm-convergence-scoreboard.sh HEAD origin/main")"
 }
@@ -72,7 +72,7 @@ usage_error() {
 
 measure_error() {
   printf 'error: %s\n' "$(toon_quote "$1")"
-  printf 'help[1]: %s\n' "$(toon_quote "$2")"
+  printf 'help[1]: %s' "$(toon_quote "$2")"
   exit 1
 }
 
@@ -251,6 +251,6 @@ printf '  %s,%s,%s,%s,%s\n' \
 printf '  %s,%s,%s,%s,%s\n' \
   "$(toon_quote "configuration")" "$CONFIG_FILES" "$CONFIG_INSERTIONS" "$CONFIG_DELETIONS" \
   "$((CONFIG_INSERTIONS - CONFIG_DELETIONS))"
-printf '  %s,%s,%s,%s,%s\n' \
+printf '  %s,%s,%s,%s,%s' \
   "$(toon_quote "other")" "$OTHER_FILES" "$OTHER_INSERTIONS" "$OTHER_DELETIONS" \
   "$((OTHER_INSERTIONS - OTHER_DELETIONS))"

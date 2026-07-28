@@ -51,6 +51,13 @@ run_scoreboard() {
   )
 }
 
+assert_no_trailing_newline() {
+  local file=$1 label=$2 last_byte
+  [ -s "$file" ] || fail "$label was empty"
+  last_byte=$(tail -c 1 "$file" | od -An -tuC | tr -d '[:space:]')
+  [ "$last_byte" != "10" ] || fail "$label ended with a newline"
+}
+
 test_deterministic_scoreboard() {
   local repo local_sha upstream_sha base_sha before after out rerun expected
   repo=$(make_fixture)
@@ -142,5 +149,32 @@ test_fail_closed_invocation() {
   pass "scoreboard rejects missing, unknown, unfetched, and dirty invocation state"
 }
 
+test_toon_documents_have_no_trailing_newline() {
+  local repo rc
+  repo=$TMP_ROOT/repo
+
+  run_scoreboard "$repo" local upstream > "$TMP_ROOT/success.toon"
+  assert_no_trailing_newline "$TMP_ROOT/success.toon" "success output"
+
+  run_scoreboard "$repo" --help > "$TMP_ROOT/help.toon"
+  assert_no_trailing_newline "$TMP_ROOT/help.toon" "help output"
+
+  set +e
+  run_scoreboard "$repo" > "$TMP_ROOT/usage-error.toon"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "usage output"
+  assert_no_trailing_newline "$TMP_ROOT/usage-error.toon" "usage error output"
+
+  set +e
+  run_scoreboard "$repo" missing upstream > "$TMP_ROOT/measure-error.toon"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "measurement error output"
+  assert_no_trailing_newline "$TMP_ROOT/measure-error.toon" "measurement error output"
+  pass "scoreboard emits every TOON document without a trailing newline"
+}
+
 test_deterministic_scoreboard
 test_fail_closed_invocation
+test_toon_documents_have_no_trailing_newline
