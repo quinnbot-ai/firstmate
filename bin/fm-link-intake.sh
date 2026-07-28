@@ -229,7 +229,7 @@ is_calendar_date() {
 
 process_start_identity() {
   local identity
-  identity=$(LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | awk 'NF { $1=$1; print; exit }')
+  identity=$(TZ=UTC0 LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | awk 'NF { $1=$1; print; exit }')
   [ -n "$identity" ] || return 1
   printf '%s\n' "$identity"
 }
@@ -244,8 +244,8 @@ lock_owner_is_live() {
   case "$LOCK_OWNER_PID" in
     ''|*[!0-9]*) return 2 ;;
   esac
-  [ -n "$LOCK_OWNER_START" ] || return 2
   kill -0 "$LOCK_OWNER_PID" 2>/dev/null || return 1
+  [ -n "$LOCK_OWNER_START" ] || return 2
   current_start=$(process_start_identity "$LOCK_OWNER_PID") || return 2
   [ "$current_start" = "$LOCK_OWNER_START" ]
 }

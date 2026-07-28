@@ -144,7 +144,7 @@ current_root() {  # <home>
 }
 
 test_process_start_identity() {
-  LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | awk 'NF { $1=$1; print; exit }'
+  TZ=UTC0 LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | awk 'NF { $1=$1; print; exit }'
 }
 
 record_for() {  # <home> <url>
@@ -271,6 +271,36 @@ test_lock_claim_and_symlink_replacement_are_portable() {
   assert_present "$quarantine_marker" 'stale fixed lock was not atomically quarantined'
   [ ! -e "$owner_dir" ] || fail 'stale owner claim survived quarantine recovery'
   pass 'lock claims use portable replacement, atomic quarantine, and process-start identity'
+}
+
+test_lock_identity_is_timezone_stable_and_upgrade_safe() {
+  local home owner_dir owner_start
+  home=$(make_home lock-identity)
+  run_intake "$home" upsert --url 'https://identity.example.test/page' --source-type web --title 'Identity baseline' --summary 'The lock identity has durable baseline state.' --terms 'lock,identity' --claim 'Process ownership remains exclusive.' >/dev/null \
+    || fail 'lock identity baseline intake failed'
+  owner_dir="$home/data/link-intake/.lock-owner.compatibility"
+  owner_start=$(TZ=HST10 test_process_start_identity "$$")
+  mkdir "$owner_dir"
+  printf '%s\n%s\n' "$$" "$owner_start" > "$owner_dir/owner"
+  ln -s "${owner_dir##*/}" "$home/data/link-intake/.update-lock"
+  if TZ=JST-9 FM_HOME="$home" "$INTAKE" validate --all > "$home/timezone-lock.out" 2> "$home/timezone-lock.err"; then
+    fail 'caller timezone changed a live lock identity'
+  fi
+  assert_grep 'another link-intake update is in progress' "$home/timezone-lock.err" 'timezone-stable live lock did not block a second updater'
+  rm "$home/data/link-intake/.update-lock"
+  printf '%s\n' "$$" > "$owner_dir/owner"
+  ln -s "${owner_dir##*/}" "$home/data/link-intake/.update-lock"
+  if run_intake "$home" validate --all > "$home/live-legacy-lock.out" 2> "$home/live-legacy-lock.err"; then
+    fail 'live legacy lock was reclaimed without a process-start identity'
+  fi
+  assert_grep 'link-intake update lock owner identity is unreadable' "$home/live-legacy-lock.err" 'live legacy lock did not fail closed'
+  rm "$home/data/link-intake/.update-lock"
+  printf '%s\n' '99999999' > "$owner_dir/owner"
+  ln -s "${owner_dir##*/}" "$home/data/link-intake/.update-lock"
+  run_intake "$home" validate --all >/dev/null \
+    || fail 'dead legacy lock was not reclaimed'
+  [ ! -e "$owner_dir" ] || fail 'dead legacy owner survived recovery'
+  pass 'lock identity is timezone-stable and legacy recovery is upgrade-safe'
 }
 
 test_retrieval_dates_are_real_and_path_safe() {
@@ -444,6 +474,7 @@ test_titles_summaries_claims_and_terms_are_searchable
 test_inaccessible_links_remain_visible_and_valid
 test_video_transcript_metadata_is_durable
 test_lock_claim_and_symlink_replacement_are_portable
+test_lock_identity_is_timezone_stable_and_upgrade_safe
 test_retrieval_dates_are_real_and_path_safe
 test_atomic_generation_switch_is_process_crash_safe
 test_validation_rejects_bidirectional_divergence
