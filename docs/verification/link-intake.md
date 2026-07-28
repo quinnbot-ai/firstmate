@@ -12,11 +12,11 @@ tests/fm-link-intake.test.sh
 Observed guarantees:
 
 ```text
-PASS: lock claims use portable replacement, atomic quarantine, and process-start identity
-PASS: lock identity is timezone-stable and legacy recovery is upgrade-safe
-PASS: retrieval dates are real calendar dates and remain path-safe
-PASS: one process-crash atomic switch survives failures and process death
-PASS: validation rejects record, index, and transcript divergence
+ok - lock claims use portable replacement, atomic quarantine, and process-start identity
+ok - lock identity is timezone-stable and legacy recovery is upgrade-safe
+ok - retrieval dates are real calendar dates and remain path-safe
+ok - one process-crash atomic switch survives failures and process death
+ok - validation rejects record, index, and transcript divergence
 ```
 
 The focused suite covers canonical duplicate convergence, searchable title and summary fields, inaccessible records, transaction-staged transcripts, an atomic initialized lock claim, UTC-normalized process-start ownership, upgrade-safe legacy lock recovery, stale-lock quarantine, BSD and GNU symlink replacement, real calendar dates, a process-crash atomic state switch, conservative retained state, bidirectional consistency, odd URLs with query slashes, and the one-line `AGENTS.md` trigger.
