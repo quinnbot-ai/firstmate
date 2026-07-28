@@ -1,4 +1,4 @@
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
 export type FooterTheme = {
   fg(color: string, text: string): string;
@@ -25,8 +25,6 @@ export type FooterData = {
 const colorize = (theme: FooterTheme, color: string, label: string, value: string): string =>
   theme.fg(color, label) + theme.fg("text", value);
 
-const fit = (line: string, width: number): string => truncateToWidth(line, Math.max(1, width));
-
 const sanitizeSingleLine = (text: string): string =>
   text
     .replace(/[\u0000-\u001f\u007f]/g, " ")
@@ -35,16 +33,21 @@ const sanitizeSingleLine = (text: string): string =>
 
 const pack = (segments: string[], width: number): string[] => {
   const lines: string[] = [];
+  const maxWidth = Math.max(1, width);
   let line = "";
   for (const segment of segments) {
-    const fitted = fit(segment, width);
-    if (!line) {
-      line = fitted;
-    } else if (footerVisibleWidth(line) + 2 + footerVisibleWidth(fitted) <= Math.max(1, width)) {
-      line += `  ${fitted}`;
+    if (footerVisibleWidth(segment) > maxWidth) {
+      if (line) lines.push(line);
+      const wrapped = wrapTextWithAnsi(segment, maxWidth);
+      lines.push(...wrapped.slice(0, -1));
+      line = wrapped.at(-1) || "";
+    } else if (!line) {
+      line = segment;
+    } else if (footerVisibleWidth(line) + 2 + footerVisibleWidth(segment) <= maxWidth) {
+      line += `  ${segment}`;
     } else {
       lines.push(line);
-      line = fitted;
+      line = segment;
     }
   }
   if (line) lines.push(line);

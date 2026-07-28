@@ -203,7 +203,7 @@ ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.82.0
 ok - Firstmate Pi footer preserves fields, statuses, and cumulative native usage
 ```
 
-The deterministic footer test resolves the installed compiler and Pi package through the npm environment, covers narrow, medium, and wide layouts, asserts that every native field remains represented without overflow, verifies cumulative usage across every Pi 0.82.0 usage-bearing entry type, and checks stable single-line keyed status rendering.
+The deterministic footer test resolves the installed compiler and Pi package through the npm environment, covers narrow, medium, and wide layouts, asserts that every complete native field and status value remains represented without overflow, verifies cumulative usage across every Pi 0.82.0 usage-bearing entry type, and checks stable single-line keyed status rendering.
 
 ## Wedge-alarm channels
 

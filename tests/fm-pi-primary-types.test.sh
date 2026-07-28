@@ -96,11 +96,24 @@ const data = {
 for (const width of [12, 32, 57, 80, 120]) {
   const lines = formatFooterLines(data, width, theme);
   const rendered = lines.join("\n");
+  const compact = rendered.replace(/\s/g, "");
   for (const line of lines) {
     assert.ok(footerVisibleWidth(line) <= width, `footer overflow at ${width}: ${line}`);
   }
-  for (const field of ["● running", "model ", "think ", "dir ", "git ", "ctx ", "↑", "↓", "$"]) {
-    assert.ok(rendered.includes(field), `footer omitted ${field} at ${width}: ${rendered}`);
+  for (const [field, expected] of [
+    ["state", `●${data.state}`],
+    ["model", `model${data.model}`],
+    ["thinking", `think${data.thinking}`],
+    ["directory", `dir${data.project}`],
+    ["branch", `git${data.branch}`],
+    ["context", `ctx${data.context}`],
+    ["input", `↑${data.input}`],
+    ["output", `↓${data.output}`],
+    ["cost", `$${data.cost}`],
+    ["guard status", "guard:armednow"],
+    ["watcher status", "watcherz:healthynow"],
+  ]) {
+    assert.ok(compact.includes(expected.replace(/\s/g, "")), `footer omitted complete ${field} at ${width}: ${rendered}`);
   }
 }
 const statusLines = formatFooterLines(data, 120, theme).join("\n");
