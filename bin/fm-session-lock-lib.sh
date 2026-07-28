@@ -5,7 +5,10 @@
 # lock, and does the current process descend from that same harness?" decision.
 # bin/fm-lock.sh uses it to acquire and inspect state/.lock;
 # bin/fm-claude-stop-autoarm.sh uses it to prove a Stop hook fires inside the
-# lock-owning primary session before it may arm or rewake.
+# lock-owning primary session before it may arm or rewake; and the watcher core
+# (bin/fm-watch.sh, bin/fm-watch-arm.sh) uses fm_session_owner_fence below so
+# supervision can never be started, retained, or attached by a process from a
+# session that no longer owns the home.
 # This file is sourced by scripts and has no side effects on source.
 
 # Known harness command names; extend when a new adapter is verified.
@@ -61,4 +64,55 @@ fm_session_lock_owned_by_self() {
   esac
   my_pid=$(fm_harness_ancestry_pid) || return 1
   [ "$my_pid" = "$lock_pid" ]
+}
+
+# Memoized-per-process harness-ancestor resolution. The ancestry walk shells out
+# to ps several times, and the owner fence below runs once per watcher cycle, so
+# resolve once and reuse: a process's ancestry never changes while it lives.
+# Call this in the CURRENT shell (never inside a command substitution, which
+# would discard the memo) and read FM_SESSION_SELF_HARNESS_PID after it returns;
+# an unresolvable ancestry leaves the pid empty.
+FM_SESSION_SELF_HARNESS_PID=
+FM_SESSION_SELF_HARNESS_RESOLVED=0
+fm_session_self_harness_resolve() {
+  [ "$FM_SESSION_SELF_HARNESS_RESOLVED" -eq 1 ] && return 0
+  FM_SESSION_SELF_HARNESS_PID=$(fm_harness_ancestry_pid 2>/dev/null || true)
+  FM_SESSION_SELF_HARNESS_RESOLVED=1
+}
+
+# Supervision session-owner fence: ONE owner of the "may this process start or
+# keep supervising this home" decision for the watcher core (bin/fm-watch.sh,
+# bin/fm-watch-arm.sh) and any future supervision entry point. Returns 0 when
+# supervision may proceed and 1 when it is fenced because the home's session
+# lock names a live verified-harness process this process does not descend
+# from; on 1, FM_SESSION_OWNER_FOREIGN_PID names that foreign owner.
+# Pass cases keep every supported supervision path working:
+#   - no or malformed state/.lock: tests, manual runs, a home between sessions;
+#   - state/.afk present: the away-mode daemon owns supervision and is not
+#     harness-descended;
+#   - the lock pid is this process's own harness ancestor: the owning session
+#     (Codex checkpoints, Claude Stop-hook and recovery arms, Pi/OpenCode
+#     adapter spawns, Grok background arms all descend from it);
+#   - the lock pid is dead or not a harness: a stale lock, so recovery
+#     proceeds unchanged and bin/fm-lock.sh's takeover path stays authoritative.
+FM_SESSION_OWNER_FOREIGN_PID=
+fm_session_owner_fence() {  # <state-dir>
+  local state=$1 lock_pid
+  FM_SESSION_OWNER_FOREIGN_PID=
+  lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
+  case "$lock_pid" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  if [ -e "$state/.afk" ]; then
+    return 0
+  fi
+  fm_session_self_harness_resolve
+  if [ "$lock_pid" = "$FM_SESSION_SELF_HARNESS_PID" ]; then
+    return 0
+  fi
+  fm_harness_pid_alive "$lock_pid" || return 0
+  # Consumed by callers (bin/fm-watch.sh, bin/fm-watch-arm.sh) after a fenced return.
+  # shellcheck disable=SC2034
+  FM_SESSION_OWNER_FOREIGN_PID=$lock_pid
+  return 1
 }

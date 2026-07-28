@@ -61,6 +61,8 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"
@@ -255,12 +257,27 @@ fail_unexplained_cycle() {
   return 1
 }
 
+# Session-owner fence (bin/fm-session-lock-lib.sh): an arm whose process does
+# not descend from the harness session holding this home's state/.lock must not
+# start, restart, or stay attached to supervision here. This is what stops an
+# orphaned arm from a previous harness session retaining or reacquiring the
+# watcher singleton after another live harness session takes over the home.
+require_session_owner() {  # <action-phrase>
+  fm_session_owner_fence "$STATE" && return 0
+  echo "watcher: FAILED - session-owner fence: home session lock is held by live harness pid $FM_SESSION_OWNER_FOREIGN_PID outside this process's session; $1"
+  return 1
+}
+
 # Stay alive across identity-matched healthy holders. If one cycle ends, attach
 # to a verified successor. With no successor, fail loudly instead of returning a
 # clean empty completion that an adapter could mistake for a no-op.
 attach_and_wait() {
   local attached_pid=$1
   while :; do
+    if ! require_session_owner "detaching"; then
+      cycle_log_append unknown unknown session-owner-fenced none
+      return 1
+    fi
     if healthy_watcher; then
       if [ "$HEALTHY_PID" != "$attached_pid" ]; then
         cycle_log_append unknown unknown lock-replaced "attached:$HEALTHY_PID"
@@ -324,6 +341,12 @@ case "${1:-}" in
   --restart) mode=restart ;;
   *) echo "usage: $(basename "$0") [--restart]" >&2; exit 2 ;;
 esac
+
+# Fence before anything else: a non-owner arm must never stop the owner's
+# watcher (--restart), attach to it, or start a competitor. The owned-child
+# path needs no further arm-side check because the child watcher re-fences at
+# startup and per cycle, and this arm propagates its typed nonzero failure.
+require_session_owner "not arming" || exit 1
 
 if [ "$mode" = restart ]; then
   # Home-scoped stop: only the watcher pid recorded in THIS home's lock.
