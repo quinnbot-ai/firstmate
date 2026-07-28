@@ -38,17 +38,19 @@
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
+#   (r) local-only + content split across evolved main history -> ALLOW  (content proof)
+#   (s) local-only + one task outcome line absent from main     -> REFUSE (content safety)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
-#   (r) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
-#   (s) index.lock with a live holder, any age                -> lock kept, REFUSE
-#   (t) lsof error while checking index.lock                  -> lock kept, REFUSE
-#   (u) dirty worktree after stale lock cleanup               -> lock removed, REFUSE
-#   (v) non-linked repo index.lock                            -> lock removed, ALLOW
-#   (w) index.lock mtime read failure                         -> lock kept, REFUSE
-#   (x) transient lock cleared after first failed return      -> retry ALLOW
-#   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
+#   (t) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
+#   (u) index.lock with a live holder, any age                -> lock kept, REFUSE
+#   (v) lsof error while checking index.lock                  -> lock kept, REFUSE
+#   (w) dirty worktree after stale lock cleanup               -> lock removed, REFUSE
+#   (x) non-linked repo index.lock                            -> lock removed, ALLOW
+#   (y) index.lock mtime read failure                         -> lock kept, REFUSE
+#   (z) transient lock cleared after first failed return      -> retry ALLOW
+#   (aa) persistent lock (never clears, not provably stale)   -> REFUSE loudly
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -822,6 +824,116 @@ test_content_in_default_fallback_allows() {
   pass "worktree whose content already landed in the default branch is torn down (content fallback)"
 }
 
+test_content_split_across_evolved_default_allows_cleanup_and_refill() {
+  local case_dir rc base_head branch_head main_head cherry
+  case_dir=$(make_case content-split-evolved)
+  write_meta "$case_dir" local-only ship
+  add_compatible_tasks_axi "$case_dir"
+
+  wt_commit_file "$case_dir" outcome.txt 'before
+old
+after' "shared outcome baseline"
+  base_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" merge -q --ff-only "$base_head"
+
+  wt_commit_file "$case_dir" outcome.txt 'before
+alpha
+bravo
+charlie
+delta
+after' "task four-line outcome"
+  branch_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  printf '%s\n' "done: implementation complete" > "$case_dir/state/task-x1.status"
+
+  printf '%s\n' 'BEFORE-LATER
+alpha
+bravo
+after' > "$case_dir/project/outcome.txt"
+  git -C "$case_dir/project" add outcome.txt
+  git -C "$case_dir/project" -c user.email=t@t -c user.name=t \
+    commit -q -m "land first outcome half with context"
+  printf '%s\n' 'BEFORE-LATER
+alpha
+bravo
+charlie
+delta
+AFTER-LATER' > "$case_dir/project/outcome.txt"
+  git -C "$case_dir/project" add outcome.txt
+  git -C "$case_dir/project" -c user.email=t@t -c user.name=t \
+    commit -q -m "land second outcome half and evolve context"
+  main_head=$(git -C "$case_dir/project" rev-parse main)
+
+  ! git -C "$case_dir/wt" merge-base --is-ancestor "$branch_head" "$main_head" \
+    || fail "content-split-evolved: task unexpectedly became an ancestor of main"
+  cherry=$(git -C "$case_dir/wt" cherry main fm/task-x1)
+  printf '%s\n' "$cherry" | grep -Eq '^\+ [0-9a-f]+$' \
+    || fail "content-split-evolved: fixture unexpectedly became patch-equivalent: $cherry"
+  ! git -C "$case_dir/wt" merge-tree --write-tree main fm/task-x1 >/dev/null 2>&1 \
+    || fail "content-split-evolved: fixture must diverge first at the 3-way content proof"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "content-split-evolved: fully landed task content should clean up"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "content-split-evolved: cleanup left the completed worker lane occupied"
+  assert_absent "$case_dir/state/task-x1.status" \
+    "content-split-evolved: cleanup retained the completed status"
+  assert_grep 'tasks-axi done task-x1' "$case_dir/stdout" \
+    "content-split-evolved: completion did not emit the guarded landing transition"
+  assert_grep 'tasks-axi ready' "$case_dir/stdout" \
+    "content-split-evolved: cleanup did not immediately request ready-work refill"
+  pass "complete -> content-landed proof -> cleanup -> ready-work refill accepts split non-patch-equivalent history"
+}
+
+test_content_split_across_evolved_default_with_absent_change_refuses() {
+  local case_dir rc base_head
+  case_dir=$(make_case content-split-missing)
+  write_meta "$case_dir" local-only ship
+  add_compatible_tasks_axi "$case_dir"
+
+  wt_commit_file "$case_dir" outcome.txt 'before
+old
+after' "shared outcome baseline"
+  base_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" merge -q --ff-only "$base_head"
+
+  wt_commit_file "$case_dir" outcome.txt 'before
+alpha
+bravo
+charlie
+delta
+after' "task four-line outcome"
+  printf '%s\n' "done: implementation complete" > "$case_dir/state/task-x1.status"
+
+  printf '%s\n' 'BEFORE-LATER
+alpha
+bravo
+delta
+AFTER-LATER' > "$case_dir/project/outcome.txt"
+  git -C "$case_dir/project" add outcome.txt
+  git -C "$case_dir/project" -c user.email=t@t -c user.name=t \
+    commit -q -m "land incomplete outcome and evolve context"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "content-split-missing: absent task content must preserve the lane"
+  assert_grep 'REFUSED:' "$case_dir/stderr" \
+    "content-split-missing: refusal did not report the guarded landing failure"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "content-split-missing: cleanup discarded metadata for unlanded work"
+  [ -f "$case_dir/state/task-x1.status" ] \
+    || fail "content-split-missing: cleanup discarded status for unlanded work"
+  assert_no_grep 'tasks-axi ready' "$case_dir/stdout" \
+    "content-split-missing: refused cleanup incorrectly requested refill"
+  pass "content proof preserves the completed worker lane when one task outcome line is absent"
+}
+
 test_content_fallback_refreshes_stale_origin_ref() {
   local case_dir rc
   case_dir=$(make_case content-stale-ref)
@@ -1390,6 +1502,8 @@ test_merged_pr_with_later_local_commit_refuses
 test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
+test_content_split_across_evolved_default_allows_cleanup_and_refill
+test_content_split_across_evolved_default_with_absent_change_refuses
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
