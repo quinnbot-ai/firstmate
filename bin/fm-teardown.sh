@@ -417,6 +417,13 @@ unique_merge_base() {
   printf '%s\n' "$bases"
 }
 
+reverse_patch_applies_at_task_locations() {
+  local proof_index=$1 proof_patch=$2 output
+  output=$(LC_ALL=C GIT_INDEX_FILE="$proof_index" git -C "$WT" apply \
+    --cached --reverse --check --verbose --unidiff-zero "$proof_patch" 2>&1) || return 1
+  [[ ! "$output" =~ offset[[:space:]]-?[1-9][0-9]*[[:space:]]lines? ]]
+}
+
 # Does the task's complete net delta already exist in an evolved default tree even
 # though later edits made the 3-way proof above conflict? Build a private temporary
 # index at the authoritative default ref, then require both sides of the proof:
@@ -439,8 +446,7 @@ content_delta_in_default() {
     && GIT_INDEX_FILE="$proof_index" git -C "$WT" read-tree "$ref" 2>/dev/null \
     && ! GIT_INDEX_FILE="$proof_index" git -C "$WT" apply --cached --check \
       --unidiff-zero "$proof_patch" >/dev/null 2>&1 \
-    && GIT_INDEX_FILE="$proof_index" git -C "$WT" apply --cached --reverse --check \
-      --unidiff-zero "$proof_patch" >/dev/null 2>&1; then
+    && reverse_patch_applies_at_task_locations "$proof_index" "$proof_patch"; then
     rc=0
   fi
   rm -f "$proof_index" "$proof_index.lock" "$proof_patch"

@@ -42,17 +42,18 @@
 #   (s) local-only + one task outcome line absent from main     -> REFUSE (content safety)
 #   (t) local-only + clean partial task outcome on main          -> REFUSE (exact proof)
 #   (u) local-only + ambiguous merge bases                       -> REFUSE (history safety)
+#   (v) local-only + relocated reverse hunk                      -> REFUSE (location safety)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
-#   (v) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
-#   (w) index.lock with a live holder, any age                -> lock kept, REFUSE
-#   (x) lsof error while checking index.lock                  -> lock kept, REFUSE
-#   (y) dirty worktree after stale lock cleanup               -> lock removed, REFUSE
-#   (z) non-linked repo index.lock                            -> lock removed, ALLOW
-#   (aa) index.lock mtime read failure                        -> lock kept, REFUSE
-#   (ab) transient lock cleared after first failed return     -> retry ALLOW
-#   (ac) persistent lock (never clears, not provably stale)   -> REFUSE loudly
+#   (w) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
+#   (x) index.lock with a live holder, any age                -> lock kept, REFUSE
+#   (y) lsof error while checking index.lock                  -> lock kept, REFUSE
+#   (z) dirty worktree after stale lock cleanup               -> lock removed, REFUSE
+#   (aa) non-linked repo index.lock                           -> lock removed, ALLOW
+#   (ab) index.lock mtime read failure                        -> lock kept, REFUSE
+#   (ac) transient lock cleared after first failed return     -> retry ALLOW
+#   (ad) persistent lock (never clears, not provably stale)   -> REFUSE loudly
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -1060,6 +1061,72 @@ after' > "$case_dir/project/outcome.txt"
   pass "content delta proof fails closed when history has multiple merge bases"
 }
 
+test_conflicting_merge_rejects_relocated_reverse_hunk() {
+  local case_dir rc base proof_index proof_patch proof_output
+  case_dir=$(make_case content-relocated-reverse)
+  write_meta "$case_dir" local-only ship
+
+  wt_commit_file "$case_dir" outcome.txt 'before
+old
+after
+separator
+missing-old
+spare
+landed' "shared outcome baseline"
+  base=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" merge -q --ff-only "$base"
+
+  wt_commit_file "$case_dir" outcome.txt 'before
+alpha
+bravo
+after
+separator
+landed
+spare
+landed' "task multi-hunk outcome"
+
+  printf '%s\n' 'BEFORE-LATER
+alpha
+bravo
+AFTER-LATER
+separator
+missing-old
+spare
+landed' > "$case_dir/project/outcome.txt"
+  git -C "$case_dir/project" add outcome.txt
+  git -C "$case_dir/project" -c user.email=t@t -c user.name=t \
+    commit -q -m "land incomplete outcome and evolve conflict context"
+
+  ! git -C "$case_dir/wt" merge-tree --write-tree main HEAD >/dev/null 2>&1 \
+    || fail "content-relocated-reverse: fixture must conflict at the exact-tree proof"
+
+  proof_index="$case_dir/proof.index"
+  proof_patch="$case_dir/task.patch"
+  git -C "$case_dir/wt" diff --no-ext-diff --no-textconv --binary --full-index \
+    --no-renames --unified=0 "$base" HEAD -- > "$proof_patch"
+  GIT_INDEX_FILE="$proof_index" git -C "$case_dir/wt" read-tree main
+  ! GIT_INDEX_FILE="$proof_index" git -C "$case_dir/wt" apply --cached --check \
+    --unidiff-zero "$proof_patch" >/dev/null 2>&1 \
+    || fail "content-relocated-reverse: task delta unexpectedly still applies forward"
+  proof_output=$(LC_ALL=C GIT_INDEX_FILE="$proof_index" git -C "$case_dir/wt" apply \
+    --cached --reverse --check --verbose --unidiff-zero "$proof_patch" 2>&1) \
+    || fail "content-relocated-reverse: fixture does not expose reverse relocation"
+  [[ "$proof_output" =~ offset[[:space:]]-?[1-9][0-9]*[[:space:]]lines? ]] \
+    || fail "content-relocated-reverse: reverse proof unexpectedly stayed at task locations"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "content-relocated-reverse: relocated content must preserve the lane"
+  assert_grep 'REFUSED:' "$case_dir/stderr" \
+    "content-relocated-reverse: refusal did not report the guarded landing failure"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "content-relocated-reverse: cleanup discarded metadata for incomplete content"
+  pass "conflict fallback rejects reverse hunks relocated away from task locations"
+}
+
 test_content_fallback_refreshes_stale_origin_ref() {
   local case_dir rc
   case_dir=$(make_case content-stale-ref)
@@ -1632,6 +1699,7 @@ test_content_split_across_evolved_default_allows_cleanup_and_refill
 test_content_split_across_evolved_default_with_absent_change_refuses
 test_clean_nonmatching_merge_does_not_use_delta_fallback
 test_ambiguous_merge_bases_refuse_delta_fallback
+test_conflicting_merge_rejects_relocated_reverse_hunk
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
