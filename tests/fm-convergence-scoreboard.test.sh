@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# Behavior tests for the deterministic, read-only convergence scoreboard.
+set -u
+
+# shellcheck source=tests/lib.sh
+# shellcheck disable=SC1091
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+SCOREBOARD="$ROOT/bin/fm-convergence-scoreboard.sh"
+TMP_ROOT=$(fm_test_tmproot fm-convergence-scoreboard)
+fm_git_identity
+
+make_fixture() {
+  local repo="$TMP_ROOT/repo"
+  mkdir -p "$repo/bin" "$repo/docs"
+  git -C "$repo" init -q -b main
+  printf 'base\n' > "$repo/AGENTS.md"
+  printf 'old\nstay\n' > "$repo/bin/tool.sh"
+  printf 'remove\n' > "$repo/docs/guide.md"
+  git -C "$repo" add AGENTS.md bin/tool.sh docs/guide.md
+  git -C "$repo" commit -qm "chore: seed fixture"
+  git -C "$repo" branch upstream
+
+  git -C "$repo" checkout -qb local
+  printf 'base\nlocal\n' > "$repo/AGENTS.md"
+  printf 'new\nstay\n' > "$repo/bin/tool.sh"
+  mkdir -p "$repo/tests"
+  printf 'one\ntwo\n' > "$repo/tests/example.test.sh"
+  git -C "$repo" rm -q docs/guide.md
+  git -C "$repo" add AGENTS.md bin/tool.sh tests/example.test.sh
+  git -C "$repo" commit -qm "feat: add local delivery"
+  printf 'version = 1\n' > "$repo/.tasks.toml"
+  printf 'other\n' > "$repo/misc.txt"
+  git -C "$repo" add .tasks.toml misc.txt
+  git -C "$repo" commit -qm "fix: finish local delivery"
+
+  git -C "$repo" checkout -q upstream
+  printf 'upstream\n' > "$repo/upstream.txt"
+  git -C "$repo" add upstream.txt
+  git -C "$repo" commit -qm "feat: advance upstream"
+  git -C "$repo" checkout -q local
+  printf '%s\n' "$repo"
+}
+
+run_scoreboard() {
+  local repo=$1
+  shift
+  (
+    cd "$repo" || exit 1
+    "$SCOREBOARD" "$@"
+  )
+}
+
+test_deterministic_scoreboard() {
+  local repo local_sha upstream_sha base_sha before after out rerun expected
+  repo=$(make_fixture)
+  local_sha=$(git -C "$repo" rev-parse local)
+  upstream_sha=$(git -C "$repo" rev-parse upstream)
+  base_sha=$(git -C "$repo" merge-base upstream local)
+  before=$(git -C "$repo" show-ref)
+
+  out=$(run_scoreboard "$repo" local upstream)
+  rerun=$(run_scoreboard "$repo" local upstream)
+  after=$(git -C "$repo" show-ref)
+
+  expected=$(printf '%s\n' \
+    'schema: "fm-convergence-scoreboard.v1"' \
+    'local:' \
+    '  ref: "local"' \
+    "  commit: \"$local_sha\"" \
+    'upstream:' \
+    '  ref: "upstream"' \
+    "  commit: \"$upstream_sha\"" \
+    'commits:' \
+    '  ahead: 2' \
+    '  behind: 1' \
+    '  first_parent_deliveries: 2' \
+    'diff:' \
+    "  base_commit: \"$base_sha\"" \
+    '  changed_files: 6' \
+    '  insertions: 6' \
+    '  deletions: 2' \
+    '  net_lines: 4' \
+    'file_groups[6]{name,changed_files,insertions,deletions,net_lines}:' \
+    '  "agent-runtime",1,1,0,1' \
+    '  "automation",1,1,1,0' \
+    '  "tests",1,2,0,2' \
+    '  "documentation",1,0,1,-1' \
+    '  "configuration",1,1,0,1' \
+    '  "other",1,1,0,1')
+
+  [ "$out" = "$expected" ] || fail "scoreboard output differs from the deterministic TOON contract:$'\n'$out"
+  [ "$rerun" = "$out" ] || fail "identical refs produced different scoreboard output"
+  [ "$after" = "$before" ] || fail "scoreboard mutated repository refs"
+  [ -z "$(git -C "$repo" status --porcelain)" ] || fail "scoreboard dirtied the fixture worktree"
+  pass "scoreboard reports reproducible graph, delivery, diff, and file-group metrics without mutation"
+}
+
+test_fail_closed_invocation() {
+  local repo out err rc
+  repo=$TMP_ROOT/repo
+
+  set +e
+  out=$(run_scoreboard "$repo" 2>"$TMP_ROOT/no-args.err")
+  rc=$?
+  set -e
+  err=$(cat "$TMP_ROOT/no-args.err")
+  expect_code 2 "$rc" "missing refs"
+  assert_contains "$out" 'error: "expected exactly <local-ref> and <upstream-ref>"' \
+    "missing refs should emit one structured usage error"
+  assert_contains "$out" 'usage: "bin/fm-convergence-scoreboard.sh <local-ref> <upstream-ref>"' \
+    "usage failure should include the complete correction"
+  [ -z "$err" ] || fail "usage failure leaked diagnostics to stderr: $err"
+
+  set +e
+  out=$(run_scoreboard "$repo" --unknown upstream 2>"$TMP_ROOT/unknown.err")
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "unknown flag"
+  assert_contains "$out" 'error: "unknown flag or invalid local ref: --unknown"' \
+    "unknown flag should be named"
+
+  set +e
+  out=$(run_scoreboard "$repo" missing upstream 2>"$TMP_ROOT/missing.err")
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "missing local ref"
+  assert_contains "$out" 'local ref is missing, unfetched, or does not resolve to one commit: missing' \
+    "missing local ref should be actionable"
+  assert_contains "$out" 'Fetch or create the local ref explicitly' \
+    "missing local ref should provide the correction"
+
+  printf 'dirty\n' > "$repo/untracked.txt"
+  set +e
+  out=$(run_scoreboard "$repo" local upstream 2>"$TMP_ROOT/dirty.err")
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "dirty worktree"
+  assert_contains "$out" 'error: "current worktree is dirty"' \
+    "dirty invocation should fail before measuring refs"
+  rm "$repo/untracked.txt"
+  pass "scoreboard rejects missing, unknown, unfetched, and dirty invocation state"
+}
+
+test_deterministic_scoreboard
+test_fail_closed_invocation
