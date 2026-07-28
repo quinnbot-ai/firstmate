@@ -255,8 +255,27 @@ test_toon_documents_have_no_trailing_newline() {
   pass "scoreboard emits every TOON document without a trailing newline"
 }
 
+test_toon_control_characters_are_escaped() {
+  local repo control_ref out rc
+  repo=$TMP_ROOT/repo
+  control_ref=$'missing\001\b\f\033ref'
+
+  set +e
+  out=$(run_scoreboard "$repo" "$control_ref" upstream)
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "control characters in a missing ref"
+  assert_contains "$out" 'missing\u0001\u0008\u000c\u001bref' \
+    "structured errors should escape non-short-form TOON control characters"
+  [[ "$out" != *$'\001'* && "$out" != *$'\b'* && "$out" != *$'\f'* && "$out" != *$'\033'* ]] \
+    || fail "structured error output retained a raw control character"
+  pass "scoreboard escapes every unsupported control character in TOON strings"
+}
+
 test_deterministic_scoreboard
 test_attributes_are_scoped_to_local_ref
 test_fail_closed_invocation
 test_diff_failure_is_not_silent
 test_toon_documents_have_no_trailing_newline
+test_toon_control_characters_are_escaped
