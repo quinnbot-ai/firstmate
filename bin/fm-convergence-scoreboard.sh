@@ -12,6 +12,9 @@
 # Ahead and behind are graph counts from upstream...local.
 # First-parent deliveries are local first-parent commits unreachable upstream.
 # Diff metrics compare the unique merge base with the resolved local commit.
+# Measurements use an isolated Git context with attributes from the local commit,
+# so ambient config, replacement refs, and worktree or info attributes cannot
+# change results for the same resolved identities.
 # Renames count as one deletion plus one addition so file grouping is stable.
 # Git binary-file numstat markers count as zero lines while the paths still count.
 # Every changed path belongs to exactly one of these ordered groups:
@@ -137,7 +140,47 @@ if ! UPSTREAM_COMMIT=$(git -C "$REPO" rev-parse --verify --quiet "$UPSTREAM_REF^
     "Fetch the upstream ref explicitly, then rerun with the same two arguments."
 fi
 
-if ! MERGE_BASES=$(git -C "$REPO" merge-base --all "$UPSTREAM_COMMIT" "$LOCAL_COMMIT" 2>/dev/null); then
+if ! OBJECTS_DIR=$(git -C "$REPO" rev-parse --path-format=absolute --git-path objects 2>/dev/null); then
+  measure_error \
+    "cannot locate the repository object database" \
+    "Verify the repository metadata, then rerun with the same refs."
+fi
+
+if ! MEASURE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-convergence-scoreboard.XXXXXX"); then
+  measure_error \
+    "cannot create isolated storage for measurements" \
+    "Verify that the temporary directory is writable, then rerun with the same refs."
+fi
+MEASURE_GIT_DIR="$MEASURE_DIR/repository.git"
+NUMSTAT_FILE="$MEASURE_DIR/numstat"
+cleanup_measurement() {
+  rm -rf -- "$MEASURE_DIR"
+}
+trap cleanup_measurement EXIT
+
+if ! GIT_CONFIG_COUNT=0 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+  git init --bare --quiet --template= "$MEASURE_GIT_DIR" 2>/dev/null; then
+  measure_error \
+    "cannot initialize isolated storage for measurements" \
+    "Verify that the temporary directory is writable, then rerun with the same refs."
+fi
+
+measure_git() {
+  (
+    unset GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_INDEX_FILE GIT_WORK_TREE
+    export GIT_ATTR_NOSYSTEM=1
+    export GIT_ATTR_SOURCE="$LOCAL_COMMIT"
+    export GIT_CONFIG_COUNT=0
+    export GIT_CONFIG_GLOBAL=/dev/null
+    export GIT_CONFIG_NOSYSTEM=1
+    export GIT_NO_LAZY_FETCH=1
+    export GIT_OBJECT_DIRECTORY="$OBJECTS_DIR"
+    git --no-replace-objects --git-dir="$MEASURE_GIT_DIR" \
+      -c core.bigFileThreshold=512m "$@"
+  )
+}
+
+if ! MERGE_BASES=$(measure_git merge-base --all "$UPSTREAM_COMMIT" "$LOCAL_COMMIT" 2>/dev/null); then
   measure_error \
     "the refs have no common commit" \
     "Choose local and upstream refs from the same repository history."
@@ -157,14 +200,14 @@ case "$MERGE_BASE_COUNT" in
     ;;
 esac
 
-if ! GRAPH_COUNTS=$(git -C "$REPO" rev-list --left-right --count "$UPSTREAM_COMMIT...$LOCAL_COMMIT" 2>/dev/null); then
+if ! GRAPH_COUNTS=$(measure_git rev-list --left-right --count "$UPSTREAM_COMMIT...$LOCAL_COMMIT" 2>/dev/null); then
   measure_error \
     "cannot count commits between the resolved refs" \
     "Verify the repository object database, then rerun with the same refs."
 fi
 read -r BEHIND AHEAD <<< "$GRAPH_COUNTS"
 
-if ! FIRST_PARENT_DELIVERIES=$(git -C "$REPO" rev-list --first-parent --count "$UPSTREAM_COMMIT..$LOCAL_COMMIT" 2>/dev/null); then
+if ! FIRST_PARENT_DELIVERIES=$(measure_git rev-list --first-parent --count "$UPSTREAM_COMMIT..$LOCAL_COMMIT" 2>/dev/null); then
   measure_error \
     "cannot count first-parent local deliveries" \
     "Verify the repository object database, then rerun with the same refs."
@@ -193,17 +236,8 @@ OTHER_FILES=0
 OTHER_INSERTIONS=0
 OTHER_DELETIONS=0
 
-if ! NUMSTAT_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-convergence-scoreboard.XXXXXX"); then
-  measure_error \
-    "cannot create temporary storage for diff metrics" \
-    "Verify that the temporary directory is writable, then rerun with the same refs."
-fi
-cleanup_numstat() {
-  rm -f "$NUMSTAT_FILE"
-}
-trap cleanup_numstat EXIT
-
-if ! git -C "$REPO" diff --numstat -z --no-renames "$MERGE_BASE" "$LOCAL_COMMIT" \
+if ! measure_git diff --numstat -z --no-renames --no-ext-diff --no-textconv \
+  --diff-algorithm=myers --no-indent-heuristic "$MERGE_BASE" "$LOCAL_COMMIT" \
   > "$NUMSTAT_FILE" 2>/dev/null; then
   measure_error \
     "cannot calculate diff metrics between the resolved refs" \
