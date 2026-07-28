@@ -185,6 +185,21 @@ working_tree_mode() {
   printf '%s\n' "$mode"
 }
 
+staged_state_matches_worktree() {
+  local current_mode current_oid index_meta index_mode index_oid path=$1
+  index_meta=$(index_blob_metadata "$path") || return 1
+  if [ ! -e "$PROJ/$path" ] && [ ! -L "$PROJ/$path" ]; then
+    [ -z "$index_meta" ]
+    return
+  fi
+  [ -n "$index_meta" ] || return 1
+  index_mode=${index_meta%% *}
+  index_oid=${index_meta##* }
+  current_oid=$(git -C "$PROJ" hash-object -- "$path" 2>/dev/null) || return 1
+  current_mode=$(working_tree_mode "$path") || return 1
+  [ "$index_oid" = "$current_oid" ] && [ "$index_mode" = "$current_mode" ]
+}
+
 DIRTY_PATHS=()
 DIRTY_STATES=()
 while IFS= read -r -d '' record; do
@@ -284,6 +299,12 @@ if [ "${#DIRTY_PATHS[@]}" -gt 0 ]; then
     set -e
     case "$ignore_rc" in
       0)
+        if [ "$state" != "??" ] && [ "$state" != "!!" ] \
+          && [ "${state:0:1}" != " " ] \
+          && ! staged_state_matches_worktree "$path"; then
+          add_unresolved "$path" "staged content or mode does not match the working-tree copy preserved by the branch-head ignore rule"
+          continue
+        fi
         if ! remember_preserved_path "$path"; then
           add_unresolved "$path" "ignored path is neither absent nor hashable as a file"
           continue

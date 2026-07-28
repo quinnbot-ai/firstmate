@@ -137,6 +137,69 @@ test_untracked_conversion_permits_and_preserves_file() {
   pass "fm-merge-local preserves a tracked file converted to ignored-untracked"
 }
 
+test_untracked_conversion_refuses_divergent_staged_content() {
+  local after_hash before before_hash before_index case_dir rc
+  case_dir=$(make_case untracked-conversion-staged-content)
+  git -C "$case_dir/branch" rm -q --cached runtime-state.txt
+  printf 'runtime-state.txt\n' >"$case_dir/branch/.gitignore"
+  git -C "$case_dir/branch" add .gitignore
+  git -C "$case_dir/branch" commit -qm "leave runtime log untracked"
+  printf 'staged runtime state\n' >"$case_dir/project/runtime-state.txt"
+  git -C "$case_dir/project" add runtime-state.txt
+  printf 'working runtime state\n' >"$case_dir/project/runtime-state.txt"
+  before=$(git -C "$case_dir/project" rev-parse main)
+  before_index=$(git -C "$case_dir/project" rev-parse :runtime-state.txt)
+  before_hash=$(git -C "$case_dir/project" hash-object -- runtime-state.txt)
+
+  set +e
+  run_merge_local "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "untracked-conversion-staged-content: merge should refuse"
+  assert_grep 'staged content or mode does not match the working-tree copy' \
+    "$case_dir/stderr" \
+    "untracked-conversion-staged-content: refusal did not diagnose divergent state"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$before" ] \
+    || fail "untracked-conversion-staged-content: refusal advanced main"
+  [ "$(git -C "$case_dir/project" rev-parse :runtime-state.txt)" = "$before_index" ] \
+    || fail "untracked-conversion-staged-content: refusal changed the index"
+  after_hash=$(git -C "$case_dir/project" hash-object -- runtime-state.txt)
+  [ "$after_hash" = "$before_hash" ] \
+    || fail "untracked-conversion-staged-content: refusal changed working content"
+  pass "fm-merge-local preserves divergent staged content by refusing conversion"
+}
+
+test_untracked_conversion_refuses_divergent_staged_mode() {
+  local before before_index case_dir rc
+  case_dir=$(make_case untracked-conversion-staged-mode)
+  git -C "$case_dir/branch" rm -q --cached runtime-state.txt
+  printf 'runtime-state.txt\n' >"$case_dir/branch/.gitignore"
+  git -C "$case_dir/branch" add .gitignore
+  git -C "$case_dir/branch" commit -qm "leave runtime log untracked"
+  chmod +x "$case_dir/project/runtime-state.txt"
+  git -C "$case_dir/project" add runtime-state.txt
+  chmod -x "$case_dir/project/runtime-state.txt"
+  before=$(git -C "$case_dir/project" rev-parse main)
+  before_index=$(git -C "$case_dir/project" ls-files --stage -- runtime-state.txt)
+
+  set +e
+  run_merge_local "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "untracked-conversion-staged-mode: merge should refuse"
+  assert_grep 'staged content or mode does not match the working-tree copy' \
+    "$case_dir/stderr" \
+    "untracked-conversion-staged-mode: refusal did not diagnose divergent mode"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$before" ] \
+    || fail "untracked-conversion-staged-mode: refusal advanced main"
+  [ "$(git -C "$case_dir/project" ls-files --stage -- runtime-state.txt)" = \
+    "$before_index" ] \
+    || fail "untracked-conversion-staged-mode: refusal changed the index mode"
+  pass "fm-merge-local preserves divergent staged mode by refusing conversion"
+}
+
 test_branch_ignored_untracked_file_permits() {
   local case_dir before_hash after_hash
   case_dir=$(make_case ignored-untracked)
@@ -361,6 +424,8 @@ test_already_ignored_file_tracked_by_target_refuses() {
 test_byte_identical_tracked_content_permits
 test_unresolved_modified_file_refuses_with_path
 test_untracked_conversion_permits_and_preserves_file
+test_untracked_conversion_refuses_divergent_staged_content
+test_untracked_conversion_refuses_divergent_staged_mode
 test_branch_ignored_untracked_file_permits
 test_diverged_branch_still_refuses
 test_non_default_checkout_still_refuses
