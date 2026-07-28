@@ -63,10 +63,10 @@ README.md            public overview and development notes
 skills/              standalone public installer-facing skills, committed; not loaded by firstmate
 bin/                 helper scripts, committed; read each script's header before first use
 .env                 optional X-mode pairing token; LOCAL, gitignored; presence-gates section 14
-config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate. Inherited as the literal file: a concrete primary adapter value also controls a secondmate home's own crewmates (section 4)
-config/crew-dispatch.json  optional crewmate dispatch profiles; LOCAL, gitignored; firstmate-maintained but human-editable natural-language rules that choose a per-task harness/model/effort profile (section 4). Inherited by secondmate homes
-config/auto-dispatch.json  optional per-home bounded report-only refill config; LOCAL, gitignored, not inherited; see docs/configuration.md "Report-only auto-dispatch"
-config/secondmate-harness  harness the PRIMARY uses to launch SECONDMATE agents, optionally followed by a model and effort token on the same line ("<harness> [<model>] [<effort>]"; section 4); LOCAL, gitignored; absent or "default" harness falls back to config/crew-harness then firstmate's own. The primary's own setting; NOT inherited into secondmate homes (secondmates do not spawn secondmates)
+  config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate. Inherited as the literal file: a concrete primary adapter value also controls a secondmate home's own crewmates (section 4)
+  config/crew-dispatch.json  optional crewmate dispatch profiles; LOCAL, gitignored; firstmate-maintained but human-editable natural-language rules that choose a per-task harness/model/effort profile (section 4). Inherited by secondmate homes
+  config/supervision-capacity  optional per-home direct-lifecycle ordinary-worker capacity; LOCAL, gitignored, not inherited; see docs/configuration.md "Direct supervision capacity"
+  config/secondmate-harness  harness the PRIMARY uses to launch SECONDMATE agents, optionally followed by a model and effort token on the same line ("<harness> [<model>] [<effort>]"; section 4); LOCAL, gitignored; absent or "default" harness falls back to config/crew-harness then firstmate's own. The primary's own setting; NOT inherited into secondmate homes (secondmates do not spawn secondmates)
 config/backlog-backend  backlog backend override; LOCAL, gitignored; absent or "tasks-axi" = default tasks-axi backend, "manual" = force routine backlog updates to hand-editing; inherited by secondmate homes (section 10)
 config/backend  runtime session-provider backend override for new tasks; LOCAL, gitignored; absent = falls through to runtime auto-detection (the runtime firstmate itself is executing inside), then tmux; tmux is the verified reference backend (docs/tmux-backend.md), while herdr, zellij, orca, and cmux are experimental spawn backends (docs/herdr-backend.md, docs/zellij-backend.md, docs/orca-backend.md, docs/cmux-backend.md) - herdr and cmux can also be selected by runtime auto-detection, zellij and orca never are (always explicit), and codex-app is not accepted; see docs/codex-app-backend.md; not inherited into secondmate homes
 config/calm     Pi Calm presentation preference; LOCAL, gitignored, and not inherited; see docs/configuration.md "Pi Calm preference"
@@ -85,7 +85,6 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   projects.md        thin fleet navigation registry; firstmate-private, parsed by fm-project-mode.sh (section 6)
   secondmates.md      secondmate routing table; firstmate-private, maintained by fm-home-seed.sh (section 6)
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
-  <id>/dispatch.json sealed firstmate-authored report-only dispatch envelope for one ready ordinary task
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
   codex-crewmate/    task-private Codex homes for ship and scout launches; LOCAL, gitignored, owned by fm-codex-home.py and removed by teardown (docs/configuration.md)
   claude-crewmate/   optional second-account Claude isolation: captain-populated profile/ plus task-private homes for ship and scout launches; LOCAL, gitignored, dormant while profile/ is absent (docs/configuration.md)
@@ -98,7 +97,6 @@ state/               volatile runtime signals; gitignored
   <id>.kimi-turnend-token   firstmate-owned Kimi hook registry token for the task; removed by teardown
   <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; treehouse-backed ship/scout tasks also record treehouse_lease=1, Codex ship/scout tasks also record codex_crewmate_home=, and ready-profile Claude ship/scout tasks also record claude_crewmate_home= (docs/configuration.md); kind=secondmate also records home= and projects=; the runtime backend records further backend-specific fields, including tmux_window_id= on the default tmux backend (docs/configuration.md "Runtime backend"; bin/fm-backend.sh, section 8); fm-pr-check, including through fm-pr-merge, records one canonical pr= and the forge's pr_head= when available (GitHub pull requests and GitLab merge requests; docs/gitlab-merge-watch.md); fm-x-link appends x_request=, x_request_ts=, x_followups=, and optional x_platform=/x_reply_max_chars= for an X-mode-originated task (section 14)
   <id>.herdr-presentation  quarantinable attempt and restart-binding journal for Herdr's optional visual projection; never task or endpoint authority; see docs/herdr-backend.md "Optional presentation spaces"
-  auto-dispatch* .auto-dispatch* .last-auto-dispatch-refill  auto-dispatch status, claim, and receipt state plus the refill lock, seal key, notice-episode marker, and persisted cadence; see docs/configuration.md
   <id>.check.sh      authenticated slow poll; the watcher dispatches validated PR data and the byte-identified X shim through trusted repository scripts, runs registered custom checks from hash-validated private snapshots, and rejects every other state check without execution
   <id>.check-trust   private content binding created by fm-check-register.sh for an intentional custom check
   <id>.pr-poll       private validated data sidecar for the byte-static PR merge poll
@@ -184,9 +182,6 @@ Break genuine headroom ties without array-order or harness bias.
 `quota-axi` owns how model or product windows relate to bounding account windows.
 The generic effort fallback and its precedence are owned by `harness-adapters`: explicit captain and standing configured effort win; otherwise use low for well-understood explicit work, xhigh for ambiguous investigation or design, intermediate levels proportionally, and never max without explicit captain preference.
 Do not add model-specific versions of that policy.
-Load `auto-dispatch` before staging or replacing a dispatch envelope, enabling or changing auto-dispatch config, or handling an auto-dispatch report or refusal.
-Auto-dispatch may consume only a sealed firstmate-authored brief and concrete profile; it never authors instructions, chooses a profile, launches a worker in report-only mode, or creates another daemon.
-
 `secondmate-provisioning` owns secondmate harness pins and inherited local material, while `harness-adapters` owns the harness consequences.
 Dispatch only on a backend that `fm-spawn` validates as spawn-capable.
 A missing dependency, authentication failure, unsupported backend, or version refusal is a blocker; never silently retry on another backend.
@@ -328,7 +323,7 @@ For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary sin
 Tear down a ship task only after landing is confirmed.
 A teardown refusal for uncommitted or unlanded work is a stop-and-investigate result, never an obstacle to bypass.
 Never force teardown without explicit discard authority.
-After successful teardown, record completion, retain only the configured recent Done history, and re-evaluate queued work whose blockers and time gates have cleared.
+Record completion and retain only the configured recent Done history as part of section 8's closeout-and-refill transaction.
 
 A secondmate is persistent and an empty queue is healthy.
 Retire one only on an explicit captain or main-firstmate decision, after loading `secondmate-provisioning`; its home must contain no work under way, and forced discard still requires explicit captain authority.
@@ -363,6 +358,14 @@ Handle actionable wakes as follows:
    A batched `stale-rechecks:` payload lists several overdue lanes; triage each listed window as its own stale wake.
 3. For `check:`, act on the named poll result, including merges and X-mode events.
 4. For `heartbeat:`, review the whole fleet from the structured fleet view, run `bin/fm-unit-economics-ledger.mjs`, inspect its dated owner-only daily line for quota windows, per-crew session cost, and validation-run volume, reconcile suspicious tasks and PR state, update the backlog, and never report an unchanged fleet as progress.
+
+Every mutable wake is one complete closeout-and-refill transaction before the next wait or turn boundary.
+Reconcile every terminal ordinary task, and when a routine ship is green or locally ready and its metadata records `yolo=on`, select its existing guarded landing owner by metadata mode: use `bin/fm-merge-local.sh` for `local-only` and `bin/fm-pr-merge.sh` for `no-mistakes` or `direct-PR`; `yolo=off`, unresolved approval, ambiguous state, parked work, and security-sensitive work remain captain-gated and untouched.
+Run `bin/fm-teardown.sh` only after landing is confirmed, and treat any refusal as preservation of that lane rather than a reason to bypass the guard or stop safe work in other lanes.
+Use `config/supervision-capacity` as the optional per-home configured capacity source, and count every ordinary `state/*.meta` lane as occupied until safe teardown removes it; a present invalid value blocks refill without disturbing existing lanes.
+After every successful teardown, update the backlog, select dependency-cleared and date-eligible ready work, and launch it immediately through the normal intake, profile, brief, and `bin/fm-spawn.sh` path until the applicable configured or captain-recorded capacity is full.
+When no explicit capacity applies, preserve section 7's no-arbitrary-cap rule.
+This primary-agent transaction is the only automatic lifecycle owner; do not interpose a report-only selector, staging envelope, receipt loop, or another daemon.
 
 When any wake reports a merged PR for a project cloned in this home, refresh that clone through the guarded fleet-sync path.
 When X-linked work reaches a milestone or terminal state, load `fmx-respond`; before terminal teardown, always post the final completion follow-up so the link clears even if earlier follow-ups were spent.
@@ -447,7 +450,7 @@ Work routed to a secondmate is recorded in that secondmate home's own backlog, n
 When a main-side thread such as a pending captain decision or relay reminder is worth durable tracking, file it as its own work item; use `tasks-axi hold <id> --reason "<reason>" --kind captain` for a captain-gated thread.
 Unresolved decisions discovered by investigations or visual reviews follow `decision-hold-lifecycle`, which owns their mandatory backlog lifecycle.
 Update the backlog on every dispatch, completion, and decision for a work item.
-Re-evaluate queued work after every teardown and heartbeat, dispatching items only when dependencies and time gates have cleared.
+Section 8 owns when automatic queue reevaluation and refill happen; this backlog contract owns eligibility through dependencies and time gates.
 
 `.tasks.toml`, `docs/configuration.md`, and current `tasks-axi --help` own the backlog schema, compatibility, retention, and routine command syntax.
 Use compatible `tasks-axi` when the configured backend selects it and the documented manual path otherwise; keep only the configured recent Done entries.

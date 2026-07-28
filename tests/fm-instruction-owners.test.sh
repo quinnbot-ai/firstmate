@@ -267,6 +267,10 @@ test_compressed_agents_retains_authority_and_supervision_safety() {
     'A separate review or audit is allowed only when the captain explicitly requests that deliverable or the authorized task is a knowledge-only review; one named question remains scoped to that question.' \
     'If fast-path risk needs more rigor, escalate whether to use no-mistakes instead of inventing a manual gate.' \
     '**local-only** has the worker stop with a clean ready branch, then waits for the configured merge authority' \
+    'select its existing guarded landing owner by metadata mode' \
+    'use `bin/fm-merge-local.sh` for `local-only` and `bin/fm-pr-merge.sh` for `no-mistakes` or `direct-PR`' \
+    'Use `config/supervision-capacity` as the optional per-home configured capacity source' \
+    'count every ordinary `state/*.meta` lane as occupied until safe teardown removes it' \
     'A status line is a wake event, not current state' \
     'keep exactly one live supervision cycle' \
     'Never broadly kill watchers' \
