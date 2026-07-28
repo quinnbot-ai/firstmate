@@ -72,7 +72,7 @@ version=$(jq -r '.version' "$PI_PACKAGE_DIR/package.json" 2>/dev/null || printf 
 printf 'ok - tracked Pi extensions pass strict no-emit typecheck against Pi %s\n' "$version"
 
 if node --experimental-strip-types -e 'process.exit(0)' >/dev/null 2>&1; then
-  FOOTER_ROOT="$TMP_ROOT" node --experimental-strip-types --input-type=module <<'JS'
+  FOOTER_ROOT="$TMP_ROOT" node --experimental-strip-types --input-type=module <<'JS' || exit 1
 import assert from "node:assert/strict";
 const { formatFooterLines, footerVisibleWidth } = await import(`file://${process.env.FOOTER_ROOT}/lib/fm-primary-footer-layout.ts`);
 const { aggregateSessionUsage } = await import(`file://${process.env.FOOTER_ROOT}/fm-primary-footer.ts`);
@@ -133,7 +133,6 @@ assert.deepEqual(
 );
 console.log("ok - Firstmate Pi footer preserves fields, statuses, and cumulative native usage");
 JS
-  [ "$?" -eq 0 ] || exit 1
 else
   printf 'skip: Node type stripping is unavailable for Pi footer formatting test\n'
 fi
@@ -154,10 +153,7 @@ run_real_tui_contract() (
   session=pi-footer
   pi_home="$TMP_ROOT/pi-home"
   mkdir -p "$pi_home"
-  cleanup_tui() {
-    tmux -L "$socket" kill-server 2>/dev/null || true
-  }
-  trap cleanup_tui EXIT
+  trap 'tmux -L "$socket" kill-server 2>/dev/null || true' EXIT
 
   printf -v launch \
     'cd %q && env PI_OFFLINE=1 PI_CODING_AGENT_DIR=%q %q --approve --no-session --no-context-files --no-skills --no-prompt-templates --no-extensions -e .pi/extensions/fm-primary-footer.ts' \
