@@ -103,6 +103,37 @@ test_deterministic_scoreboard() {
   pass "scoreboard reports reproducible graph, delivery, diff, and file-group metrics without mutation"
 }
 
+test_attributes_are_scoped_to_local_ref() {
+  local repo expected from_worktree from_info
+  repo=$TMP_ROOT/repo
+
+  git -C "$repo" checkout -qb local-attributed local
+  printf 'misc.txt -diff\n' > "$repo/.gitattributes"
+  git -C "$repo" add .gitattributes
+  git -C "$repo" commit -qm "test: add local measurement attributes"
+  expected=$(run_scoreboard "$repo" local-attributed upstream)
+  assert_contains "$expected" '  changed_files: 7' \
+    "the local commit attribute fixture should add one changed file"
+  assert_contains "$expected" '  "other",2,1,0,1' \
+    "the local commit should classify its marked binary path with zero line changes"
+
+  git -C "$repo" checkout -qb ambient-attributes upstream
+  printf '* -diff\n' > "$repo/.gitattributes"
+  git -C "$repo" add .gitattributes
+  git -C "$repo" commit -qm "test: add unrelated worktree attributes"
+  from_worktree=$(run_scoreboard "$repo" local-attributed upstream)
+  [ "$from_worktree" = "$expected" ] \
+    || fail "ambient worktree attributes changed metrics for the same explicit refs"
+
+  printf '* diff\n' > "$repo/.git/info/attributes"
+  from_info=$(run_scoreboard "$repo" local-attributed upstream)
+  [ "$from_info" = "$expected" ] \
+    || fail "ambient info attributes changed metrics for the same explicit refs"
+  rm -f "$repo/.git/info/attributes"
+  git -C "$repo" checkout -q local
+  pass "scoreboard derives attributes from the explicit local ref, not ambient repository state"
+}
+
 test_fail_closed_invocation() {
   local repo out err rc
   repo=$TMP_ROOT/repo
@@ -225,6 +256,7 @@ test_toon_documents_have_no_trailing_newline() {
 }
 
 test_deterministic_scoreboard
+test_attributes_are_scoped_to_local_ref
 test_fail_closed_invocation
 test_diff_failure_is_not_silent
 test_toon_documents_have_no_trailing_newline
