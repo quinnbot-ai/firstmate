@@ -57,6 +57,7 @@ cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
 TARGET_VIEW_ROOT=
 TARGET_VIEW_TREE=
 TARGET_VIEW_INDEX=
+TARGET_VIEW_GIT_DIR=
 TARGET_GIT_DIR=
 PRESERVE_TEMP_ROOT=
 MOVED_PATHS=()
@@ -122,13 +123,17 @@ cleanup_merge_temps() {
 trap cleanup_merge_temps EXIT
 
 init_target_view() {
-  local tree_paths path
+  local empty_template tree_paths path
   TARGET_VIEW_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-merge-local.XXXXXX") || return 1
   TARGET_VIEW_TREE="$TARGET_VIEW_ROOT/tree"
   TARGET_VIEW_INDEX="$TARGET_VIEW_ROOT/index"
+  empty_template="$TARGET_VIEW_ROOT/empty-template"
   tree_paths="$TARGET_VIEW_ROOT/tree-paths"
   TARGET_GIT_DIR=$(git -C "$PROJ" rev-parse --absolute-git-dir) || return 1
-  mkdir -p "$TARGET_VIEW_TREE" || return 1
+  mkdir -p "$TARGET_VIEW_TREE" "$empty_template" || return 1
+  git -c init.defaultBranch=fm-target-view init -q \
+    --template="$empty_template" "$TARGET_VIEW_TREE" || return 1
+  TARGET_VIEW_GIT_DIR="$TARGET_VIEW_TREE/.git"
   GIT_INDEX_FILE="$TARGET_VIEW_INDEX" git -C "$PROJ" read-tree "$BRANCH" || return 1
   git -C "$PROJ" ls-tree -r -z --name-only "$BRANCH" >"$tree_paths" || return 1
 
@@ -146,15 +151,38 @@ init_target_view() {
 }
 
 branch_ignores_path() {
-  GIT_DIR="$TARGET_GIT_DIR" \
+  GIT_CONFIG_NOSYSTEM=1 \
+  GIT_CONFIG_GLOBAL=/dev/null \
+  GIT_DIR="$TARGET_VIEW_GIT_DIR" \
   GIT_WORK_TREE="$TARGET_VIEW_TREE" \
   GIT_INDEX_FILE="$TARGET_VIEW_INDEX" \
-    git -C "$TARGET_VIEW_TREE" check-ignore --quiet -- "$1"
+    git -c core.excludesFile=/dev/null \
+      -C "$TARGET_VIEW_TREE" check-ignore --quiet -- "$1"
 }
 
 branch_blob_metadata() {
   GIT_LITERAL_PATHSPECS=1 git -C "$PROJ" ls-tree "$BRANCH" -- "$1" \
     | awk 'NR == 1 { print $1, $2, $3 }'
+}
+
+index_blob_metadata() {
+  GIT_LITERAL_PATHSPECS=1 git -C "$PROJ" ls-files --stage -- "$1" \
+    | awk '$3 == 0 { print $1, $2; exit }'
+}
+
+working_tree_mode() {
+  local mode path=$1
+  mode=$(
+    GIT_LITERAL_PATHSPECS=1 git -c core.fileMode=true \
+      -C "$PROJ" diff-files --raw --no-abbrev -- "$path" \
+      | awk 'NR == 1 { sub(/^:/, "", $1); print $2 }'
+  ) || return 1
+  if [ -z "$mode" ]; then
+    mode=$(index_blob_metadata "$path") || return 1
+    mode=${mode%% *}
+  fi
+  [ -n "$mode" ] && [ "$mode" != "000000" ] || return 1
+  printf '%s\n' "$mode"
 }
 
 DIRTY_PATHS=()
@@ -173,6 +201,12 @@ while IFS= read -r -d '' record; do
       ;;
   esac
 done < <(git -C "$PROJ" status --porcelain=v1 -z --untracked-files=all)
+while IFS= read -r -d '' path; do
+  DIRTY_PATHS+=("$path")
+  DIRTY_STATES+=("!!")
+done < <(
+  git -C "$PROJ" ls-files --others --ignored --exclude-standard -z
+)
 
 UNRESOLVED_PATHS=()
 UNRESOLVED_REASONS=()
@@ -257,7 +291,7 @@ if [ "${#DIRTY_PATHS[@]}" -gt 0 ]; then
         RESOLVED_PATHS+=("$path")
         RESOLVED_MODES+=("")
         RESOLVED_OIDS+=("")
-        if [ "$state" = "??" ]; then
+        if [ "$state" = "??" ] || [ "$state" = "!!" ]; then
           RESOLVED_ACTIONS+=("keep-untracked")
         else
           RESOLVED_ACTIONS+=("remove-index")
@@ -272,7 +306,7 @@ if [ "${#DIRTY_PATHS[@]}" -gt 0 ]; then
         ;;
     esac
 
-    if [ "$state" = "??" ]; then
+    if [ "$state" = "??" ] || [ "$state" = "!!" ]; then
       add_unresolved "$path" "untracked path is not ignored at the branch head"
       continue
     fi
@@ -302,12 +336,37 @@ if [ "${#DIRTY_PATHS[@]}" -gt 0 ]; then
       add_unresolved "$path" "the branch-head entry is '$target_type', not a file blob"
       continue
     fi
+    if [ "${state:0:1}" != " " ]; then
+      index_meta=$(index_blob_metadata "$path")
+      if [ -z "$index_meta" ]; then
+        add_unresolved "$path" "staged content has no ordinary index entry"
+        continue
+      fi
+      index_mode=${index_meta%% *}
+      index_oid=${index_meta##* }
+      if [ "$index_oid" != "$target_oid" ]; then
+        add_unresolved "$path" "staged content does not match the branch-head blob"
+        continue
+      fi
+      if [ "$index_mode" != "$target_mode" ]; then
+        add_unresolved "$path" "staged mode $index_mode does not match branch-head mode $target_mode"
+        continue
+      fi
+    fi
     if ! current_oid=$(git -C "$PROJ" hash-object -- "$path" 2>/dev/null); then
       add_unresolved "$path" "working-tree content cannot be hashed as a file"
       continue
     fi
     if [ "$current_oid" != "$target_oid" ]; then
       add_unresolved "$path" "working-tree content does not match the branch-head blob"
+      continue
+    fi
+    if ! current_mode=$(working_tree_mode "$path"); then
+      add_unresolved "$path" "working-tree mode cannot be determined"
+      continue
+    fi
+    if [ "$current_mode" != "$target_mode" ]; then
+      add_unresolved "$path" "working-tree mode $current_mode does not match branch-head mode $target_mode"
       continue
     fi
 

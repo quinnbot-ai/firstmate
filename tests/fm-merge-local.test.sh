@@ -11,6 +11,9 @@
 #   (e) a diverged branch still refuses
 #   (f) a non-default checkout still refuses
 #   (g) mixed resolved and unresolved dirt refuses and names the blocker
+#   (h) staged content and executable modes must also match the branch
+#   (i) repository and global excludes cannot stand in for branch ignore rules
+#   (j) already-ignored untracked files are enumerated and retained or refused
 set -u
 
 # shellcheck disable=SC1091
@@ -221,6 +224,140 @@ test_mixed_resolved_and_unresolved_refuses() {
   pass "fm-merge-local refuses a mixed set when any dirty path is unresolved"
 }
 
+test_divergent_staged_content_refuses() {
+  local case_dir before before_index rc
+  case_dir=$(make_case divergent-staged)
+  printf 'tracked target\n' >"$case_dir/branch/tracked.txt"
+  git -C "$case_dir/branch" add tracked.txt
+  git -C "$case_dir/branch" commit -qm "incoming tracked content"
+  printf 'staged local content\n' >"$case_dir/project/tracked.txt"
+  git -C "$case_dir/project" add tracked.txt
+  printf 'tracked target\n' >"$case_dir/project/tracked.txt"
+  before=$(git -C "$case_dir/project" rev-parse main)
+  before_index=$(git -C "$case_dir/project" rev-parse :tracked.txt)
+
+  set +e
+  run_merge_local "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "divergent-staged: merge should refuse"
+  assert_grep 'staged content does not match the branch-head blob' \
+    "$case_dir/stderr" \
+    "divergent-staged: refusal did not diagnose the staged content"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$before" ] \
+    || fail "divergent-staged: refusal advanced main"
+  [ "$(git -C "$case_dir/project" rev-parse :tracked.txt)" = "$before_index" ] \
+    || fail "divergent-staged: refusal changed the staged content"
+  pass "fm-merge-local refuses divergent staged content"
+}
+
+test_working_tree_mode_must_match() {
+  local case_dir before rc
+  case_dir=$(make_case mode-mismatch)
+  printf 'tracked target\n' >"$case_dir/branch/tracked.txt"
+  chmod +x "$case_dir/branch/tracked.txt"
+  git -C "$case_dir/branch" add tracked.txt
+  git -C "$case_dir/branch" commit -qm "incoming executable"
+  printf 'tracked target\n' >"$case_dir/project/tracked.txt"
+  chmod -x "$case_dir/project/tracked.txt"
+  before=$(git -C "$case_dir/project" rev-parse main)
+
+  set +e
+  run_merge_local "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "mode-mismatch: merge should refuse"
+  assert_grep 'working-tree mode 100644 does not match branch-head mode 100755' \
+    "$case_dir/stderr" \
+    "mode-mismatch: refusal did not diagnose the executable mode"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$before" ] \
+    || fail "mode-mismatch: refusal advanced main"
+  pass "fm-merge-local refuses a working-tree mode mismatch"
+}
+
+test_ambient_excludes_do_not_approve_untracked_files() {
+  local case_dir before info_exclude rc
+  case_dir=$(make_case ambient-excludes)
+  info_exclude=$(git -C "$case_dir/project" rev-parse --absolute-git-dir)
+  info_exclude="$info_exclude/info/exclude"
+  printf 'info-only.txt\n' >>"$info_exclude"
+  printf 'global-only.txt\n' >"$case_dir/global-excludes"
+  git -C "$case_dir/project" config core.excludesFile "$case_dir/global-excludes"
+  printf 'repository exclude\n' >"$case_dir/project/info-only.txt"
+  printf 'global exclude\n' >"$case_dir/project/global-only.txt"
+  before=$(git -C "$case_dir/project" rev-parse main)
+
+  set +e
+  run_merge_local "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "ambient-excludes: merge should refuse"
+  assert_grep 'info-only.txt' "$case_dir/stderr" \
+    "ambient-excludes: repository-excluded path was not diagnosed"
+  assert_grep 'global-only.txt' "$case_dir/stderr" \
+    "ambient-excludes: globally excluded path was not diagnosed"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$before" ] \
+    || fail "ambient-excludes: refusal advanced main"
+  pass "fm-merge-local ignores ambient exclude sources in the target view"
+}
+
+test_already_ignored_untracked_file_is_preserved() {
+  local case_dir before_hash after_hash
+  case_dir=$(make_case already-ignored)
+  printf 'generated-state.txt\n' >"$case_dir/project/.gitignore"
+  git -C "$case_dir/project" add .gitignore
+  git -C "$case_dir/project" commit -qm "ignore generated state"
+  git -C "$case_dir/branch" merge -q --ff-only main
+  printf 'branch-only\n' >"$case_dir/branch/branch.txt"
+  git -C "$case_dir/branch" add branch.txt
+  git -C "$case_dir/branch" commit -qm "incoming branch change"
+  printf 'generated state\n' >"$case_dir/project/generated-state.txt"
+  before_hash=$(git -C "$case_dir/project" hash-object -- generated-state.txt)
+
+  run_merge_local "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr" \
+    || fail "already-ignored: merge should succeed"
+
+  after_hash=$(git -C "$case_dir/project" hash-object -- generated-state.txt)
+  [ "$after_hash" = "$before_hash" ] \
+    || fail "already-ignored: merge changed the ignored untracked file"
+  assert_main_reached_branch "$case_dir" \
+    "already-ignored: main did not fast-forward to the task branch"
+  pass "fm-merge-local preserves an already-ignored untracked file"
+}
+
+test_already_ignored_file_tracked_by_target_refuses() {
+  local case_dir before rc
+  case_dir=$(make_case ignored-to-tracked)
+  printf 'generated-state.txt\n' >"$case_dir/project/.gitignore"
+  git -C "$case_dir/project" add .gitignore
+  git -C "$case_dir/project" commit -qm "ignore generated state"
+  git -C "$case_dir/branch" merge -q --ff-only main
+  rm "$case_dir/branch/.gitignore"
+  printf 'incoming generated state\n' >"$case_dir/branch/generated-state.txt"
+  git -C "$case_dir/branch" add -f generated-state.txt
+  git -C "$case_dir/branch" add -u
+  git -C "$case_dir/branch" commit -qm "track generated state"
+  printf 'local generated state\n' >"$case_dir/project/generated-state.txt"
+  before=$(git -C "$case_dir/project" rev-parse main)
+
+  set +e
+  run_merge_local "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "ignored-to-tracked: merge should refuse"
+  assert_grep 'generated-state.txt' "$case_dir/stderr" \
+    "ignored-to-tracked: refusal did not name the ignored local file"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$before" ] \
+    || fail "ignored-to-tracked: refusal advanced main"
+  assert_grep 'local generated state' "$case_dir/project/generated-state.txt" \
+    "ignored-to-tracked: refusal overwrote the ignored local file"
+  pass "fm-merge-local refuses an ignored file tracked by the target"
+}
+
 test_byte_identical_tracked_content_permits
 test_unresolved_modified_file_refuses_with_path
 test_untracked_conversion_permits_and_preserves_file
@@ -228,3 +365,8 @@ test_branch_ignored_untracked_file_permits
 test_diverged_branch_still_refuses
 test_non_default_checkout_still_refuses
 test_mixed_resolved_and_unresolved_refuses
+test_divergent_staged_content_refuses
+test_working_tree_mode_must_match
+test_ambient_excludes_do_not_approve_untracked_files
+test_already_ignored_untracked_file_is_preserved
+test_already_ignored_file_tracked_by_target_refuses
