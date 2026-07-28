@@ -182,12 +182,12 @@ test_git_environment_is_allowlisted() {
   mkdir -p "$shim_dir"
   {
     printf '%s\n' '#!/usr/bin/env bash'
-    printf '%s\n' '[ "${GIT_OPTIONAL_LOCKS-}" = 0 ] || exit 91'
-    printf '%s\n' '[ "${GIT_NO_LAZY_FETCH-}" = 1 ] || exit 92'
-    printf '%s\n' '[ -z "${GIT_NAMESPACE-}" ] || exit 93'
-    printf '%s\n' '[ -z "${SCOREBOARD_AMBIENT_SENTINEL-}" ] || exit 94'
-    printf '%s\n' '[ -z "${REAL_GIT-}" ] || exit 95'
-    printf '[ "${HOME-}" = %q ] || exit 96\n' "${HOME-}"
+    printf '%s\n' "[ \"\${GIT_OPTIONAL_LOCKS-}\" = 0 ] || exit 91"
+    printf '%s\n' "[ \"\${GIT_NO_LAZY_FETCH-}\" = 1 ] || exit 92"
+    printf '%s\n' "[ -z \"\${GIT_NAMESPACE-}\" ] || exit 93"
+    printf '%s\n' "[ -z \"\${SCOREBOARD_AMBIENT_SENTINEL-}\" ] || exit 94"
+    printf '%s\n' "[ -z \"\${REAL_GIT-}\" ] || exit 95"
+    printf "[ \"\${HOME-}\" = %q ] || exit 96\n" "${HOME-}"
     printf 'exec %q "$@"\n' "$real_git"
   } > "$shim_dir/git"
   chmod +x "$shim_dir/git"
