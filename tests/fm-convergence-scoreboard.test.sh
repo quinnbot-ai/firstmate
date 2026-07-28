@@ -175,6 +175,29 @@ test_fail_closed_invocation() {
   pass "scoreboard rejects missing, unknown, unfetched, and dirty invocation state"
 }
 
+test_diff_failure_is_not_silent() {
+  local repo blob object_path backup out rc
+  repo=$TMP_ROOT/repo
+  blob=$(git -C "$repo" rev-parse upstream:docs/guide.md)
+  object_path="$repo/.git/objects/${blob:0:2}/${blob:2}"
+  backup="$TMP_ROOT/missing-blob.backup"
+  [ -f "$object_path" ] || fail "diff failure fixture blob is not loose"
+  mv "$object_path" "$backup"
+
+  set +e
+  out=$(run_scoreboard "$repo" local upstream)
+  rc=$?
+  set -e
+
+  mv "$backup" "$object_path"
+  expect_code 1 "$rc" "unavailable diff object"
+  assert_contains "$out" 'error: "cannot calculate diff metrics between the resolved refs"' \
+    "a failed diff must not produce plausible zero metrics"
+  assert_contains "$out" 'Verify that all repository objects are available locally' \
+    "a failed diff should provide the deterministic correction"
+  pass "scoreboard fails loudly when resolved commits cannot produce diff metrics"
+}
+
 test_toon_documents_have_no_trailing_newline() {
   local repo rc
   repo=$TMP_ROOT/repo
@@ -203,4 +226,5 @@ test_toon_documents_have_no_trailing_newline() {
 
 test_deterministic_scoreboard
 test_fail_closed_invocation
+test_diff_failure_is_not_silent
 test_toon_documents_have_no_trailing_newline
