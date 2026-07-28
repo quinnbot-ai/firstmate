@@ -390,15 +390,31 @@ pr_is_merged() {
 # merge of that ref with HEAD has the default tree when HEAD introduces nothing the
 # default branch does not already contain. This isolates branch-only changes, so
 # unrelated commits the default branch gained past the merge-base do not count as
-# "added". Returns non-zero when inconclusive (no default ref, or a merge conflict).
+# "added". Returns 0 for an exact match, 2 for a merge conflict, and 1 otherwise.
 content_in_default() {
-  local ref=$1 default_tree merged_tree
+  local ref=$1 default_tree merged_tree merge_rc
   [ -n "$ref" ] || return 1
   default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
   [ -n "$default_tree" ] || return 1
-  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
+  if merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null); then
+    :
+  else
+    merge_rc=$?
+    [ "$merge_rc" -eq 1 ] && return 2
+    return 1
+  fi
   merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
   [ "$merged_tree" = "$default_tree" ]
+}
+
+unique_merge_base() {
+  local left=$1 right=$2 bases
+  bases=$(git -C "$WT" merge-base --all "$left" "$right" 2>/dev/null) || return 1
+  [ -n "$bases" ] || return 1
+  case "$bases" in
+    *$'\n'*) return 1 ;;
+  esac
+  printf '%s\n' "$bases"
 }
 
 # Does the task's complete net delta already exist in an evolved default tree even
@@ -410,7 +426,7 @@ content_in_default() {
 content_delta_in_default() {
   local ref=$1 base proof_dir proof_index proof_patch rc=1
   [ -n "$ref" ] || return 1
-  base=$(git -C "$WT" merge-base "$ref" HEAD 2>/dev/null) || return 1
+  base=$(unique_merge_base "$ref" HEAD) || return 1
   if git -C "$WT" diff --quiet "$base" HEAD -- 2>/dev/null; then
     return 0
   fi
@@ -433,8 +449,13 @@ content_delta_in_default() {
 }
 
 content_landed_in_ref() {
-  local ref=$1
-  content_in_default "$ref" && return 0
+  local ref=$1 content_rc
+  if content_in_default "$ref"; then
+    return 0
+  else
+    content_rc=$?
+  fi
+  [ "$content_rc" -eq 2 ] || return 1
   content_delta_in_default "$ref"
 }
 

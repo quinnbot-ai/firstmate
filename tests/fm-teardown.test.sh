@@ -40,17 +40,19 @@
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
 #   (r) local-only + content split across evolved main history -> ALLOW  (content proof)
 #   (s) local-only + one task outcome line absent from main     -> REFUSE (content safety)
+#   (t) local-only + clean partial task outcome on main          -> REFUSE (exact proof)
+#   (u) local-only + ambiguous merge bases                       -> REFUSE (history safety)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
-#   (t) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
-#   (u) index.lock with a live holder, any age                -> lock kept, REFUSE
-#   (v) lsof error while checking index.lock                  -> lock kept, REFUSE
-#   (w) dirty worktree after stale lock cleanup               -> lock removed, REFUSE
-#   (x) non-linked repo index.lock                            -> lock removed, ALLOW
-#   (y) index.lock mtime read failure                         -> lock kept, REFUSE
-#   (z) transient lock cleared after first failed return      -> retry ALLOW
-#   (aa) persistent lock (never clears, not provably stale)   -> REFUSE loudly
+#   (v) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
+#   (w) index.lock with a live holder, any age                -> lock kept, REFUSE
+#   (x) lsof error while checking index.lock                  -> lock kept, REFUSE
+#   (y) dirty worktree after stale lock cleanup               -> lock removed, REFUSE
+#   (z) non-linked repo index.lock                            -> lock removed, ALLOW
+#   (aa) index.lock mtime read failure                        -> lock kept, REFUSE
+#   (ab) transient lock cleared after first failed return     -> retry ALLOW
+#   (ac) persistent lock (never clears, not provably stale)   -> REFUSE loudly
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -934,6 +936,130 @@ AFTER-LATER' > "$case_dir/project/outcome.txt"
   pass "content proof preserves the completed worker lane when one task outcome line is absent"
 }
 
+test_clean_nonmatching_merge_does_not_use_delta_fallback() {
+  local case_dir rc base merged_tree default_tree proof_index proof_patch
+  case_dir=$(make_case content-clean-partial)
+  write_meta "$case_dir" local-only ship
+
+  wt_commit_file "$case_dir" outcome.txt 'anchor-a
+old-a
+anchor-b
+old-b
+spare
+landed' "shared outcome baseline"
+  base=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" merge -q --ff-only "$base"
+
+  wt_commit_file "$case_dir" outcome.txt 'anchor-a
+landed
+anchor-b
+landed
+spare
+landed' "task multi-hunk outcome"
+
+  printf '%s\n' 'anchor-a
+landed
+anchor-b
+old-b
+spare
+landed' > "$case_dir/project/outcome.txt"
+  git -C "$case_dir/project" add outcome.txt
+  git -C "$case_dir/project" -c user.email=t@t -c user.name=t \
+    commit -q -m "land only the first task hunk"
+
+  merged_tree=$(git -C "$case_dir/wt" merge-tree --write-tree main HEAD)
+  merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
+  default_tree=$(git -C "$case_dir/wt" rev-parse "main^{tree}")
+  [ "$merged_tree" != "$default_tree" ] \
+    || fail "content-clean-partial: fixture unexpectedly matched the default tree"
+
+  proof_index="$case_dir/proof.index"
+  proof_patch="$case_dir/task.patch"
+  git -C "$case_dir/wt" diff --no-ext-diff --no-textconv --binary --full-index \
+    --no-renames --unified=0 "$base" HEAD -- > "$proof_patch"
+  GIT_INDEX_FILE="$proof_index" git -C "$case_dir/wt" read-tree main
+  ! GIT_INDEX_FILE="$proof_index" git -C "$case_dir/wt" apply --cached --check \
+    --unidiff-zero "$proof_patch" >/dev/null 2>&1 \
+    || fail "content-clean-partial: task delta unexpectedly still applies forward"
+  GIT_INDEX_FILE="$proof_index" git -C "$case_dir/wt" apply --cached --reverse --check \
+    --unidiff-zero "$proof_patch" >/dev/null 2>&1 \
+    || fail "content-clean-partial: fixture does not expose the unsafe fallback"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "content-clean-partial: a clean non-match must preserve the lane"
+  assert_grep 'REFUSED:' "$case_dir/stderr" \
+    "content-clean-partial: refusal did not report the guarded landing failure"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "content-clean-partial: cleanup discarded metadata for partial content"
+  pass "clean non-matching content proof does not invoke the conflict-only fallback"
+}
+
+test_ambiguous_merge_bases_refuse_delta_fallback() {
+  local case_dir rc root left right bases base proof_index proof_patch
+  case_dir=$(make_case content-ambiguous-base)
+  write_meta "$case_dir" local-only ship
+
+  wt_commit_file "$case_dir" outcome.txt old "shared outcome baseline"
+  root=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" merge -q --ff-only "$root"
+
+  wt_commit_file "$case_dir" left.txt left "left history"
+  left=$(git -C "$case_dir/wt" rev-parse HEAD)
+  printf '%s\n' right > "$case_dir/project/right.txt"
+  git -C "$case_dir/project" add right.txt
+  git -C "$case_dir/project" -c user.email=t@t -c user.name=t \
+    commit -q -m "right history"
+  right=$(git -C "$case_dir/project" rev-parse HEAD)
+
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t \
+    merge -q --no-ff "$right" -m "merge right into task"
+  git -C "$case_dir/project" -c user.email=t@t -c user.name=t \
+    merge -q --no-ff "$left" -m "merge left into main"
+
+  wt_commit_file "$case_dir" outcome.txt task "task outcome"
+  printf '%s\n' 'before
+task
+after' > "$case_dir/project/outcome.txt"
+  git -C "$case_dir/project" add outcome.txt
+  git -C "$case_dir/project" -c user.email=t@t -c user.name=t \
+    commit -q -m "land task outcome with later context"
+
+  bases=$(git -C "$case_dir/wt" merge-base --all main HEAD)
+  expect_code 2 "$(printf '%s\n' "$bases" | grep -c .)" \
+    "content-ambiguous-base: fixture must have two best merge bases"
+  ! git -C "$case_dir/wt" merge-tree --write-tree main HEAD >/dev/null 2>&1 \
+    || fail "content-ambiguous-base: fixture must conflict at the exact-tree proof"
+
+  base=$(git -C "$case_dir/wt" merge-base main HEAD)
+  proof_index="$case_dir/proof.index"
+  proof_patch="$case_dir/task.patch"
+  git -C "$case_dir/wt" diff --no-ext-diff --no-textconv --binary --full-index \
+    --no-renames --unified=0 "$base" HEAD -- > "$proof_patch"
+  GIT_INDEX_FILE="$proof_index" git -C "$case_dir/wt" read-tree main
+  ! GIT_INDEX_FILE="$proof_index" git -C "$case_dir/wt" apply --cached --check \
+    --unidiff-zero "$proof_patch" >/dev/null 2>&1 \
+    || fail "content-ambiguous-base: arbitrary delta unexpectedly applies forward"
+  GIT_INDEX_FILE="$proof_index" git -C "$case_dir/wt" apply --cached --reverse --check \
+    --unidiff-zero "$proof_patch" >/dev/null 2>&1 \
+    || fail "content-ambiguous-base: fixture does not expose arbitrary-base acceptance"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "content-ambiguous-base: ambiguous history must preserve the lane"
+  assert_grep 'REFUSED:' "$case_dir/stderr" \
+    "content-ambiguous-base: refusal did not report the guarded landing failure"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "content-ambiguous-base: cleanup discarded metadata under ambiguous history"
+  pass "content delta proof fails closed when history has multiple merge bases"
+}
+
 test_content_fallback_refreshes_stale_origin_ref() {
   local case_dir rc
   case_dir=$(make_case content-stale-ref)
@@ -1504,6 +1630,8 @@ test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_split_across_evolved_default_allows_cleanup_and_refill
 test_content_split_across_evolved_default_with_absent_change_refuses
+test_clean_nonmatching_merge_does_not_use_delta_fallback
+test_ambiguous_merge_bases_refuse_delta_fallback
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
