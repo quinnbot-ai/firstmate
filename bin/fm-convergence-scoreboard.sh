@@ -193,6 +193,23 @@ OTHER_FILES=0
 OTHER_INSERTIONS=0
 OTHER_DELETIONS=0
 
+if ! NUMSTAT_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-convergence-scoreboard.XXXXXX"); then
+  measure_error \
+    "cannot create temporary storage for diff metrics" \
+    "Verify that the temporary directory is writable, then rerun with the same refs."
+fi
+cleanup_numstat() {
+  rm -f "$NUMSTAT_FILE"
+}
+trap cleanup_numstat EXIT
+
+if ! git -C "$REPO" diff --numstat -z --no-renames "$MERGE_BASE" "$LOCAL_COMMIT" \
+  > "$NUMSTAT_FILE" 2>/dev/null; then
+  measure_error \
+    "cannot calculate diff metrics between the resolved refs" \
+    "Verify that all repository objects are available locally, then rerun with the same refs."
+fi
+
 while IFS=$'\t' read -r -d '' added deleted path; do
   [ "$added" = "-" ] && added=0
   [ "$deleted" = "-" ] && deleted=0
@@ -231,7 +248,7 @@ while IFS=$'\t' read -r -d '' added deleted path; do
       OTHER_DELETIONS=$((OTHER_DELETIONS + deleted))
       ;;
   esac
-done < <(git -C "$REPO" diff --numstat -z --no-renames "$MERGE_BASE" "$LOCAL_COMMIT" 2>/dev/null)
+done < "$NUMSTAT_FILE"
 
 printf 'schema: %s\n' "$(toon_quote "fm-convergence-scoreboard.v1")"
 printf 'local:\n'
