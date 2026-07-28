@@ -10,7 +10,9 @@
 # Records and the searchable index live in the generation selected by
 # $FM_HOME/data/link-intake/current.
 # The helper owns their exact Markdown and TSV formats, canonicalization, validation,
-# history snapshots, and single-switch atomic publication.
+# history snapshots, and single-switch process-crash atomic publication.
+# It does not issue filesystem sync barriers, so power-loss durability depends on
+# the host filesystem.
 # It never retrieves pages, downloads media, authenticates, or makes external changes.
 # A caller supplies only normalized public or otherwise authorized metadata after using
 # the appropriate existing browser or media tool.
@@ -28,6 +30,7 @@ GENERATIONS_DIR="$LINK_ROOT/generations"
 CURRENT_LINK="$LINK_ROOT/current"
 LOCK_DIR="$LINK_ROOT/.update-lock"
 LOCK_HELD=0
+LOCK_OWNER_DIR=
 STAGED_GENERATION=
 STAGED_LINK=
 CURRENT_GENERATION=
@@ -63,25 +66,46 @@ resolve_current_quiet() {
 }
 
 cleanup() {
-  local status=$? owner
+  local status=$? lock_target owner_name
   trap - EXIT HUP INT TERM
   if [ -n "$STAGED_LINK" ] && ! rm -f "$STAGED_LINK"; then
     printf 'error: temporary state link retained: %s\n' "$STAGED_LINK" >&2
-    status=2
+    [ "$status" -ne 0 ] || status=2
   fi
   if [ -n "$STAGED_GENERATION" ]; then
-    if resolve_current_quiet && [ "$QUIET_CURRENT_GENERATION" = "$STAGED_GENERATION" ]; then
-      STAGED_GENERATION=
-    elif ! remove_generation "$STAGED_GENERATION"; then
+    if resolve_current_quiet; then
+      if [ "$QUIET_CURRENT_GENERATION" = "$STAGED_GENERATION" ]; then
+        STAGED_GENERATION=
+      elif remove_generation "$STAGED_GENERATION"; then
+        STAGED_GENERATION=
+      else
+        printf 'error: recoverable staged generation retained: %s\n' "$STAGED_GENERATION" >&2
+        [ "$status" -ne 0 ] || status=2
+      fi
+    else
       printf 'error: recoverable staged generation retained: %s\n' "$STAGED_GENERATION" >&2
-      status=2
+      [ "$status" -ne 0 ] || status=2
     fi
   fi
-  if [ "$LOCK_HELD" = 1 ]; then
-    owner=$(sed -n '1p' "$LOCK_DIR/owner" 2>/dev/null || true)
-    if [ "$owner" = "$$" ]; then
-      rm -f "$LOCK_DIR/owner" 2>/dev/null || true
-      rmdir "$LOCK_DIR" 2>/dev/null || true
+  if [ -n "$LOCK_OWNER_DIR" ]; then
+    owner_name=${LOCK_OWNER_DIR##*/}
+    lock_target=$(readlink "$LOCK_DIR" 2>/dev/null || true)
+    if [ "$LOCK_HELD" = 1 ]; then
+      if [ "$lock_target" = "$owner_name" ]; then
+        if rm -f "$LOCK_DIR"; then
+          LOCK_HELD=0
+        else
+          printf 'error: link-intake lock retained: %s\n' "$LOCK_DIR" >&2
+          [ "$status" -ne 0 ] || status=2
+        fi
+      else
+        printf 'error: link-intake lock ownership retained: %s\n' "$LOCK_OWNER_DIR" >&2
+        [ "$status" -ne 0 ] || status=2
+      fi
+    fi
+    if [ "$LOCK_HELD" = 0 ]; then
+      rm -f "$LOCK_OWNER_DIR/owner" 2>/dev/null || true
+      rmdir "$LOCK_OWNER_DIR" 2>/dev/null || true
     fi
   fi
   exit "$status"
@@ -176,29 +200,81 @@ logical_record_path_for() {
   printf '%s/records/%s.md\n' "$CURRENT_LINK" "$id"
 }
 
+create_symlink_no_target() {
+  local source=$1 target=$2
+  if ln --help 2>&1 | grep -F -q -- '--no-target-directory'; then
+    ln -sT "$source" "$target"
+  else
+    ln -sh "$source" "$target"
+  fi
+}
+
 acquire_lock() {
-  local owner stale attempt=0
+  local owner owner_path target current_target stale attempt=0 claim_name path
   mkdir -p "$GENERATIONS_DIR" || die 'could not initialize link-intake storage'
-  while [ "$attempt" -lt 3 ]; do
-    if mkdir "$LOCK_DIR" 2>/dev/null; then
-      if ! printf '%s\n' "$$" > "$LOCK_DIR/owner"; then
-        rmdir "$LOCK_DIR" 2>/dev/null || true
-        die 'could not record link-intake lock ownership'
-      fi
+  LOCK_OWNER_DIR=$(mktemp -d "$LINK_ROOT/.lock-owner.XXXXXX") \
+    || die 'could not create link-intake lock claim'
+  printf '%s\n' "$$" > "$LOCK_OWNER_DIR/owner" \
+    || die 'could not initialize link-intake lock claim'
+  claim_name=${LOCK_OWNER_DIR##*/}
+  while [ "$attempt" -lt 5 ]; do
+    if create_symlink_no_target "$claim_name" "$LOCK_DIR" 2>/dev/null; then
       LOCK_HELD=1
+      for path in "$LINK_ROOT"/.lock-owner.*; do
+        [ -d "$path" ] || continue
+        [ "$path" = "$LOCK_OWNER_DIR" ] && continue
+        owner=$(sed -n '1p' "$path/owner" 2>/dev/null || true)
+        case "$owner" in
+          ''|*[!0-9]*) continue ;;
+        esac
+        if ! kill -0 "$owner" 2>/dev/null; then
+          rm -f "$path/owner" 2>/dev/null || true
+          rmdir "$path" 2>/dev/null || true
+        fi
+      done
       return 0
     fi
-    owner=$(sed -n '1p' "$LOCK_DIR/owner" 2>/dev/null || true)
+    [ -L "$LOCK_DIR" ] || die 'link-intake update lock is invalid'
+    target=$(readlink "$LOCK_DIR") || die 'link-intake update lock is unreadable'
+    case "$target" in
+      .lock-owner.*) ;;
+      *) die 'link-intake update lock target is invalid' ;;
+    esac
+    case "$target" in
+      */*) die 'link-intake update lock target is invalid' ;;
+    esac
+    owner_path="$LINK_ROOT/$target"
+    if [ ! -e "$owner_path" ] && [ ! -L "$owner_path" ]; then
+      if create_symlink_no_target "$claim_name" "$owner_path" 2>/dev/null; then
+        current_target=$(readlink "$LOCK_DIR" 2>/dev/null || true)
+        if [ "$current_target" = "$target" ]; then
+          rm -f "$LOCK_DIR" || die "stale link-intake lock retained: $LOCK_DIR"
+          rm -f "$owner_path" || die "stale link-intake lock recovery retained: $owner_path"
+        else
+          die "stale link-intake lock recovery retained: $owner_path"
+        fi
+      fi
+      attempt=$((attempt + 1))
+      continue
+    fi
+    owner=$(sed -n '1p' "$owner_path/owner" 2>/dev/null || true)
     case "$owner" in
       ''|*[!0-9]*) die 'link-intake update lock owner is unreadable' ;;
     esac
     if kill -0 "$owner" 2>/dev/null; then
       die 'another link-intake update is in progress'
     fi
-    stale="$LINK_ROOT/.stale-lock.$$.$attempt"
-    if mv "$LOCK_DIR" "$stale" 2>/dev/null; then
-      rm -f "$stale/owner" || die "stale link-intake lock retained: $stale"
-      rmdir "$stale" || die "stale link-intake lock retained: $stale"
+    stale="$LINK_ROOT/.stale-lock-owner.$$.$attempt"
+    if mv "$owner_path" "$stale" 2>/dev/null; then
+      current_target=$(readlink "$LOCK_DIR" 2>/dev/null || true)
+      [ "$current_target" = "$target" ] || die "stale link-intake lock retained: $stale"
+      rm -f "$LOCK_DIR" || die "stale link-intake lock retained: $stale"
+      if [ -L "$stale" ]; then
+        rm -f "$stale" || die "stale link-intake lock retained: $stale"
+      else
+        rm -f "$stale/owner" || die "stale link-intake lock retained: $stale"
+        rmdir "$stale" || die "stale link-intake lock retained: $stale"
+      fi
     fi
     attempt=$((attempt + 1))
   done
@@ -425,13 +501,22 @@ copy_transcript() {
   printf 'transcripts/%s/%s.txt\n' "$id" "$digest"
 }
 
+replace_symlink() {
+  local source=$1 target=$2
+  if mv --help 2>&1 | grep -F -q -- '--no-target-directory'; then
+    mv -fT "$source" "$target"
+  else
+    mv -fh "$source" "$target"
+  fi
+}
+
 publish_generation() {
   local target
   target="generations/${STAGED_GENERATION##*/}"
   STAGED_LINK=$(mktemp "$LINK_ROOT/.current.XXXXXX") || die 'could not create current-state switch'
   rm -f "$STAGED_LINK" || die 'could not prepare current-state switch'
   ln -s "$target" "$STAGED_LINK" || die 'could not prepare current-state target'
-  mv -fh "$STAGED_LINK" "$CURRENT_LINK" || die 'could not publish link-intake generation'
+  replace_symlink "$STAGED_LINK" "$CURRENT_LINK" || die 'could not publish link-intake generation'
   STAGED_LINK=
   STAGED_GENERATION=
 }

@@ -12,8 +12,10 @@ tests/fm-link-intake.test.sh
 Observed guarantees:
 
 ```text
-PASS: one atomic generation switch survives failures and process death
+PASS: lock claims are atomic and symlink replacement is portable
+PASS: one process-crash atomic switch survives failures and process death
 PASS: validation rejects record, index, and transcript divergence
 ```
 
-The focused suite covers canonical duplicate convergence, searchable title and summary fields, inaccessible records, transaction-staged transcripts, a crash-safe single state switch, stale-lock recovery, retained recoverable state, bidirectional consistency, odd URLs with query slashes, and the one-line `AGENTS.md` trigger.
+The focused suite covers canonical duplicate convergence, searchable title and summary fields, inaccessible records, transaction-staged transcripts, an atomic initialized lock claim, BSD and GNU symlink replacement, a process-crash atomic state switch, stale-lock recovery, conservative retained state, bidirectional consistency, odd URLs with query slashes, and the one-line `AGENTS.md` trigger.
+Filesystem sync barriers and power-loss durability are explicitly outside this focused process-crash guarantee.

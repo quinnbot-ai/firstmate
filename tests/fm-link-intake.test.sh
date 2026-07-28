@@ -10,6 +10,8 @@ INTAKE="$ROOT/bin/fm-link-intake.sh"
 TMP_ROOT=$(fm_test_tmproot fm-link-intake)
 REAL_MV=$(command -v mv)
 REAL_RM=$(command -v rm)
+REAL_LN=$(command -v ln)
+REAL_READLINK=$(command -v readlink)
 
 make_home() {  # <name>
   local home="$TMP_ROOT/$1"
@@ -29,6 +31,17 @@ make_failing_tools() {  # <home>
   cat > "$fakebin/mv" <<'SH'
 #!/usr/bin/env bash
 set -u
+if [ "${1:-}" = --help ] && [ "${FM_EMULATE_GNU_MV:-}" = 1 ]; then
+  printf '%s\n' '  -T, --no-target-directory'
+  exit 0
+fi
+if [ "${1:-}" = -fT ] && [ "${FM_EMULATE_GNU_MV:-}" = 1 ]; then
+  if "${FM_REAL_MV:?}" --help 2>&1 | grep -F -q -- '--no-target-directory'; then
+    exec "$FM_REAL_MV" "$@"
+  fi
+  shift
+  exec "$FM_REAL_MV" -fh "$@"
+fi
 destination=
 for argument in "$@"; do
   destination=$argument
@@ -70,8 +83,39 @@ if [ -n "${FM_FAIL_REMOVE_PREFIX:-}" ]; then
 fi
 exec "${FM_REAL_RM:?}" "$@"
 SH
+  cat > "$fakebin/ln" <<'SH'
+#!/usr/bin/env bash
+set -u
+destination=
+for argument in "$@"; do
+  destination=$argument
+done
+if [ "$destination" = "${FM_KILL_LINK_DEST:-}" ] && [ ! -e "${FM_KILL_LINK_ONCE:?}" ]; then
+  : > "$FM_KILL_LINK_ONCE"
+  kill -KILL "$PPID"
+  exit 1
+fi
+exec "${FM_REAL_LN:?}" "$@"
+SH
+  cat > "$fakebin/readlink" <<'SH'
+#!/usr/bin/env bash
+set -u
+path=
+for argument in "$@"; do
+  path=$argument
+done
+if [ "$path" = "${FM_FAIL_READLINK_PATH:-}" ] \
+  && [ -e "${FM_FAIL_READLINK_AFTER:-}" ] \
+  && [ ! -e "${FM_FAIL_READLINK_ONCE:?}" ]; then
+  : > "$FM_FAIL_READLINK_ONCE"
+  exit 1
+fi
+exec "${FM_REAL_READLINK:?}" "$@"
+SH
   chmod +x "$fakebin/mv"
   chmod +x "$fakebin/rm"
+  chmod +x "$fakebin/ln"
+  chmod +x "$fakebin/readlink"
   printf '%s\n' "$fakebin"
 }
 
@@ -160,7 +204,31 @@ test_video_transcript_metadata_is_durable() {
   pass 'video records retain transcripts and reject silent omissions'
 }
 
-test_atomic_generation_switch_is_crash_safe() {
+test_lock_claim_and_symlink_replacement_are_portable() {
+  local home fakebin failure_marker rc=0 owners
+  home=$(make_home portable-lock)
+  fakebin=$(make_failing_tools "$home")
+  failure_marker="$home/lock-link-killed"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_REAL_MV="$REAL_MV" FM_REAL_RM="$REAL_RM" \
+    FM_REAL_LN="$REAL_LN" FM_REAL_READLINK="$REAL_READLINK" \
+    FM_KILL_LINK_DEST="$home/data/link-intake/.update-lock" FM_KILL_LINK_ONCE="$failure_marker" \
+    "$INTAKE" upsert --url 'https://portable.example.test/page' --source-type web --title 'Killed claim' --summary 'The process dies before exposing its lock.' --terms 'lock,killed' --claim 'The fixed lock is never ownerless.' > "$home/killed.out" 2> "$home/killed.err" || rc=$?
+  [ "$rc" = 137 ] || fail "SIGKILL before lock claim should exit 137, got $rc"
+  [ ! -e "$home/data/link-intake/.update-lock" ] && [ ! -L "$home/data/link-intake/.update-lock" ] \
+    || fail 'SIGKILL exposed an ownerless fixed lock'
+  run_intake "$home" upsert --url 'https://portable.example.test/page' --source-type web --title 'Recovered claim' --summary 'A later invocation acquires the lock.' --terms 'lock,recovered' --claim 'The abandoned private claim does not block progress.' >/dev/null \
+    || fail 'abandoned private lock claim blocked recovery'
+  owners=$(find "$home/data/link-intake" -mindepth 1 -maxdepth 1 -name '.lock-owner.*' | wc -l | tr -d ' ')
+  [ "$owners" = 0 ] || fail 'lock recovery left an abandoned owner claim'
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_REAL_MV="$REAL_MV" FM_REAL_RM="$REAL_RM" \
+    FM_REAL_LN="$REAL_LN" FM_REAL_READLINK="$REAL_READLINK" FM_EMULATE_GNU_MV=1 \
+    "$INTAKE" upsert --url 'https://portable.example.test/page' --source-type web --title 'GNU publication' --summary 'GNU no-target replacement commits the generation.' --terms 'gnu,portable' --claim 'The portable selector uses GNU mv syntax.' >/dev/null \
+    || fail 'GNU mv publication path failed'
+  assert_grep 'Title: GNU publication' "$(record_for "$home" 'https://portable.example.test/page')" 'GNU mv publication did not commit'
+  pass 'lock claims are atomic and symlink replacement is portable'
+}
+
+test_atomic_generation_switch_is_process_crash_safe() {
   local home record index root fakebin before_record before_index before_current after_record after_index failure_marker
   local old_transcript new_transcript retained generations rc=0
   home=$(make_home atomic)
@@ -178,7 +246,7 @@ test_atomic_generation_switch_is_crash_safe() {
   before_index=$(shasum -a 256 "$index" | awk '{print $1}')
   before_current=$(readlink "$home/data/link-intake/current")
   failure_marker="$home/current-move-failed"
-  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_REAL_MV="$REAL_MV" FM_REAL_RM="$REAL_RM" \
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_REAL_MV="$REAL_MV" FM_REAL_RM="$REAL_RM" FM_REAL_LN="$REAL_LN" FM_REAL_READLINK="$REAL_READLINK" \
     FM_FAIL_MOVE_DEST="$home/data/link-intake/current" FM_FAIL_MOVE_ONCE="$failure_marker" \
     "$INTAKE" upsert --url 'https://atomic.example.test/page' --source-type video --title 'Switch failure' --summary 'Valid update that cannot publish.' --terms 'atomic,switch' --claim 'The state switch fails.' --transcript-file "$new_transcript" > "$home/switch-failure.out" 2> "$home/switch-failure.err"; then
     fail 'generation publication failure unexpectedly succeeded'
@@ -193,7 +261,7 @@ test_atomic_generation_switch_is_crash_safe() {
   generations=$(find "$home/data/link-intake/generations" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
   [ "$generations" = 1 ] || fail 'failed state switch left an abandoned generation'
   failure_marker="$home/current-move-retained"
-  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_REAL_MV="$REAL_MV" FM_REAL_RM="$REAL_RM" \
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_REAL_MV="$REAL_MV" FM_REAL_RM="$REAL_RM" FM_REAL_LN="$REAL_LN" FM_REAL_READLINK="$REAL_READLINK" \
     FM_FAIL_MOVE_DEST="$home/data/link-intake/current" FM_FAIL_MOVE_ONCE="$failure_marker" \
     FM_FAIL_REMOVE_PREFIX="$home/data/link-intake/generations/.generation." FM_FAIL_REMOVE_ONCE="$home/remove-failed" \
     "$INTAKE" upsert --url 'https://atomic.example.test/page' --source-type video --title 'Retained candidate' --summary 'A recoverable candidate remains available.' --terms 'atomic,recoverable' --claim 'Cleanup fails visibly.' --transcript-file "$new_transcript" > "$home/retained.out" 2> "$home/retained.err"; then
@@ -205,17 +273,21 @@ test_atomic_generation_switch_is_crash_safe() {
   run_intake "$home" validate --all >/dev/null || fail 'validation did not recover a retained staged generation'
   [ ! -e "$retained" ] || fail 'recovery did not clean the retained staged generation'
   failure_marker="$home/current-move-signaled"
-  PATH="$fakebin:$PATH" FM_HOME="$home" FM_REAL_MV="$REAL_MV" FM_REAL_RM="$REAL_RM" \
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_REAL_MV="$REAL_MV" FM_REAL_RM="$REAL_RM" FM_REAL_LN="$REAL_LN" FM_REAL_READLINK="$REAL_READLINK" \
     FM_SIGNAL_MOVE_DEST="$home/data/link-intake/current" FM_SIGNAL_MOVE_ONCE="$failure_marker" \
+    FM_FAIL_READLINK_PATH="$home/data/link-intake/current" FM_FAIL_READLINK_AFTER="$failure_marker" FM_FAIL_READLINK_ONCE="$home/readlink-failed" \
     "$INTAKE" upsert --url 'https://atomic.example.test/page' --source-type video --title 'Interrupted update' --summary 'Valid update interrupted at the commit point.' --terms 'atomic,signal' --claim 'The signal follows the atomic switch.' --transcript-file "$new_transcript" > "$home/signal.out" 2> "$home/signal.err" || rc=$?
   [ "$rc" = 143 ] || fail "TERM during publication should exit 143, got $rc"
   [ ! -d "$home/data/link-intake/.update-lock" ] || fail 'TERM left the update lock held'
+  retained=$(sed -n 's/^error: recoverable staged generation retained: //p' "$home/signal.err")
+  assert_present "$retained" 'uncertain cleanup did not retain and report the selected generation'
+  [ -e "$home/data/link-intake/current/index.tsv" ] || fail 'uncertain cleanup left current state dangling'
   run_intake "$home" validate --all >/dev/null || fail 'state committed before TERM failed validation'
   assert_grep 'Title: Interrupted update' "$(record_for "$home" 'https://atomic.example.test/page')" 'TERM exposed a partial generation'
   before_current=$(readlink "$home/data/link-intake/current")
   failure_marker="$home/current-move-killed"
   rc=0
-  PATH="$fakebin:$PATH" FM_HOME="$home" FM_REAL_MV="$REAL_MV" FM_REAL_RM="$REAL_RM" \
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_REAL_MV="$REAL_MV" FM_REAL_RM="$REAL_RM" FM_REAL_LN="$REAL_LN" FM_REAL_READLINK="$REAL_READLINK" \
     FM_KILL_MOVE_DEST="$home/data/link-intake/current" FM_KILL_MOVE_ONCE="$failure_marker" \
     "$INTAKE" upsert --url 'https://atomic.example.test/page' --source-type video --title 'Killed update' --summary 'This update dies before its commit point.' --terms 'atomic,killed' --claim 'SIGKILL precedes the state switch.' --transcript-file "$old_transcript" > "$home/killed.out" 2> "$home/killed.err" || rc=$?
   [ "$rc" = 137 ] || fail "SIGKILL before publication should exit 137, got $rc"
@@ -225,7 +297,8 @@ test_atomic_generation_switch_is_crash_safe() {
   [ ! -d "$home/data/link-intake/.update-lock" ] || fail 'stale update lock was not reclaimed'
   generations=$(find "$home/data/link-intake/generations" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
   [ "$generations" = 1 ] || fail 'crash recovery left an abandoned generation'
-  pass 'one atomic generation switch survives failures and process death'
+  assert_grep 'power-loss durability depends on the host filesystem' "$ROOT/docs/link-intake.md" 'operator contract overstates the process-crash guarantee'
+  pass 'one process-crash atomic switch survives failures and process death'
 }
 
 test_validation_rejects_bidirectional_divergence() {
@@ -297,7 +370,8 @@ test_canonical_duplicate_converges_and_preserves_evidence
 test_titles_summaries_claims_and_terms_are_searchable
 test_inaccessible_links_remain_visible_and_valid
 test_video_transcript_metadata_is_durable
-test_atomic_generation_switch_is_crash_safe
+test_lock_claim_and_symlink_replacement_are_portable
+test_atomic_generation_switch_is_process_crash_safe
 test_validation_rejects_bidirectional_divergence
 test_odd_urls_never_control_filenames_or_shell
 test_agents_trigger_is_concise_and_agent_agnostic
