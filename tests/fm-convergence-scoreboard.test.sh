@@ -127,6 +127,32 @@ test_fail_closed_invocation() {
   assert_contains "$out" 'error: "unknown flag or invalid local ref: --unknown"' \
     "unknown flag should be named"
 
+  git -C "$repo" branch ambiguous local
+  git -C "$repo" tag ambiguous local
+  set +e
+  out=$(run_scoreboard "$repo" ambiguous upstream 2>"$TMP_ROOT/ambiguous.err")
+  rc=$?
+  set -e
+  err=$(cat "$TMP_ROOT/ambiguous.err")
+  expect_code 1 "$rc" "ambiguous local ref"
+  assert_contains "$out" 'error: "local ref name is ambiguous: ambiguous"' \
+    "ambiguous local ref should fail instead of following Git ref precedence"
+  assert_contains "$out" 'Use a fully qualified ref such as refs/heads/<name>' \
+    "ambiguous local ref should provide the deterministic correction"
+  [ -z "$err" ] || fail "ambiguous ref failure leaked diagnostics to stderr: $err"
+  run_scoreboard "$repo" refs/heads/ambiguous upstream >/dev/null \
+    || fail "fully qualified local ref did not resolve the reported ambiguity"
+
+  git -C "$repo" branch ambiguous-upstream upstream
+  git -C "$repo" tag ambiguous-upstream upstream
+  set +e
+  out=$(run_scoreboard "$repo" local ambiguous-upstream)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "ambiguous upstream ref"
+  assert_contains "$out" 'error: "upstream ref name is ambiguous: ambiguous-upstream"' \
+    "ambiguous upstream ref should fail instead of following Git ref precedence"
+
   set +e
   out=$(run_scoreboard "$repo" missing upstream 2>"$TMP_ROOT/missing.err")
   rc=$?

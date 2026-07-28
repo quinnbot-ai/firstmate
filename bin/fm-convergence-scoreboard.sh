@@ -76,6 +76,18 @@ measure_error() {
   exit 1
 }
 
+reject_ambiguous_ref() {
+  local role=$1 ref=$2 diagnostics
+  diagnostics=$(git -C "$REPO" rev-parse --symbolic-full-name "$ref" 2>&1 >/dev/null) || true
+  case "$diagnostics" in
+    *"refname '$ref' is ambiguous"*)
+      measure_error \
+        "$role ref name is ambiguous: $ref" \
+        "Use a fully qualified ref such as refs/heads/<name> or refs/remotes/<remote>/<name>, then rerun with the same two arguments."
+      ;;
+  esac
+}
+
 if [ "$#" -eq 1 ] && { [ "$1" = "--help" ] || [ "$1" = "-h" ]; }; then
   usage
   exit 0
@@ -110,6 +122,9 @@ if [ -n "$STATUS" ]; then
     "current worktree is dirty" \
     "Commit or otherwise resolve every tracked and untracked change, then rerun with the same refs."
 fi
+
+reject_ambiguous_ref "local" "$LOCAL_REF"
+reject_ambiguous_ref "upstream" "$UPSTREAM_REF"
 
 if ! LOCAL_COMMIT=$(git -C "$REPO" rev-parse --verify --quiet "$LOCAL_REF^{commit}" 2>/dev/null); then
   measure_error \
