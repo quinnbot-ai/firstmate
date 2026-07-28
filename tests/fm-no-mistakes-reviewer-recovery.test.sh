@@ -26,8 +26,14 @@ test_preflight_preserves_shared_daemon_safety() {
     'quota-axi --json' \
     'Codex-only' \
     'no lane has an active pipeline run' \
+    'restart the shared daemon once' \
+    'run `no-mistakes doctor`' \
     'Never perform that recovery while any lane is active' \
-    'never ask a crewmate to perform it'; do
+    'never ask a crewmate to perform it' \
+    'Configuration written after the daemon started is not proof' \
+    'Compare the configuration modification time with the daemon start record' \
+    'If the installed help lacks a run-scoped agent override' \
+    'safe fallback is shared-daemon routing only'; do
     assert_grep "$phrase" "$SKILL" "reviewer recovery preflight lost '$phrase'"
   done
   pass "reviewer recovery preflight protects the shared daemon"
@@ -41,6 +47,10 @@ test_failure_is_loud_and_diagnosable() {
     'capture its `id` as `<run-id>`' \
     'no-mistakes axi status --run <run-id>' \
     'no-mistakes axi logs --run <run-id> --step review --full' \
+    'or the corresponding `document` log' \
+    'start and completion timestamps' \
+    'selected agent sequence' \
+    'terminal error' \
     'context canceled' \
     'do not loop restarts' \
     'github.com/kunchenguid/no-mistakes/issues/474'; do
