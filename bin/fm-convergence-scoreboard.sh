@@ -165,6 +165,12 @@ if ! OBJECTS_DIR=$(preflight_git -C "$REPO" rev-parse --path-format=absolute --g
     "cannot locate the repository object database" \
     "Verify the repository metadata, then rerun with the same refs."
 fi
+if ! OBJECT_FORMAT=$(preflight_git -C "$REPO" rev-parse --show-object-format=storage 2>/dev/null) \
+  || [ -z "$OBJECT_FORMAT" ]; then
+  measure_error \
+    "cannot determine the repository object format" \
+    "Verify the repository metadata, then rerun with the same refs."
+fi
 
 if ! MEASURE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-convergence-scoreboard.XXXXXX"); then
   measure_error \
@@ -179,7 +185,8 @@ cleanup_measurement() {
 trap cleanup_measurement EXIT
 
 if ! GIT_CONFIG_COUNT=0 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
-  preflight_git init --bare --quiet --template= "$MEASURE_GIT_DIR" 2>/dev/null; then
+  preflight_git init --bare --quiet --template= --object-format="$OBJECT_FORMAT" \
+    "$MEASURE_GIT_DIR" 2>/dev/null; then
   measure_error \
     "cannot initialize isolated storage for measurements" \
     "Verify that the temporary directory is writable, then rerun with the same refs."

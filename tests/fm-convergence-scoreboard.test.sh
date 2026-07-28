@@ -135,11 +135,17 @@ test_attributes_are_scoped_to_local_ref() {
 }
 
 test_preflight_git_environment_is_sanitized() {
-  local repo decoy expected out shim_dir real_git
+  local repo decoy expected out shim_dir real_git source_format ambient_format
   repo=$TMP_ROOT/repo
   decoy=$TMP_ROOT/decoy
   shim_dir=$TMP_ROOT/git-shim
   real_git=$(command -v git)
+  source_format=$(git -C "$repo" rev-parse --show-object-format=storage)
+  case "$source_format" in
+    sha1) ambient_format=sha256 ;;
+    sha256) ambient_format=sha1 ;;
+    *) fail "unsupported fixture object format: $source_format" ;;
+  esac
 
   git init -q -b main "$decoy"
   printf 'decoy\n' > "$decoy/README.md"
@@ -161,6 +167,7 @@ EOF
       REAL_GIT="$real_git" \
       GIT_DIR="$decoy/.git" \
       GIT_WORK_TREE="$decoy" \
+      GIT_DEFAULT_HASH="$ambient_format" \
       GIT_OPTIONAL_LOCKS=1 \
       GIT_NO_LAZY_FETCH=0 \
       "$SCOREBOARD" local upstream
@@ -168,7 +175,7 @@ EOF
 
   [ "$out" = "$expected" ] \
     || fail "ambient Git repository or mutation settings changed the explicit-ref measurement"
-  pass "scoreboard sanitizes repository selection and disables optional locks and lazy fetches"
+  pass "scoreboard binds object format, repository selection, locks, and fetches to explicit inputs"
 }
 
 test_fail_closed_invocation() {
