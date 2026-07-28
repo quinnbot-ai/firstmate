@@ -121,6 +121,25 @@ test_arm_refuses_foreign_live_owner() {
   pass "arm refuses to start supervision under a live foreign session owner"
 }
 
+test_watcher_refuses_foreign_live_owner_at_startup() {
+  local dir state out rc foreign
+  dir=$(make_case fence-watcher-startup-refusal)
+  state="$dir/state"
+  mark_pr_check_migration_complete "$state"
+  start_idle_harness "$FAKE_CLAUDE" "$dir/foreign.pid" "$dir/foreign-stop"
+  wait_for_file "$dir/foreign.pid" || fail "foreign fake harness did not start"
+  foreign=$(cat "$dir/foreign.pid")
+  printf '%s\n' "$foreign" > "$state/.lock"
+  rc=0
+  out=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" 2>&1) || rc=$?
+  touch "$dir/foreign-stop"
+  [ "$rc" -ne 0 ] || fail "watcher exited zero under a live foreign session owner"
+  assert_contains "$out" "watcher: FAILED - session-owner fence: home session lock is held by live harness pid $foreign" "watcher did not print the typed startup fence refusal"
+  assert_contains "$out" "not starting" "watcher startup refusal missing its action phrase"
+  [ ! -e "$state/.watch.lock" ] || fail "fenced watcher still created a singleton"
+  pass "watcher refuses startup under a live foreign session owner"
+}
+
 test_cached_owner_identity_rejects_reused_pid() {
   local dir state rc
   dir=$(make_case fence-pid-reuse)
@@ -407,6 +426,7 @@ test_afk_daemon_watcher_is_exempt() {
 }
 
 test_arm_refuses_foreign_live_owner
+test_watcher_refuses_foreign_live_owner_at_startup
 test_cached_owner_identity_rejects_reused_pid
 test_restart_from_non_owner_leaves_owner_watcher
 test_restart_serializes_owner_check_and_termination
