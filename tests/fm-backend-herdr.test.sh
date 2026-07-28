@@ -1241,6 +1241,36 @@ test_presentation_lock_malformed_socket_falls_back() {
   pass "herdr presentation lock: malformed socket metadata degrades to flat"
 }
 
+test_presentation_recovery_lock_budget_covers_handoff() {
+  local lock_source default_attempts recovery_attempts out
+  lock_source=$(sed -n '/^spawn_herdr_presentation_order_lock_acquire()/,/^spawn_herdr_presentation_order_lock_release()/p' "$ROOT/bin/fm-spawn.sh" | sed '$d')
+  default_attempts=$(sed -n 's/^HERDR_PRESENTATION_ORDER_LOCK_ATTEMPTS=//p' "$ROOT/bin/fm-spawn.sh")
+  recovery_attempts=$(sed -n 's/^HERDR_PRESENTATION_RECOVERY_LOCK_ATTEMPTS=//p' "$ROOT/bin/fm-spawn.sh")
+  out=$(LOCK_SOURCE="$lock_source" DEFAULT_ATTEMPTS="$default_attempts" RECOVERY_ATTEMPTS="$recovery_attempts" \
+    bash -c '
+      HERDR_PRESENTATION_ORDER_LOCK=
+      HERDR_PRESENTATION_ORDER_LOCK_HELD=0
+      eval "$LOCK_SOURCE"
+      fm_backend_herdr_presentation_session_lock_path() { printf "%s" /tmp/fm-herdr-budget.lock; }
+      sleep() { :; }
+      tries=0
+      fm_lock_try_acquire() {
+        tries=$((tries + 1))
+        [ "$tries" -ge 601 ]
+      }
+      if spawn_herdr_presentation_order_lock_acquire fmtest "$DEFAULT_ATTEMPTS"; then
+        exit 1
+      fi
+      printf "%s " "$tries"
+      tries=0
+      spawn_herdr_presentation_order_lock_acquire fmtest "$RECOVERY_ATTEMPTS" || exit 1
+      printf "%s %s" "$tries" "$HERDR_PRESENTATION_ORDER_LOCK_HELD"
+    ')
+  [ "$out" = "50 601 1" ] \
+    || fail "recovery lock budget did not outwait the 60-second handoff boundary: $out"
+  pass "herdr presentation lock: recovery outwaits a full Treehouse handoff while fresh projection stays best-effort"
+}
+
 test_projection_order_rejects_malformed_socket() {
   local dir log resp fb mover out status
   dir="$TMP_ROOT/projection-order-malformed-socket"; mkdir -p "$dir/responses"
@@ -3026,6 +3056,7 @@ test_projection_order_missing_parent_is_read_only
 test_presentation_session_lock_path_is_shared_across_homes
 test_presentation_session_lock_path_rejects_malformed_socket
 test_presentation_lock_malformed_socket_falls_back
+test_presentation_recovery_lock_budget_covers_handoff
 test_projection_order_rejects_malformed_socket
 test_presentation_lock_insecure_namespace_falls_back
 test_spawn_task_lock_covers_all_backend_creation_and_metadata_publication
