@@ -12,10 +12,11 @@ tests/fm-link-intake.test.sh
 Observed guarantees:
 
 ```text
-PASS: lock claims are atomic and symlink replacement is portable
+PASS: lock claims use portable replacement, atomic quarantine, and process-start identity
+PASS: retrieval dates are real calendar dates and remain path-safe
 PASS: one process-crash atomic switch survives failures and process death
 PASS: validation rejects record, index, and transcript divergence
 ```
 
-The focused suite covers canonical duplicate convergence, searchable title and summary fields, inaccessible records, transaction-staged transcripts, an atomic initialized lock claim, BSD and GNU symlink replacement, a process-crash atomic state switch, stale-lock recovery, conservative retained state, bidirectional consistency, odd URLs with query slashes, and the one-line `AGENTS.md` trigger.
+The focused suite covers canonical duplicate convergence, searchable title and summary fields, inaccessible records, transaction-staged transcripts, an atomic initialized lock claim, portable process-start ownership, stale-lock quarantine, BSD and GNU symlink replacement, real calendar dates, a process-crash atomic state switch, conservative retained state, bidirectional consistency, odd URLs with query slashes, and the one-line `AGENTS.md` trigger.
 Filesystem sync barriers and power-loss durability are explicitly outside this focused process-crash guarantee.

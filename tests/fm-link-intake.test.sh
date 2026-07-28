@@ -43,7 +43,12 @@ if [ "${1:-}" = -fT ] && [ "${FM_EMULATE_GNU_MV:-}" = 1 ]; then
   exec "$FM_REAL_MV" -fh "$@"
 fi
 destination=
+source=
 for argument in "$@"; do
+  case "$argument" in
+    -*) ;;
+    *) [ -n "$source" ] || source=$argument ;;
+  esac
   destination=$argument
 done
 if [ "$destination" = "${FM_FAIL_MOVE_DEST:-}" ] && [ ! -e "${FM_FAIL_MOVE_ONCE:?}" ]; then
@@ -62,6 +67,16 @@ if [ "$destination" = "${FM_SIGNAL_MOVE_DEST:-}" ] && [ ! -e "${FM_SIGNAL_MOVE_O
   kill -TERM "$PPID"
   exit "$status"
 fi
+if [ "$source" = "${FM_QUARANTINE_SOURCE:-}" ]; then
+  case "$destination" in
+    "${FM_QUARANTINE_PREFIX:-}"*)
+      "${FM_REAL_MV:?}" "$@"
+      status=$?
+      [ "$status" -ne 0 ] || : > "${FM_QUARANTINE_MARKER:?}"
+      exit "$status"
+      ;;
+  esac
+fi
 exec "${FM_REAL_MV:?}" "$@"
 SH
   cat > "$fakebin/rm" <<'SH'
@@ -71,6 +86,9 @@ destination=
 for argument in "$@"; do
   destination=$argument
 done
+if [ "$destination" = "${FM_GUARDED_REMOVE_DEST:-}" ] && [ ! -e "${FM_QUARANTINE_MARKER:?}" ]; then
+  exit 1
+fi
 if [ -n "${FM_FAIL_REMOVE_PREFIX:-}" ]; then
   case "$destination" in
     "$FM_FAIL_REMOVE_PREFIX"*)
@@ -123,6 +141,10 @@ current_root() {  # <home>
   local home=$1 target
   target=$(readlink "$home/data/link-intake/current") || fail 'current generation link is absent'
   printf '%s/data/link-intake/%s\n' "$home" "$target"
+}
+
+test_process_start_identity() {
+  LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | awk 'NF { $1=$1; print; exit }'
 }
 
 record_for() {  # <home> <url>
@@ -205,7 +227,7 @@ test_video_transcript_metadata_is_durable() {
 }
 
 test_lock_claim_and_symlink_replacement_are_portable() {
-  local home fakebin failure_marker rc=0 owners
+  local home fakebin failure_marker rc=0 owners owner_dir owner_start quarantine_marker
   home=$(make_home portable-lock)
   fakebin=$(make_failing_tools "$home")
   failure_marker="$home/lock-link-killed"
@@ -225,7 +247,58 @@ test_lock_claim_and_symlink_replacement_are_portable() {
     "$INTAKE" upsert --url 'https://portable.example.test/page' --source-type web --title 'GNU publication' --summary 'GNU no-target replacement commits the generation.' --terms 'gnu,portable' --claim 'The portable selector uses GNU mv syntax.' >/dev/null \
     || fail 'GNU mv publication path failed'
   assert_grep 'Title: GNU publication' "$(record_for "$home" 'https://portable.example.test/page')" 'GNU mv publication did not commit'
-  pass 'lock claims are atomic and symlink replacement is portable'
+  owner_dir="$home/data/link-intake/.lock-owner.recycled"
+  owner_start=$(test_process_start_identity "$$")
+  mkdir "$owner_dir"
+  printf '%s\n%s\n' "$$" "$owner_start" > "$owner_dir/owner"
+  ln -s "${owner_dir##*/}" "$home/data/link-intake/.update-lock"
+  if run_intake "$home" validate --all > "$home/live-lock.out" 2> "$home/live-lock.err"; then
+    fail 'matching live process identity was reclaimed'
+  fi
+  assert_grep 'another link-intake update is in progress' "$home/live-lock.err" 'live lock identity did not block a second updater'
+  rm "$home/data/link-intake/.update-lock"
+  printf '%s\n%s\n' "$$" 'Mon Jan 1 00:00:00 2001' > "$owner_dir/owner"
+  ln -s "${owner_dir##*/}" "$home/data/link-intake/.update-lock"
+  quarantine_marker="$home/lock-quarantined"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_REAL_MV="$REAL_MV" FM_REAL_RM="$REAL_RM" \
+    FM_REAL_LN="$REAL_LN" FM_REAL_READLINK="$REAL_READLINK" \
+    FM_QUARANTINE_SOURCE="$home/data/link-intake/.update-lock" \
+    FM_QUARANTINE_PREFIX="$home/data/link-intake/.stale-update-lock." \
+    FM_QUARANTINE_MARKER="$quarantine_marker" \
+    FM_GUARDED_REMOVE_DEST="$home/data/link-intake/.update-lock" \
+    "$INTAKE" validate --all >/dev/null \
+    || fail 'recycled PID lock recovery failed'
+  assert_present "$quarantine_marker" 'stale fixed lock was not atomically quarantined'
+  [ ! -e "$owner_dir" ] || fail 'stale owner claim survived quarantine recovery'
+  pass 'lock claims use portable replacement, atomic quarantine, and process-start identity'
+}
+
+test_retrieval_dates_are_real_and_path_safe() {
+  local home invalid record history root
+  home=$(make_home retrieved-date)
+  for invalid in '../.-..-..' '2025-02-29' '2026-04-31' '0000-01-01'; do
+    if run_intake "$home" upsert --url 'https://date.example.test/page' --source-type article --title 'Invalid date' --summary 'This record must not publish.' --terms 'date,invalid' --claim 'Invalid dates are rejected.' --retrieved-at "$invalid" > "$home/invalid-date.out" 2> "$home/invalid-date.err"; then
+      fail "invalid retrieval date was accepted: $invalid"
+    fi
+    assert_grep 'retrieved-at must be a real YYYY-MM-DD calendar date' "$home/invalid-date.err" 'invalid retrieval date failure was not visible'
+  done
+  [ ! -e "$home/data/link-intake/current" ] || fail 'invalid retrieval date published state'
+  run_intake "$home" upsert --url 'https://date.example.test/page' --source-type article --title 'Leap date' --summary 'A real leap-day record.' --terms 'date,leap' --claim 'Leap day is valid.' --retrieved-at '2024-02-29' >/dev/null \
+    || fail 'real leap-day retrieval date was rejected'
+  run_intake "$home" upsert --url 'https://date.example.test/page' --source-type article --title 'Leap date updated' --summary 'A repeated leap-day record.' --terms 'date,history' --claim 'History remains record-local.' --retrieved-at '2024-02-29' >/dev/null \
+    || fail 'repeated leap-day intake failed'
+  record=$(record_for "$home" 'https://date.example.test/page')
+  assert_grep 'Retrieved at: 2024-02-29' "$record" 'valid retrieval date was not retained'
+  history=$(find "$(current_root "$home")/history" -type f -name '2024-02-29-*.md' | head -1)
+  assert_present "$history" 'valid retrieval date did not produce record-local history'
+  root=$(current_root "$home")
+  printf 'Unscoped history.\n' > "$root/history/escaped.md"
+  if run_intake "$home" validate --all > "$home/escaped-history.out" 2> "$home/escaped-history.err"; then
+    fail 'validation accepted history outside a record directory'
+  fi
+  assert_grep 'unexpected entry in history directory' "$home/escaped-history.err" 'unscoped history failure was not visible'
+  rm "$root/history/escaped.md"
+  pass 'retrieval dates are real calendar dates and remain path-safe'
 }
 
 test_atomic_generation_switch_is_process_crash_safe() {
@@ -371,6 +444,7 @@ test_titles_summaries_claims_and_terms_are_searchable
 test_inaccessible_links_remain_visible_and_valid
 test_video_transcript_metadata_is_durable
 test_lock_claim_and_symlink_replacement_are_portable
+test_retrieval_dates_are_real_and_path_safe
 test_atomic_generation_switch_is_process_crash_safe
 test_validation_rejects_bidirectional_divergence
 test_odd_urls_never_control_filenames_or_shell

@@ -200,6 +200,56 @@ logical_record_path_for() {
   printf '%s/records/%s.md\n' "$CURRENT_LINK" "$id"
 }
 
+is_calendar_date() {
+  local value=$1 year month day maximum
+  case "$value" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
+    *) return 1 ;;
+  esac
+  year=${value%%-*}
+  month=${value#*-}
+  month=${month%%-*}
+  day=${value##*-}
+  year=$((10#$year))
+  month=$((10#$month))
+  day=$((10#$day))
+  [ "$year" -ge 1 ] && [ "$month" -ge 1 ] && [ "$month" -le 12 ] && [ "$day" -ge 1 ] || return 1
+  case "$month" in
+    1|3|5|7|8|10|12) maximum=31 ;;
+    4|6|9|11) maximum=30 ;;
+    2)
+      maximum=28
+      if [ $((year % 400)) -eq 0 ] || { [ $((year % 4)) -eq 0 ] && [ $((year % 100)) -ne 0 ]; }; then
+        maximum=29
+      fi
+      ;;
+  esac
+  [ "$day" -le "$maximum" ]
+}
+
+process_start_identity() {
+  local identity
+  identity=$(LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | awk 'NF { $1=$1; print; exit }')
+  [ -n "$identity" ] || return 1
+  printf '%s\n' "$identity"
+}
+
+LOCK_OWNER_PID=
+LOCK_OWNER_START=
+
+lock_owner_is_live() {
+  local owner_file=$1 current_start
+  LOCK_OWNER_PID=$(sed -n '1p' "$owner_file" 2>/dev/null || true)
+  LOCK_OWNER_START=$(sed -n '2p' "$owner_file" 2>/dev/null || true)
+  case "$LOCK_OWNER_PID" in
+    ''|*[!0-9]*) return 2 ;;
+  esac
+  [ -n "$LOCK_OWNER_START" ] || return 2
+  kill -0 "$LOCK_OWNER_PID" 2>/dev/null || return 1
+  current_start=$(process_start_identity "$LOCK_OWNER_PID") || return 2
+  [ "$current_start" = "$LOCK_OWNER_START" ]
+}
+
 create_symlink_no_target() {
   local source=$1 target=$2
   if ln --help 2>&1 | grep -F -q -- '--no-target-directory'; then
@@ -210,11 +260,13 @@ create_symlink_no_target() {
 }
 
 acquire_lock() {
-  local owner owner_path target current_target stale attempt=0 claim_name path
+  local owner_path target stale stale_lock quarantined_target attempt=0 claim_name path owner_status self_start
   mkdir -p "$GENERATIONS_DIR" || die 'could not initialize link-intake storage'
   LOCK_OWNER_DIR=$(mktemp -d "$LINK_ROOT/.lock-owner.XXXXXX") \
     || die 'could not create link-intake lock claim'
-  printf '%s\n' "$$" > "$LOCK_OWNER_DIR/owner" \
+  self_start=$(process_start_identity "$$") \
+    || die 'could not identify link-intake lock process'
+  printf '%s\n%s\n' "$$" "$self_start" > "$LOCK_OWNER_DIR/owner" \
     || die 'could not initialize link-intake lock claim'
   claim_name=${LOCK_OWNER_DIR##*/}
   while [ "$attempt" -lt 5 ]; do
@@ -223,14 +275,20 @@ acquire_lock() {
       for path in "$LINK_ROOT"/.lock-owner.*; do
         [ -d "$path" ] || continue
         [ "$path" = "$LOCK_OWNER_DIR" ] && continue
-        owner=$(sed -n '1p' "$path/owner" 2>/dev/null || true)
-        case "$owner" in
-          ''|*[!0-9]*) continue ;;
-        esac
-        if ! kill -0 "$owner" 2>/dev/null; then
-          rm -f "$path/owner" 2>/dev/null || true
-          rmdir "$path" 2>/dev/null || true
-        fi
+        lock_owner_is_live "$path/owner"
+        owner_status=$?
+        [ "$owner_status" = 1 ] || continue
+        rm -f "$path/owner" 2>/dev/null || true
+        rmdir "$path" 2>/dev/null || true
+      done
+      for path in "$LINK_ROOT"/.stale-update-lock.*; do
+        [ -L "$path" ] || continue
+        rm -f "$path" 2>/dev/null || true
+      done
+      for path in "$LINK_ROOT"/.stale-lock-owner.*; do
+        [ -d "$path" ] || continue
+        rm -f "$path/owner" 2>/dev/null || true
+        rmdir "$path" 2>/dev/null || true
       done
       return 0
     fi
@@ -244,31 +302,30 @@ acquire_lock() {
       */*) die 'link-intake update lock target is invalid' ;;
     esac
     owner_path="$LINK_ROOT/$target"
+    stale="$LINK_ROOT/.stale-lock-owner.${target#.lock-owner.}"
     if [ ! -e "$owner_path" ] && [ ! -L "$owner_path" ]; then
-      if create_symlink_no_target "$claim_name" "$owner_path" 2>/dev/null; then
-        current_target=$(readlink "$LOCK_DIR" 2>/dev/null || true)
-        if [ "$current_target" = "$target" ]; then
-          rm -f "$LOCK_DIR" || die "stale link-intake lock retained: $LOCK_DIR"
-          rm -f "$owner_path" || die "stale link-intake lock recovery retained: $owner_path"
-        else
-          die "stale link-intake lock recovery retained: $owner_path"
-        fi
+      if [ -d "$stale" ] && mv "$stale" "$owner_path" 2>/dev/null; then
+        attempt=$((attempt + 1))
+        continue
       fi
-      attempt=$((attempt + 1))
-      continue
+      die "link-intake update lock owner is absent: $owner_path"
     fi
-    owner=$(sed -n '1p' "$owner_path/owner" 2>/dev/null || true)
-    case "$owner" in
-      ''|*[!0-9]*) die 'link-intake update lock owner is unreadable' ;;
-    esac
-    if kill -0 "$owner" 2>/dev/null; then
+    if lock_owner_is_live "$owner_path/owner"; then
       die 'another link-intake update is in progress'
+    else
+      owner_status=$?
     fi
-    stale="$LINK_ROOT/.stale-lock-owner.$$.$attempt"
+    [ "$owner_status" = 1 ] || die 'link-intake update lock owner identity is unreadable'
     if mv "$owner_path" "$stale" 2>/dev/null; then
-      current_target=$(readlink "$LOCK_DIR" 2>/dev/null || true)
-      [ "$current_target" = "$target" ] || die "stale link-intake lock retained: $stale"
-      rm -f "$LOCK_DIR" || die "stale link-intake lock retained: $stale"
+      stale_lock="$LINK_ROOT/.stale-update-lock.${target#.lock-owner.}"
+      [ ! -e "$stale_lock" ] && [ ! -L "$stale_lock" ] \
+        || die "stale link-intake lock quarantine retained: $stale"
+      mv "$LOCK_DIR" "$stale_lock" 2>/dev/null \
+        || die "stale link-intake lock recovery retained: $stale"
+      quarantined_target=$(readlink "$stale_lock" 2>/dev/null || true)
+      [ "$quarantined_target" = "$target" ] \
+        || die "stale link-intake lock quarantine retained: $stale_lock"
+      rm -f "$stale_lock" || die "stale link-intake lock quarantine retained: $stale_lock"
       if [ -L "$stale" ]; then
         rm -f "$stale" || die "stale link-intake lock retained: $stale"
       else
@@ -365,7 +422,7 @@ validate_record() {
   require_one_line 'record title' "$title"
   require_one_line 'record summary' "$summary"
   require_one_line 'record search terms' "$terms"
-  case "$retrieved" in ????-??-??) ;; *) die "record retrieval date is invalid: $record" ;; esac
+  is_calendar_date "$retrieved" || die "record retrieval date is invalid: $record"
   [ -n "$transcript" ] || die "record is missing transcript metadata: $record"
   originals=$(existing_original_urls "$record")
   [ -n "$originals" ] || die "record has no original URL: $record"
@@ -417,7 +474,7 @@ VALIDATED_RECORD_COUNT=0
 
 validate_state() {
   local generation=$1 index="$1/index.tsv" records="$1/records" history="$1/history" transcripts="$1/transcripts"
-  local header canonical id retrieved source title status terms record path basename matches count=0 relative
+  local header canonical id retrieved source title status terms record path entry basename matches count=0 relative record_id
   [ -d "$records" ] || die "link-intake records directory is absent: $records"
   [ -d "$history" ] || die "link-intake history directory is absent: $history"
   [ -d "$transcripts" ] || die "link-intake transcripts directory is absent: $transcripts"
@@ -446,9 +503,19 @@ validate_state() {
     matches=$(awk -F '\t' -v id="$id" 'NR > 1 && $2 == id { count++ } END { print count + 0 }' "$index")
     [ "$matches" = 1 ] || die "record is absent from index: $path"
   done
-  for path in "$history"/*/*.md; do
-    [ -f "$path" ] || continue
-    validate_record "$path" '' "$generation"
+  for path in "$history"/*; do
+    [ -e "$path" ] || continue
+    [ -d "$path" ] || die "unexpected entry in history directory: $path"
+    id=${path##*/}
+    for entry in "$path"/*; do
+      [ -e "$entry" ] || continue
+      [ -f "$entry" ] || die "unexpected entry in record history: $entry"
+      basename=${entry##*/}
+      case "$basename" in *.md) ;; *) die "unexpected entry in record history: $entry" ;; esac
+      validate_record "$entry" '' "$generation"
+      record_id=$(sed -n 's/^Record ID: //p' "$entry" | head -1)
+      [ "$record_id" = "$id" ] || die "history record ID does not match directory: $entry"
+    done
   done
   for path in "$transcripts"/*/*.txt; do
     [ -f "$path" ] || continue
@@ -548,7 +615,7 @@ command_upsert() {
   [ -z "$canonical_input" ] || require_one_line 'canonical URL' "$canonical_input"
   case "$source" in article|web|video|audio|document|image|other) ;; *) die 'source type must be article, web, video, audio, document, image, or other' ;; esac
   if [ -n "$retrieved" ]; then
-    case "$retrieved" in ????-??-??) ;; *) die 'retrieved-at must use YYYY-MM-DD' ;; esac
+    is_calendar_date "$retrieved" || die 'retrieved-at must be a real YYYY-MM-DD calendar date'
   else
     retrieved=$(date -u +%F)
   fi
