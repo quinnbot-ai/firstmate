@@ -8,7 +8,8 @@
 # Both refs are required so reruns never inherit an ambient branch or remote.
 # The current worktree must be clean because an uncommitted convergence step
 # cannot be represented by either resolved commit identity.
-# The refs must resolve to commits with exactly one merge base.
+# Each ref name must be unambiguous and resolve locally to a commit.
+# The resolved commits must have exactly one merge base.
 # Ahead and behind are graph counts from upstream...local.
 # First-parent deliveries are local first-parent commits unreachable upstream.
 # Diff metrics compare the unique merge base with the resolved local commit.
@@ -24,7 +25,8 @@
 #   documentation: docs/, README.md, and CONTRIBUTING.md
 #   configuration: .tasks.toml, .no-mistakes.yaml, and .gitignore
 #   other: every remaining path
-# Stdout is deterministic TOON for both successful results and errors.
+# Stdout is deterministic TOON without a trailing newline for help, successful
+# results, and errors.
 # Exit 0 means success, 1 means the comparison cannot be measured, and 2 means
 # the invocation is invalid.
 set -u
