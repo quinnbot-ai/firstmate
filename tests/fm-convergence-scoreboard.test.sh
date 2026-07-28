@@ -134,6 +134,43 @@ test_attributes_are_scoped_to_local_ref() {
   pass "scoreboard derives attributes from the explicit local ref, not ambient repository state"
 }
 
+test_preflight_git_environment_is_sanitized() {
+  local repo decoy expected out shim_dir real_git
+  repo=$TMP_ROOT/repo
+  decoy=$TMP_ROOT/decoy
+  shim_dir=$TMP_ROOT/git-shim
+  real_git=$(command -v git)
+
+  git init -q -b main "$decoy"
+  printf 'decoy\n' > "$decoy/README.md"
+  git -C "$decoy" add README.md
+  git -C "$decoy" commit -qm "test: seed decoy"
+  mkdir -p "$shim_dir"
+  cat > "$shim_dir/git" <<'EOF'
+#!/usr/bin/env bash
+[ "${GIT_OPTIONAL_LOCKS-}" = 0 ] || exit 91
+[ "${GIT_NO_LAZY_FETCH-}" = 1 ] || exit 92
+exec "$REAL_GIT" "$@"
+EOF
+  chmod +x "$shim_dir/git"
+
+  expected=$(run_scoreboard "$repo" local upstream)
+  out=$(
+    cd "$repo" || exit 1
+    PATH="$shim_dir:$PATH" \
+      REAL_GIT="$real_git" \
+      GIT_DIR="$decoy/.git" \
+      GIT_WORK_TREE="$decoy" \
+      GIT_OPTIONAL_LOCKS=1 \
+      GIT_NO_LAZY_FETCH=0 \
+      "$SCOREBOARD" local upstream
+  )
+
+  [ "$out" = "$expected" ] \
+    || fail "ambient Git repository or mutation settings changed the explicit-ref measurement"
+  pass "scoreboard sanitizes repository selection and disables optional locks and lazy fetches"
+}
+
 test_fail_closed_invocation() {
   local repo out err rc
   repo=$TMP_ROOT/repo
@@ -275,6 +312,7 @@ test_toon_control_characters_are_escaped() {
 
 test_deterministic_scoreboard
 test_attributes_are_scoped_to_local_ref
+test_preflight_git_environment_is_sanitized
 test_fail_closed_invocation
 test_diff_failure_is_not_silent
 test_toon_documents_have_no_trailing_newline

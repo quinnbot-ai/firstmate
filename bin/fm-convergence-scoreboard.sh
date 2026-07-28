@@ -30,6 +30,8 @@
 set -u
 
 export LC_ALL=C
+export GIT_NO_LAZY_FETCH=1
+export GIT_OPTIONAL_LOCKS=0
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELF="$SELF_DIR/$(basename "${BASH_SOURCE[0]}")"
@@ -89,9 +91,17 @@ measure_error() {
   exit 1
 }
 
+preflight_git() {
+  (
+    unset GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_DIR GIT_INDEX_FILE
+    unset GIT_OBJECT_DIRECTORY GIT_WORK_TREE
+    git "$@"
+  )
+}
+
 reject_ambiguous_ref() {
   local role=$1 ref=$2 diagnostics
-  diagnostics=$(git -C "$REPO" rev-parse --symbolic-full-name "$ref" 2>&1 >/dev/null) || true
+  diagnostics=$(preflight_git -C "$REPO" rev-parse --symbolic-full-name "$ref" 2>&1 >/dev/null) || true
   case "$diagnostics" in
     *"refname '$ref' is ambiguous"*)
       measure_error \
@@ -119,13 +129,13 @@ esac
 LOCAL_REF=$1
 UPSTREAM_REF=$2
 
-if ! REPO=$(git rev-parse --show-toplevel 2>/dev/null) || [ -z "$REPO" ]; then
+if ! REPO=$(preflight_git rev-parse --show-toplevel 2>/dev/null) || [ -z "$REPO" ]; then
   measure_error \
     "current directory is not inside a Git worktree" \
     "Run this command from the clean worktree that contains both refs."
 fi
 
-if ! STATUS=$(git -C "$REPO" status --porcelain --untracked-files=normal 2>/dev/null); then
+if ! STATUS=$(preflight_git -C "$REPO" status --porcelain --untracked-files=normal 2>/dev/null); then
   measure_error \
     "cannot inspect the current worktree state" \
     "Verify the worktree is readable, then rerun the same command."
@@ -139,18 +149,18 @@ fi
 reject_ambiguous_ref "local" "$LOCAL_REF"
 reject_ambiguous_ref "upstream" "$UPSTREAM_REF"
 
-if ! LOCAL_COMMIT=$(git -C "$REPO" rev-parse --verify --quiet "$LOCAL_REF^{commit}" 2>/dev/null); then
+if ! LOCAL_COMMIT=$(preflight_git -C "$REPO" rev-parse --verify --quiet "$LOCAL_REF^{commit}" 2>/dev/null); then
   measure_error \
     "local ref is missing, unfetched, or does not resolve to one commit: $LOCAL_REF" \
     "Fetch or create the local ref explicitly, then rerun with the same two arguments."
 fi
-if ! UPSTREAM_COMMIT=$(git -C "$REPO" rev-parse --verify --quiet "$UPSTREAM_REF^{commit}" 2>/dev/null); then
+if ! UPSTREAM_COMMIT=$(preflight_git -C "$REPO" rev-parse --verify --quiet "$UPSTREAM_REF^{commit}" 2>/dev/null); then
   measure_error \
     "upstream ref is missing, unfetched, or does not resolve to one commit: $UPSTREAM_REF" \
     "Fetch the upstream ref explicitly, then rerun with the same two arguments."
 fi
 
-if ! OBJECTS_DIR=$(git -C "$REPO" rev-parse --path-format=absolute --git-path objects 2>/dev/null); then
+if ! OBJECTS_DIR=$(preflight_git -C "$REPO" rev-parse --path-format=absolute --git-path objects 2>/dev/null); then
   measure_error \
     "cannot locate the repository object database" \
     "Verify the repository metadata, then rerun with the same refs."
@@ -169,7 +179,7 @@ cleanup_measurement() {
 trap cleanup_measurement EXIT
 
 if ! GIT_CONFIG_COUNT=0 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
-  git init --bare --quiet --template= "$MEASURE_GIT_DIR" 2>/dev/null; then
+  preflight_git init --bare --quiet --template= "$MEASURE_GIT_DIR" 2>/dev/null; then
   measure_error \
     "cannot initialize isolated storage for measurements" \
     "Verify that the temporary directory is writable, then rerun with the same refs."
