@@ -101,12 +101,9 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 
 Run `bin/fm-convergence-scoreboard.sh <local-ref> <upstream-ref>` from a clean worktree before convergence starts and after every convergence step.
 Keep both ref arguments explicit and record the emitted commit identities with the measurements so a result can be reproduced after branch names move.
-The diff uses the refs' unique merge base and the resolved local commit, while ahead and behind use the full symmetric commit graph.
-Git attributes come from the resolved local commit, so worktree, repository-info, replacement-ref, and user configuration cannot change a repeated measurement.
+Use `--help` for the current origin/upstream examples, and fully qualify any ref name that collides across namespaces.
+The command emits deterministic TOON and fails instead of returning partial metrics when it cannot complete a measurement.
 
 Stated limitation: the cleanliness preflight assumes repo-local `.git/info/attributes`, filter configuration, and fsmonitor configuration are benign ambient inputs; they can affect whether the command proceeds, but they do not enter the isolated ref measurement.
 
-First-parent deliveries count local first-parent commits that are not reachable from upstream.
-Renames count as one deletion plus one addition, and binary paths count as changed files with zero line changes.
-The stable file-group order is `agent-runtime`, `automation`, `tests`, `documentation`, `configuration`, and `other`.
-The script header owns the exact path membership and output contract.
+The script header owns the exact measurement basis, isolation guarantees, metric meanings, path membership, output schema, and exit contract.

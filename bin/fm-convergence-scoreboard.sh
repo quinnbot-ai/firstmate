@@ -13,9 +13,12 @@
 # Ahead and behind are graph counts from upstream...local.
 # First-parent deliveries are local first-parent commits unreachable upstream.
 # Diff metrics compare the unique merge base with the resolved local commit.
-# Measurements use an isolated Git context with attributes from the local commit,
-# so ambient config, replacement refs, and worktree or info attributes cannot
-# change results for the same resolved identities.
+# Every Git subprocess uses an allowlisted environment with optional locks and
+# lazy fetches disabled.
+# Measurements ignore ambient config and replacement refs, source attributes
+# from the local commit, and use a bare repository pinned to the source storage
+# object format, so ambient Git state cannot change the resolved measurements.
+# A failed graph or diff measurement exits before emitting partial metrics.
 # Renames count as one deletion plus one addition so file grouping is stable.
 # Git binary-file numstat markers count as zero lines while the paths still count.
 # Every changed path belongs to exactly one of these ordered groups:
@@ -26,7 +29,7 @@
 #   configuration: .tasks.toml, .no-mistakes.yaml, and .gitignore
 #   other: every remaining path
 # Stdout is deterministic TOON without a trailing newline for help, successful
-# results, and errors.
+# results, and errors, and quoted strings escape every ASCII control character.
 # Exit 0 means success, 1 means the comparison cannot be measured, and 2 means
 # the invocation is invalid.
 set -u
