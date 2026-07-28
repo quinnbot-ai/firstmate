@@ -187,6 +187,24 @@ tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
 ```
 
+## Pure Kun presentation parity
+
+The Firstmate Pure Kun presentation was verified on 2026-07-27 with Pi 0.82.0.
+The tracked `firstmate-dark` theme and default footer use Pi's native theme, footer-data, context-usage, session-branch, and terminal-title APIs while preserving extension status texts.
+
+Exact commands and output:
+
+```text
+pi --version
+0.82.0
+
+PATH="/Users/nick/.local/share/mise/installs/node/22.22.2/lib/node_modules/openclaw/node_modules/typescript/bin:$PATH" FM_PI_PACKAGE_DIR="$(npm root -g)/@earendil-works/pi-coding-agent" tests/fm-pi-primary-types.test.sh
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.82.0
+ok - Firstmate Pi footer formatting stays within narrow and wide width tiers
+```
+
+The deterministic footer test covers narrow, medium, and wide layouts and asserts that every rendered line stays within its requested terminal width.
+
 ## Wedge-alarm channels
 
 The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.

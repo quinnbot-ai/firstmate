@@ -29,10 +29,12 @@ mkdir -p "$TMP_ROOT/lib" "$TMP_ROOT/node_modules/@earendil-works" "$TMP_ROOT/nod
 cp "$ROOT/.pi/extensions/fm-calm.ts" "$TMP_ROOT/fm-calm.ts"
 cp "$ROOT/.pi/extensions/fm-primary-pi-watch.ts" "$TMP_ROOT/fm-primary-pi-watch.ts"
 cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$TMP_ROOT/fm-primary-turnend-guard.ts"
+cp "$ROOT/.pi/extensions/fm-primary-footer.ts" "$TMP_ROOT/fm-primary-footer.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-assistant-layout.ts" "$TMP_ROOT/lib/fm-calm-assistant-layout.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-operational-user-layout.ts" "$TMP_ROOT/lib/fm-calm-operational-user-layout.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$TMP_ROOT/lib/fm-calm-visibility.ts"
 cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$TMP_ROOT/lib/fm-operational-input.ts"
+cp "$ROOT/.pi/extensions/lib/fm-primary-footer-layout.ts" "$TMP_ROOT/lib/fm-primary-footer-layout.ts"
 ln -s "$PI_PACKAGE_DIR" "$TMP_ROOT/node_modules/@earendil-works/pi-coding-agent"
 ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$TMP_ROOT/node_modules/@earendil-works/pi-tui"
 ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$TMP_ROOT/node_modules/typebox"
@@ -60,3 +62,37 @@ JSON
 tsc -p "$TMP_ROOT/tsconfig.json" || exit 1
 version=$(jq -r '.version' "$PI_PACKAGE_DIR/package.json" 2>/dev/null || printf 'unknown')
 printf 'ok - tracked Pi extensions pass strict no-emit typecheck against Pi %s\n' "$version"
+
+if node --experimental-strip-types -e 'process.exit(0)' >/dev/null 2>&1; then
+  FOOTER_ROOT="$TMP_ROOT" node --experimental-strip-types --input-type=module <<'JS'
+import assert from "node:assert/strict";
+const { formatFooterLines, footerVisibleWidth } = await import(`file://${process.env.FOOTER_ROOT}/lib/fm-primary-footer-layout.ts`);
+
+const theme = { fg: (_color, text) => text };
+const data = {
+  state: "running",
+  model: "gpt-5.6-sol",
+  thinking: "think:high",
+  project: "firstmate",
+  branch: "fm/pi-ui-parity",
+  context: "12.3k (18%)",
+  input: "4.5k",
+  output: "2.1k",
+  cost: "0.042",
+  statuses: ["watcher: healthy", "guard: armed"],
+};
+for (const width of [32, 57, 80, 120]) {
+  for (const line of formatFooterLines(data, width, theme)) {
+    assert.ok(footerVisibleWidth(line) <= width, `footer overflow at ${width}: ${line}`);
+  }
+}
+assert.equal(formatFooterLines(data, 32, theme).length, 2);
+assert.match(formatFooterLines(data, 32, theme)[1], /watcher: healthy/);
+assert.equal(formatFooterLines(data, 80, theme).length, 2);
+assert.match(formatFooterLines(data, 120, theme)[1], /watcher: healthy/);
+console.log("ok - Firstmate Pi footer formatting stays within narrow and wide width tiers");
+JS
+  [ "$?" -eq 0 ] || exit 1
+else
+  printf 'skip: Node type stripping is unavailable for Pi footer formatting test\n'
+fi
