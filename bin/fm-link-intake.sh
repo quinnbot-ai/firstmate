@@ -7,9 +7,10 @@
 #   bin/fm-link-intake.sh validate --all
 #   bin/fm-link-intake.sh --help
 #
-# Records and the searchable index live only in $FM_HOME/data/link-intake/.
+# Records and the searchable index live in the generation selected by
+# $FM_HOME/data/link-intake/current.
 # The helper owns their exact Markdown and TSV formats, canonicalization, validation,
-# history snapshots, and atomic publication.
+# history snapshots, and single-switch atomic publication.
 # It never retrieves pages, downloads media, authenticates, or makes external changes.
 # A caller supplies only normalized public or otherwise authorized metadata after using
 # the appropriate existing browser or media tool.
@@ -23,59 +24,65 @@ set -u
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 FM_HOME=${FM_HOME:-$(cd "$SCRIPT_DIR/.." && pwd)}
 LINK_ROOT="$FM_HOME/data/link-intake"
-RECORDS_DIR="$LINK_ROOT/records"
-TRANSCRIPTS_DIR="$LINK_ROOT/transcripts"
-HISTORY_DIR="$LINK_ROOT/history"
-INDEX_FILE="$LINK_ROOT/index.tsv"
+GENERATIONS_DIR="$LINK_ROOT/generations"
+CURRENT_LINK="$LINK_ROOT/current"
 LOCK_DIR="$LINK_ROOT/.update-lock"
 LOCK_HELD=0
-TX_ACTIVE=0
-TX_RECORD=
-TX_RECORD_TMP=
-TX_RECORD_BACKUP=
-TX_RECORD_EXISTED=0
-TX_RECORD_PUBLISHED=0
-TX_INDEX_TMP=
-TX_INDEX_BACKUP=
-TX_INDEX_EXISTED=0
-TX_INDEX_PUBLISHED=0
+STAGED_GENERATION=
+STAGED_LINK=
+CURRENT_GENERATION=
+QUIET_CURRENT_GENERATION=
 
-rollback_publication() {
-  local failed=0
-  if [ "$TX_INDEX_PUBLISHED" = 1 ]; then
-    if [ "$TX_INDEX_EXISTED" = 1 ]; then
-      mv -f "$TX_INDEX_BACKUP" "$INDEX_FILE" || failed=1
-    else
-      rm -f "$INDEX_FILE" || failed=1
-    fi
-  fi
-  if [ "$TX_RECORD_PUBLISHED" = 1 ]; then
-    if [ "$TX_RECORD_EXISTED" = 1 ]; then
-      mv -f "$TX_RECORD_BACKUP" "$TX_RECORD" || failed=1
-    else
-      rm -f "$TX_RECORD" || failed=1
-    fi
-  fi
-  TX_ACTIVE=0
-  return "$failed"
+remove_generation() {
+  local generation=$1
+  case "$generation" in
+    "$GENERATIONS_DIR"/.generation.*)
+      rm -rf -- "$generation"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+resolve_current_quiet() {
+  local target name
+  QUIET_CURRENT_GENERATION=
+  [ -L "$CURRENT_LINK" ] || return 1
+  target=$(readlink "$CURRENT_LINK") || return 1
+  case "$target" in
+    generations/.generation.*) ;;
+    *) return 1 ;;
+  esac
+  name=${target#generations/}
+  case "$name" in
+    */*) return 1 ;;
+  esac
+  [ -d "$LINK_ROOT/$target" ] || return 1
+  QUIET_CURRENT_GENERATION="$LINK_ROOT/$target"
 }
 
 cleanup() {
-  local status=$? rollback_status=0
+  local status=$? owner
   trap - EXIT HUP INT TERM
-  if [ "$TX_ACTIVE" = 1 ]; then
-    rollback_publication || rollback_status=$?
-  fi
-  [ -z "$TX_RECORD_TMP" ] || rm -f "$TX_RECORD_TMP"
-  [ -z "$TX_INDEX_TMP" ] || rm -f "$TX_INDEX_TMP"
-  [ -z "$TX_RECORD_BACKUP" ] || rm -f "$TX_RECORD_BACKUP"
-  [ -z "$TX_INDEX_BACKUP" ] || rm -f "$TX_INDEX_BACKUP"
-  if [ "$LOCK_HELD" = 1 ]; then
-    rmdir "$LOCK_DIR" 2>/dev/null || true
-  fi
-  if [ "$rollback_status" -ne 0 ]; then
-    printf 'error: link-intake publication rollback failed\n' >&2
+  if [ -n "$STAGED_LINK" ] && ! rm -f "$STAGED_LINK"; then
+    printf 'error: temporary state link retained: %s\n' "$STAGED_LINK" >&2
     status=2
+  fi
+  if [ -n "$STAGED_GENERATION" ]; then
+    if resolve_current_quiet && [ "$QUIET_CURRENT_GENERATION" = "$STAGED_GENERATION" ]; then
+      STAGED_GENERATION=
+    elif ! remove_generation "$STAGED_GENERATION"; then
+      printf 'error: recoverable staged generation retained: %s\n' "$STAGED_GENERATION" >&2
+      status=2
+    fi
+  fi
+  if [ "$LOCK_HELD" = 1 ]; then
+    owner=$(sed -n '1p' "$LOCK_DIR/owner" 2>/dev/null || true)
+    if [ "$owner" = "$$" ]; then
+      rm -f "$LOCK_DIR/owner" 2>/dev/null || true
+      rmdir "$LOCK_DIR" 2>/dev/null || true
+    fi
   fi
   exit "$status"
 }
@@ -100,7 +107,7 @@ Usage:
 Source types: article, web, video, audio, document, image, other.
 
 `upsert` preserves every supplied original URL, snapshots a replaced record under
-data/link-intake/history/, and prints the current record path.
+data/link-intake/current/history/, and prints the current record path.
 `--failure` creates a visible inaccessible record when title, summary, claims, and
 terms cannot be obtained.
 For video or audio, provide a legally accessible `--transcript-file` or explain why
@@ -108,7 +115,7 @@ it is unavailable with `--transcript-unavailable`.
 EOF
 }
 
-require_one_line() {  # <field> <value>
+require_one_line() {
   local field=$1 value=$2
   [ -n "$value" ] || die "$field is required"
   case "$value" in
@@ -116,7 +123,7 @@ require_one_line() {  # <field> <value>
   esac
 }
 
-sha256() {  # stdin -> hexadecimal digest
+sha256() {
   if command -v shasum >/dev/null 2>&1; then
     shasum -a 256 | awk '{print $1}'
   elif command -v sha256sum >/dev/null 2>&1; then
@@ -126,7 +133,7 @@ sha256() {  # stdin -> hexadecimal digest
   fi
 }
 
-canonicalize_url() {  # <url> -> canonical URL
+canonicalize_url() {
   local input=$1 without_fragment scheme rest authority suffix lowered_authority
   require_one_line URL "$input"
   without_fragment=${input%%#*}
@@ -136,20 +143,8 @@ canonicalize_url() {  # <url> -> canonical URL
     *) die 'URL must use http or https' ;;
   esac
   rest=${without_fragment#*://}
-  case "$rest" in
-    */*)
-      authority=${rest%%/*}
-      suffix=/${rest#*/}
-      ;;
-    *\?*)
-      authority=${rest%%\?*}
-      suffix="?${rest#*\?}"
-      ;;
-    *)
-      authority=$rest
-      suffix=''
-      ;;
-  esac
+  authority=${rest%%[/?]*}
+  suffix=${rest#"$authority"}
   [ -n "$authority" ] || die 'URL must include a host'
   case "$authority" in
     *@*|*' '*|*\\*) die 'URL authority is not accepted' ;;
@@ -163,7 +158,7 @@ canonicalize_url() {  # <url> -> canonical URL
   printf '%s://%s%s\n' "$scheme" "$lowered_authority" "$suffix"
 }
 
-url_host() {  # <canonical URL> -> host-like searchable term
+url_host() {
   local rest authority
   rest=${1#*://}
   authority=${rest%%/*}
@@ -171,23 +166,89 @@ url_host() {  # <canonical URL> -> host-like searchable term
   printf '%s\n' "${authority%%:*}"
 }
 
-record_id_for() {  # <canonical URL> -> deterministic safe ID
+record_id_for() {
   printf '%s' "$1" | sha256
 }
 
-record_path_for() {  # <canonical URL> -> path
+logical_record_path_for() {
   local id
   id=$(record_id_for "$1")
-  printf '%s/%s.md\n' "$RECORDS_DIR" "$id"
+  printf '%s/records/%s.md\n' "$CURRENT_LINK" "$id"
 }
 
-with_lock() {
-  mkdir -p "$RECORDS_DIR" "$TRANSCRIPTS_DIR" "$HISTORY_DIR" || die 'could not initialize link-intake storage'
-  mkdir "$LOCK_DIR" 2>/dev/null || die 'another link-intake update is in progress'
-  LOCK_HELD=1
+acquire_lock() {
+  local owner stale attempt=0
+  mkdir -p "$GENERATIONS_DIR" || die 'could not initialize link-intake storage'
+  while [ "$attempt" -lt 3 ]; do
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+      if ! printf '%s\n' "$$" > "$LOCK_DIR/owner"; then
+        rmdir "$LOCK_DIR" 2>/dev/null || true
+        die 'could not record link-intake lock ownership'
+      fi
+      LOCK_HELD=1
+      return 0
+    fi
+    owner=$(sed -n '1p' "$LOCK_DIR/owner" 2>/dev/null || true)
+    case "$owner" in
+      ''|*[!0-9]*) die 'link-intake update lock owner is unreadable' ;;
+    esac
+    if kill -0 "$owner" 2>/dev/null; then
+      die 'another link-intake update is in progress'
+    fi
+    stale="$LINK_ROOT/.stale-lock.$$.$attempt"
+    if mv "$LOCK_DIR" "$stale" 2>/dev/null; then
+      rm -f "$stale/owner" || die "stale link-intake lock retained: $stale"
+      rmdir "$stale" || die "stale link-intake lock retained: $stale"
+    fi
+    attempt=$((attempt + 1))
+  done
+  die 'could not acquire link-intake update lock'
 }
 
-existing_original_urls() {  # <record> -> original URLs without Markdown prefix
+resolve_current() {
+  local target name
+  CURRENT_GENERATION=
+  if [ ! -e "$CURRENT_LINK" ] && [ ! -L "$CURRENT_LINK" ]; then
+    return 1
+  fi
+  [ -L "$CURRENT_LINK" ] || die "link-intake current state is not a symbolic link: $CURRENT_LINK"
+  target=$(readlink "$CURRENT_LINK") || die "link-intake current state is unreadable: $CURRENT_LINK"
+  case "$target" in
+    generations/.generation.*) ;;
+    *) die "link-intake current state target is invalid: $target" ;;
+  esac
+  name=${target#generations/}
+  case "$name" in
+    */*) die "link-intake current state target is invalid: $target" ;;
+  esac
+  CURRENT_GENERATION="$LINK_ROOT/$target"
+  [ -d "$CURRENT_GENERATION" ] || die "link-intake current generation is absent: $CURRENT_GENERATION"
+}
+
+prune_abandoned_generations() {
+  local current=${1:-} generation
+  for generation in "$GENERATIONS_DIR"/.generation.*; do
+    [ -d "$generation" ] || continue
+    [ -n "$current" ] && [ "$generation" = "$current" ] && continue
+    remove_generation "$generation" || die "recoverable staged generation retained: $generation"
+  done
+}
+
+create_staged_generation() {
+  local current=${1:-}
+  STAGED_GENERATION=$(mktemp -d "$GENERATIONS_DIR/.generation.XXXXXX") \
+    || die 'could not create staged link-intake generation'
+  if [ -n "$current" ]; then
+    cp -R "$current/." "$STAGED_GENERATION/" || die 'could not copy current link-intake generation'
+  else
+    mkdir -p "$STAGED_GENERATION/records" "$STAGED_GENERATION/transcripts" "$STAGED_GENERATION/history" \
+      || die 'could not initialize staged link-intake generation'
+    printf 'canonical_url\trecord_id\tretrieved_at\tsource_type\ttitle\tstatus\tsearch_terms\n' \
+      > "$STAGED_GENERATION/index.tsv" || die 'could not initialize staged link-intake index'
+  fi
+}
+
+existing_original_urls() {
   awk '
     /^Original URLs:$/ { seen=1; next }
     seen && /^- / { sub(/^- /, ""); print; next }
@@ -195,7 +256,7 @@ existing_original_urls() {  # <record> -> original URLs without Markdown prefix
   ' "$1"
 }
 
-unique_original_urls() {  # <existing record or empty> <new URL> -> sorted URLs
+unique_original_urls() {
   local existing=$1 original=$2
   {
     [ -n "$existing" ] && [ -f "$existing" ] && existing_original_urls "$existing"
@@ -203,8 +264,9 @@ unique_original_urls() {  # <existing record or empty> <new URL> -> sorted URLs
   } | LC_ALL=C sort -u
 }
 
-validate_record() {  # <record path> <expected canonical URL or empty>
-  local record=$1 expected=${2:-} canonical normalized record_id expected_id source title summary terms transcript status originals claims failure retrieved original
+validate_record() {
+  local record=$1 expected=${2:-} generation=$3
+  local canonical normalized record_id expected_id source title summary terms transcript status originals claims failure retrieved original
   [ -f "$record" ] || die "record is absent: $record"
   record_id=$(sed -n 's/^Record ID: //p' "$record" | head -1)
   canonical=$(sed -n 's/^Canonical URL: //p' "$record" | head -1)
@@ -240,7 +302,7 @@ EOF
   [ -n "$claims" ] || die "record has no claims or takeaways: $record"
   case "$transcript" in
     'not applicable'|unavailable:*) ;;
-    'stored at transcripts/'*) [ -f "$LINK_ROOT/${transcript#stored at }" ] || die "record transcript path is absent: $record" ;;
+    'stored at transcripts/'*) [ -f "$generation/${transcript#stored at }" ] || die "record transcript path is absent: $record" ;;
     *) die "record transcript metadata is invalid: $record" ;;
   esac
   case "$source" in
@@ -254,12 +316,12 @@ EOF
   fi
 }
 
-validate_index_record() {  # <record> <canonical> <id> <retrieved-at> <source> <title> <status> <terms>
-  local record=$1 canonical=$2 id=$3 retrieved=$4 source=$5 title=$6 status=$7 terms=$8
+validate_index_record() {
+  local generation=$1 record=$2 canonical=$3 id=$4 retrieved=$5 source=$6 title=$7 status=$8 terms=$9
   local record_id record_retrieved record_source record_title record_status record_terms expected_id
   expected_id=$(record_id_for "$canonical")
   [ "$id" = "$expected_id" ] || die "index record ID does not match canonical URL: $canonical"
-  validate_record "$record" "$canonical"
+  validate_record "$record" "$canonical" "$generation"
   record_id=$(sed -n 's/^Record ID: //p' "$record" | head -1)
   record_retrieved=$(sed -n 's/^Retrieved at: //p' "$record" | head -1)
   record_source=$(sed -n 's/^Source type: //p' "$record" | head -1)
@@ -277,9 +339,12 @@ validate_index_record() {  # <record> <canonical> <id> <retrieved-at> <source> <
 
 VALIDATED_RECORD_COUNT=0
 
-validate_state() {  # <index> [replacement id] [replacement record]
-  local index=$1 replacement_id=${2:-} replacement_record=${3:-}
-  local header canonical id retrieved source title status terms record path basename matches count=0
+validate_state() {
+  local generation=$1 index="$1/index.tsv" records="$1/records" history="$1/history" transcripts="$1/transcripts"
+  local header canonical id retrieved source title status terms record path basename matches count=0 relative
+  [ -d "$records" ] || die "link-intake records directory is absent: $records"
+  [ -d "$history" ] || die "link-intake history directory is absent: $history"
+  [ -d "$transcripts" ] || die "link-intake transcripts directory is absent: $transcripts"
   [ -f "$index" ] || die "link-intake index is absent: $index"
   IFS= read -r header < "$index" || die "link-intake index is unreadable: $index"
   [ "$header" = $'canonical_url\trecord_id\tretrieved_at\tsource_type\ttitle\tstatus\tsearch_terms' ] \
@@ -291,102 +356,89 @@ validate_state() {  # <index> [replacement id] [replacement record]
   ' "$index" || die "link-intake index rows are malformed or duplicated: $index"
   while IFS=$'\t' read -r canonical id retrieved source title status terms; do
     [ "$canonical" = canonical_url ] && continue
-    if [ -n "$replacement_id" ] && [ "$id" = "$replacement_id" ]; then
-      record=$replacement_record
-    else
-      record="$RECORDS_DIR/$id.md"
-    fi
-    validate_index_record "$record" "$canonical" "$id" "$retrieved" "$source" "$title" "$status" "$terms"
+    record="$records/$id.md"
+    validate_index_record "$generation" "$record" "$canonical" "$id" "$retrieved" "$source" "$title" "$status" "$terms"
     count=$((count + 1))
   done < "$index"
   [ "$count" -gt 0 ] || die 'link-intake index has no records'
-  for path in "$RECORDS_DIR"/*.md; do
-    [ -f "$path" ] || continue
+  for path in "$records"/*; do
+    [ -e "$path" ] || continue
+    [ -f "$path" ] || die "unexpected entry in records directory: $path"
     basename=${path##*/}
+    case "$basename" in *.md) ;; *) die "unexpected entry in records directory: $path" ;; esac
     id=${basename%.md}
-    [ -n "$replacement_id" ] && [ "$id" = "$replacement_id" ] && continue
     matches=$(awk -F '\t' -v id="$id" 'NR > 1 && $2 == id { count++ } END { print count + 0 }' "$index")
     [ "$matches" = 1 ] || die "record is absent from index: $path"
   done
-  if [ -n "$replacement_id" ]; then
-    matches=$(awk -F '\t' -v id="$replacement_id" 'NR > 1 && $2 == id { count++ } END { print count + 0 }' "$index")
-    [ "$matches" = 1 ] || die "replacement record is absent from index: $replacement_record"
-  fi
+  for path in "$history"/*/*.md; do
+    [ -f "$path" ] || continue
+    validate_record "$path" '' "$generation"
+  done
+  for path in "$transcripts"/*/*.txt; do
+    [ -f "$path" ] || continue
+    relative=${path#"$generation/"}
+    matches=$(grep -R -F -l "Transcript: stored at $relative" "$records" "$history" 2>/dev/null | wc -l | tr -d ' ')
+    [ "$matches" -gt 0 ] || die "transcript is absent from records and history: $path"
+  done
   VALIDATED_RECORD_COUNT=$count
 }
 
-prepare_index() {  # <canonical> <id> <retrieved-at> <source> <title> <status> <terms>
-  local canonical=$1 id=$2 retrieved=$3 source=$4 title=$5 status=$6 terms=$7
-  TX_INDEX_TMP=$(mktemp "$LINK_ROOT/.index.XXXXXX") || die 'could not create index update'
+prepare_index() {
+  local generation=$1 canonical=$2 id=$3 retrieved=$4 source=$5 title=$6 status=$7 terms=$8
+  local index="$generation/index.tsv" tmp
+  tmp=$(mktemp "$generation/.index.XXXXXX") || die 'could not create staged index update'
   {
     printf 'canonical_url\trecord_id\tretrieved_at\tsource_type\ttitle\tstatus\tsearch_terms\n'
-    if [ -f "$INDEX_FILE" ]; then
-      awk -F '\t' -v id="$id" 'NR > 1 && $2 != id { print }' "$INDEX_FILE"
-    fi
+    awk -F '\t' -v id="$id" 'NR > 1 && $2 != id { print }' "$index"
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$canonical" "$id" "$retrieved" "$source" "$title" "$status" "$terms"
-  } > "$TX_INDEX_TMP" || die 'could not write index update'
+  } > "$tmp" || die 'could not write staged index update'
+  mv "$tmp" "$index" || die 'could not install staged index update'
 }
 
-publish_state() {  # <record>
-  local record=$1
-  TX_RECORD=$record
-  if [ -f "$record" ]; then
-    TX_RECORD_EXISTED=1
-    TX_RECORD_BACKUP=$(mktemp "$RECORDS_DIR/.record-backup.XXXXXX") || die 'could not create record rollback backup'
-    cp "$record" "$TX_RECORD_BACKUP" || die 'could not prepare record rollback backup'
-  fi
-  if [ -f "$INDEX_FILE" ]; then
-    TX_INDEX_EXISTED=1
-    TX_INDEX_BACKUP=$(mktemp "$LINK_ROOT/.index-backup.XXXXXX") || die 'could not create index rollback backup'
-    cp "$INDEX_FILE" "$TX_INDEX_BACKUP" || die 'could not prepare index rollback backup'
-  fi
-  TX_ACTIVE=1
-  TX_RECORD_PUBLISHED=1
-  mv "$TX_RECORD_TMP" "$record" || die 'could not publish record update'
-  TX_INDEX_PUBLISHED=1
-  mv "$TX_INDEX_TMP" "$INDEX_FILE" || die 'could not publish index update'
-  TX_ACTIVE=0
-  rm -f "$TX_RECORD_BACKUP" "$TX_INDEX_BACKUP"
-  TX_RECORD_TMP=
-  TX_INDEX_TMP=
-  TX_RECORD_BACKUP=
-  TX_INDEX_BACKUP=
-}
-
-snapshot_existing_record() {  # <record> <id> <retrieved date>
-  local record=$1 id=$2 retrieved=$3 digest destination tmp
+snapshot_existing_record() {
+  local generation=$1 record=$2 id=$3
+  local digest destination tmp previous_retrieved
   [ -f "$record" ] || return 0
   digest=$(sha256 < "$record")
-  destination="$HISTORY_DIR/$id/${retrieved}-${digest}.md"
+  previous_retrieved=$(sed -n 's/^Retrieved at: //p' "$record" | head -1)
+  destination="$generation/history/$id/${previous_retrieved}-${digest}.md"
   [ -f "$destination" ] && return 0
-  mkdir -p "$HISTORY_DIR/$id" || die 'could not initialize record history'
-  tmp=$(mktemp "$HISTORY_DIR/$id/.snapshot.XXXXXX") || die 'could not create record history snapshot'
-  if ! cp "$record" "$tmp" || ! mv "$tmp" "$destination"; then
-    rm -f "$tmp"
-    die 'could not publish record history snapshot'
-  fi
+  mkdir -p "$generation/history/$id" || die 'could not initialize record history'
+  tmp=$(mktemp "$generation/history/$id/.snapshot.XXXXXX") || die 'could not create record history snapshot'
+  cp "$record" "$tmp" || die 'could not stage record history snapshot'
+  mv "$tmp" "$destination" || die 'could not install staged record history snapshot'
 }
 
-copy_transcript() {  # <source> <id> -> durable relative transcript path
-  local source=$1 id=$2 digest directory destination tmp
+copy_transcript() {
+  local generation=$1 source=$2 id=$3
+  local digest directory destination tmp
   [ -f "$source" ] || die "transcript file is absent: $source"
   digest=$(sha256 < "$source")
-  directory="$TRANSCRIPTS_DIR/$id"
+  directory="$generation/transcripts/$id"
   destination="$directory/$digest.txt"
   if [ ! -f "$destination" ]; then
     mkdir -p "$directory" || die 'could not initialize transcript storage'
-    tmp=$(mktemp "$directory/.transcript.XXXXXX") || die 'could not create transcript update'
-    if ! cp "$source" "$tmp" || ! mv "$tmp" "$destination"; then
-      rm -f "$tmp"
-      die 'could not publish transcript'
-    fi
+    tmp=$(mktemp "$directory/.transcript.XXXXXX") || die 'could not create staged transcript'
+    cp "$source" "$tmp" || die 'could not stage transcript'
+    mv "$tmp" "$destination" || die 'could not install staged transcript'
   fi
   printf 'transcripts/%s/%s.txt\n' "$id" "$digest"
 }
 
+publish_generation() {
+  local target
+  target="generations/${STAGED_GENERATION##*/}"
+  STAGED_LINK=$(mktemp "$LINK_ROOT/.current.XXXXXX") || die 'could not create current-state switch'
+  rm -f "$STAGED_LINK" || die 'could not prepare current-state switch'
+  ln -s "$target" "$STAGED_LINK" || die 'could not prepare current-state target'
+  mv -fh "$STAGED_LINK" "$CURRENT_LINK" || die 'could not publish link-intake generation'
+  STAGED_LINK=
+  STAGED_GENERATION=
+}
+
 command_upsert() {
   local original='' canonical='' canonical_input='' source='' title='' summary='' terms='' retrieved='' transcript_file='' transcript_unavailable='' failure='' argument claim
-  local claims='' id record existing transcript note status host path
+  local claims='' id current='' record existing transcript note status host path record_tmp logical_record
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --url) shift; original=${1:-} ;;
@@ -403,7 +455,7 @@ command_upsert() {
       -h|--help|help) usage; return 0 ;;
       *) die "unknown argument: $1" ;;
     esac
-    [ "$#" -gt 0 ] || die "missing value for option"
+    [ "$#" -gt 0 ] || die 'missing value for option'
     shift
   done
   require_one_line URL "$original"
@@ -431,38 +483,44 @@ command_upsert() {
   require_one_line 'search terms' "$terms"
   [ -n "$claims" ] || die 'at least one --claim is required unless --failure is given'
   [ -z "$transcript_file" ] || [ -z "$transcript_unavailable" ] || die 'provide either transcript-file or transcript-unavailable, not both'
-  id=$(record_id_for "$canonical")
   case "$source" in
     video|audio)
-      if [ -n "$transcript_file" ]; then
-        transcript=$(copy_transcript "$transcript_file" "$id") || return $?
-        note="stored at $transcript"
-      else
+      if [ -z "$transcript_file" ]; then
         if [ -z "$transcript_unavailable" ] && [ -n "$failure" ]; then
           transcript_unavailable=$failure
         fi
         require_one_line 'transcript-unavailable reason' "$transcript_unavailable"
-        note="unavailable: $transcript_unavailable"
+      else
+        [ -f "$transcript_file" ] || die "transcript file is absent: $transcript_file"
       fi
       ;;
     *)
       [ -z "$transcript_file" ] || die 'transcript-file is only supported for video or audio records'
       [ -z "$transcript_unavailable" ] || die 'transcript-unavailable is only supported for video or audio records'
-      note='not applicable'
       ;;
   esac
-  with_lock
-  record="$RECORDS_DIR/$id.md"
-  existing=$record
-  if [ -f "$INDEX_FILE" ]; then
-    validate_state "$INDEX_FILE"
-  else
-    for path in "$RECORDS_DIR"/*.md; do
-      [ -f "$path" ] || continue
-      die "link-intake index is absent while records exist: $path"
-    done
+  acquire_lock
+  if resolve_current; then
+    current=$CURRENT_GENERATION
+    validate_state "$current"
   fi
-  TX_RECORD_TMP=$(mktemp "$RECORDS_DIR/.record.XXXXXX") || die 'could not create record update'
+  prune_abandoned_generations "$current"
+  create_staged_generation "$current"
+  id=$(record_id_for "$canonical")
+  record="$STAGED_GENERATION/records/$id.md"
+  existing=$record
+  case "$source" in
+    video|audio)
+      if [ -n "$transcript_file" ]; then
+        transcript=$(copy_transcript "$STAGED_GENERATION" "$transcript_file" "$id") || return $?
+        note="stored at $transcript"
+      else
+        note="unavailable: $transcript_unavailable"
+      fi
+      ;;
+    *) note='not applicable' ;;
+  esac
+  record_tmp=$(mktemp "$STAGED_GENERATION/records/.record.XXXXXX") || die 'could not create staged record update'
   {
     printf '# Link intake record\n\n'
     printf 'Record ID: %s\n' "$id"
@@ -479,29 +537,34 @@ command_upsert() {
     printf 'Failure: %s\n\n' "${failure:-none}"
     printf '## Key claims or takeaways\n'
     printf '%s\n' "$claims" | while IFS= read -r argument; do printf '%s\n' "- $argument"; done
-  } > "$TX_RECORD_TMP" || die 'could not write record update'
-  validate_record "$TX_RECORD_TMP" "$canonical"
-  prepare_index "$canonical" "$id" "$retrieved" "$source" "$title" "$status" "$terms"
-  validate_state "$TX_INDEX_TMP" "$id" "$TX_RECORD_TMP"
-  if [ -f "$record" ] && ! cmp -s "$record" "$TX_RECORD_TMP"; then
-    snapshot_existing_record "$record" "$id" "$retrieved"
+  } > "$record_tmp" || die 'could not write staged record update'
+  validate_record "$record_tmp" "$canonical" "$STAGED_GENERATION"
+  if [ -f "$record" ] && ! cmp -s "$record" "$record_tmp"; then
+    snapshot_existing_record "$STAGED_GENERATION" "$record" "$id"
   fi
-  publish_state "$record"
-  printf '%s\n' "$record"
+  mv "$record_tmp" "$record" || die 'could not install staged record update'
+  prepare_index "$STAGED_GENERATION" "$canonical" "$id" "$retrieved" "$source" "$title" "$status" "$terms"
+  validate_state "$STAGED_GENERATION"
+  publish_generation
+  logical_record=$(logical_record_path_for "$canonical")
+  printf '%s\n' "$logical_record"
 }
 
 command_validate() {
   local target=${1:-} canonical record
   [ "$#" -eq 1 ] || die 'validate accepts one URL or --all'
-  validate_state "$INDEX_FILE"
+  acquire_lock
+  resolve_current || die 'link-intake current state is absent'
+  prune_abandoned_generations "$CURRENT_GENERATION"
+  validate_state "$CURRENT_GENERATION"
   if [ "$target" = --all ]; then
     printf 'valid: %s records\n' "$VALIDATED_RECORD_COUNT"
     return 0
   fi
   canonical=$(canonicalize_url "$target") || return $?
-  record=$(record_path_for "$canonical")
-  validate_record "$record" "$canonical"
-  printf 'valid: %s\n' "$record"
+  record="$CURRENT_GENERATION/records/$(record_id_for "$canonical").md"
+  validate_record "$record" "$canonical" "$CURRENT_GENERATION"
+  printf 'valid: %s\n' "$(logical_record_path_for "$canonical")"
 }
 
 main() {

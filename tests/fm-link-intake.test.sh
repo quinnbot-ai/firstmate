@@ -9,6 +9,7 @@ set -u
 INTAKE="$ROOT/bin/fm-link-intake.sh"
 TMP_ROOT=$(fm_test_tmproot fm-link-intake)
 REAL_MV=$(command -v mv)
+REAL_RM=$(command -v rm)
 
 make_home() {  # <name>
   local home="$TMP_ROOT/$1"
@@ -22,7 +23,7 @@ run_intake() {  # <home> <arguments...>
   FM_HOME="$home" "$INTAKE" "$@"
 }
 
-make_failing_mv() {  # <home>
+make_failing_tools() {  # <home>
   local fakebin="$1/fakebin"
   mkdir -p "$fakebin"
   cat > "$fakebin/mv" <<'SH'
@@ -36,6 +37,11 @@ if [ "$destination" = "${FM_FAIL_MOVE_DEST:-}" ] && [ ! -e "${FM_FAIL_MOVE_ONCE:
   : > "$FM_FAIL_MOVE_ONCE"
   exit 1
 fi
+if [ "$destination" = "${FM_KILL_MOVE_DEST:-}" ] && [ ! -e "${FM_KILL_MOVE_ONCE:?}" ]; then
+  : > "$FM_KILL_MOVE_ONCE"
+  kill -KILL "$PPID"
+  exit 1
+fi
 if [ "$destination" = "${FM_SIGNAL_MOVE_DEST:-}" ] && [ ! -e "${FM_SIGNAL_MOVE_ONCE:?}" ]; then
   : > "$FM_SIGNAL_MOVE_ONCE"
   "${FM_REAL_MV:?}" "$@"
@@ -45,14 +51,40 @@ if [ "$destination" = "${FM_SIGNAL_MOVE_DEST:-}" ] && [ ! -e "${FM_SIGNAL_MOVE_O
 fi
 exec "${FM_REAL_MV:?}" "$@"
 SH
+  cat > "$fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+set -u
+destination=
+for argument in "$@"; do
+  destination=$argument
+done
+if [ -n "${FM_FAIL_REMOVE_PREFIX:-}" ]; then
+  case "$destination" in
+    "$FM_FAIL_REMOVE_PREFIX"*)
+      if [ ! -e "${FM_FAIL_REMOVE_ONCE:?}" ]; then
+        : > "$FM_FAIL_REMOVE_ONCE"
+        exit 1
+      fi
+      ;;
+  esac
+fi
+exec "${FM_REAL_RM:?}" "$@"
+SH
   chmod +x "$fakebin/mv"
+  chmod +x "$fakebin/rm"
   printf '%s\n' "$fakebin"
 }
 
+current_root() {  # <home>
+  local home=$1 target
+  target=$(readlink "$home/data/link-intake/current") || fail 'current generation link is absent'
+  printf '%s/data/link-intake/%s\n' "$home" "$target"
+}
+
 record_for() {  # <home> <url>
-  local home=$1 url=$2
-  run_intake "$home" validate "$url" >/dev/null || fail 'expected record did not validate'
-  find "$home/data/link-intake/records" -type f -name '*.md' | head -1
+  local home=$1 url=$2 result
+  result=$(run_intake "$home" validate "$url") || fail 'expected record did not validate'
+  printf '%s\n' "${result#valid: }"
 }
 
 test_canonical_duplicate_converges_and_preserves_evidence() {
@@ -63,14 +95,14 @@ test_canonical_duplicate_converges_and_preserves_evidence() {
   second=$(run_intake "$home" upsert --url 'https://example.com/watch?b=2' --source-type web --title 'Updated title' --summary 'A newer searchable summary.' --terms 'updated,example' --claim 'Updated claim.') \
     || fail 'duplicate URL intake failed'
   [ "$first" = "$second" ] || fail 'canonical duplicate created a second record path'
-  count=$(find "$home/data/link-intake/records" -type f -name '*.md' | wc -l | tr -d ' ')
+  count=$(find "$(current_root "$home")/records" -type f -name '*.md' | wc -l | tr -d ' ')
   [ "$count" = 1 ] || fail 'canonical duplicate created multiple records'
   record=$second
   assert_grep 'Canonical URL: https://example.com/watch?b=2' "$record" 'canonical URL was not normalized'
   assert_grep '- HTTPS://Example.com:443/watch?b=2#chapter' "$record" 'first original URL was not retained'
   assert_grep '- https://example.com/watch?b=2' "$record" 'second original URL was not retained'
   assert_grep 'Updated title' "$record" 'current title was not updated'
-  history=$(find "$home/data/link-intake/history" -type f -name '*.md' | head -1)
+  history=$(find "$(current_root "$home")/history" -type f -name '*.md' | head -1)
   assert_present "$history" 'replaced record did not retain an immutable history snapshot'
   assert_grep 'First title' "$history" 'history snapshot lost prior evidence'
   pass 'canonical duplicate convergence retains original URLs and prior evidence'
@@ -82,7 +114,7 @@ test_titles_summaries_claims_and_terms_are_searchable() {
   run_intake "$home" upsert --url 'https://example.org/research' --source-type article --title 'Research Title' --summary 'Concise searchable summary of the research.' --terms 'research,searchable,summary' --claim 'The source makes a testable claim.' >/dev/null \
     || fail 'searchable intake failed'
   record=$(record_for "$home" 'https://example.org/research')
-  index="$home/data/link-intake/index.tsv"
+  index="$(current_root "$home")/index.tsv"
   assert_grep 'Title: Research Title' "$record" 'record title is missing'
   assert_grep 'Summary: Concise searchable summary of the research.' "$record" 'record summary is missing'
   assert_grep '- The source makes a testable claim.' "$record" 'record claim is missing'
@@ -114,9 +146,9 @@ test_video_transcript_metadata_is_durable() {
   record=$(record_for "$home" 'https://video.example.test/watch?v=42')
   transcript_path=$(sed -n 's/^Transcript: stored at //p' "$record")
   [ -n "$transcript_path" ] || fail 'record did not store transcript metadata'
-  assert_present "$home/data/link-intake/$transcript_path" 'durable transcript path is missing'
-  assert_grep 'A legally accessible transcript.' "$home/data/link-intake/$transcript_path" 'durable transcript body is wrong'
-  rm "$home/data/link-intake/$transcript_path"
+  assert_present "$(current_root "$home")/$transcript_path" 'durable transcript path is missing'
+  assert_grep 'A legally accessible transcript.' "$(current_root "$home")/$transcript_path" 'durable transcript body is wrong'
+  rm "$(current_root "$home")/$transcript_path"
   if run_intake "$home" validate 'https://video.example.test/watch?v=42' > "$home/missing-path.out" 2> "$home/missing-path.err"; then
     fail 'validation accepted missing durable transcript content'
   fi
@@ -128,90 +160,126 @@ test_video_transcript_metadata_is_durable() {
   pass 'video records retain transcripts and reject silent omissions'
 }
 
-test_atomic_updates_restore_record_and_index_on_publication_failure() {
-  local home record index fakebin before_record before_index after_record after_index failure_marker rc=0
+test_atomic_generation_switch_is_crash_safe() {
+  local home record index root fakebin before_record before_index before_current after_record after_index failure_marker
+  local old_transcript new_transcript retained generations rc=0
   home=$(make_home atomic)
-  run_intake "$home" upsert --url 'https://atomic.example.test/page' --source-type web --title 'Atomic title' --summary 'Initial complete summary.' --terms 'atomic,initial' --claim 'Initial claim.' >/dev/null \
+  old_transcript="$home/old-transcript.txt"
+  new_transcript="$home/new-transcript.txt"
+  printf 'Original durable transcript.\n' > "$old_transcript"
+  printf 'New staged transcript.\n' > "$new_transcript"
+  run_intake "$home" upsert --url 'https://atomic.example.test/page' --source-type video --title 'Atomic title' --summary 'Initial complete summary.' --terms 'atomic,initial' --claim 'Initial claim.' --transcript-file "$old_transcript" >/dev/null \
     || fail 'initial atomic intake failed'
   record=$(record_for "$home" 'https://atomic.example.test/page')
-  index="$home/data/link-intake/index.tsv"
-  fakebin=$(make_failing_mv "$home")
+  root=$(current_root "$home")
+  index="$root/index.tsv"
+  fakebin=$(make_failing_tools "$home")
   before_record=$(shasum -a 256 "$record" | awk '{print $1}')
   before_index=$(shasum -a 256 "$index" | awk '{print $1}')
-  failure_marker="$home/record-move-failed"
-  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_REAL_MV="$REAL_MV" \
-    FM_FAIL_MOVE_DEST="$record" FM_FAIL_MOVE_ONCE="$failure_marker" \
-    "$INTAKE" upsert --url 'https://atomic.example.test/page' --source-type web --title 'Record failure' --summary 'Valid update that cannot publish.' --terms 'atomic,record' --claim 'Record move fails.' > "$home/record-failure.out" 2> "$home/record-failure.err"; then
-    fail 'record publication failure unexpectedly succeeded'
+  before_current=$(readlink "$home/data/link-intake/current")
+  failure_marker="$home/current-move-failed"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_REAL_MV="$REAL_MV" FM_REAL_RM="$REAL_RM" \
+    FM_FAIL_MOVE_DEST="$home/data/link-intake/current" FM_FAIL_MOVE_ONCE="$failure_marker" \
+    "$INTAKE" upsert --url 'https://atomic.example.test/page' --source-type video --title 'Switch failure' --summary 'Valid update that cannot publish.' --terms 'atomic,switch' --claim 'The state switch fails.' --transcript-file "$new_transcript" > "$home/switch-failure.out" 2> "$home/switch-failure.err"; then
+    fail 'generation publication failure unexpectedly succeeded'
   fi
   after_record=$(shasum -a 256 "$record" | awk '{print $1}')
   after_index=$(shasum -a 256 "$index" | awk '{print $1}')
-  [ "$before_record" = "$after_record" ] || fail 'record publication failure changed the prior record'
-  [ "$before_index" = "$after_index" ] || fail 'record publication failure changed the prior index'
-  failure_marker="$home/index-move-failed"
-  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_REAL_MV="$REAL_MV" \
-    FM_FAIL_MOVE_DEST="$index" FM_FAIL_MOVE_ONCE="$failure_marker" \
-    "$INTAKE" upsert --url 'https://atomic.example.test/page' --source-type web --title 'Index failure' --summary 'Valid update that must roll back.' --terms 'atomic,index' --claim 'Index move fails.' > "$home/index-failure.out" 2> "$home/index-failure.err"; then
-    fail 'index publication failure unexpectedly succeeded'
+  [ "$before_current" = "$(readlink "$home/data/link-intake/current")" ] || fail 'failed state switch changed the current generation'
+  [ "$before_record" = "$after_record" ] || fail 'failed state switch changed the prior record'
+  [ "$before_index" = "$after_index" ] || fail 'failed state switch changed the prior index'
+  ! grep -R -F 'New staged transcript.' "$home/data/link-intake/generations" >/dev/null 2>&1 \
+    || fail 'failed state switch left an orphaned transcript'
+  generations=$(find "$home/data/link-intake/generations" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
+  [ "$generations" = 1 ] || fail 'failed state switch left an abandoned generation'
+  failure_marker="$home/current-move-retained"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_REAL_MV="$REAL_MV" FM_REAL_RM="$REAL_RM" \
+    FM_FAIL_MOVE_DEST="$home/data/link-intake/current" FM_FAIL_MOVE_ONCE="$failure_marker" \
+    FM_FAIL_REMOVE_PREFIX="$home/data/link-intake/generations/.generation." FM_FAIL_REMOVE_ONCE="$home/remove-failed" \
+    "$INTAKE" upsert --url 'https://atomic.example.test/page' --source-type video --title 'Retained candidate' --summary 'A recoverable candidate remains available.' --terms 'atomic,recoverable' --claim 'Cleanup fails visibly.' --transcript-file "$new_transcript" > "$home/retained.out" 2> "$home/retained.err"; then
+    fail 'publication with failed candidate cleanup unexpectedly succeeded'
   fi
-  after_record=$(shasum -a 256 "$record" | awk '{print $1}')
-  after_index=$(shasum -a 256 "$index" | awk '{print $1}')
-  [ "$before_record" = "$after_record" ] || fail 'index publication failure did not restore the prior record'
-  [ "$before_index" = "$after_index" ] || fail 'index publication failure did not preserve the prior index'
-  failure_marker="$home/record-move-signaled"
-  PATH="$fakebin:$PATH" FM_HOME="$home" FM_REAL_MV="$REAL_MV" \
-    FM_SIGNAL_MOVE_DEST="$record" FM_SIGNAL_MOVE_ONCE="$failure_marker" \
-    "$INTAKE" upsert --url 'https://atomic.example.test/page' --source-type web --title 'Interrupted update' --summary 'Valid update interrupted during publication.' --terms 'atomic,signal' --claim 'The signal terminates publication.' > "$home/signal.out" 2> "$home/signal.err" || rc=$?
+  retained=$(sed -n 's/^error: recoverable staged generation retained: //p' "$home/retained.err")
+  assert_present "$retained" 'failed cleanup did not preserve and report the recoverable generation'
+  [ "$before_current" = "$(readlink "$home/data/link-intake/current")" ] || fail 'failed cleanup changed the current generation'
+  run_intake "$home" validate --all >/dev/null || fail 'validation did not recover a retained staged generation'
+  [ ! -e "$retained" ] || fail 'recovery did not clean the retained staged generation'
+  failure_marker="$home/current-move-signaled"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_REAL_MV="$REAL_MV" FM_REAL_RM="$REAL_RM" \
+    FM_SIGNAL_MOVE_DEST="$home/data/link-intake/current" FM_SIGNAL_MOVE_ONCE="$failure_marker" \
+    "$INTAKE" upsert --url 'https://atomic.example.test/page' --source-type video --title 'Interrupted update' --summary 'Valid update interrupted at the commit point.' --terms 'atomic,signal' --claim 'The signal follows the atomic switch.' --transcript-file "$new_transcript" > "$home/signal.out" 2> "$home/signal.err" || rc=$?
   [ "$rc" = 143 ] || fail "TERM during publication should exit 143, got $rc"
-  after_record=$(shasum -a 256 "$record" | awk '{print $1}')
-  after_index=$(shasum -a 256 "$index" | awk '{print $1}')
-  [ "$before_record" = "$after_record" ] || fail 'TERM during publication did not restore the prior record'
-  [ "$before_index" = "$after_index" ] || fail 'TERM during publication changed the prior index'
   [ ! -d "$home/data/link-intake/.update-lock" ] || fail 'TERM left the update lock held'
-  ! find "$home/data/link-intake" \( -name '.record.*' -o -name '.index.*' -o -name '*-backup.*' \) | grep . >/dev/null \
-    || fail 'publication rollback left transaction files'
-  run_intake "$home" validate --all >/dev/null || fail 'restored state failed validation'
-  pass 'record and index publication failures restore the prior state'
+  run_intake "$home" validate --all >/dev/null || fail 'state committed before TERM failed validation'
+  assert_grep 'Title: Interrupted update' "$(record_for "$home" 'https://atomic.example.test/page')" 'TERM exposed a partial generation'
+  before_current=$(readlink "$home/data/link-intake/current")
+  failure_marker="$home/current-move-killed"
+  rc=0
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_REAL_MV="$REAL_MV" FM_REAL_RM="$REAL_RM" \
+    FM_KILL_MOVE_DEST="$home/data/link-intake/current" FM_KILL_MOVE_ONCE="$failure_marker" \
+    "$INTAKE" upsert --url 'https://atomic.example.test/page' --source-type video --title 'Killed update' --summary 'This update dies before its commit point.' --terms 'atomic,killed' --claim 'SIGKILL precedes the state switch.' --transcript-file "$old_transcript" > "$home/killed.out" 2> "$home/killed.err" || rc=$?
+  [ "$rc" = 137 ] || fail "SIGKILL before publication should exit 137, got $rc"
+  [ "$before_current" = "$(readlink "$home/data/link-intake/current")" ] || fail 'SIGKILL before the commit point changed current state'
+  [ -d "$home/data/link-intake/.update-lock" ] || fail 'SIGKILL fixture did not leave a stale lock'
+  run_intake "$home" validate --all >/dev/null || fail 'validation did not recover from a killed updater'
+  [ ! -d "$home/data/link-intake/.update-lock" ] || fail 'stale update lock was not reclaimed'
+  generations=$(find "$home/data/link-intake/generations" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
+  [ "$generations" = 1 ] || fail 'crash recovery left an abandoned generation'
+  pass 'one atomic generation switch survives failures and process death'
 }
 
 test_validation_rejects_bidirectional_divergence() {
-  local home other record orphan
+  local home other record orphan root saved
   home=$(make_home divergence)
   other=$(make_home divergence-other)
   run_intake "$home" upsert --url 'https://consistent.example.test/page' --source-type web --title 'Consistent' --summary 'Initially consistent state.' --terms 'consistent' --claim 'The state starts consistent.' >/dev/null \
     || fail 'consistent intake failed'
   run_intake "$other" upsert --url 'https://orphan.example.test/page' --source-type web --title 'Orphan' --summary 'Record not present in the first index.' --terms 'orphan' --claim 'The copied record is unindexed.' >/dev/null \
     || fail 'orphan fixture intake failed'
-  orphan=$(find "$other/data/link-intake/records" -type f -name '*.md' | head -1)
-  cp "$orphan" "$home/data/link-intake/records/"
+  orphan=$(find "$(current_root "$other")/records" -type f -name '*.md' | head -1)
+  root=$(current_root "$home")
+  cp "$orphan" "$root/records/"
   if run_intake "$home" validate --all > "$home/orphan.out" 2> "$home/orphan.err"; then
     fail 'validation accepted a record absent from the index'
   fi
   assert_grep 'record is absent from index' "$home/orphan.err" 'orphan record failure was not visible'
-  rm "$home/data/link-intake/records/${orphan##*/}"
+  rm "$root/records/${orphan##*/}"
   record=$(record_for "$home" 'https://consistent.example.test/page')
+  saved="$home/saved-record.md"
+  cp "$record" "$saved"
   rm "$record"
   if run_intake "$home" validate --all > "$home/missing-record.out" 2> "$home/missing-record.err"; then
     fail 'validation accepted an index entry without its record'
   fi
   assert_grep 'record is absent' "$home/missing-record.err" 'missing indexed record failure was not visible'
-  pass 'validation rejects divergence in both index-to-record directions'
+  cp "$saved" "$record"
+  mkdir -p "$root/transcripts/orphan"
+  printf 'Unreferenced transcript.\n' > "$root/transcripts/orphan/content.txt"
+  if run_intake "$home" validate --all > "$home/orphan-transcript.out" 2> "$home/orphan-transcript.err"; then
+    fail 'validation accepted a transcript absent from records and history'
+  fi
+  assert_grep 'transcript is absent from records and history' "$home/orphan-transcript.err" 'orphan transcript failure was not visible'
+  pass 'validation rejects record, index, and transcript divergence'
 }
 
 test_odd_urls_never_control_filenames_or_shell() {
-  local home record files
+  local home record files query_record
   home=$(make_home odd-url)
   run_intake "$home" upsert --url 'https://EXAMPLE.test/a/../../%24%28touch%20nope%29?x=%3B%26' --source-type web --title 'Odd URL title' --summary 'Odd but valid URL summary.' --terms 'odd,url' --claim 'Odd URL remains data.' >/dev/null \
     || fail 'odd URL intake failed'
   record=$(record_for "$home" 'https://example.test/a/../../%24%28touch%20nope%29?x=%3B%26')
-  files=$(find "$home/data/link-intake/records" -type f -name '*.md' -exec basename {} \;)
+  files=$(find "$(current_root "$home")/records" -type f -name '*.md' -exec basename {} \;)
   case "$files" in [0-9a-f][0-9a-f]*) ;; *) fail 'record filename is not a deterministic hexadecimal digest' ;; esac
   assert_grep 'Canonical URL: https://example.test/a/../../%24%28touch%20nope%29?x=%3B%26' "$record" 'odd URL was not retained as data'
   if run_intake "$home" upsert --url 'https://example.test/@unsafe' --canonical-url 'file:///tmp/nope' --source-type web --title 'Bad canonical' --summary 'Should reject.' --terms 'bad' --claim 'Bad.' > "$home/bad.out" 2> "$home/bad.err"; then
     fail 'non-HTTP canonical URL was accepted'
   fi
   assert_grep 'URL must use http or https' "$home/bad.err" 'unsafe canonical URL failure was not visible'
-  pass 'odd URLs use digest paths and unsafe URL schemes are refused'
+  run_intake "$home" upsert --url 'https://Example.test?Token=ABC/Path' --source-type web --title 'Query slash' --summary 'A slash inside a query remains case-sensitive data.' --terms 'query,slash' --claim 'Only the scheme and host are lowercased.' >/dev/null \
+    || fail 'query containing a slash was rejected'
+  query_record=$(record_for "$home" 'https://example.test?Token=ABC/Path')
+  assert_grep 'Canonical URL: https://example.test?Token=ABC/Path' "$query_record" 'query content was lowercased as authority'
+  pass 'odd URLs preserve query case and use digest paths'
 }
 
 test_agents_trigger_is_concise_and_agent_agnostic() {
@@ -229,7 +297,7 @@ test_canonical_duplicate_converges_and_preserves_evidence
 test_titles_summaries_claims_and_terms_are_searchable
 test_inaccessible_links_remain_visible_and_valid
 test_video_transcript_metadata_is_durable
-test_atomic_updates_restore_record_and_index_on_publication_failure
+test_atomic_generation_switch_is_crash_safe
 test_validation_rejects_bidirectional_divergence
 test_odd_urls_never_control_filenames_or_shell
 test_agents_trigger_is_concise_and_agent_agnostic
