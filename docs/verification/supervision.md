@@ -190,7 +190,8 @@ tests/fm-turnend-guard.test.sh
 ## Pure Kun presentation parity
 
 The Firstmate Pure Kun presentation was verified on 2026-07-28 with Pi 0.82.0.
-The tracked `firstmate-dark` theme and default footer use Pi's native theme, footer-data, context-usage, session-branch, and terminal-title APIs while preserving extension status texts.
+[The README's Pi launch guidance](../../README.md#install-and-launch) owns the current user-visible presentation contract.
+The tracked implementation uses Pi's native theme, footer-data, context-usage, session-branch, extension-status, and terminal-title APIs.
 
 Exact commands and output:
 
