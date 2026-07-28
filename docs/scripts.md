@@ -103,6 +103,9 @@ Run `bin/fm-convergence-scoreboard.sh <local-ref> <upstream-ref>` from a clean w
 Keep both ref arguments explicit and record the emitted commit identities with the measurements so a result can be reproduced after branch names move.
 The diff uses the refs' unique merge base and the resolved local commit, while ahead and behind use the full symmetric commit graph.
 Git attributes come from the resolved local commit, so worktree, repository-info, replacement-ref, and user configuration cannot change a repeated measurement.
+
+Stated limitation: the cleanliness preflight assumes repo-local `.git/info/attributes`, filter configuration, and fsmonitor configuration are benign ambient inputs; they can affect whether the command proceeds, but they do not enter the isolated ref measurement.
+
 First-parent deliveries count local first-parent commits that are not reachable from upstream.
 Renames count as one deletion plus one addition, and binary paths count as changed files with zero line changes.
 The stable file-group order is `agent-runtime`, `automation`, `tests`, `documentation`, `configuration`, and `other`.
