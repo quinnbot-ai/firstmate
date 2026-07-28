@@ -32,8 +32,6 @@
 set -u
 
 export LC_ALL=C
-export GIT_NO_LAZY_FETCH=1
-export GIT_OPTIONAL_LOCKS=0
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELF="$SELF_DIR/$(basename "${BASH_SOURCE[0]}")"
@@ -94,26 +92,34 @@ measure_error() {
   exit 1
 }
 
-sanitize_git_environment() {
-  unset GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_ATTR_NOSYSTEM GIT_ATTR_SOURCE
-  unset GIT_CEILING_DIRECTORIES GIT_COMMON_DIR GIT_CONFIG GIT_CONFIG_GLOBAL
-  unset GIT_CONFIG_NOSYSTEM GIT_CONFIG_PARAMETERS GIT_CONFIG_SYSTEM
-  unset GIT_DEFAULT_HASH GIT_DIR GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_GRAFT_FILE
-  unset GIT_IMPLICIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_PREFIX
-  unset GIT_REPLACE_REF_BASE GIT_SHALLOW_FILE GIT_WORK_TREE
-  export GIT_CONFIG_COUNT=0
-  export GIT_CONFIG_GLOBAL=/dev/null
-  export GIT_CONFIG_NOSYSTEM=1
-  export GIT_NO_LAZY_FETCH=1
-  export GIT_NO_REPLACE_OBJECTS=1
-  export GIT_OPTIONAL_LOCKS=0
+isolated_git() {
+  local attr_source=$1 object_directory=$2
+  local -a environment
+  shift 2
+  environment=(
+    env -i
+    "PATH=$PATH"
+    "HOME=${HOME-}"
+    "LC_ALL=C"
+    "GIT_CONFIG_COUNT=0"
+    "GIT_CONFIG_GLOBAL=/dev/null"
+    "GIT_CONFIG_NOSYSTEM=1"
+    "GIT_NO_LAZY_FETCH=1"
+    "GIT_NO_REPLACE_OBJECTS=1"
+    "GIT_OPTIONAL_LOCKS=0"
+  )
+  if [ -n "$attr_source" ]; then
+    environment+=(
+      "GIT_ATTR_NOSYSTEM=1"
+      "GIT_ATTR_SOURCE=$attr_source"
+      "GIT_OBJECT_DIRECTORY=$object_directory"
+    )
+  fi
+  "${environment[@]}" git "$@"
 }
 
 preflight_git() {
-  (
-    sanitize_git_environment
-    git "$@"
-  )
+  isolated_git '' '' "$@"
 }
 
 reject_ambiguous_ref() {
@@ -204,8 +210,7 @@ cleanup_measurement() {
 }
 trap cleanup_measurement EXIT
 
-if ! GIT_CONFIG_COUNT=0 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
-  preflight_git init --bare --quiet --template= --object-format="$OBJECT_FORMAT" \
+if ! preflight_git init --bare --quiet --template= --object-format="$OBJECT_FORMAT" \
     "$MEASURE_GIT_DIR" 2>/dev/null; then
   measure_error \
     "cannot initialize isolated storage for measurements" \
@@ -213,14 +218,9 @@ if ! GIT_CONFIG_COUNT=0 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
 fi
 
 measure_git() {
-  (
-    sanitize_git_environment
-    export GIT_ATTR_NOSYSTEM=1
-    export GIT_ATTR_SOURCE="$LOCAL_COMMIT"
-    export GIT_OBJECT_DIRECTORY="$OBJECTS_DIR"
-    git --no-replace-objects --git-dir="$MEASURE_GIT_DIR" \
-      -c core.bigFileThreshold=512m "$@"
-  )
+  isolated_git "$LOCAL_COMMIT" "$OBJECTS_DIR" \
+    --no-replace-objects --git-dir="$MEASURE_GIT_DIR" \
+    -c core.bigFileThreshold=512m "$@"
 }
 
 if ! MERGE_BASES=$(measure_git merge-base --all "$UPSTREAM_COMMIT" "$LOCAL_COMMIT" 2>/dev/null); then

@@ -154,7 +154,7 @@ test_tab_prefixed_path_is_not_documentation() {
   pass "scoreboard preserves leading tabs when classifying changed paths"
 }
 
-test_preflight_git_environment_is_sanitized() {
+test_git_environment_is_allowlisted() {
   local repo decoy expected out shim_dir real_git source_format ambient_format
   local ambient_shallow ambient_graft
   repo=$TMP_ROOT/repo
@@ -180,12 +180,16 @@ test_preflight_git_environment_is_sanitized() {
     "$(git -C "$repo" rev-parse upstream)" \
     > "$ambient_graft"
   mkdir -p "$shim_dir"
-  cat > "$shim_dir/git" <<'EOF'
-#!/usr/bin/env bash
-[ "${GIT_OPTIONAL_LOCKS-}" = 0 ] || exit 91
-[ "${GIT_NO_LAZY_FETCH-}" = 1 ] || exit 92
-exec "$REAL_GIT" "$@"
-EOF
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' '[ "${GIT_OPTIONAL_LOCKS-}" = 0 ] || exit 91'
+    printf '%s\n' '[ "${GIT_NO_LAZY_FETCH-}" = 1 ] || exit 92'
+    printf '%s\n' '[ -z "${GIT_NAMESPACE-}" ] || exit 93'
+    printf '%s\n' '[ -z "${SCOREBOARD_AMBIENT_SENTINEL-}" ] || exit 94'
+    printf '%s\n' '[ -z "${REAL_GIT-}" ] || exit 95'
+    printf '[ "${HOME-}" = %q ] || exit 96\n' "${HOME-}"
+    printf 'exec %q "$@"\n' "$real_git"
+  } > "$shim_dir/git"
   chmod +x "$shim_dir/git"
 
   expected=$(run_scoreboard "$repo" local upstream)
@@ -199,14 +203,16 @@ EOF
       GIT_SHALLOW_FILE="$ambient_shallow" \
       GIT_GRAFT_FILE="$ambient_graft" \
       GIT_DEFAULT_HASH="$ambient_format" \
+      GIT_NAMESPACE=ambient \
       GIT_OPTIONAL_LOCKS=1 \
       GIT_NO_LAZY_FETCH=0 \
+      SCOREBOARD_AMBIENT_SENTINEL=present \
       "$SCOREBOARD" local upstream
   )
 
   [ "$out" = "$expected" ] \
     || fail "ambient Git repository or mutation settings changed the explicit-ref measurement"
-  pass "scoreboard binds object format, repository selection, locks, and fetches to explicit inputs"
+  pass "scoreboard allowlists the complete Git execution environment"
 }
 
 test_fail_closed_invocation() {
@@ -379,7 +385,7 @@ test_toon_control_characters_are_escaped() {
 test_deterministic_scoreboard
 test_attributes_are_scoped_to_local_ref
 test_tab_prefixed_path_is_not_documentation
-test_preflight_git_environment_is_sanitized
+test_git_environment_is_allowlisted
 test_fail_closed_invocation
 test_diff_failure_is_not_silent
 test_toon_documents_have_no_trailing_newline
