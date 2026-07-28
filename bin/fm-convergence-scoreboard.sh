@@ -35,13 +35,23 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELF="$SELF_DIR/$(basename "${BASH_SOURCE[0]}")"
 
 toon_quote() {
-  local value=$1
+  local value=$1 char code escaped='' i
   value=${value//\\/\\\\}
   value=${value//\"/\\\"}
   value=${value//$'\n'/\\n}
   value=${value//$'\r'/\\r}
   value=${value//$'\t'/\\t}
-  printf '"%s"' "$value"
+  for ((i = 0; i < ${#value}; i += 1)); do
+    char=${value:i:1}
+    if [[ "$char" == [[:cntrl:]] ]]; then
+      printf -v code '%d' "'$char"
+      if ((code < 32)); then
+        printf -v char '\\u%04x' "$code"
+      fi
+    fi
+    escaped+=$char
+  done
+  printf '"%s"' "$escaped"
 }
 
 display_bin() {
