@@ -78,8 +78,8 @@ usage() {
     "$(toon_quote "upstream-ref")" \
     "$(toon_quote "Fetched upstream ref to compare against.")"
   printf 'examples[2]: %s,%s' \
-    "$(toon_quote "bin/fm-convergence-scoreboard.sh fork/main origin/main")" \
-    "$(toon_quote "bin/fm-convergence-scoreboard.sh HEAD origin/main")"
+    "$(toon_quote "bin/fm-convergence-scoreboard.sh origin/main upstream/main")" \
+    "$(toon_quote "bin/fm-convergence-scoreboard.sh HEAD upstream/main")"
 }
 
 usage_error() {
