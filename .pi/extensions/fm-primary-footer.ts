@@ -33,6 +33,7 @@ export default function (pi: ExtensionAPI) {
   let requestRender: (() => void) | undefined;
   let currentBranch = "";
   let currentContext: ExtensionContext | undefined;
+  let refreshTitleOnNextRender = false;
 
   const refreshTitle = (ctx: typeof currentContext): void => {
     if (!ctx) return;
@@ -83,14 +84,19 @@ export default function (pi: ExtensionAPI) {
         tui.requestRender();
       });
       requestRender = () => tui.requestRender();
-      refreshTitle(ctx);
+      refreshTitleOnNextRender = true;
       return {
         dispose() {
           unsubscribe();
           requestRender = undefined;
+          refreshTitleOnNextRender = false;
         },
         invalidate() {},
         render(width: number) {
+          if (refreshTitleOnNextRender) {
+            refreshTitleOnNextRender = false;
+            refreshTitle(ctx);
+          }
           const data = stats(ctx);
           data.statuses = [...footerData.getExtensionStatuses()].map(([key, value]) => ({ key, value }));
           return formatFooterLines(data, width, theme);

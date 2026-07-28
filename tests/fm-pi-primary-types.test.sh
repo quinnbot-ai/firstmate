@@ -137,3 +137,57 @@ JS
 else
   printf 'skip: Node type stripping is unavailable for Pi footer formatting test\n'
 fi
+
+run_real_tui_contract() (
+  PI_BIN=${FM_PI_BIN:-"$(command -v pi 2>/dev/null || true)"}
+  if [ ! -x "$PI_BIN" ] || ! command -v tmux >/dev/null 2>&1; then
+    printf 'skip: pi or tmux not found for real Pi footer contract\n'
+    exit 0
+  fi
+
+  fail_tui() {
+    printf 'not ok - %s\n' "$1" >&2
+    exit 1
+  }
+
+  socket="fm-pi-primary-types-$$"
+  session=pi-footer
+  pi_home="$TMP_ROOT/pi-home"
+  mkdir -p "$pi_home"
+  cleanup_tui() {
+    tmux -L "$socket" kill-server 2>/dev/null || true
+  }
+  trap cleanup_tui EXIT
+
+  printf -v launch \
+    'cd %q && env PI_OFFLINE=1 PI_CODING_AGENT_DIR=%q %q --approve --no-session --no-context-files --no-skills --no-prompt-templates --no-extensions -e .pi/extensions/fm-primary-footer.ts' \
+    "$ROOT" "$pi_home" "$PI_BIN"
+  tmux -L "$socket" new-session -d -s "$session" -x 120 -y 30 "$launch" \
+    || fail_tui "could not launch Pi footer contract"
+
+  pane=
+  i=0
+  while [ "$i" -lt 120 ]; do
+    pane=$(tmux -L "$socket" capture-pane -p -t "$session" -S -80 2>/dev/null || true)
+    printf '%s\n' "$pane" | grep -Fq "dir $(basename "$ROOT")" && break
+    tmux -L "$socket" has-session -t "$session" 2>/dev/null \
+      || fail_tui "Pi exited before rendering the Firstmate footer: $pane"
+    sleep 0.05
+    i=$((i + 1))
+  done
+  printf '%s\n' "$pane" | grep -Fq "dir $(basename "$ROOT")" \
+    || fail_tui "Pi did not render the Firstmate footer: $pane"
+
+  title=$(tmux -L "$socket" display-message -p -t "$session" '#{pane_title}') \
+    || fail_tui "could not read Pi terminal title"
+  prefix="Firstmate · $(basename "$ROOT") · "
+  rest=${title#"$prefix"}
+  branch=${rest%%" · "*}
+  model=${rest#*" · "}
+  [ "$rest" != "$title" ] && [ -n "$branch" ] && [ "$model" != "$rest" ] && [ -n "$model" ] \
+    || fail_tui "Pi did not retain the project/branch/model title: $title"
+
+  printf 'ok - Pi %s real TUI rendered the Firstmate footer and retained its project/branch/model title\n' "$("$PI_BIN" --version)"
+)
+
+run_real_tui_contract

@@ -189,7 +189,7 @@ tests/fm-turnend-guard.test.sh
 
 ## Pure Kun presentation parity
 
-The Firstmate Pure Kun presentation was verified on 2026-07-27 with Pi 0.82.0.
+The Firstmate Pure Kun presentation was verified on 2026-07-28 with Pi 0.82.0.
 The tracked `firstmate-dark` theme and default footer use Pi's native theme, footer-data, context-usage, session-branch, and terminal-title APIs while preserving extension status texts.
 
 Exact commands and output:
@@ -201,9 +201,11 @@ pi --version
 FM_PI_PACKAGE_DIR="$(npm root -g)/@earendil-works/pi-coding-agent" tests/fm-pi-primary-types.test.sh
 ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.82.0
 ok - Firstmate Pi footer preserves fields, statuses, and cumulative native usage
+ok - Pi 0.82.0 real TUI rendered the Firstmate footer and retained its project/branch/model title
 ```
 
-The deterministic footer test resolves the installed compiler and Pi package through the npm environment, covers narrow, medium, and wide layouts, asserts that every complete native field and status value remains represented without overflow, verifies cumulative usage across every Pi 0.82.0 usage-bearing entry type, and checks stable single-line keyed status rendering.
+The focused footer test resolves the installed compiler and Pi package through the npm environment, covers narrow, medium, and wide layouts, asserts that every complete native field and status value remains represented without overflow, verifies cumulative usage across every Pi 0.82.0 usage-bearing entry type, and checks stable single-line keyed status rendering.
+Its offline real-TUI check launches only the tracked footer extension, confirms the themed footer renders without provider traffic, and reads tmux's terminal title after startup to verify the project, branch, and model title survives Pi's default rebind update.
 
 ## Wedge-alarm channels
 

@@ -1,7 +1,8 @@
+import type { ThemeColor } from "@earendil-works/pi-coding-agent";
 import { visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
 export type FooterTheme = {
-  fg(color: string, text: string): string;
+  fg(color: ThemeColor, text: string): string;
 };
 
 export type FooterStatus = {
@@ -22,7 +23,7 @@ export type FooterData = {
   statuses: FooterStatus[];
 };
 
-const colorize = (theme: FooterTheme, color: string, label: string, value: string): string =>
+const colorize = (theme: FooterTheme, color: ThemeColor, label: string, value: string): string =>
   theme.fg(color, label) + theme.fg("text", value);
 
 const sanitizeSingleLine = (text: string): string =>
@@ -58,13 +59,13 @@ export function formatFooterLines(data: FooterData, width: number, theme: Footer
   const state = colorize(theme, data.state === "running" ? "success" : "muted", "● ", data.state);
   const model = colorize(theme, "accent", "model ", data.model);
   const thinking = colorize(theme, "accent", "think ", data.thinking);
-  const location = colorize(theme, "purple", "dir ", data.project);
-  const branch = colorize(theme, "aqua", "git ", data.branch || "-");
+  const location = colorize(theme, "borderAccent", "dir ", data.project);
+  const branch = colorize(theme, "accent", "git ", data.branch || "-");
   const usage = [
     colorize(theme, "warning", "ctx ", data.context),
     colorize(theme, "muted", "↑", data.input),
     colorize(theme, "muted", "↓", data.output),
-    colorize(theme, "aqua", "$", data.cost),
+    colorize(theme, "accent", "$", data.cost),
   ];
   const statuses = data.statuses
     .map(({ key, value }) => ({ key: sanitizeSingleLine(key), value: sanitizeSingleLine(value) }))
