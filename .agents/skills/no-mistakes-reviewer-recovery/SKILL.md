@@ -36,9 +36,10 @@ Compare the configuration modification time with the daemon start record when di
 
 ## Detection and evidence
 
-Read the attributed current-code state with `bin/fm-crew-state.sh <id>`.
+Read the attributed current-code state with `bin/fm-crew-state.sh <crew-id>`.
 It renders a matching no-mistakes review or document failure as `state: failed · source: run-step`; that is the authoritative loud signal, not a quiet pane or a stale status event.
-For the exact evidence, capture `no-mistakes axi status --run <id>` and `no-mistakes axi logs --run <id> --step review --full` or the corresponding `document` log.
+From the crew worktree recorded in `state/<crew-id>.meta`, run `no-mistakes axi status`, require its `branch` and `head` to match that worktree under the same current-code rule as `fm-crew-state.sh`, and capture its `id` as `<run-id>`.
+For the exact evidence, capture `no-mistakes axi status --run <run-id>` and `no-mistakes axi logs --run <run-id> --step review --full` or the corresponding `document` log.
 Record the run id, step, start and completion timestamps, selected agent sequence, and the terminal error.
 
 A log that shows one agent killed and the fallback failing immediately with `context canceled` does not demonstrate that the fallback agent is unhealthy.

@@ -35,10 +35,12 @@ test_preflight_preserves_shared_daemon_safety() {
 
 test_failure_is_loud_and_diagnosable() {
   for phrase in \
-    'bin/fm-crew-state.sh <id>' \
+    'bin/fm-crew-state.sh <crew-id>' \
     'state: failed · source: run-step' \
-    'no-mistakes axi status --run <id>' \
-    'no-mistakes axi logs --run <id> --step review --full' \
+    'state/<crew-id>.meta' \
+    'capture its `id` as `<run-id>`' \
+    'no-mistakes axi status --run <run-id>' \
+    'no-mistakes axi logs --run <run-id> --step review --full' \
     'context canceled' \
     'do not loop restarts' \
     'github.com/kunchenguid/no-mistakes/issues/474'; do
