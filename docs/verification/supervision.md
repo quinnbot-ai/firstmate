@@ -198,12 +198,12 @@ Exact commands and output:
 pi --version
 0.82.0
 
-PATH="/Users/nick/.local/share/mise/installs/node/22.22.2/lib/node_modules/openclaw/node_modules/typescript/bin:$PATH" FM_PI_PACKAGE_DIR="$(npm root -g)/@earendil-works/pi-coding-agent" tests/fm-pi-primary-types.test.sh
+FM_PI_PACKAGE_DIR="$(npm root -g)/@earendil-works/pi-coding-agent" tests/fm-pi-primary-types.test.sh
 ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.82.0
-ok - Firstmate Pi footer formatting stays within narrow and wide width tiers
+ok - Firstmate Pi footer preserves fields, statuses, and cumulative native usage
 ```
 
-The deterministic footer test covers narrow, medium, and wide layouts and asserts that every rendered line stays within its requested terminal width.
+The deterministic footer test resolves the installed compiler and Pi package through the npm environment, covers narrow, medium, and wide layouts, asserts that every native field remains represented without overflow, verifies cumulative usage across every Pi 0.82.0 usage-bearing entry type, and checks stable single-line keyed status rendering.
 
 ## Wedge-alarm channels
 

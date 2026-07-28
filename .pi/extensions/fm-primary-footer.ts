@@ -6,6 +6,29 @@ const shortNumber = (value: number): string =>
 
 const projectName = (cwd: string): string => cwd.split(/[\\/]/).filter(Boolean).pop() || cwd;
 
+type SessionEntries = ReturnType<ExtensionContext["sessionManager"]["getEntries"]>;
+
+export const aggregateSessionUsage = (entries: SessionEntries): { input: number; output: number; cost: number } => {
+  let input = 0;
+  let output = 0;
+  let cost = 0;
+  for (const entry of entries) {
+    let usage;
+    if (entry.type === "message" && entry.message.role === "assistant") {
+      usage = entry.message.usage;
+    } else if (entry.type === "message" && entry.message.role === "toolResult") {
+      usage = entry.message.usage;
+    } else if (entry.type === "branch_summary" || entry.type === "compaction") {
+      usage = entry.usage;
+    }
+    if (!usage) continue;
+    input += usage.input;
+    output += usage.output;
+    cost += usage.cost.total;
+  }
+  return { input, output, cost };
+};
+
 export default function (pi: ExtensionAPI) {
   let requestRender: (() => void) | undefined;
   let currentBranch = "";
@@ -19,27 +42,18 @@ export default function (pi: ExtensionAPI) {
   };
 
   const stats = (ctx: NonNullable<typeof currentContext>): FooterData => {
-    let input = 0;
-    let output = 0;
-    let cost = 0;
-    for (const entry of ctx.sessionManager.getBranch()) {
-      if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-      const usage = (entry.message as { usage: { input: number; output: number; cost: { total: number } } }).usage;
-      input += usage.input;
-      output += usage.output;
-      cost += usage.cost.total;
-    }
+    const totals = aggregateSessionUsage(ctx.sessionManager.getEntries());
     const usage = ctx.getContextUsage();
     return {
       state: ctx.isIdle() ? "idle" : "running",
       model: ctx.model?.id || "no-model",
-      thinking: ctx.thinkingLevel ? `think:${ctx.thinkingLevel}` : "",
+      thinking: ctx.thinkingLevel || "off",
       project: projectName(ctx.cwd),
       branch: currentBranch,
       context: usage?.tokens == null ? "?" : `${shortNumber(usage.tokens)}${usage.percent == null ? "" : ` (${Math.round(usage.percent)}%)`}`,
-      input: shortNumber(input),
-      output: shortNumber(output),
-      cost: cost.toFixed(3),
+      input: shortNumber(totals.input),
+      output: shortNumber(totals.output),
+      cost: totals.cost.toFixed(3),
       statuses: [],
     };
   };
@@ -78,7 +92,7 @@ export default function (pi: ExtensionAPI) {
         invalidate() {},
         render(width: number) {
           const data = stats(ctx);
-          data.statuses = [...footerData.getExtensionStatuses().values()];
+          data.statuses = [...footerData.getExtensionStatuses()].map(([key, value]) => ({ key, value }));
           return formatFooterLines(data, width, theme);
         },
       };

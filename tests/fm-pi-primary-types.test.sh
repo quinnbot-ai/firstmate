@@ -5,11 +5,19 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 command -v npm >/dev/null 2>&1 || { echo "skip: npm not found for Pi extension typecheck"; exit 0; }
-command -v tsc >/dev/null 2>&1 || { echo "skip: tsc not found for Pi extension typecheck"; exit 0; }
 
-PI_PACKAGE_DIR=${FM_PI_PACKAGE_DIR:-"$(npm root -g)/@earendil-works/pi-coding-agent"}
+GLOBAL_NODE_MODULES=$(npm root -g)
+PI_PACKAGE_DIR=${FM_PI_PACKAGE_DIR:-"$GLOBAL_NODE_MODULES/@earendil-works/pi-coding-agent"}
 if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
   echo "skip: installed @earendil-works/pi-coding-agent package not found"
+  exit 0
+fi
+TSC_BIN=${FM_TSC_BIN:-"$(command -v tsc 2>/dev/null || true)"}
+if [ ! -x "$TSC_BIN" ]; then
+  TSC_BIN="$GLOBAL_NODE_MODULES/openclaw/node_modules/typescript/bin/tsc"
+fi
+if [ ! -x "$TSC_BIN" ]; then
+  echo "skip: tsc not found for Pi extension typecheck"
   exit 0
 fi
 if [ ! -d "$PI_PACKAGE_DIR/node_modules/typebox" ] || \
@@ -59,7 +67,7 @@ cat > "$TMP_ROOT/tsconfig.json" <<'JSON'
 }
 JSON
 
-tsc -p "$TMP_ROOT/tsconfig.json" || exit 1
+"$TSC_BIN" -p "$TMP_ROOT/tsconfig.json" || exit 1
 version=$(jq -r '.version' "$PI_PACKAGE_DIR/package.json" 2>/dev/null || printf 'unknown')
 printf 'ok - tracked Pi extensions pass strict no-emit typecheck against Pi %s\n' "$version"
 
@@ -67,30 +75,50 @@ if node --experimental-strip-types -e 'process.exit(0)' >/dev/null 2>&1; then
   FOOTER_ROOT="$TMP_ROOT" node --experimental-strip-types --input-type=module <<'JS'
 import assert from "node:assert/strict";
 const { formatFooterLines, footerVisibleWidth } = await import(`file://${process.env.FOOTER_ROOT}/lib/fm-primary-footer-layout.ts`);
+const { aggregateSessionUsage } = await import(`file://${process.env.FOOTER_ROOT}/fm-primary-footer.ts`);
 
 const theme = { fg: (_color, text) => text };
 const data = {
   state: "running",
   model: "gpt-5.6-sol",
-  thinking: "think:high",
+  thinking: "high",
   project: "firstmate",
   branch: "fm/pi-ui-parity",
   context: "12.3k (18%)",
   input: "4.5k",
   output: "2.1k",
   cost: "0.042",
-  statuses: ["watcher: healthy", "guard: armed"],
+  statuses: [
+    { key: "watcher\tz", value: "healthy\nnow" },
+    { key: "guard", value: "armed\rnow" },
+  ],
 };
-for (const width of [32, 57, 80, 120]) {
-  for (const line of formatFooterLines(data, width, theme)) {
+for (const width of [12, 32, 57, 80, 120]) {
+  const lines = formatFooterLines(data, width, theme);
+  const rendered = lines.join("\n");
+  for (const line of lines) {
     assert.ok(footerVisibleWidth(line) <= width, `footer overflow at ${width}: ${line}`);
   }
+  for (const field of ["● running", "model ", "think ", "dir ", "git ", "ctx ", "↑", "↓", "$"]) {
+    assert.ok(rendered.includes(field), `footer omitted ${field} at ${width}: ${rendered}`);
+  }
 }
-assert.equal(formatFooterLines(data, 32, theme).length, 2);
-assert.match(formatFooterLines(data, 32, theme)[1], /watcher: healthy/);
-assert.equal(formatFooterLines(data, 80, theme).length, 2);
-assert.match(formatFooterLines(data, 120, theme)[1], /watcher: healthy/);
-console.log("ok - Firstmate Pi footer formatting stays within narrow and wide width tiers");
+const statusLines = formatFooterLines(data, 120, theme).join("\n");
+assert.ok(statusLines.indexOf("guard: armed now") < statusLines.indexOf("watcher z: healthy now"));
+assert.doesNotMatch(statusLines, /[\r\t]/);
+
+const usage = (input, output, total) => ({ input, output, cost: { total } });
+assert.deepEqual(
+  aggregateSessionUsage([
+    { type: "message", message: { role: "assistant", usage: usage(10, 2, 1) } },
+    { type: "message", message: { role: "toolResult", usage: usage(3, 4, 2) } },
+    { type: "compaction", usage: usage(5, 6, 3) },
+    { type: "branch_summary", usage: usage(7, 8, 4) },
+    { type: "message", message: { role: "user" } },
+  ]),
+  { input: 25, output: 20, cost: 10 },
+);
+console.log("ok - Firstmate Pi footer preserves fields, statuses, and cumulative native usage");
 JS
   [ "$?" -eq 0 ] || exit 1
 else
