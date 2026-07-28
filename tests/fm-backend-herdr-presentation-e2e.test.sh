@@ -26,6 +26,7 @@ HERDR_CALL_LOG="$TMP_ROOT/herdr-calls.log"
 TREEHOUSE_CALL_LOG="$TMP_ROOT/treehouse-calls.log"
 MOVE_CALL_LOG="$TMP_ROOT/workspace-move-calls.log"
 FOCUS_AUDIT_LOG="$TMP_ROOT/focus-audit.log"
+MACOS_FOCUS_AUDIT_LOG="$TMP_ROOT/macos-focus-audit.log"
 ACTIVE_SEEDED_CONTROL="$TMP_ROOT/active-seeded-control"
 POST_CREATE_ABORT_CONTROL="$TMP_ROOT/post-create-abort-control"
 mkdir -p "$FAKEBIN"
@@ -33,9 +34,19 @@ mkdir -p "$FAKEBIN"
 : > "$TREEHOUSE_CALL_LOG"
 : > "$MOVE_CALL_LOG"
 : > "$FOCUS_AUDIT_LOG"
+: > "$MACOS_FOCUS_AUDIT_LOG"
 REAL_MOVER="$ROOT/bin/backends/herdr-workspace-move.py"
-export REAL_HERDR REAL_TREEHOUSE REAL_MOVER HERDR_CALL_LOG TREEHOUSE_CALL_LOG MOVE_CALL_LOG FOCUS_AUDIT_LOG HERDR_ORIGINAL_PATH HERDR_LAB_HELPER
+export REAL_HERDR REAL_TREEHOUSE REAL_MOVER HERDR_CALL_LOG TREEHOUSE_CALL_LOG MOVE_CALL_LOG FOCUS_AUDIT_LOG MACOS_FOCUS_AUDIT_LOG HERDR_ORIGINAL_PATH HERDR_LAB_HELPER
 export ACTIVE_SEEDED_CONTROL POST_CREATE_ABORT_CONTROL TMP_ROOT
+
+# Herdr's logical workspace/tab focus is distinct from macOS app activation.
+# The projection regression records app focus around every production mutation.
+MACOS_FOCUS_AUDIT_ENABLED=0
+if command -v osascript >/dev/null 2>&1 \
+   && osascript -l JavaScript -e 'ObjC.import("AppKit"); $.NSWorkspace.sharedWorkspace.frontmostApplication.bundleIdentifier.js' >/dev/null 2>&1; then
+  MACOS_FOCUS_AUDIT_ENABLED=1
+fi
+export MACOS_FOCUS_AUDIT_ENABLED
 
 # Log every production-adapter call, remove its already-validated trailing
 # session flag, and send the operation through the lab helper so that helper
@@ -75,6 +86,10 @@ done
 if [ "${1:-}" = --version ]; then
   exec env PATH="$HERDR_ORIGINAL_PATH" "$REAL_HERDR" "$@" --session "$HERDR_LAB_SESSION"
 fi
+macos_frontmost_app() {
+  [ "${MACOS_FOCUS_AUDIT_ENABLED:-0}" = 1 ] || return 0
+  osascript -l JavaScript -e 'ObjC.import("AppKit"); $.NSWorkspace.sharedWorkspace.frontmostApplication.bundleIdentifier.js' 2>/dev/null
+}
 focus_snapshot() {
   local list row workspace tab tabs
   list=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" workspace list) || return 1
@@ -131,6 +146,9 @@ case "${1:-} ${2:-}" in
   "workspace create") mutation=workspace-create; mutation_target=$label ;;
   "tab create") mutation=tab-create; mutation_target=$label ;;
   "pane close") mutation=pane-close ;;
+  "pane run") mutation=pane-run ;;
+  "pane send-text") mutation=pane-send-text ;;
+  "pane send-keys") mutation=pane-send-keys ;;
   "tab focus") mutation=tab-focus ;;
 esac
 refusal_probe=0
@@ -142,11 +160,13 @@ if [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$ACTIVE_SEEDED_CONTROL" ] \
 fi
 before=
 [ -z "$mutation" ] || before=$(focus_snapshot || printf ambiguous/ambiguous)
+macos_before=$(macos_frontmost_app || true)
 if out=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"); then
   status=0
 else
   status=$?
 fi
+macos_after=$(macos_frontmost_app || true)
 if [ "$status" -eq 0 ] && [ "$mutation" = workspace-create ]; then
   case "$label" in
     $'└ active-seeded · p:'*)
@@ -186,6 +206,9 @@ fi
 if [ -n "$mutation" ]; then
   after=$(focus_snapshot || printf ambiguous/ambiguous)
   printf '%s\t%s\t%s\t%s\n' "$mutation" "$before" "$after" "$mutation_target" >> "$FOCUS_AUDIT_LOG"
+  if [ "${MACOS_FOCUS_AUDIT_ENABLED:-0}" = 1 ]; then
+    printf '%s\t%s\t%s\t%s\n' "$mutation" "$macos_before" "$macos_after" "$mutation_target" >> "$MACOS_FOCUS_AUDIT_LOG"
+  fi
 fi
 if [ "$refusal_probe" -eq 1 ]; then
   refusal_after=$(focus_snapshot || printf ambiguous/ambiguous)
@@ -236,15 +259,24 @@ focus_snapshot() {
   ' >/dev/null 2>&1 || return 1
   printf '%s/%s' "$workspace" "$tab"
 }
+macos_frontmost_app() {
+  [ "${MACOS_FOCUS_AUDIT_ENABLED:-0}" = 1 ] || return 0
+  osascript -l JavaScript -e 'ObjC.import("AppKit"); $.NSWorkspace.sharedWorkspace.frontmostApplication.bundleIdentifier.js' 2>/dev/null
+}
 printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$MOVE_CALL_LOG"
 before=$(focus_snapshot || printf ambiguous/ambiguous)
+macos_before=$(macos_frontmost_app || true)
 if out=$("$REAL_MOVER" "$@"); then
   status=0
 else
   status=$?
 fi
+macos_after=$(macos_frontmost_app || true)
 after=$(focus_snapshot || printf ambiguous/ambiguous)
 printf 'workspace-move\t%s\t%s\t%s\n' "$before" "$after" "$2" >> "$FOCUS_AUDIT_LOG"
+if [ "${MACOS_FOCUS_AUDIT_ENABLED:-0}" = 1 ]; then
+  printf 'workspace-move\t%s\t%s\t%s\n' "$macos_before" "$macos_after" "$2" >> "$MACOS_FOCUS_AUDIT_LOG"
+fi
 [ -z "$out" ] || printf '%s\n' "$out"
 exit "$status"
 SH
@@ -320,6 +352,17 @@ assert_focus_is() {  # <expected> <case-name>
 }
 
 focus_audit_line_count() { wc -l < "$FOCUS_AUDIT_LOG" | tr -d '[:space:]'; }
+
+macos_focus_audit_line_count() { wc -l < "$MACOS_FOCUS_AUDIT_LOG" | tr -d '[:space:]'; }
+
+assert_macos_focus_preserved_since() {  # <line-count> <case-name>
+  local start=$1 case_name=$2 changed
+  [ "$MACOS_FOCUS_AUDIT_ENABLED" = 1 ] || return 0
+  changed=$(sed -n "$((start + 1)),\$p" "$MACOS_FOCUS_AUDIT_LOG" | awk -F '\t' '
+    $2 == "" || $3 == "" || $2 != $3 { print $0 }
+  ')
+  [ -z "$changed" ] || fail "$case_name activated a different macOS app: $changed"
+}
 
 assert_raw_presentation_mutations_preserved_since() {  # <line-count> <case-name>
   local start=$1 case_name=$2 changed
@@ -520,10 +563,12 @@ assert_focus_is "$CAPTAIN_FOCUS" "focused secondmate fixture"
 : > "$TREEHOUSE_CALL_LOG"
 : > "$HOME_DIR/config/herdr-presentation-spaces"
 SHAPE_FOCUS_AUDIT_START=$(focus_audit_line_count)
+SHAPE_MACOS_FOCUS_AUDIT_START=$(macos_focus_audit_line_count)
 spawn_task shape "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/on.out" 2> "$TMP_ROOT/on.err" \
   || fail "projected spawn failed: $(cat "$TMP_ROOT/on.err")"
 assert_focus_is "$CAPTAIN_FOCUS" "projected spawn"
 assert_raw_presentation_mutations_preserved_since "$SHAPE_FOCUS_AUDIT_START" "projected spawn"
+assert_macos_focus_preserved_since "$SHAPE_MACOS_FOCUS_AUDIT_START" "projected spawn"
 ON_META="$TMP_ROOT/on.meta"
 cp "$HOME_DIR/state/shape.meta" "$ON_META"
 ON_WT=$(remember_meta_worktree "$ON_META")
