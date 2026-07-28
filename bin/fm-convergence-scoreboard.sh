@@ -49,7 +49,7 @@ toon_quote() {
     char=${value:i:1}
     if [[ "$char" == [[:cntrl:]] ]]; then
       printf -v code '%d' "'$char"
-      if ((code < 32)); then
+      if ((code < 32 || code == 127)); then
         printf -v char '\\u%04x' "$code"
       fi
     fi
@@ -94,17 +94,34 @@ measure_error() {
   exit 1
 }
 
+sanitize_git_environment() {
+  unset GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_ATTR_NOSYSTEM GIT_ATTR_SOURCE
+  unset GIT_CEILING_DIRECTORIES GIT_COMMON_DIR GIT_CONFIG GIT_CONFIG_GLOBAL
+  unset GIT_CONFIG_NOSYSTEM GIT_CONFIG_PARAMETERS GIT_CONFIG_SYSTEM
+  unset GIT_DEFAULT_HASH GIT_DIR GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_GRAFT_FILE
+  unset GIT_IMPLICIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_PREFIX
+  unset GIT_REPLACE_REF_BASE GIT_SHALLOW_FILE GIT_WORK_TREE
+  export GIT_CONFIG_COUNT=0
+  export GIT_CONFIG_GLOBAL=/dev/null
+  export GIT_CONFIG_NOSYSTEM=1
+  export GIT_NO_LAZY_FETCH=1
+  export GIT_NO_REPLACE_OBJECTS=1
+  export GIT_OPTIONAL_LOCKS=0
+}
+
 preflight_git() {
   (
-    unset GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_DIR GIT_INDEX_FILE
-    unset GIT_OBJECT_DIRECTORY GIT_WORK_TREE
+    sanitize_git_environment
     git "$@"
   )
 }
 
 reject_ambiguous_ref() {
   local role=$1 ref=$2 diagnostics
-  diagnostics=$(preflight_git -C "$REPO" rev-parse --symbolic-full-name "$ref" 2>&1 >/dev/null) || true
+  diagnostics=$(
+    preflight_git -c core.warnAmbiguousRefs=true \
+      -C "$REPO" rev-parse --symbolic-full-name "$ref" 2>&1 >/dev/null
+  ) || true
   case "$diagnostics" in
     *"refname '$ref' is ambiguous"*)
       measure_error \
@@ -197,13 +214,9 @@ fi
 
 measure_git() {
   (
-    unset GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_INDEX_FILE GIT_WORK_TREE
+    sanitize_git_environment
     export GIT_ATTR_NOSYSTEM=1
     export GIT_ATTR_SOURCE="$LOCAL_COMMIT"
-    export GIT_CONFIG_COUNT=0
-    export GIT_CONFIG_GLOBAL=/dev/null
-    export GIT_CONFIG_NOSYSTEM=1
-    export GIT_NO_LAZY_FETCH=1
     export GIT_OBJECT_DIRECTORY="$OBJECTS_DIR"
     git --no-replace-objects --git-dir="$MEASURE_GIT_DIR" \
       -c core.bigFileThreshold=512m "$@"
@@ -274,7 +287,11 @@ if ! measure_git diff --numstat -z --no-renames --no-ext-diff --no-textconv \
     "Verify that all repository objects are available locally, then rerun with the same refs."
 fi
 
-while IFS=$'\t' read -r -d '' added deleted path; do
+while IFS= read -r -d '' record; do
+  added=${record%%$'\t'*}
+  remainder=${record#*$'\t'}
+  deleted=${remainder%%$'\t'*}
+  path=${remainder#*$'\t'}
   [ "$added" = "-" ] && added=0
   [ "$deleted" = "-" ] && deleted=0
   CHANGED_FILES=$((CHANGED_FILES + 1))

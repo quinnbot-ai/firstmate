@@ -134,11 +134,34 @@ test_attributes_are_scoped_to_local_ref() {
   pass "scoreboard derives attributes from the explicit local ref, not ambient repository state"
 }
 
+test_tab_prefixed_path_is_not_documentation() {
+  local repo tab_path out
+  repo=$TMP_ROOT/repo
+  tab_path=$'\tdocs/tab-prefixed.md'
+
+  git -C "$repo" checkout -qb tab-path local
+  mkdir -p "$repo/${tab_path%/*}"
+  printf 'tab path\n' > "$repo/$tab_path"
+  git -C "$repo" add -- "$tab_path"
+  git -C "$repo" commit -qm "test: add tab-prefixed path"
+
+  out=$(run_scoreboard "$repo" tab-path upstream)
+  assert_contains "$out" '  "documentation",1,0,1,-1' \
+    "a leading tab must not turn a non-documentation path into documentation"
+  assert_contains "$out" '  "other",2,2,0,2' \
+    "a tab-prefixed docs path should remain in the other group"
+  git -C "$repo" checkout -q local
+  pass "scoreboard preserves leading tabs when classifying changed paths"
+}
+
 test_preflight_git_environment_is_sanitized() {
   local repo decoy expected out shim_dir real_git source_format ambient_format
+  local ambient_shallow ambient_graft
   repo=$TMP_ROOT/repo
   decoy=$TMP_ROOT/decoy
   shim_dir=$TMP_ROOT/git-shim
+  ambient_shallow=$TMP_ROOT/ambient-shallow
+  ambient_graft=$TMP_ROOT/ambient-graft
   real_git=$(command -v git)
   source_format=$(git -C "$repo" rev-parse --show-object-format=storage)
   case "$source_format" in
@@ -151,6 +174,11 @@ test_preflight_git_environment_is_sanitized() {
   printf 'decoy\n' > "$decoy/README.md"
   git -C "$decoy" add README.md
   git -C "$decoy" commit -qm "test: seed decoy"
+  git -C "$repo" rev-parse local > "$ambient_shallow"
+  printf '%s %s\n' \
+    "$(git -C "$repo" rev-parse local)" \
+    "$(git -C "$repo" rev-parse upstream)" \
+    > "$ambient_graft"
   mkdir -p "$shim_dir"
   cat > "$shim_dir/git" <<'EOF'
 #!/usr/bin/env bash
@@ -167,6 +195,9 @@ EOF
       REAL_GIT="$real_git" \
       GIT_DIR="$decoy/.git" \
       GIT_WORK_TREE="$decoy" \
+      GIT_CONFIG_PARAMETERS="'core.warnAmbiguousRefs'='false'" \
+      GIT_SHALLOW_FILE="$ambient_shallow" \
+      GIT_GRAFT_FILE="$ambient_graft" \
       GIT_DEFAULT_HASH="$ambient_format" \
       GIT_OPTIONAL_LOCKS=1 \
       GIT_NO_LAZY_FETCH=0 \
@@ -215,6 +246,17 @@ test_fail_closed_invocation() {
   assert_contains "$out" 'Use a fully qualified ref such as refs/heads/<name>' \
     "ambiguous local ref should provide the deterministic correction"
   [ -z "$err" ] || fail "ambiguous ref failure leaked diagnostics to stderr: $err"
+  set +e
+  out=$(
+    cd "$repo" || exit 1
+    GIT_CONFIG_PARAMETERS="'core.warnAmbiguousRefs'='false'" \
+      "$SCOREBOARD" ambiguous upstream
+  )
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "ambiguous local ref with warnings disabled"
+  assert_contains "$out" 'error: "local ref name is ambiguous: ambiguous"' \
+    "ambient warning configuration must not suppress ambiguity rejection"
   run_scoreboard "$repo" refs/heads/ambiguous upstream >/dev/null \
     || fail "fully qualified local ref did not resolve the reported ambiguity"
 
@@ -318,7 +360,7 @@ test_help_without_home() {
 test_toon_control_characters_are_escaped() {
   local repo control_ref out rc
   repo=$TMP_ROOT/repo
-  control_ref=$'missing\001\b\f\033ref'
+  control_ref=$'missing\001\b\f\033\177ref'
 
   set +e
   out=$(run_scoreboard "$repo" "$control_ref" upstream)
@@ -326,15 +368,17 @@ test_toon_control_characters_are_escaped() {
   set -e
 
   expect_code 1 "$rc" "control characters in a missing ref"
-  assert_contains "$out" 'missing\u0001\u0008\u000c\u001bref' \
+  assert_contains "$out" 'missing\u0001\u0008\u000c\u001b\u007fref' \
     "structured errors should escape non-short-form TOON control characters"
-  [[ "$out" != *$'\001'* && "$out" != *$'\b'* && "$out" != *$'\f'* && "$out" != *$'\033'* ]] \
+  [[ "$out" != *$'\001'* && "$out" != *$'\b'* && "$out" != *$'\f'* \
+    && "$out" != *$'\033'* && "$out" != *$'\177'* ]] \
     || fail "structured error output retained a raw control character"
   pass "scoreboard escapes every unsupported control character in TOON strings"
 }
 
 test_deterministic_scoreboard
 test_attributes_are_scoped_to_local_ref
+test_tab_prefixed_path_is_not_documentation
 test_preflight_git_environment_is_sanitized
 test_fail_closed_invocation
 test_diff_failure_is_not_silent
