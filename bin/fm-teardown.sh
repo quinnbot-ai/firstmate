@@ -22,8 +22,9 @@
 # A gh lookup error falls back to the content checks; if they are also inconclusive,
 # teardown refuses rather than risk discarding unlanded work. The exact-tree proof
 # runs first. When later default-branch edits make its 3-way merge conflict, a
-# conservative zero-context proof accepts only when the task delta cannot still be
-# applied forward and can be applied completely in reverse against the default tree.
+# conservative zero-context proof accepts only when the unique merge-base task delta
+# cannot still be applied forward and can be applied completely in reverse at its
+# original task locations against the default tree.
 # Uncommitted changes are never landed.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
@@ -428,8 +429,8 @@ reverse_patch_applies_at_task_locations() {
 # though later edits made the 3-way proof above conflict? Build a private temporary
 # index at the authoritative default ref, then require both sides of the proof:
 # the task delta must not still apply forward, and its exact zero-context form must
-# apply completely in reverse. Any unsupported diff, ambiguous application, or
-# missing task hunk fails closed.
+# apply completely in reverse at its original task locations. Any unsupported diff,
+# ambiguous application, relocated hunk, or missing task hunk fails closed.
 content_delta_in_default() {
   local ref=$1 base proof_dir proof_index proof_patch rc=1
   [ -n "$ref" ] || return 1
