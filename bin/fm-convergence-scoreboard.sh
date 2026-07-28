@@ -57,10 +57,11 @@ toon_quote() {
 }
 
 display_bin() {
-  case "$SELF" in
-    "$HOME"/*) printf '%s/%s' '~' "${SELF#"$HOME"/}" ;;
-    *) printf '%s' "$SELF" ;;
-  esac
+  if [ -n "${HOME-}" ] && [[ "$SELF" == "$HOME"/* ]]; then
+    printf '%s/%s' '~' "${SELF#"$HOME"/}"
+  else
+    printf '%s' "$SELF"
+  fi
 }
 
 usage() {

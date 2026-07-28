@@ -299,6 +299,22 @@ test_toon_documents_have_no_trailing_newline() {
   pass "scoreboard emits every TOON document without a trailing newline"
 }
 
+test_help_without_home() {
+  local out err rc
+
+  set +e
+  out=$(env -u HOME "$SCOREBOARD" --help 2>"$TMP_ROOT/help-unset-home.err")
+  rc=$?
+  set -e
+  err=$(cat "$TMP_ROOT/help-unset-home.err")
+
+  expect_code 0 "$rc" "help without HOME"
+  assert_contains "$out" "bin: \"$SCOREBOARD\"" \
+    "help without HOME should report the absolute executable path"
+  [ -z "$err" ] || fail "help without HOME leaked diagnostics to stderr: $err"
+  pass "scoreboard help is deterministic when HOME is unset"
+}
+
 test_toon_control_characters_are_escaped() {
   local repo control_ref out rc
   repo=$TMP_ROOT/repo
@@ -323,4 +339,5 @@ test_preflight_git_environment_is_sanitized
 test_fail_closed_invocation
 test_diff_failure_is_not_silent
 test_toon_documents_have_no_trailing_newline
+test_help_without_home
 test_toon_control_characters_are_escaped
