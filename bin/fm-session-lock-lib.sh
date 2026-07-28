@@ -68,15 +68,37 @@ fm_session_lock_owned_by_self() {
 
 # Memoized-per-process harness-ancestor resolution. The ancestry walk shells out
 # to ps several times, and the owner fence below runs once per watcher cycle, so
-# resolve once and reuse: a process's ancestry never changes while it lives.
+# resolve the harness pid and its stable process identity once and reuse both.
 # Call this in the CURRENT shell (never inside a command substitution, which
-# would discard the memo) and read FM_SESSION_SELF_HARNESS_PID after it returns;
-# an unresolvable ancestry leaves the pid empty.
+# would discard the memo) and read FM_SESSION_SELF_HARNESS_PID and
+# FM_SESSION_SELF_HARNESS_IDENTITY after it returns; an unresolvable ancestry
+# leaves both empty.
 FM_SESSION_SELF_HARNESS_PID=
+FM_SESSION_SELF_HARNESS_IDENTITY=
 FM_SESSION_SELF_HARNESS_RESOLVED=0
+fm_session_process_identity() {
+  local pid=$1 out
+  if [ "$(type -t fm_pid_identity 2>/dev/null)" = function ]; then
+    fm_pid_identity "$pid"
+    return
+  fi
+  out=$(LC_ALL=C ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
+}
+
 fm_session_self_harness_resolve() {
+  local pid identity
   [ "$FM_SESSION_SELF_HARNESS_RESOLVED" -eq 1 ] && return 0
-  FM_SESSION_SELF_HARNESS_PID=$(fm_harness_ancestry_pid 2>/dev/null || true)
+  pid=$(fm_harness_ancestry_pid 2>/dev/null || true)
+  identity=
+  if [ -n "$pid" ]; then
+    identity=$(fm_session_process_identity "$pid" 2>/dev/null || true)
+  fi
+  if [ -n "$identity" ]; then
+    FM_SESSION_SELF_HARNESS_PID=$pid
+    FM_SESSION_SELF_HARNESS_IDENTITY=$identity
+  fi
   FM_SESSION_SELF_HARNESS_RESOLVED=1
 }
 
@@ -97,7 +119,7 @@ fm_session_self_harness_resolve() {
 #     proceeds unchanged and bin/fm-lock.sh's takeover path stays authoritative.
 FM_SESSION_OWNER_FOREIGN_PID=
 fm_session_owner_fence() {  # <state-dir>
-  local state=$1 lock_pid
+  local state=$1 lock_pid lock_identity
   FM_SESSION_OWNER_FOREIGN_PID=
   lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
   case "$lock_pid" in
@@ -107,8 +129,11 @@ fm_session_owner_fence() {  # <state-dir>
     return 0
   fi
   fm_session_self_harness_resolve
-  if [ "$lock_pid" = "$FM_SESSION_SELF_HARNESS_PID" ]; then
-    return 0
+  if [ "$lock_pid" = "$FM_SESSION_SELF_HARNESS_PID" ] && [ -n "$FM_SESSION_SELF_HARNESS_IDENTITY" ]; then
+    lock_identity=$(fm_session_process_identity "$lock_pid" 2>/dev/null || true)
+    if [ "$lock_identity" = "$FM_SESSION_SELF_HARNESS_IDENTITY" ]; then
+      return 0
+    fi
   fi
   fm_harness_pid_alive "$lock_pid" || return 0
   # Consumed by callers (bin/fm-watch.sh, bin/fm-watch-arm.sh) after a fenced return.

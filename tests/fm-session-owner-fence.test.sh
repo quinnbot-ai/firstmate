@@ -16,6 +16,8 @@ set -u
 
 WATCH="$ROOT/bin/fm-watch.sh"
 WATCH_ARM="$ROOT/bin/fm-watch-arm.sh"
+SESSION_LIB="$ROOT/bin/fm-session-lock-lib.sh"
+WAKE_LIB="$ROOT/bin/fm-wake-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-session-owner-fence)
 FAKEBIN=$(fm_fakebin "$TMP_ROOT/harness")
@@ -50,6 +52,28 @@ wait_for_file() {  # <path> [limit]
     i=$((i + 1))
   done
   [ -s "$1" ]
+}
+
+write_watcher_lock() {
+  local state=$1 home=$2 pid=$3 identity
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$WAKE_LIB" "$pid") \
+    || fail "could not resolve watcher identity for pid $pid"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$pid" > "$state/.watch.lock/pid"
+  printf '%s\n' "$home" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+}
+
+start_session_claim_holder() {
+  local state=$1 ready=$2 stop=$3
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2/.lock.acquire"
+    printf "%s\n" ready > "$3"
+    while [ ! -e "$4" ]; do sleep 0.1; done
+    fm_lock_release "$2/.lock.acquire"
+  ' _ "$WAKE_LIB" "$state" "$ready" "$stop" &
 }
 
 # Start a watcher as a child of a live fake claude that first writes its own
@@ -97,6 +121,29 @@ test_arm_refuses_foreign_live_owner() {
   pass "arm refuses to start supervision under a live foreign session owner"
 }
 
+test_cached_owner_identity_rejects_reused_pid() {
+  local dir state rc
+  dir=$(make_case fence-pid-reuse)
+  state="$dir/state"
+  printf '%s\n' 4242 > "$state/.lock"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fake_identity=original
+    fm_harness_ancestry_pid() { printf "%s\n" 4242; }
+    fm_session_process_identity() { printf "%s\n" "$fake_identity"; }
+    fm_harness_pid_alive() { return 0; }
+    fm_session_owner_fence "$2" || exit 10
+    fake_identity=reused
+    if fm_session_owner_fence "$2"; then
+      exit 11
+    fi
+    [ "$FM_SESSION_OWNER_FOREIGN_PID" = 4242 ] || exit 12
+  ' _ "$SESSION_LIB" "$state" || rc=$?
+  [ "$rc" -eq 0 ] || fail "memoized owner identity trusted a reused pid (status $rc)"
+  pass "memoized harness ownership rejects a reused pid identity"
+}
+
 test_restart_from_non_owner_leaves_owner_watcher() {
   local dir state out rc wpid a_pid lock_pid
   dir=$(make_case fence-restart-refusal)
@@ -115,6 +162,129 @@ test_restart_from_non_owner_leaves_owner_watcher() {
   touch "$dir/a-stop"
   kill "$wpid" "$a_pid" 2>/dev/null || true
   pass "non-owner restart cannot stop the owning session's watcher"
+}
+
+test_restart_serializes_owner_check_and_termination() {
+  local dir state peer claim_holder foreign arm_pid rc out dead
+  dir=$(make_case fence-restart-serialization)
+  state="$dir/state"
+  mark_pr_check_migration_complete "$state"
+  dead=$(dead_pid)
+  printf '%s\n' "$dead" > "$state/.lock"
+  sleep 300 &
+  peer=$!
+  write_watcher_lock "$state" "$dir" "$peer"
+  touch "$state/.last-watcher-beat"
+  start_session_claim_holder "$state" "$dir/claim-ready" "$dir/claim-stop"
+  claim_holder=$!
+  wait_for_file "$dir/claim-ready" || fail "session claim holder did not acquire"
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" --restart > "$dir/restart.out" 2>&1 &
+  arm_pid=$!
+  sleep 0.5
+  is_live_non_zombie "$peer" || fail "restart terminated the watcher while session ownership could still transfer"
+  start_idle_harness "$FAKE_CODEX" "$dir/foreign.pid" "$dir/foreign-stop"
+  wait_for_file "$dir/foreign.pid" || fail "foreign fake harness did not start"
+  foreign=$(cat "$dir/foreign.pid")
+  printf '%s\n' "$foreign" > "$state/.lock"
+  touch "$dir/claim-stop"
+  wait "$claim_holder" 2>/dev/null || true
+  rc=0
+  wait "$arm_pid" || rc=$?
+  out=$(cat "$dir/restart.out")
+  [ "$rc" -ne 0 ] || fail "restart crossed a session-lock handoff"
+  assert_contains "$out" "not restarting" "serialized restart omitted its ownership refusal"
+  is_live_non_zombie "$peer" || fail "serialized restart killed the new session's recorded watcher"
+  touch "$dir/foreign-stop"
+  kill "$peer" 2>/dev/null || true
+  wait "$peer" 2>/dev/null || true
+  pass "restart serializes ownership validation with watcher termination"
+}
+
+test_attached_successor_rechecks_owner_after_wait() {
+  local dir state first arm_pid peer foreign i rc out
+  dir=$(make_case fence-attached-successor)
+  state="$dir/state"
+  mark_pr_check_migration_complete "$state"
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/first.out" 2>&1 &
+  first=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$first" ] && [ -e "$state/.last-watcher-beat" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$first" ] || fail "first watcher did not become healthy"
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=3 "$WATCH_ARM" > "$dir/arm.out" 2>&1 &
+  arm_pid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF "watcher: attached pid=$first" "$dir/arm.out" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$first" "$dir/arm.out" || fail "arm did not attach to the first watcher"
+  kill "$first" 2>/dev/null || true
+  wait "$first" 2>/dev/null || true
+  i=0
+  while [ "$i" -lt 80 ] && [ -e "$state/.watch.lock" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ ! -e "$state/.watch.lock" ] || fail "first watcher did not release its singleton"
+  touch -t 200001010000 "$state/.last-watcher-beat"
+  sleep 300 &
+  peer=$!
+  write_watcher_lock "$state" "$dir" "$peer"
+  start_idle_harness "$FAKE_CODEX" "$dir/foreign.pid" "$dir/foreign-stop"
+  wait_for_file "$dir/foreign.pid" || fail "foreign fake harness did not start"
+  foreign=$(cat "$dir/foreign.pid")
+  printf '%s\n' "$foreign" > "$state/.lock"
+  touch "$state/.last-watcher-beat"
+  rc=0
+  wait "$arm_pid" || rc=$?
+  out=$(cat "$dir/arm.out")
+  [ "$rc" -ne 0 ] || fail "attached arm crossed a session handoff"
+  assert_contains "$out" "not attaching to successor" "attached successor wait omitted its owner recheck"
+  ! grep -qF "watcher: attached pid=$peer" "$dir/arm.out" || fail "old arm reported attachment to the new owner's successor"
+  touch "$dir/foreign-stop"
+  kill "$peer" 2>/dev/null || true
+  wait "$peer" 2>/dev/null || true
+  pass "attached successor wait rechecks ownership before attachment"
+}
+
+test_owned_child_successor_rechecks_owner_after_wait() {
+  local dir state peer foreign arm_pid i rc out
+  dir=$(make_case fence-owned-child-successor)
+  state="$dir/state"
+  mark_pr_check_migration_complete "$state"
+  sleep 300 &
+  peer=$!
+  write_watcher_lock "$state" "$dir" "$peer"
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=3 "$WATCH_ARM" > "$dir/arm.out" 2>&1 &
+  arm_pid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF "watcher: already running pid $peer" "$state"/.watch-arm-output.* 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: already running pid $peer" "$state"/.watch-arm-output.* 2>/dev/null \
+    || fail "owned child did not enter its successor wait"
+  start_idle_harness "$FAKE_CODEX" "$dir/foreign.pid" "$dir/foreign-stop"
+  wait_for_file "$dir/foreign.pid" || fail "foreign fake harness did not start"
+  foreign=$(cat "$dir/foreign.pid")
+  printf '%s\n' "$foreign" > "$state/.lock"
+  touch "$state/.last-watcher-beat"
+  rc=0
+  wait "$arm_pid" || rc=$?
+  out=$(cat "$dir/arm.out")
+  [ "$rc" -ne 0 ] || fail "owned-child arm crossed a session handoff"
+  assert_contains "$out" "not attaching to successor" "owned-child successor wait omitted its owner recheck"
+  ! grep -qF "watcher: attached pid=$peer" "$dir/arm.out" || fail "owned-child arm reported attachment to the new owner's successor"
+  touch "$dir/foreign-stop"
+  kill "$peer" 2>/dev/null || true
+  wait "$peer" 2>/dev/null || true
+  pass "owned-child successor wait rechecks ownership before attachment"
 }
 
 test_cross_harness_takeover_stands_down_and_hands_over() {
@@ -237,7 +407,11 @@ test_afk_daemon_watcher_is_exempt() {
 }
 
 test_arm_refuses_foreign_live_owner
+test_cached_owner_identity_rejects_reused_pid
 test_restart_from_non_owner_leaves_owner_watcher
+test_restart_serializes_owner_check_and_termination
+test_attached_successor_rechecks_owner_after_wait
+test_owned_child_successor_rechecks_owner_after_wait
 test_cross_harness_takeover_stands_down_and_hands_over
 test_dead_owner_lock_still_arms
 test_afk_daemon_watcher_is_exempt
