@@ -15,6 +15,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-fleet-snapshot.sh`   | Print the read-only structured fleet snapshot JSON (schema `fm-fleet-snapshot.v1`)   |
 | `fm-fleet-view.sh`       | Render the fleet snapshot as a human Markdown view                                   |
 | `fm-bearings-snapshot.sh` | Project the fleet snapshot to the compact TOON bearings view; local-only unless `--include-prs` |
+| `fm-convergence-scoreboard.sh` | Measure one clean local ref against one explicit upstream ref as deterministic TOON |
 | `fm-update.sh`           | Fast-forward-only self-update of firstmate and secondmate homes from origin          |
 | `fm-backlog-handoff.sh`  | Validate and delegate queued backlog-item moves into a secondmate home               |
 | `fm-decision-hold.sh`    | Create, verify, complete, and resolve durable captain-held decisions                 |
@@ -93,3 +94,13 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-x-dismiss.sh`        | Dismiss a skipped X-mode mention at the relay without replying                       |
 | `fm-x-link.sh`           | Link a spawned task to its originating X-mode mention in task meta                   |
 | `fm-x-followup.sh`       | Detect, post, and cap completion follow-ups for an X-mode-linked task                |
+
+## Convergence scoreboard
+
+Run `bin/fm-convergence-scoreboard.sh <local-ref> <upstream-ref>` from a clean worktree before convergence starts and after every convergence step.
+Keep both ref arguments explicit and record the emitted commit identities with the measurements so a result can be reproduced after branch names move.
+The diff uses the refs' unique merge base and the resolved local commit, while ahead and behind use the full symmetric commit graph.
+First-parent deliveries count local first-parent commits that are not reachable from upstream.
+Renames count as one deletion plus one addition, and binary paths count as changed files with zero line changes.
+The stable file-group order is `agent-runtime`, `automation`, `tests`, `documentation`, `configuration`, and `other`.
+The script header owns the exact path membership and output contract.
