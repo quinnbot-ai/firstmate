@@ -6,12 +6,17 @@
 # locally instead of via a GitHub PR). It is the one sanctioned exception to hard
 # rule #1 "never run state-changing git in projects/", and it is narrow: it only
 # runs for mode=local-only tasks, only after the captain approves (or yolo=on
-# auto-approves), and only as a fast-forward. A dirty checkout is allowed only
-# when every dirty path is proven to match the incoming blob or to become
-# ignored and untracked at the branch head. Proven ignored paths are preserved
-# on disk, and every previously dirty path must be clean after the fast-forward.
-# Diverged branches still refuse and require the crewmate to rebase. See
-# AGENTS.md prime directives, project management, and task lifecycle.
+# auto-approves), and only as a fast-forward. A dirty default-branch checkout is
+# allowed only when every dirty path is resolved: tracked working-tree and staged
+# content must match the incoming blob bytes and tree mode, while
+# tracked-to-untracked conversions and untracked files must be ignored by the
+# target head's .gitignore rules; info/exclude and global excludes do not count.
+# Every unresolved path is diagnosed before advancing. Proven ignored files are
+# retained on disk, then every previously dirty path is verified clean. A
+# preservation or cleanliness failure after the fast-forward is reported without
+# attempting rollback. Diverged branches still refuse and require the crewmate
+# to rebase. See AGENTS.md prime directives, project management, and task
+# lifecycle.
 # Usage: fm-merge-local.sh <task-id>
 set -eu
 
