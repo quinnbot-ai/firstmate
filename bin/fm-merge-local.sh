@@ -13,14 +13,16 @@
 # ignored by the target head's .gitignore rules under the project's
 # core.ignoreCase semantics; info/exclude and global excludes do not count.
 # An ignored directory is allowed only when the target head tracks nothing under
-# its prefix. Every unresolved path is diagnosed before advancing. Proven ignored
-# files are retained byte-for-byte; proven ignored symlinks retain their readlink
-# targets; proven ignored directories remain directories without walking or
-# hashing their contents. Every previously dirty path is then verified clean. A
-# preservation or cleanliness failure after the fast-forward is reported without
-# attempting rollback. Diverged branches still refuse and require the crewmate
-# to rebase. See AGENTS.md prime directives, project management, and task
-# lifecycle.
+# its prefix. Unresolved paths refuse before advancing; the first 50 receive
+# per-path diagnostics, followed by a +N summary for any remainder. Proven
+# ignored files are retained byte-for-byte; proven ignored symlinks retain their
+# readlink targets; proven ignored directories remain directories without
+# walking or hashing their contents. Other present entry types and entries that
+# cannot be inspected refuse. Every previously dirty path is then verified clean.
+# A preservation or cleanliness failure after the fast-forward is reported
+# without attempting rollback. Diverged branches still refuse and require the
+# crewmate to rebase. See AGENTS.md prime directives, project management, and
+# task lifecycle.
 # Usage: fm-merge-local.sh <task-id>
 set -eu
 
