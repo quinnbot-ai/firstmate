@@ -217,7 +217,7 @@ working_tree_mode() {
 
 staged_state_matches_worktree() {
   local current_mode current_oid current_target index_meta index_mode index_oid
-  local index_target path=$1
+  local index_snapshot path=$1 worktree_snapshot
   index_meta=$(index_blob_metadata "$path") || return 1
   if [ ! -e "$PROJ/$path" ] && [ ! -L "$PROJ/$path" ]; then
     [ -z "$index_meta" ]
@@ -231,12 +231,12 @@ staged_state_matches_worktree() {
     current_target=$(readlink "$PROJ/$path" && printf x) || return 1
     current_target=${current_target%?}
     current_target=${current_target%$'\n'}
-    index_target=$(
-      git --no-replace-objects -C "$PROJ" cat-file blob "$index_oid" \
-        && printf x
-    ) || return 1
-    index_target=${index_target%?}
-    [ "$index_target" = "$current_target" ]
+    worktree_snapshot="$TARGET_VIEW_ROOT/staged-symlink-worktree"
+    index_snapshot="$TARGET_VIEW_ROOT/staged-symlink-index"
+    printf '%s' "$current_target" >"$worktree_snapshot" || return 1
+    git --no-replace-objects -C "$PROJ" cat-file blob "$index_oid" \
+      >"$index_snapshot" || return 1
+    cmp -s "$worktree_snapshot" "$index_snapshot"
     return
   fi
   [ ! -L "$PROJ/$path" ] || return 1
@@ -294,8 +294,62 @@ add_unresolved() {
   UNRESOLVED_REASONS+=("$2")
 }
 
+append_target_classified_untracked_tree() {
+  local child dotglob_was_set ignore_directory_rc nullglob_was_set path=$1
+  local -a children=()
+
+  set +e
+  branch_ignores_directory_path "$path"
+  ignore_directory_rc=$?
+  set -e
+  case "$ignore_directory_rc" in
+    0)
+      expanded_paths+=("$path")
+      expanded_states+=("??")
+      return 0
+      ;;
+    1)
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  if [ -e "$PROJ/${path%/}/.git" ] || [ -L "$PROJ/${path%/}/.git" ]; then
+    expanded_paths+=("$path")
+    expanded_states+=("??")
+    return 0
+  fi
+  [ -r "$PROJ/$path" ] && [ -x "$PROJ/$path" ] || return 1
+
+  if shopt -q dotglob; then
+    dotglob_was_set=1
+  else
+    dotglob_was_set=0
+  fi
+  if shopt -q nullglob; then
+    nullglob_was_set=1
+  else
+    nullglob_was_set=0
+  fi
+  shopt -s dotglob nullglob
+  children=("$PROJ/${path%/}"/*)
+  [ "$dotglob_was_set" -eq 1 ] || shopt -u dotglob
+  [ "$nullglob_was_set" -eq 1 ] || shopt -u nullglob
+
+  for child in "${children[@]}"; do
+    child=${child#"$PROJ"/}
+    if [ -d "$PROJ/$child" ] && [ ! -L "$PROJ/$child" ]; then
+      append_target_classified_untracked_tree "$child" || return 1
+    else
+      expanded_paths+=("$child")
+      expanded_states+=("??")
+    fi
+  done
+}
+
 expand_unignored_untracked_directories() {
-  local i path state record records_path ignore_directory_rc
+  local i path state
   local -a expanded_paths=() expanded_states=()
   for ((i = 0; i < ${#DIRTY_PATHS[@]}; i++)); do
     path=${DIRTY_PATHS[$i]}
@@ -306,34 +360,7 @@ expand_unignored_untracked_directories() {
       continue
     fi
 
-    set +e
-    branch_ignores_directory_path "$path"
-    ignore_directory_rc=$?
-    set -e
-    case "$ignore_directory_rc" in
-      0)
-        # The later collision proof covers this entire prefix, so do not walk it.
-        expanded_paths+=("$path")
-        expanded_states+=("$state")
-        ;;
-      1)
-        # A whole-directory proof is unavailable.  Preserve the established
-        # regular-file behavior by enumerating this one prefix for target-ignored
-        # files, rather than recursively walking every untracked directory.
-        records_path="$TARGET_VIEW_ROOT/untracked-$i"
-        if ! git -C "$PROJ" status --porcelain=v1 -z --untracked-files=all \
-          -- ":(literal)$path" >"$records_path"; then
-          return 1
-        fi
-        while IFS= read -r -d '' record; do
-          expanded_paths+=("${record:3}")
-          expanded_states+=("${record:0:2}")
-        done <"$records_path"
-        ;;
-      *)
-        return 1
-        ;;
-    esac
+    append_target_classified_untracked_tree "$path" || return 1
   done
   DIRTY_PATHS=("${expanded_paths[@]}")
   DIRTY_STATES=("${expanded_states[@]}")
