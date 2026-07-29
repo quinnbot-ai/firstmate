@@ -24,6 +24,7 @@
 #   (r) large unresolved-path diagnostics are bounded
 #   (s) staged tracked-to-ignored symlinks are compared without following them
 #   (t) index flags cannot hide staged symlink target drift
+#   (u) index flags cannot hide staged symlink type drift
 set -u
 
 # shellcheck disable=SC1091
@@ -529,6 +530,46 @@ test_assume_unchanged_does_not_hide_staged_symlink_drift() {
   pass "fm-merge-local rejects staged symlink drift hidden by index flags"
 }
 
+test_assume_unchanged_does_not_hide_staged_symlink_type_drift() {
+  local before case_dir rc
+  case_dir=$(make_case staged-ignored-symlink-type-drift)
+  rm "$case_dir/project/runtime-state.txt"
+  ln -s missing-initial-target "$case_dir/project/runtime-state.txt"
+  git -C "$case_dir/project" add runtime-state.txt
+  git -C "$case_dir/project" commit -qm "track runtime symlink"
+  git -C "$case_dir/branch" merge -q --ff-only main
+  git -C "$case_dir/branch" rm -q --cached runtime-state.txt
+  printf 'runtime-state.txt\n' >"$case_dir/branch/.gitignore"
+  git -C "$case_dir/branch" add .gitignore
+  git -C "$case_dir/branch" commit -qm "ignore runtime symlink"
+  rm "$case_dir/project/runtime-state.txt"
+  ln -s staged-target "$case_dir/project/runtime-state.txt"
+  git -C "$case_dir/project" add runtime-state.txt
+  git -C "$case_dir/project" update-index --assume-unchanged -- runtime-state.txt
+  rm "$case_dir/project/runtime-state.txt"
+  printf '%s' staged-target >"$case_dir/project/runtime-state.txt"
+  before=$(git -C "$case_dir/project" rev-parse main)
+
+  set +e
+  run_merge_local "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" \
+    "staged-ignored-symlink-type-drift: merge should refuse type drift"
+  assert_grep 'staged content or mode does not match' "$case_dir/stderr" \
+    "staged-ignored-symlink-type-drift: refusal diagnostic changed"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$before" ] \
+    || fail "staged-ignored-symlink-type-drift: refusal advanced main"
+  if [ ! -f "$case_dir/project/runtime-state.txt" ] \
+    || [ -L "$case_dir/project/runtime-state.txt" ]; then
+    fail "staged-ignored-symlink-type-drift: refusal changed the file type"
+  fi
+  assert_grep 'staged-target' "$case_dir/project/runtime-state.txt" \
+    "staged-ignored-symlink-type-drift: refusal changed the file content"
+  pass "fm-merge-local rejects staged symlink type drift hidden by index flags"
+}
+
 test_branch_ignored_special_file_refuses() {
   local before case_dir rc
   case_dir=$(make_case ignored-special-file)
@@ -813,6 +854,7 @@ test_branch_ignored_symlink_is_preserved
 test_branch_ignored_symlink_ignores_target_content_changes
 test_staged_tracked_to_ignored_symlink_is_preserved
 test_assume_unchanged_does_not_hide_staged_symlink_drift
+test_assume_unchanged_does_not_hide_staged_symlink_type_drift
 test_branch_ignored_special_file_refuses
 test_unresolved_path_diagnostic_is_bounded
 test_diverged_branch_still_refuses

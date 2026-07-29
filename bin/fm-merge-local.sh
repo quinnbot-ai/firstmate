@@ -224,8 +224,8 @@ staged_state_matches_worktree() {
   [ -n "$index_meta" ] || return 1
   index_mode=${index_meta%% *}
   index_oid=${index_meta##* }
-  if [ -L "$PROJ/$path" ]; then
-    [ "$index_mode" = "120000" ] || return 1
+  if [ "$index_mode" = "120000" ]; then
+    [ -L "$PROJ/$path" ] || return 1
     current_target=$(readlink "$PROJ/$path" && printf x) || return 1
     current_target=${current_target%?}
     current_target=${current_target%$'\n'}
@@ -235,6 +235,7 @@ staged_state_matches_worktree() {
     [ "$index_target" = "$current_target" ]
     return
   fi
+  [ ! -L "$PROJ/$path" ] || return 1
   current_oid=$(git -C "$PROJ" hash-object -- "$path" 2>/dev/null) || return 1
   current_mode=$(working_tree_mode "$path") || return 1
   [ "$index_oid" = "$current_oid" ] && [ "$index_mode" = "$current_mode" ]
