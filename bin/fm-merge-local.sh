@@ -14,12 +14,13 @@
 # core.ignoreCase semantics; info/exclude and global excludes do not count.
 # An ignored directory is allowed only when the target head tracks nothing under
 # its prefix. Every unresolved path is diagnosed before advancing. Proven ignored
-# files are retained byte-for-byte; proven ignored directories remain directories
-# without walking or hashing their contents. Every previously dirty path is then
-# verified clean. A preservation or cleanliness failure after the fast-forward is
-# reported without attempting rollback. Diverged branches still refuse and
-# require the crewmate to rebase. See AGENTS.md prime directives, project
-# management, and task lifecycle.
+# files are retained byte-for-byte; proven ignored symlinks retain their readlink
+# targets; proven ignored directories remain directories without walking or
+# hashing their contents. Every previously dirty path is then verified clean. A
+# preservation or cleanliness failure after the fast-forward is reported without
+# attempting rollback. Diverged branches still refuse and require the crewmate
+# to rebase. See AGENTS.md prime directives, project management, and task
+# lifecycle.
 # Usage: fm-merge-local.sh <task-id>
 set -eu
 
@@ -322,8 +323,18 @@ expand_unignored_untracked_directories() {
 }
 
 remember_preserved_path() {
-  local path=$1 oid
-  if oid=$(git -C "$PROJ" hash-object -- "$path" 2>/dev/null); then
+  local path=$1 oid snapshot
+  if [ -L "$PROJ/$path" ]; then
+    snapshot="$TARGET_VIEW_ROOT/readlink"
+    if ! readlink "$PROJ/$path" >"$snapshot" \
+      || ! oid=$(git -C "$PROJ" hash-object -- "$snapshot"); then
+      return 1
+    fi
+    PRESERVE_PATHS+=("$path")
+    PRESERVE_KINDS+=("symlink")
+    PRESERVE_OIDS+=("$oid")
+  elif [ -f "$PROJ/$path" ] \
+    && oid=$(git -C "$PROJ" hash-object -- "$path" 2>/dev/null); then
     PRESERVE_PATHS+=("$path")
     PRESERVE_KINDS+=("blob")
     PRESERVE_OIDS+=("$oid")
@@ -345,6 +356,17 @@ remember_preserved_directory() {
     return 0
   fi
   return 1
+}
+
+print_unresolved_paths() {
+  local count=${#UNRESOLVED_PATHS[@]} i limit=50
+  echo "error: $PROJ has dirty paths not resolved by $BRANCH; refusing to merge:" >&2
+  for ((i = 0; i < count && i < limit; i++)); do
+    printf '  - %q: %s\n' "${UNRESOLVED_PATHS[$i]}" "${UNRESOLVED_REASONS[$i]}" >&2
+  done
+  if [ "$count" -gt "$limit" ]; then
+    printf '  +%d more unresolved paths\n' "$((count - limit))" >&2
+  fi
 }
 
 move_preserved_path_out_of_merge() {
@@ -527,10 +549,7 @@ if [ "${#DIRTY_PATHS[@]}" -gt 0 ]; then
 fi
 
 if [ "${#UNRESOLVED_PATHS[@]}" -gt 0 ]; then
-  echo "error: $PROJ has dirty paths not resolved by $BRANCH; refusing to merge:" >&2
-  for ((i = 0; i < ${#UNRESOLVED_PATHS[@]}; i++)); do
-    printf '  - %q: %s\n' "${UNRESOLVED_PATHS[$i]}" "${UNRESOLVED_REASONS[$i]}" >&2
-  done
+  print_unresolved_paths
   exit 1
 fi
 
@@ -577,10 +596,7 @@ for ((i = 0; i < ${#RESOLVED_PATHS[@]}; i++)); do
 done
 
 if [ "${#UNRESOLVED_PATHS[@]}" -gt 0 ]; then
-  echo "error: $PROJ has dirty paths not resolved by $BRANCH; refusing to merge:" >&2
-  for ((i = 0; i < ${#UNRESOLVED_PATHS[@]}; i++)); do
-    printf '  - %q: %s\n' "${UNRESOLVED_PATHS[$i]}" "${UNRESOLVED_REASONS[$i]}" >&2
-  done
+  print_unresolved_paths
   exit 1
 fi
 
@@ -631,6 +647,21 @@ for ((i = 0; i < ${#PRESERVE_PATHS[@]}; i++)); do
   if [ "${PRESERVE_KINDS[$i]}" = "directory" ]; then
     if [ ! -d "$PROJ/$path" ] || [ -L "$PROJ/$path" ]; then
       printf 'error: fast-forward completed, but ignored directory %q is now absent or no longer a directory\n' \
+        "$path" >&2
+      exit 1
+    fi
+    continue
+  fi
+  if [ "${PRESERVE_KINDS[$i]}" = "symlink" ]; then
+    snapshot="$TARGET_VIEW_ROOT/readlink"
+    if [ ! -L "$PROJ/$path" ] || ! readlink "$PROJ/$path" >"$snapshot" \
+      || ! preserved_oid=$(git -C "$PROJ" hash-object -- "$snapshot"); then
+      printf 'error: fast-forward completed, but ignored symlink %q is now absent or unreadable\n' \
+        "$path" >&2
+      exit 1
+    fi
+    if [ "$preserved_oid" != "${PRESERVE_OIDS[$i]}" ]; then
+      printf 'error: fast-forward completed, but ignored symlink %q changed target\n' \
         "$path" >&2
       exit 1
     fi
