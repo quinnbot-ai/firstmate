@@ -65,6 +65,7 @@ TARGET_VIEW_INDEX=
 TARGET_VIEW_GIT_DIR=
 TARGET_VIEW_PATHS=
 TARGET_GIT_DIR=
+TARGET_IGNORE_CASE=false
 PRESERVE_TEMP_ROOT=
 MOVED_PATHS=()
 MOVED_RESTORED=()
@@ -136,6 +137,9 @@ init_target_view() {
   empty_template="$TARGET_VIEW_ROOT/empty-template"
   TARGET_VIEW_PATHS="$TARGET_VIEW_ROOT/tree-paths"
   TARGET_GIT_DIR=$(git -C "$PROJ" rev-parse --absolute-git-dir) || return 1
+  TARGET_IGNORE_CASE=$(
+    git -C "$PROJ" config --type=bool --default=false --get core.ignoreCase
+  ) || return 1
   mkdir -p "$TARGET_VIEW_TREE" "$empty_template" || return 1
   git -c init.defaultBranch=fm-target-view init -q \
     --template="$empty_template" "$TARGET_VIEW_TREE" || return 1
@@ -167,13 +171,15 @@ branch_ignores_path() {
 }
 
 branch_ignores_directory_path() {
+  local path
+  path=${1%/}/
   GIT_CONFIG_NOSYSTEM=1 \
   GIT_CONFIG_GLOBAL=/dev/null \
   GIT_DIR="$TARGET_VIEW_GIT_DIR" \
   GIT_WORK_TREE="$TARGET_VIEW_TREE" \
   GIT_INDEX_FILE="$TARGET_VIEW_INDEX" \
     git -c core.excludesFile=/dev/null \
-      -C "$TARGET_VIEW_TREE" check-ignore --no-index --quiet -- "$1"
+      -C "$TARGET_VIEW_TREE" check-ignore --no-index --quiet -- "$path"
 }
 
 branch_blob_metadata() {
@@ -217,16 +223,17 @@ staged_state_matches_worktree() {
 }
 
 branch_tree_uses_directory_prefix() {
-  local path=$1 prefix entry
+  local matches path=$1 pathspec prefix
   prefix=${path%/}
-  while IFS= read -r -d '' entry; do
-    case "$entry" in
-      "$prefix"|"$prefix"/*)
-        return 0
-        ;;
-    esac
-  done <"$TARGET_VIEW_PATHS"
-  return 1
+  pathspec=":(literal)$prefix"
+  if [ "$TARGET_IGNORE_CASE" = true ]; then
+    pathspec=":(icase,literal)$prefix"
+  fi
+  matches=$(
+    GIT_INDEX_FILE="$TARGET_VIEW_INDEX" \
+      git -C "$PROJ" ls-files -- "$pathspec"
+  ) || return 2
+  [ -n "$matches" ]
 }
 
 DIRTY_PATHS=()
@@ -386,10 +393,27 @@ if [ "${#DIRTY_PATHS[@]}" -gt 0 ]; then
       set -e
       case "$ignore_directory_rc" in
         0)
-          if branch_tree_uses_directory_prefix "$path"; then
-            add_unresolved "$path" "ignored directory has an incoming tracked path under its prefix"
+          if [ "$state" != "??" ] && [ "$state" != "!!" ] \
+            && [ "${state:0:1}" != " " ]; then
+            add_unresolved "$path" "staged state cannot be preserved when the working-tree path is a directory"
             continue
           fi
+          set +e
+          branch_tree_uses_directory_prefix "$path"
+          prefix_collision_rc=$?
+          set -e
+          case "$prefix_collision_rc" in
+            0)
+              add_unresolved "$path" "ignored directory has an incoming tracked path under its prefix"
+              continue
+              ;;
+            1)
+              ;;
+            *)
+              add_unresolved "$path" "could not inspect the branch head for paths under the ignored directory prefix"
+              continue
+              ;;
+          esac
           if ! remember_preserved_directory "$path"; then
             add_unresolved "$path" "ignored directory disappeared during merge preparation"
             continue

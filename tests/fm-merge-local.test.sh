@@ -305,6 +305,69 @@ test_branch_ignored_directory_with_incoming_collision_refuses() {
   pass "fm-merge-local refuses an ignored directory when the incoming tree uses its prefix"
 }
 
+test_branch_ignored_directory_with_casefolded_incoming_collision_refuses() {
+  local case_dir before rc
+  case_dir=$(make_case ignored-directory-casefolded-collision)
+  git -C "$case_dir/project" config core.ignoreCase true
+  printf 'workspace/\n' >"$case_dir/branch/.gitignore"
+  mkdir -p "$case_dir/branch/workspace"
+  printf 'incoming tracked state\n' >"$case_dir/branch/workspace/config.json"
+  git -C "$case_dir/branch" add .gitignore
+  git -C "$case_dir/branch" add -f workspace/config.json
+  git -C "$case_dir/branch" commit -qm "ignore workspace with tracked config"
+  mkdir -p "$case_dir/project/Workspace"
+  printf 'local runtime state\n' >"$case_dir/project/Workspace/runtime.json"
+  before=$(git -C "$case_dir/project" rev-parse main)
+
+  set +e
+  run_merge_local "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "ignored-directory-casefolded-collision: merge should refuse"
+  assert_grep 'Workspace/' "$case_dir/stderr" \
+    "ignored-directory-casefolded-collision: refusal did not name the unsafe directory"
+  assert_grep 'incoming tracked path' "$case_dir/stderr" \
+    "ignored-directory-casefolded-collision: refusal did not explain the tracked collision"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$before" ] \
+    || fail "ignored-directory-casefolded-collision: refusal advanced main"
+  [ -f "$case_dir/project/Workspace/runtime.json" ] \
+    || fail "ignored-directory-casefolded-collision: refusal changed local runtime state"
+  pass "fm-merge-local refuses case-folded incoming collisions for ignored directories"
+}
+
+test_tracked_path_replaced_by_directory_refuses_staged_state() {
+  local before before_index case_dir rc
+  case_dir=$(make_case staged-directory-conversion)
+  git -C "$case_dir/branch" rm -q runtime-state.txt
+  printf 'runtime-state.txt/\n' >"$case_dir/branch/.gitignore"
+  git -C "$case_dir/branch" add .gitignore
+  git -C "$case_dir/branch" commit -qm "leave runtime directory untracked"
+  printf 'staged runtime state\n' >"$case_dir/project/runtime-state.txt"
+  git -C "$case_dir/project" add runtime-state.txt
+  rm "$case_dir/project/runtime-state.txt"
+  mkdir "$case_dir/project/runtime-state.txt"
+  printf 'working runtime state\n' >"$case_dir/project/runtime-state.txt/state"
+  before=$(git -C "$case_dir/project" rev-parse main)
+  before_index=$(git -C "$case_dir/project" rev-parse :runtime-state.txt)
+
+  set +e
+  run_merge_local "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "staged-directory-conversion: merge should refuse"
+  assert_grep 'staged state cannot be preserved' "$case_dir/stderr" \
+    "staged-directory-conversion: refusal did not diagnose the staged state"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$before" ] \
+    || fail "staged-directory-conversion: refusal advanced main"
+  [ "$(git -C "$case_dir/project" rev-parse :runtime-state.txt)" = "$before_index" ] \
+    || fail "staged-directory-conversion: refusal changed the index"
+  assert_grep 'working runtime state' "$case_dir/project/runtime-state.txt/state" \
+    "staged-directory-conversion: refusal changed the working directory"
+  pass "fm-merge-local refuses to discard staged state behind an ignored directory"
+}
+
 test_staged_mode_only_dirt_matching_branch_permits() {
   local case_dir mode
   case_dir=$(make_case staged-mode)
@@ -534,6 +597,8 @@ test_branch_ignored_untracked_file_permits
 test_branch_ignored_untracked_directory_permits_without_descending
 test_nested_branch_ignored_untracked_file_permits
 test_branch_ignored_directory_with_incoming_collision_refuses
+test_branch_ignored_directory_with_casefolded_incoming_collision_refuses
+test_tracked_path_replaced_by_directory_refuses_staged_state
 test_staged_mode_only_dirt_matching_branch_permits
 test_diverged_branch_still_refuses
 test_non_default_checkout_still_refuses
