@@ -306,7 +306,7 @@ test_branch_ignored_directory_with_incoming_collision_refuses() {
 }
 
 test_branch_ignored_directory_with_casefolded_incoming_collision_refuses() {
-  local case_dir before rc
+  local case_dir before fakebin rc real_git
   case_dir=$(make_case ignored-directory-casefolded-collision)
   git -C "$case_dir/project" config core.ignoreCase true
   printf 'workspace/\n' >"$case_dir/branch/.gitignore"
@@ -318,9 +318,30 @@ test_branch_ignored_directory_with_casefolded_incoming_collision_refuses() {
   mkdir -p "$case_dir/project/Workspace"
   printf 'local runtime state\n' >"$case_dir/project/Workspace/runtime.json"
   before=$(git -C "$case_dir/project" rev-parse main)
+  fakebin=$(fm_fakebin "$case_dir")
+  real_git=$(command -v git)
+  cat >"$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+set -eu
+target_init=false
+last=
+for arg in "$@"; do
+  [ "$arg" = "init.defaultBranch=fm-target-view" ] && target_init=true
+  last=$arg
+done
+if [ "$target_init" = true ]; then
+  "$FM_REAL_GIT" "$@"
+  "$FM_REAL_GIT" -C "$last" config core.ignoreCase false
+  exit 0
+fi
+exec "$FM_REAL_GIT" "$@"
+SH
+  chmod +x "$fakebin/git"
 
   set +e
-  run_merge_local "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr"
+  FM_REAL_GIT="$real_git" \
+  PATH="$fakebin:$PATH" \
+    run_merge_local "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr"
   rc=$?
   set -e
 

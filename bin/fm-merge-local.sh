@@ -167,6 +167,7 @@ branch_ignores_path() {
   GIT_WORK_TREE="$TARGET_VIEW_TREE" \
   GIT_INDEX_FILE="$TARGET_VIEW_INDEX" \
     git -c core.excludesFile=/dev/null \
+      -c core.ignoreCase="$TARGET_IGNORE_CASE" \
       -C "$TARGET_VIEW_TREE" check-ignore --quiet -- "$1"
 }
 
@@ -179,6 +180,7 @@ branch_ignores_directory_path() {
   GIT_WORK_TREE="$TARGET_VIEW_TREE" \
   GIT_INDEX_FILE="$TARGET_VIEW_INDEX" \
     git -c core.excludesFile=/dev/null \
+      -c core.ignoreCase="$TARGET_IGNORE_CASE" \
       -C "$TARGET_VIEW_TREE" check-ignore --no-index --quiet -- "$path"
 }
 
