@@ -22,6 +22,7 @@
 #   (p) target content changes behind an ignored symlink do not change its proof
 #   (q) ignored special files still refuse
 #   (r) large unresolved-path diagnostics are bounded
+#   (s) staged tracked-to-ignored symlinks are compared without following them
 set -u
 
 # shellcheck disable=SC1091
@@ -459,6 +460,38 @@ test_branch_ignored_symlink_ignores_target_content_changes() {
   pass "fm-merge-local proves an ignored symlink independently of its target content"
 }
 
+test_staged_tracked_to_ignored_symlink_is_preserved() {
+  local case_dir link_target
+  case_dir=$(make_case staged-ignored-symlink)
+  rm "$case_dir/project/runtime-state.txt"
+  ln -s missing-initial-target "$case_dir/project/runtime-state.txt"
+  git -C "$case_dir/project" add runtime-state.txt
+  git -C "$case_dir/project" commit -qm "track runtime symlink"
+  git -C "$case_dir/branch" merge -q --ff-only main
+  git -C "$case_dir/branch" rm -q --cached runtime-state.txt
+  printf 'runtime-state.txt\n' >"$case_dir/branch/.gitignore"
+  git -C "$case_dir/branch" add .gitignore
+  git -C "$case_dir/branch" commit -qm "ignore runtime symlink"
+  mkdir "$case_dir/directory-target"
+  rm "$case_dir/project/runtime-state.txt"
+  ln -s ../directory-target "$case_dir/project/runtime-state.txt"
+  git -C "$case_dir/project" add runtime-state.txt
+  link_target=$(readlink "$case_dir/project/runtime-state.txt")
+
+  run_merge_local "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr" \
+    || fail "staged-ignored-symlink: merge should preserve a staged ignored symlink"
+
+  [ -L "$case_dir/project/runtime-state.txt" ] \
+    || fail "staged-ignored-symlink: merge removed the ignored symlink"
+  [ "$(readlink "$case_dir/project/runtime-state.txt")" = "$link_target" ] \
+    || fail "staged-ignored-symlink: merge changed the staged symlink target"
+  assert_path_clean "$case_dir/project" runtime-state.txt \
+    "staged-ignored-symlink: preserved symlink remained dirty after merge"
+  assert_main_reached_branch "$case_dir" \
+    "staged-ignored-symlink: main did not fast-forward to the task branch"
+  pass "fm-merge-local preserves staged ignored symlinks without following them"
+}
+
 test_branch_ignored_special_file_refuses() {
   local before case_dir rc
   case_dir=$(make_case ignored-special-file)
@@ -741,6 +774,7 @@ test_tracked_path_replaced_by_directory_refuses_staged_state
 test_staged_mode_only_dirt_matching_branch_permits
 test_branch_ignored_symlink_is_preserved
 test_branch_ignored_symlink_ignores_target_content_changes
+test_staged_tracked_to_ignored_symlink_is_preserved
 test_branch_ignored_special_file_refuses
 test_unresolved_path_diagnostic_is_bounded
 test_diverged_branch_still_refuses
