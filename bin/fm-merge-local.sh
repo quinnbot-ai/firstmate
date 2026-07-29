@@ -9,14 +9,17 @@
 # auto-approves), and only as a fast-forward. A dirty default-branch checkout is
 # allowed only when every dirty path is resolved: tracked working-tree and staged
 # content must match the incoming blob bytes and tree mode, while
-# tracked-to-untracked conversions and untracked files must be ignored by the
-# target head's .gitignore rules; info/exclude and global excludes do not count.
-# Every unresolved path is diagnosed before advancing. Proven ignored files are
-# retained on disk, then every previously dirty path is verified clean. A
-# preservation or cleanliness failure after the fast-forward is reported without
-# attempting rollback. Diverged branches still refuse and require the crewmate
-# to rebase. See AGENTS.md prime directives, project management, and task
-# lifecycle.
+# tracked-to-untracked conversions and untracked files or directories must be
+# ignored by the target head's .gitignore rules under the project's
+# core.ignoreCase semantics; info/exclude and global excludes do not count.
+# An ignored directory is allowed only when the target head tracks nothing under
+# its prefix. Every unresolved path is diagnosed before advancing. Proven ignored
+# files are retained byte-for-byte; proven ignored directories remain directories
+# without walking or hashing their contents. Every previously dirty path is then
+# verified clean. A preservation or cleanliness failure after the fast-forward is
+# reported without attempting rollback. Diverged branches still refuse and
+# require the crewmate to rebase. See AGENTS.md prime directives, project
+# management, and task lifecycle.
 # Usage: fm-merge-local.sh <task-id>
 set -eu
 
