@@ -214,7 +214,8 @@ working_tree_mode() {
 }
 
 staged_state_matches_worktree() {
-  local current_mode current_oid index_meta index_mode index_oid path=$1
+  local current_mode current_oid current_target index_meta index_mode index_oid
+  local index_target path=$1
   index_meta=$(index_blob_metadata "$path") || return 1
   if [ ! -e "$PROJ/$path" ] && [ ! -L "$PROJ/$path" ]; then
     [ -z "$index_meta" ]
@@ -225,7 +226,13 @@ staged_state_matches_worktree() {
   index_oid=${index_meta##* }
   if [ -L "$PROJ/$path" ]; then
     [ "$index_mode" = "120000" ] || return 1
-    GIT_LITERAL_PATHSPECS=1 git -C "$PROJ" diff-files --quiet -- "$path"
+    current_target=$(readlink "$PROJ/$path" && printf x) || return 1
+    current_target=${current_target%?}
+    current_target=${current_target%$'\n'}
+    index_target=$(git -C "$PROJ" cat-file blob "$index_oid" && printf x) \
+      || return 1
+    index_target=${index_target%?}
+    [ "$index_target" = "$current_target" ]
     return
   fi
   current_oid=$(git -C "$PROJ" hash-object -- "$path" 2>/dev/null) || return 1
