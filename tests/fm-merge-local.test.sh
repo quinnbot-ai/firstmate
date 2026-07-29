@@ -25,6 +25,7 @@
 #   (s) staged tracked-to-ignored symlinks are compared without following them
 #   (t) index flags cannot hide staged symlink target drift
 #   (u) index flags cannot hide staged symlink type drift
+#   (v) replacement refs cannot substitute staged symlink bytes
 set -u
 
 # shellcheck disable=SC1091
@@ -570,6 +571,50 @@ test_assume_unchanged_does_not_hide_staged_symlink_type_drift() {
   pass "fm-merge-local rejects staged symlink type drift hidden by index flags"
 }
 
+test_replace_ref_does_not_substitute_staged_symlink_blob() {
+  local before case_dir index_oid rc replacement_oid
+  case_dir=$(make_case staged-ignored-symlink-replace-ref)
+  rm "$case_dir/project/runtime-state.txt"
+  ln -s missing-initial-target "$case_dir/project/runtime-state.txt"
+  git -C "$case_dir/project" add runtime-state.txt
+  git -C "$case_dir/project" commit -qm "track runtime symlink"
+  git -C "$case_dir/branch" merge -q --ff-only main
+  git -C "$case_dir/branch" rm -q --cached runtime-state.txt
+  printf 'runtime-state.txt\n' >"$case_dir/branch/.gitignore"
+  git -C "$case_dir/branch" add .gitignore
+  git -C "$case_dir/branch" commit -qm "ignore runtime symlink"
+  rm "$case_dir/project/runtime-state.txt"
+  ln -s staged-target "$case_dir/project/runtime-state.txt"
+  git -C "$case_dir/project" add runtime-state.txt
+  index_oid=$(
+    git -C "$case_dir/project" ls-files --stage -- runtime-state.txt \
+      | awk '{ print $2 }'
+  )
+  replacement_oid=$(
+    printf '%s' replacement-target \
+      | git -C "$case_dir/project" hash-object -w --stdin
+  )
+  git -C "$case_dir/project" replace "$index_oid" "$replacement_oid"
+  rm "$case_dir/project/runtime-state.txt"
+  ln -s replacement-target "$case_dir/project/runtime-state.txt"
+  before=$(git -C "$case_dir/project" rev-parse main)
+
+  set +e
+  run_merge_local "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" \
+    "staged-ignored-symlink-replace-ref: merge should refuse substituted bytes"
+  assert_grep 'staged content or mode does not match' "$case_dir/stderr" \
+    "staged-ignored-symlink-replace-ref: refusal diagnostic changed"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$before" ] \
+    || fail "staged-ignored-symlink-replace-ref: refusal advanced main"
+  [ "$(readlink "$case_dir/project/runtime-state.txt")" = "replacement-target" ] \
+    || fail "staged-ignored-symlink-replace-ref: refusal changed the link"
+  pass "fm-merge-local rejects staged symlink substitution by replacement refs"
+}
+
 test_branch_ignored_special_file_refuses() {
   local before case_dir rc
   case_dir=$(make_case ignored-special-file)
@@ -855,6 +900,7 @@ test_branch_ignored_symlink_ignores_target_content_changes
 test_staged_tracked_to_ignored_symlink_is_preserved
 test_assume_unchanged_does_not_hide_staged_symlink_drift
 test_assume_unchanged_does_not_hide_staged_symlink_type_drift
+test_replace_ref_does_not_substitute_staged_symlink_blob
 test_branch_ignored_special_file_refuses
 test_unresolved_path_diagnostic_is_bounded
 test_diverged_branch_still_refuses

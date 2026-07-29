@@ -229,8 +229,10 @@ staged_state_matches_worktree() {
     current_target=$(readlink "$PROJ/$path" && printf x) || return 1
     current_target=${current_target%?}
     current_target=${current_target%$'\n'}
-    index_target=$(git -C "$PROJ" cat-file blob "$index_oid" && printf x) \
-      || return 1
+    index_target=$(
+      git --no-replace-objects -C "$PROJ" cat-file blob "$index_oid" \
+        && printf x
+    ) || return 1
     index_target=${index_target%?}
     [ "$index_target" = "$current_target" ]
     return
