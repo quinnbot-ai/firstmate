@@ -348,13 +348,14 @@ append_target_classified_untracked_tree() {
   done
 }
 
-expand_unignored_untracked_directories() {
+expand_untracked_directories_against_target() {
   local i path state
   local -a expanded_paths=() expanded_states=()
   for ((i = 0; i < ${#DIRTY_PATHS[@]}; i++)); do
     path=${DIRTY_PATHS[$i]}
     state=${DIRTY_STATES[$i]}
-    if [ "$state" != "??" ] || [ ! -d "$PROJ/$path" ] || [ -L "$PROJ/$path" ]; then
+    if { [ "$state" != "??" ] && [ "$state" != "!!" ]; } \
+      || [ ! -d "$PROJ/$path" ] || [ -L "$PROJ/$path" ]; then
       expanded_paths+=("$path")
       expanded_states+=("$state")
       continue
@@ -441,7 +442,7 @@ if [ "${#DIRTY_PATHS[@]}" -gt 0 ]; then
     echo "error: could not construct the $BRANCH ignore view; refusing to merge a dirty checkout" >&2
     exit 1
   fi
-  if ! expand_unignored_untracked_directories; then
+  if ! expand_untracked_directories_against_target; then
     echo "error: could not classify untracked directories against $BRANCH; refusing to merge a dirty checkout" >&2
     exit 1
   fi

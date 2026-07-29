@@ -28,6 +28,7 @@
 #   (v) replacement refs cannot substitute staged symlink bytes
 #   (w) NUL bytes in a staged symlink blob cannot collapse during comparison
 #   (x) nested directly ignored directories are preserved without descending
+#   (y) current parent ignores cannot hide a narrower target directory boundary
 set -u
 
 # shellcheck disable=SC1091
@@ -677,6 +678,32 @@ test_nested_directly_ignored_directory_preserves_special_entries() {
   pass "fm-merge-local stops at nested target-ignored directory boundaries"
 }
 
+test_currently_ignored_parent_reclassifies_nested_target_directory() {
+  local case_dir
+  case_dir=$(make_case current-ignore-to-nested-target-ignore)
+  printf 'outer/\n' >"$case_dir/project/.gitignore"
+  git -C "$case_dir/project" add .gitignore
+  git -C "$case_dir/project" commit -qm "ignore outer runtime directory"
+  git -C "$case_dir/branch" merge -q --ff-only main
+  printf 'outer/cache/\n' >"$case_dir/branch/.gitignore"
+  printf 'incoming\n' >"$case_dir/branch/incoming.txt"
+  git -C "$case_dir/branch" add .gitignore incoming.txt
+  git -C "$case_dir/branch" commit -qm "narrow runtime directory ignore"
+  mkdir -p "$case_dir/project/outer/cache"
+  mkfifo "$case_dir/project/outer/cache/runtime.pipe"
+
+  run_merge_local "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr" \
+    || fail "current-ignore-to-nested-target-ignore: merge should preserve the nested ignored directory"
+
+  [ -d "$case_dir/project/outer/cache" ] \
+    || fail "current-ignore-to-nested-target-ignore: merge removed the nested ignored directory"
+  [ -p "$case_dir/project/outer/cache/runtime.pipe" ] \
+    || fail "current-ignore-to-nested-target-ignore: merge inspected or changed the FIFO"
+  assert_main_reached_branch "$case_dir" \
+    "current-ignore-to-nested-target-ignore: main did not fast-forward to the task branch"
+  pass "fm-merge-local reclassifies currently ignored parents against target rules"
+}
+
 test_branch_ignored_special_file_refuses() {
   local before case_dir rc
   case_dir=$(make_case ignored-special-file)
@@ -965,6 +992,7 @@ test_assume_unchanged_does_not_hide_staged_symlink_type_drift
 test_replace_ref_does_not_substitute_staged_symlink_blob
 test_nul_in_staged_symlink_blob_refuses
 test_nested_directly_ignored_directory_preserves_special_entries
+test_currently_ignored_parent_reclassifies_nested_target_directory
 test_branch_ignored_special_file_refuses
 test_unresolved_path_diagnostic_is_bounded
 test_diverged_branch_still_refuses
