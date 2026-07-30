@@ -93,14 +93,24 @@ fm_ops_inbox_config_load() {
       FM_OPS_INBOX_CONFIG_ERROR="config/ops-inbox.json is not a JSON object"
       return 1
     fi
+    if ! jq -e '
+      [
+        "enabled", "state_dir", "spool", "acks", "receipt", "age_hours",
+        "count", "remind_hours", "growth", "receipt_stale_hours", "max_lines"
+      ] as $allowed
+      | all(keys_unsorted[]; . as $key | ($allowed | index($key)) != null)
+    ' "$file" >/dev/null 2>&1; then
+      FM_OPS_INBOX_CONFIG_ERROR="config/ops-inbox.json has an unrecognized setting"
+      # Configuration errors fail closed through the poll's config-error wake.
+      return 1
+    fi
+    # Recognized null settings stay absent so their initialized defaults survive.
     raw=$(jq -r 'to_entries[] | select(.value != null) | .key + "=" + (.value | tostring)' \
       "$file" 2>/dev/null) || {
       FM_OPS_INBOX_CONFIG_ERROR="config/ops-inbox.json could not be read"
       return 1
     }
-    # One key=value line per setting. An unrecognized key is an error rather than
-    # a silently ignored line, so a mistyped threshold can never read as a
-    # configured one.
+    # One key=value line per non-null recognized setting.
     local line key value
     while IFS= read -r line; do
       [ -n "$line" ] || continue
@@ -176,21 +186,29 @@ fm_ops_inbox_watch_expected() {
 # per-check timeout no matter how large the spool grows. Hitting that cap is
 # reported rather than hidden: a capped read understates the total and the oldest
 # age, and the spool needs rotating or triaging.
-# Any malformed input line, including a partial trailing write, fails the scan so
-# the caller wakes fail-closed instead of treating a partial parse as clean.
+# A non-terminated final spool record is ignored as a momentary append in progress.
+# Every malformed complete input line fails the scan so the caller wakes fail-closed.
 # shellcheck disable=SC2034 # Result globals read by callers after this returns.
 fm_ops_inbox_scan() {
   local spool=$1 acks=$2 max_lines=${3:-20000} scan classes sample ack_stream alert_stream
+  local last_byte spool_filter spool_tail_lines
   FM_OPS_INBOX_SCAN_COUNT=0
   FM_OPS_INBOX_SCAN_OLDEST=
   FM_OPS_INBOX_SCAN_TOP=
   FM_OPS_INBOX_SCAN_CLASSES=
   FM_OPS_INBOX_SCAN_TRUNCATED=0
-  [ -f "$spool" ] || return 0
+  if [ ! -f "$spool" ]; then
+    # An active scan fails closed; auto mode exits silently before calling it.
+    return 1
+  fi
   command -v jq >/dev/null 2>&1 || return 1
   case "$max_lines" in
     ''|*[!0-9]*|0) max_lines=20000 ;;
   esac
+  last_byte=$(
+    set -o pipefail
+    tail -c 1 "$spool" 2>/dev/null | od -An -tx1 | tr -d '[:space:]'
+  ) || return 1
   sample=$(
     set -o pipefail
     head -n "$((max_lines + 1))" "$spool" 2>/dev/null | awk 'END { print NR + 0 }'
@@ -198,6 +216,12 @@ fm_ops_inbox_scan() {
   case "$sample" in
     ''|*[!0-9]*) return 1 ;;
   esac
+  spool_tail_lines=$max_lines
+  spool_filter=p
+  if [ -n "$last_byte" ] && [ "$last_byte" != 0a ]; then
+    spool_tail_lines=$((max_lines + 1))
+    spool_filter='$!p'
+  fi
   [ "$sample" -le "$max_lines" ] || FM_OPS_INBOX_SCAN_TRUNCATED=1
   ack_stream=
   if [ -f "$acks" ]; then
@@ -211,10 +235,15 @@ fm_ops_inbox_scan() {
     set -o pipefail
     # @tsv, not hand-built tabs: an alert field carrying a tab or newline would
     # otherwise forge extra columns in this stream.
-    tail -n "$max_lines" "$spool" 2>/dev/null | jq -r '
+    tail -n "$spool_tail_lines" "$spool" 2>/dev/null \
+      | sed -n "$spool_filter" \
+      | jq -r '
       select(.severity == "critical" and .ack == false)
-      | ["E", ((.id // "") | tostring), ((.ts // "") | tostring), ((.source // "") | tostring)]
-      | @tsv
+      | ((.ts // "") | tostring) as $ts
+      | if ($ts | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
+        then ["E", ((.id // "") | tostring), $ts, ((.source // "") | tostring)] | @tsv
+        else error("invalid critical alert timestamp")
+        end
     ' 2>/dev/null
   ) || return 1
   scan=$(awk -F'\t' '
@@ -223,6 +252,7 @@ fm_ops_inbox_scan() {
         if ($2 != "" && ($2 in acked)) next
         count++
         ts = $3
+        # Fixed-format validation above makes this lexicographic minimum sound.
         if (ts != "" && (oldest == "" || ts < oldest)) oldest = ts
         src = $4
         gsub(/[^A-Za-z0-9._:@\/-]/, "_", src)

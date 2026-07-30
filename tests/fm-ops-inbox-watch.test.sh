@@ -102,7 +102,7 @@ test_inert_without_an_inbox() {
   out=$(run_bootstrap "$home")
   [ -z "$out" ] || fail "bootstrap must say nothing about an alert watch it never arms (got: $out)"
   assert_absent "$home/state/ops-watch.check.sh" "bootstrap armed a watch with no inbox to watch"
-  pass "the alert watch stays inert on a home with no alert inbox"
+  pass "auto mode stays silent and unarmed on a home with no alert inbox"
 }
 
 test_quiet_backlog_is_silent() {
@@ -220,6 +220,37 @@ test_malformed_spool_fails_closed() {
   pass "a malformed spool wakes fail-closed"
 }
 
+test_malformed_timestamp_fails_closed() {
+  local home out
+  home=$(make_home malformed-timestamp)
+  configure "$home"
+  alert "$home" old-valid 32400 backup-verify
+  printf '{"id":"bad-ts","ts":"!","source":"routine-scheduler","severity":"critical","message":"bad timestamp","ack":false}\n' \
+    >> "$home/ops/ops-inbox.jsonl"
+  receipt "$home" 2 60
+  out=$(run_poll "$home")
+  assert_contains "$out" "ops-inbox: alert inbox at $home/ops/ops-inbox.jsonl could not be read" \
+    "a complete critical alert with a malformed timestamp must wake through scan failure"
+  assert_not_contains "$out" "oldest 9h" \
+    "a malformed timestamp must not hide an old alert behind a normal digest"
+  pass "a malformed critical timestamp wakes fail-closed"
+}
+
+test_torn_trailing_spool_write_is_tolerated() {
+  local home out
+  home=$(make_home torn-spool)
+  configure "$home"
+  alert "$home" complete 32400 backup-verify
+  printf '{"id":"torn"' >> "$home/ops/ops-inbox.jsonl"
+  receipt "$home" 1 60
+  out=$(run_poll "$home")
+  assert_contains "$out" "1 unacked critical alert" \
+    "a torn trailing write must leave complete alert records readable"
+  assert_not_contains "$out" "could not be read" \
+    "a torn trailing write must not cause a spurious scan-failure wake"
+  pass "a torn trailing spool write is ignored until it completes"
+}
+
 test_standing_backlog_does_not_rewake_every_poll() {
   local home first second
   home=$(make_home dedupe)
@@ -318,6 +349,27 @@ test_unusable_configuration_is_reported_not_guessed() {
   pass "an unusable alert-watch configuration is reported instead of guessed"
 }
 
+test_unknown_null_configuration_key_is_refused() {
+  local home out
+  home=$(make_home unknown-null-config)
+  configure "$home" '"coutn": null'
+  out=$(run_poll "$home")
+  assert_contains "$out" "has an unrecognized setting" \
+    "an unknown setting must be refused even when its value is null"
+  pass "an unknown null-valued setting is refused"
+}
+
+test_recognized_null_configuration_keeps_default() {
+  local home out
+  home=$(make_home recognized-null-config)
+  configure "$home" '"count": null'
+  alert "$home" null-default 600 backup-verify
+  receipt "$home" 1 60
+  out=$(run_poll "$home")
+  [ -z "$out" ] || fail "a recognized null setting must retain its quiet default (got: $out)"
+  pass "a recognized null-valued setting keeps its default"
+}
+
 test_rejected_threshold_value_is_reported() {
   local home out
   home=$(make_home bad-threshold)
@@ -335,6 +387,17 @@ test_explicit_disable_wins() {
   out=$(run_poll "$home")
   [ -z "$out" ] || fail "an explicitly disabled watch must stay silent (got: $out)"
   pass "an explicitly disabled alert watch stays silent"
+}
+
+test_explicit_enable_without_spool_fails_closed() {
+  local home out
+  home=$(make_home enabled-missing-spool)
+  configure "$home" '"enabled": true'
+  receipt "$home" 0 60
+  out=$(run_poll "$home")
+  assert_contains "$out" "ops-inbox: alert inbox at $home/ops/ops-inbox.jsonl could not be read" \
+    "an explicitly enabled watch must wake when its required spool is missing"
+  pass "an explicitly enabled watch with no spool wakes fail-closed"
 }
 
 test_bootstrap_arms_registers_and_is_idempotent() {
@@ -536,14 +599,19 @@ test_missing_receipt_is_wake_worthy
 test_fresh_receipt_count_is_authoritative
 test_corrupt_recent_receipt_is_unreadable
 test_malformed_spool_fails_closed
+test_malformed_timestamp_fails_closed
+test_torn_trailing_spool_write_is_tolerated
 test_standing_backlog_does_not_rewake_every_poll
 test_material_growth_wakes_again
 test_new_alert_class_wakes_again
 test_reremind_interval_wakes_again
 test_cleared_backlog_resets_dedupe
 test_unusable_configuration_is_reported_not_guessed
+test_unknown_null_configuration_key_is_refused
+test_recognized_null_configuration_keeps_default
 test_rejected_threshold_value_is_reported
 test_explicit_disable_wins
+test_explicit_enable_without_spool_fails_closed
 test_read_cap_is_reported_not_hidden
 test_bootstrap_arms_registers_and_is_idempotent
 test_bootstrap_disarms_when_the_inbox_goes_away

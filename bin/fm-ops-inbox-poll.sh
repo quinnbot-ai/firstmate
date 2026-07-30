@@ -73,6 +73,8 @@ if ! fm_ops_inbox_config_load "$CONFIG"; then
   exit 0
 fi
 
+# Disabled and auto-without-spool homes stay silent; explicit watches continue
+# and fail closed below when their required spool cannot be read.
 fm_ops_inbox_watch_expected "$FM_HOME" || exit 0
 
 if ! command -v jq >/dev/null 2>&1; then
