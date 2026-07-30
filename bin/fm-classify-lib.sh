@@ -115,15 +115,31 @@ status_is_terminal_verb() {
 FM_CLASSIFY_NO_MISTAKES_MODE_DEFAULT='no-mistakes'
 
 # 0 if the given status line is the TERMINAL no-mistakes ship signal: a done:
-# line whose note reports both a PR and green checks.
+# line whose note reports both a URL-shaped PR reference and green checks.
 status_done_reports_pr_checks_green() {  # <status-line>
-  local line=$1
+  local line=$1 note token normalized_token pr_url=
+  local -a note_tokens
   [ -n "$line" ] || return 1
   [ "$(status_line_verb "$line")" = "done" ] || return 1
-  case "$(status_line_note "$line")" in
-    *PR*"checks green"*|*"checks green"*PR*) return 0 ;;
+  note=$(status_line_note "$line")
+  case "$note" in
+    *"checks green"*) ;;
     *) return 1 ;;
   esac
+  IFS=$' \t' read -r -a note_tokens <<< "$note"
+  for token in "${note_tokens[@]}"; do
+    case "$token" in
+      ?*://*/pull/?*|?*://*/pulls/?*|?*://*/merge-request/?*|?*://*/merge-requests/?*|?*://*/merge_request/?*|?*://*/merge_requests/?*)
+        pr_url=$token
+        continue
+        ;;
+    esac
+    normalized_token=$(printf '%s' "$token" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]')
+    case "$normalized_token" in
+      pending|not|never|isnt|arent) return 1 ;;
+    esac
+  done
+  [ -n "$pr_url" ]
 }
 
 # 0 if the given status line is a PREMATURE done for a no-mistakes ship task:
