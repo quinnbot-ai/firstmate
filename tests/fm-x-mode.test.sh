@@ -71,6 +71,7 @@ case "$url" in
     ;;
   */connector/answer)
     [ -n "$ofile" ] && printf '%s' "${FAKE_ANSWER_BODY:-}" > "$ofile"
+    [ -n "${FAKE_ANSWER_CHMOD_DIR:-}" ] && chmod 500 "$FAKE_ANSWER_CHMOD_DIR"
     [ -n "${FAKE_ANSWER_TRANSPORT_FAIL:-}" ] && exit 28
     printf '%s' "${FAKE_ANSWER_CODE:-200}"
     ;;
@@ -1507,7 +1508,7 @@ test_reply_followup_409_without_marker_still_exits_distinctly() {
   pass "fm-x-reply maps every follow-up 409 to exit 9 even without the marker"
 }
 
-test_reply_answer_409_is_generic_failure() {
+test_reply_answer_409_is_unresolved() {
   local home fakebin out rc err
   home="$TMP_ROOT/reply-answer-409"; mkdir -p "$home"
   fakebin=$(make_fake_curl "$home")
@@ -1516,10 +1517,13 @@ test_reply_answer_409_is_generic_failure() {
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
     FAKE_ANSWER_CODE=409 FAKE_ANSWER_BODY='{"error":"followup_unavailable"}' \
     "$ROOT/bin/fm-x-reply.sh" "req-answer-409" "Normal answer." 2>"$err"); rc=$?
-  expect_code 1 "$rc" "answer 409 exit"
+  expect_code 11 "$rc" "answer 409 exit"
   [ -z "$out" ] || fail "answer 409 must not echo the request_id (got: $out)"
-  assert_grep "relay returned HTTP 409" "$err" "answer 409 must stay on the generic failure path"
-  pass "fm-x-reply treats answer-endpoint 409 as a generic failure"
+  assert_grep "relay returned HTTP 409" "$err" "answer 409 must report the relay response"
+  assert_grep "answer's outcome is unknown" "$err" "answer 409 must report the unresolved outcome"
+  assert_present "$home/state/x-context/req-answer-409.answered.json" \
+    "an answer 409 must hold its claim"
+  pass "fm-x-reply holds an answer-endpoint 409 as unresolved"
 }
 
 # The poll offers a mention at least once, so exactly-once has to hold where the
@@ -1537,6 +1541,8 @@ test_reply_answers_one_request_id_once() {
     "$ROOT/bin/fm-x-reply.sh" "req-once" "First answer." 2>"$err"); rc=$?
   expect_code 0 "$rc" "first answer exit"
   [ "$out" = "req-once" ] || fail "the first answer must echo the request_id (got: $out)"
+  [ "$(jq -r '.answered' "$home/state/x-context/req-once.answered.json")" = true ] \
+    || fail "a successful answer must confirm its marker"
   # The same request offered again: the answer must be refused, not re-posted.
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
     FAKE_CURL_LOG="$log" FAKE_ANSWER_CODE=200 \
@@ -1548,6 +1554,33 @@ test_reply_answers_one_request_id_once() {
   [ "$posts" = 1 ] \
     || fail "a repeated answer must not reach the relay (answer posts: $posts)"
   pass "fm-x-reply posts one public answer per request_id"
+}
+
+# A claim only grants permission to post.
+# If its owner dies before confirming the answer, the next attempt must escalate
+# the unresolved outcome and must not post.
+test_reply_unconfirmed_answer_claim_refuses_as_unresolved() {
+  local home fakebin log out rc err
+  home="$TMP_ROOT/reply-answer-unconfirmed"; mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  log="$home/curl.log"
+  err="$home/err.txt"
+  printf 'FMX_PAIRING_TOKEN=tok-unconfirmed\n' > "$home/.env"
+  FMX_NOW_OVERRIDE=1700000000 "$BASH" -c \
+    '. "$1"; fmx_answer_registry_claim "$2" "$3"' \
+    _ "$ROOT/bin/fm-x-lib.sh" "$home/state" "req-unconfirmed" \
+    || fail "the unconfirmed answer claim must be created"
+  [ "$(jq -r '.answered' "$home/state/x-context/req-unconfirmed.answered.json")" = false ] \
+    || fail "a fresh answer claim must remain unconfirmed"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000001 \
+    FMX_RELAY_URL="https://relay.test" \
+    FAKE_CURL_LOG="$log" FAKE_ANSWER_CODE=200 \
+    "$ROOT/bin/fm-x-reply.sh" "req-unconfirmed" "Answer." 2>"$err"); rc=$?
+  expect_code 11 "$rc" "unconfirmed answer claim exit"
+  [ -z "$out" ] || fail "an unconfirmed claim must not echo the request_id (got: $out)"
+  assert_grep "outcome is unknown" "$err" "an unconfirmed claim must report the unresolved outcome"
+  [ ! -f "$log" ] || fail "an unconfirmed claim must not reach the relay"
+  pass "fm-x-reply escalates an unconfirmed answer claim without posting"
 }
 
 # Refusing a duplicate must not strand a genuine retry: an answer that did not
@@ -1594,18 +1627,66 @@ test_reply_ambiguous_transport_failure_holds_answer_claim() {
     "an ambiguous answer must report that its outcome is unknown"
   assert_grep "claim is deliberately held" "$err" \
     "an ambiguous answer must report that its claim remains held"
-  assert_grep "refuse with exit 10" "$err" \
+  assert_grep "refuse with exit 11" "$err" \
     "an ambiguous answer must explain how a later attempt is refused"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
     FAKE_CURL_LOG="$log" FAKE_ANSWER_CODE=200 \
     "$ROOT/bin/fm-x-reply.sh" "req-ambiguous" "Second answer." 2>"$err"); rc=$?
-  expect_code 10 "$rc" "answer retry after ambiguous transport exit"
+  expect_code 11 "$rc" "answer retry after ambiguous transport exit"
   [ -z "$out" ] || fail "a refused answer retry must not echo the request_id (got: $out)"
   posts=$(grep -c 'url=https://relay.test/connector/answer' "$log")
   [ "$posts" = 1 ] \
     || fail "an ambiguous answer must reach the relay only once (answer posts: $posts)"
   assert_present "$marker" "a refused retry must keep the ambiguous answer claim"
   pass "fm-x-reply holds ambiguous answer outcomes against duplicate posts"
+}
+
+# fmx_post_json return 2 is pinned at the library boundary because the reply
+# client creates its own readable payload and exposing that file would require a
+# production seam.
+# This proves curl is never invoked for that status; the reply client's release
+# classification remains inspection-covered.
+test_reply_unreadable_payload_is_pretransmission_failure() {
+  local home fakebin log payload response rc
+  home="$TMP_ROOT/reply-unreadable-payload"; mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  log="$home/curl.log"
+  payload="$home/payload.json"
+  response="$home/response.json"
+  printf '{"request_id":"req-unreadable","text":"Answer."}\n' > "$payload"
+  chmod 000 "$payload"
+  PATH="$fakebin:$BASE_PATH" FMX_RELAY_URL="https://relay.test" FMX_TOKEN=tok \
+    FAKE_CURL_LOG="$log" "$BASH" -c \
+    '. "$1"; fmx_post_json answer "$2" "$3"' \
+    _ "$ROOT/bin/fm-x-lib.sh" "$payload" "$response" >/dev/null 2>&1; rc=$?
+  chmod 600 "$payload"
+  expect_code 2 "$rc" "unreadable payload library exit"
+  [ ! -f "$log" ] || fail "an unreadable payload must fail before curl runs"
+  pass "fmx_post_json classifies an unreadable payload before transmission"
+}
+
+# A definite non-post remains exit 1 even when its answer claim cannot be
+# released, but the stranded claim must be reported.
+test_reply_failed_answer_reports_unreleased_claim() {
+  local home fakebin context_dir out rc err
+  home="$TMP_ROOT/reply-unreleased-claim"; mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  context_dir="$home/state/x-context"
+  err="$home/err.txt"
+  printf 'FMX_PAIRING_TOKEN=tok-unreleased\n' > "$home/.env"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_ANSWER_CODE=500 FAKE_ANSWER_CHMOD_DIR="$context_dir" \
+    "$ROOT/bin/fm-x-reply.sh" "req-unreleased" "Answer." 2>"$err"); rc=$?
+  chmod 700 "$context_dir"
+  expect_code 1 "$rc" "failed answer with unreleased claim exit"
+  [ -z "$out" ] || fail "a failed answer must not echo the request_id (got: $out)"
+  assert_grep "claim for req-unreleased could not be released" "$err" \
+    "a failed claim release must be reported"
+  assert_grep "later attempt for this request will refuse until it is cleared" "$err" \
+    "a failed claim release must explain the stranded claim"
+  assert_present "$context_dir/req-unreleased.answered.json" \
+    "a failed claim release must leave the marker visible"
+  pass "fm-x-reply reports a claim that could not be released"
 }
 
 # The claim covers the initial answer only: follow-ups are legitimately repeated
@@ -2997,10 +3078,13 @@ test_reply_image_path_errors_are_clear
 test_reply_followup_live_posts_to_followup_endpoint
 test_reply_followup_409_marker_exits_distinctly
 test_reply_followup_409_without_marker_still_exits_distinctly
-test_reply_answer_409_is_generic_failure
+test_reply_answer_409_is_unresolved
 test_reply_answers_one_request_id_once
+test_reply_unconfirmed_answer_claim_refuses_as_unresolved
 test_reply_failed_answer_stays_retryable
 test_reply_ambiguous_transport_failure_holds_answer_claim
+test_reply_unreadable_payload_is_pretransmission_failure
+test_reply_failed_answer_reports_unreleased_claim
 test_reply_answer_claim_spares_followups_and_dry_runs
 test_reply_followup_image_live_posts_image_object
 test_reply_followup_flag_position_is_flexible

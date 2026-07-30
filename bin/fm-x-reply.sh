@@ -39,11 +39,12 @@
 # once (an interrupted offer is re-offered rather than silenced), so a repeated
 # wake can reach this client twice for one request. The initial answer path
 # atomically claims state/x-context/<request_id>.answered.json before posting and
-# REFUSES with exit 10 when that request was already answered or an earlier
+# confirms the marker only after a 2xx response. A confirmed duplicate REFUSES
+# with exit 10; an unconfirmed claim REFUSES with exit 11 because the earlier
 # attempt's outcome is unknown. The claim is released whenever the answer
-# definitely did not land, so an ordinary failure stays retryable; a 2xx and the
-# relay's own 409 already-answered verdict keep it. Follow-ups are legitimately
-# repeated and are governed by the relay's cap instead. The confirmed
+# definitely did not land, so an ordinary failure stays retryable; a 2xx and 409
+# keep it. Follow-ups are legitimately repeated and are governed by the relay's
+# cap instead. The confirmed
 # relay contract for an exhausted follow-up binding is HTTP 409 from
 # /connector/followup, optionally with {"error":"followup_unavailable"} in the
 # response body. This client always maps a follow-up 409 to exit code 9 so
@@ -53,8 +54,9 @@
 # call can instead see a benign no-op 200, so fm-x-followup.sh's local
 # window/cap pruning remains the primary guard.
 # Exit 11 is reserved for an initial answer whose outcome is unknown after an
-# ambiguous transport failure or unreadable HTTP status.
-# Its answer claim stays held, and a later attempt refuses with exit 10.
+# ambiguous transport failure, 409 response, unreadable HTTP status, or an
+# existing unconfirmed claim.
+# Its answer claim stays held, and a later attempt also refuses with exit 11.
 #
 # Reply platform + split budget are resolved per axis: an explicit
 # FMX_REPLY_PLATFORM / FMX_REPLY_MAX_CHARS env override wins (fm-x-followup passes
@@ -115,6 +117,12 @@ reply_make_tmp_file() {
   file=$(mktemp "${TMPDIR:-/tmp}/fm-x-reply.XXXXXX") || return 1
   TMP_FILES+=("$file")
   printf -v "$var_name" '%s' "$file"
+}
+
+release_answer_claim() {
+  fmx_answer_registry_release "$STATE" "$REQ" && return 0
+  echo "fm-x-reply: the answer claim for $REQ could not be released; a later attempt for this request will refuse until it is cleared" >&2
+  return 1
 }
 
 usage() {
@@ -342,8 +350,12 @@ if [ "$FOLLOWUP" = 0 ]; then
   case "$answer_claim_rc" in
     0) : ;;
     1)
-      echo "fm-x-reply: $REQ was already answered (or an earlier attempt's outcome is unknown); refusing to post again" >&2
-      exit 10
+      if fmx_answer_registry_answered "$STATE" "$REQ"; then
+        echo "fm-x-reply: $REQ was already answered; refusing to post again" >&2
+        exit 10
+      fi
+      echo "fm-x-reply: the answer's outcome is unknown for $REQ; its unconfirmed claim is deliberately held, and this attempt will not post" >&2
+      exit 11
       ;;
     *)
       # Refuse rather than post what cannot be recorded: an unrecorded answer is
@@ -355,7 +367,7 @@ if [ "$FOLLOWUP" = 0 ]; then
 fi
 reply_make_tmp_file RESPONSE_BODY_FILE || {
   echo "fm-x-reply: cannot create relay response temp file" >&2
-  [ "$FOLLOWUP" = 1 ] || fmx_answer_registry_release "$STATE" "$REQ"
+  [ "$FOLLOWUP" = 1 ] || release_answer_claim || true
   exit 1
 }
 code=$(fmx_post_json "$ENDPOINT" "$PAYLOAD_FILE" "$RESPONSE_BODY_FILE")
@@ -368,18 +380,23 @@ case "$post_rc" in
   0) : ;;
   127)
     echo "fm-x-reply: curl not found" >&2
-    [ "$FOLLOWUP" = 1 ] || fmx_answer_registry_release "$STATE" "$REQ"
+    [ "$FOLLOWUP" = 1 ] || release_answer_claim || true
+    exit 1
+    ;;
+  2)
+    echo "fm-x-reply: request payload is unreadable: $PAYLOAD_FILE" >&2
+    [ "$FOLLOWUP" = 1 ] || release_answer_claim || true
     exit 1
     ;;
   3)
     echo "fm-x-reply: invalid FMX_PAIRING_TOKEN" >&2
-    [ "$FOLLOWUP" = 1 ] || fmx_answer_registry_release "$STATE" "$REQ"
+    [ "$FOLLOWUP" = 1 ] || release_answer_claim || true
     exit 1
     ;;
   *)
     echo "fm-x-reply: request to relay failed" >&2
     if [ "$FOLLOWUP" = 0 ]; then
-      echo "fm-x-reply: the answer's outcome is unknown; its claim is deliberately held, and a later attempt for this request will refuse with exit 10" >&2
+      echo "fm-x-reply: the answer's outcome is unknown; its claim is deliberately held, and a later attempt for this request will refuse with exit 11" >&2
       exit 11
     fi
     exit 1
@@ -389,6 +406,8 @@ esac
 case "$code" in
   2[0-9][0-9])
     if [ "$FOLLOWUP" = 0 ]; then
+      fmx_answer_registry_confirm "$STATE" "$REQ" \
+        || echo "fm-x-reply: warning: could not confirm the answer marker for $REQ" >&2
       fmx_context_registry_set "$STATE" "$REQ" "$REQ_PLATFORM" "$REQ_EXPLICIT_MAX" 1 2>/dev/null \
         || echo "fm-x-reply: warning: could not retain reply context for $REQ" >&2
     fi
@@ -407,17 +426,18 @@ case "$code" in
       exit 9
     fi
     echo "fm-x-reply: relay returned HTTP $code" >&2
-    exit 1
+    echo "fm-x-reply: the answer's outcome is unknown; its claim is deliberately held, and a later attempt for this request will refuse with exit 11" >&2
+    exit 11
     ;;
   [1-5][0-9][0-9])
     echo "fm-x-reply: relay returned HTTP $code" >&2
-    [ "$FOLLOWUP" = 1 ] || fmx_answer_registry_release "$STATE" "$REQ"
+    [ "$FOLLOWUP" = 1 ] || release_answer_claim || true
     exit 1
     ;;
   *)
     echo "fm-x-reply: relay returned an unreadable HTTP status" >&2
     if [ "$FOLLOWUP" = 0 ]; then
-      echo "fm-x-reply: the answer's outcome is unknown; its claim is deliberately held, and a later attempt for this request will refuse with exit 10" >&2
+      echo "fm-x-reply: the answer's outcome is unknown; its claim is deliberately held, and a later attempt for this request will refuse with exit 11" >&2
       exit 11
     fi
     exit 1

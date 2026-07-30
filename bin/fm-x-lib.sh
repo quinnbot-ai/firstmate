@@ -31,6 +31,10 @@
 #   fmx_answer_registry_claim <state> <request_id> - atomically claim the right
 #                                to post one public answer; 0=claimed,
 #                                1=already answered or unresolved, 2=error
+#   fmx_answer_registry_confirm <state> <request_id> - record that the claimed
+#                                public answer received a 2xx response
+#   fmx_answer_registry_answered <state> <request_id> - true only for a marker
+#                                whose public answer is confirmed
 #   fmx_answer_registry_release <state> <request_id> - drop a claim whose post
 #                                definitely did not land
 #   fmx_context_registry_prune <state> - remove records older than seven days
@@ -620,8 +624,9 @@ fmx_offer_registry_emitted() {
 # public answer. The poll offers a mention at least once - an interrupted offer
 # is deliberately re-offered rather than silenced - so exactly-once has to be
 # enforced where the public action happens, not where the wake is produced.
-# Returns 0 only to the caller that created the marker, 1 when a request has
-# already been answered or an earlier attempt is unresolved, and 2 on invalid
+# The initial marker records answered:false, which grants its creator permission
+# to post but does not claim the answer landed. Returns 0 only to the caller that
+# created the marker, 1 when a request has already been claimed, and 2 on invalid
 # input or a publication failure. Callers must refuse to post on anything but 0.
 # The marker shares the context registry's retention, so it covers the relay's
 # whole follow-up window.
@@ -637,7 +642,7 @@ fmx_answer_registry_claim() {
   esac
   [ "${#now}" -le 18 ] || return 2
   record=$(jq -cn --arg rid "$rid" --argjson recorded_at "$now" \
-    '{request_id:$rid, recorded_at:$recorded_at}') || return 2
+    '{request_id:$rid, recorded_at:$recorded_at, answered:false}') || return 2
   dir="$state/x-context"
   printf '%s\n' "$record" \
     | fmx_private_artifact_publish_stdin_once "$dir" "$rid.answered.json" 600
@@ -645,19 +650,57 @@ fmx_answer_registry_claim() {
   return "$rc"
 }
 
+# fmx_answer_registry_confirm <state> <request_id>: record that the claimed
+# answer received a 2xx response, preserving the claim's recorded_at so
+# retention still runs from the first claim. Returns non-zero when no valid
+# marker exists or the write fails.
+fmx_answer_registry_confirm() {
+  local state=$1 rid=$2 dir file now recorded_at
+  case "$rid" in
+    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  dir="$state/x-context"
+  file="$dir/$rid.answered.json"
+  fmx_private_artifact_file_valid "$dir" "$rid.answered.json" 600 || return 1
+  now=${FMX_NOW_OVERRIDE:-$(date +%s)}
+  case "$now" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "${#now}" -le 18 ] || return 1
+  recorded_at=$(fmx_context_registry_recorded_at "$file" "$now") || recorded_at=$now
+  (set -o pipefail; jq -cn --arg rid "$rid" --argjson recorded_at "$recorded_at" \
+    '{request_id:$rid, recorded_at:$recorded_at, answered:true}' \
+    | fmx_private_artifact_publish_stdin "$dir" "$rid.answered.json" 600) || return 1
+}
+
+# fmx_answer_registry_answered <state> <request_id>: true only when a valid
+# marker records a confirmed answer. A missing answered field is unresolved,
+# because legacy claim markers cannot prove that their post landed.
+fmx_answer_registry_answered() {
+  local state=$1 rid=$2 dir answered
+  case "$rid" in
+    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  dir="$state/x-context"
+  fmx_private_artifact_file_valid "$dir" "$rid.answered.json" 600 || return 1
+  answered=$(jq -r '.answered == true' "$dir/$rid.answered.json" 2>/dev/null) || return 1
+  [ "$answered" = true ]
+}
+
 # fmx_answer_registry_release <state> <request_id>: drop a claim whose post
 # definitely did not land, so the answer can be retried. Only a definite failure
 # releases it; an unknown outcome must keep the claim so the public surface
-# never gets a second post from an automatic retry. Idempotent and best-effort.
+# never gets a second post from an automatic retry. Idempotent when the marker is
+# absent and non-zero when the marker cannot be safely removed.
 fmx_answer_registry_release() {
   local state=$1 rid=$2 dir
   case "$rid" in
-    ''|.*|*[!A-Za-z0-9._-]*) return 0 ;;
+    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
   esac
   dir="$state/x-context"
-  [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
-  rm -f "$dir/$rid.answered.json" 2>/dev/null || true
-  return 0
+  [ -e "$dir" ] || return 0
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  rm -f "$dir/$rid.answered.json" 2>/dev/null
 }
 
 # fmx_context_registry_get <state> <request_id>: print the durable per-request
