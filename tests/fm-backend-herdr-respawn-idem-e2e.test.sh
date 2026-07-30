@@ -115,7 +115,7 @@ sleep 0.5
 fm_backend_herdr_server_ensure "$SESSION" || fail "the isolated session's server did not come back up after the restart"
 
 if ! herdr pane get "$CREW_PANE_ID" --session "$SESSION" >/dev/null 2>&1; then
-  fail "repro setup is wrong: the crewmate-shaped pane should survive a session restart alive (docs/herdr-backend.md 'Restart and liveness behavior'), but it is gone"
+  fail "repro setup is wrong: the crewmate-shaped pane should survive a session restart alive (docs/herdr-backend.md 'ID stability'), but it is gone"
 fi
 if herdr agent get "$CREW_PANE_ID" --session "$SESSION" >/dev/null 2>&1; then
   fail "repro setup is wrong: the restored pane should have NO registered agent (agent_not_found expected)"
