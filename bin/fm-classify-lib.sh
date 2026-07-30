@@ -117,7 +117,7 @@ FM_CLASSIFY_NO_MISTAKES_MODE_DEFAULT='no-mistakes'
 # 0 if the given status line is the TERMINAL no-mistakes ship signal: a done:
 # line whose note reports both a URL-shaped PR reference and green checks.
 status_done_reports_pr_checks_green() {  # <status-line>
-  local line=$1 note prefix= rest= suffix= pr_url= url_rest= url_prefix= pr_number=
+  local line=$1 note prefix='' rest='' suffix='' pr_url='' url_rest='' url_prefix='' pr_number=''
   [ -n "$line" ] || return 1
   [ "$(status_line_verb "$line")" = "done" ] || return 1
   note=$(status_line_note "$line")
