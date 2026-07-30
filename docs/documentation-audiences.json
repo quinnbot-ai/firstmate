@@ -320,6 +320,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/stow-memory.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/link-intake.md",
       "audience": "maintainer-verification"
     },
