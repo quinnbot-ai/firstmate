@@ -1519,6 +1519,87 @@ test_reply_answer_409_is_generic_failure() {
   pass "fm-x-reply treats answer-endpoint 409 as a generic failure"
 }
 
+# The poll offers a mention at least once, so exactly-once has to hold where the
+# public action happens. A repeated wake for one request_id must never become a
+# second public answer.
+test_reply_answers_one_request_id_once() {
+  local home fakebin log out rc err posts
+  home="$TMP_ROOT/reply-answer-once"; mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  log="$home/curl.log"
+  err="$home/err.txt"
+  printf 'FMX_PAIRING_TOKEN=tok-once\n' > "$home/.env"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_CURL_LOG="$log" FAKE_ANSWER_CODE=200 \
+    "$ROOT/bin/fm-x-reply.sh" "req-once" "First answer." 2>"$err"); rc=$?
+  expect_code 0 "$rc" "first answer exit"
+  [ "$out" = "req-once" ] || fail "the first answer must echo the request_id (got: $out)"
+  # The same request offered again: the answer must be refused, not re-posted.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_CURL_LOG="$log" FAKE_ANSWER_CODE=200 \
+    "$ROOT/bin/fm-x-reply.sh" "req-once" "Second answer." 2>"$err"); rc=$?
+  expect_code 10 "$rc" "repeated answer exit"
+  [ -z "$out" ] || fail "a repeated answer must not echo the request_id (got: $out)"
+  assert_grep "already answered" "$err" "a repeated answer must say why it refused"
+  posts=$(grep -c 'url=https://relay.test/connector/answer' "$log")
+  [ "$posts" = 1 ] \
+    || fail "a repeated answer must not reach the relay (answer posts: $posts)"
+  pass "fm-x-reply posts one public answer per request_id"
+}
+
+# Refusing a duplicate must not strand a genuine retry: an answer that did not
+# land has to stay postable.
+test_reply_failed_answer_stays_retryable() {
+  local home fakebin log out rc posts
+  home="$TMP_ROOT/reply-answer-retry"; mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  log="$home/curl.log"
+  printf 'FMX_PAIRING_TOKEN=tok-retry\n' > "$home/.env"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_CURL_LOG="$log" FAKE_ANSWER_CODE=500 \
+    "$ROOT/bin/fm-x-reply.sh" "req-retry" "Answer." 2>/dev/null); rc=$?
+  expect_code 1 "$rc" "failed answer exit"
+  assert_absent "$home/state/x-context/req-retry.answered.json" \
+    "an answer that did not land must not keep its claim"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_CURL_LOG="$log" FAKE_ANSWER_CODE=200 \
+    "$ROOT/bin/fm-x-reply.sh" "req-retry" "Answer." 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "retried answer exit"
+  [ "$out" = "req-retry" ] || fail "a retried answer must post (got: $out)"
+  posts=$(grep -c 'url=https://relay.test/connector/answer' "$log")
+  [ "$posts" = 2 ] || fail "the retry must reach the relay (answer posts: $posts)"
+  pass "fm-x-reply keeps a failed answer retryable"
+}
+
+# The claim covers the initial answer only: follow-ups are legitimately repeated
+# and keep the relay's own cap, and a preview must never consume a real answer.
+test_reply_answer_claim_spares_followups_and_dry_runs() {
+  local home fakebin log out rc posts
+  home="$TMP_ROOT/reply-answer-claim-scope"; mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  log="$home/curl.log"
+  printf 'FMX_PAIRING_TOKEN=tok-scope\n' > "$home/.env"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_DRY_RUN=1 "$ROOT/bin/fm-x-reply.sh" "req-scope" "Preview." 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "dry-run answer exit"
+  assert_absent "$home/state/x-context/req-scope.answered.json" \
+    "a dry-run preview must not consume the answer claim"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_CURL_LOG="$log" FAKE_ANSWER_CODE=200 \
+    "$ROOT/bin/fm-x-reply.sh" "req-scope" "Real answer." 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "answer after dry-run exit"
+  [ "$out" = "req-scope" ] || fail "a real answer must still post after a preview (got: $out)"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_REPLY_PLATFORM=x FMX_REPLY_MAX_CHARS=280 \
+    FAKE_CURL_LOG="$log" FAKE_FOLLOWUP_CODE=200 \
+    "$ROOT/bin/fm-x-reply.sh" "req-scope" --followup "Progress." 2>/dev/null); rc=$?
+  expect_code 0 "$rc" "follow-up after answer exit"
+  [ "$out" = "req-scope" ] || fail "a follow-up must not be blocked by the answer claim (got: $out)"
+  posts=$(grep -c 'url=https://relay.test/connector/followup' "$log")
+  [ "$posts" = 1 ] || fail "the follow-up must reach the relay (follow-up posts: $posts)"
+  pass "fm-x-reply's answer claim spares follow-ups and dry-run previews"
+}
+
 test_reply_followup_image_live_posts_image_object() {
   local home fakebin log out rc data img expected
   home="$TMP_ROOT/reply-followup-image-live"; mkdir -p "$home"
@@ -2880,6 +2961,9 @@ test_reply_followup_live_posts_to_followup_endpoint
 test_reply_followup_409_marker_exits_distinctly
 test_reply_followup_409_without_marker_still_exits_distinctly
 test_reply_answer_409_is_generic_failure
+test_reply_answers_one_request_id_once
+test_reply_failed_answer_stays_retryable
+test_reply_answer_claim_spares_followups_and_dry_runs
 test_reply_followup_image_live_posts_image_object
 test_reply_followup_flag_position_is_flexible
 test_reply_followup_dry_run_marks_endpoint

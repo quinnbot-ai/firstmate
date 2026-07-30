@@ -28,6 +28,11 @@
 #                                marker's wake was emitted
 #   fmx_offer_registry_emitted <state> <request_id> - true only for a marker
 #                                whose wake was emitted
+#   fmx_answer_registry_claim <state> <request_id> - atomically claim the right
+#                                to post one public answer; 0=claimed,
+#                                1=already answered or unresolved, 2=error
+#   fmx_answer_registry_release <state> <request_id> - drop a claim whose post
+#                                definitely did not land
 #   fmx_context_registry_prune <state> - remove records older than seven days
 #   fmx_context_registry_get <state> <request_id> - read the durable per-request
 #                                reply context, or the empty shape when absent
@@ -608,6 +613,51 @@ fmx_offer_registry_emitted() {
   emitted=$(jq -r 'if has("wake_emitted") then (.wake_emitted == true) else true end' \
     "$dir/$rid.offered.json" 2>/dev/null) || return 1
   [ "$emitted" = true ]
+}
+
+# fmx_answer_registry_claim <state> <request_id>: atomically claim the durable
+# answered marker at state/x-context/<request_id>.answered.json before posting a
+# public answer. The poll offers a mention at least once - an interrupted offer
+# is deliberately re-offered rather than silenced - so exactly-once has to be
+# enforced where the public action happens, not where the wake is produced.
+# Returns 0 only to the caller that created the marker, 1 when a request has
+# already been answered or an earlier attempt is unresolved, and 2 on invalid
+# input or a publication failure. Callers must refuse to post on anything but 0.
+# The marker shares the context registry's retention, so it covers the relay's
+# whole follow-up window.
+fmx_answer_registry_claim() {
+  local state=$1 rid=$2 dir now record rc
+  case "$rid" in
+    ''|.*|*[!A-Za-z0-9._-]*) return 2 ;;
+  esac
+  fmx_context_registry_prune "$state"
+  now=${FMX_NOW_OVERRIDE:-$(date +%s)}
+  case "$now" in
+    ''|*[!0-9]*) return 2 ;;
+  esac
+  [ "${#now}" -le 18 ] || return 2
+  record=$(jq -cn --arg rid "$rid" --argjson recorded_at "$now" \
+    '{request_id:$rid, recorded_at:$recorded_at}') || return 2
+  dir="$state/x-context"
+  printf '%s\n' "$record" \
+    | fmx_private_artifact_publish_stdin_once "$dir" "$rid.answered.json" 600
+  rc=$?
+  return "$rc"
+}
+
+# fmx_answer_registry_release <state> <request_id>: drop a claim whose post
+# definitely did not land, so the answer can be retried. Only a definite failure
+# releases it; an unknown outcome must keep the claim so the public surface
+# never gets a second post from an automatic retry. Idempotent and best-effort.
+fmx_answer_registry_release() {
+  local state=$1 rid=$2 dir
+  case "$rid" in
+    ''|.*|*[!A-Za-z0-9._-]*) return 0 ;;
+  esac
+  dir="$state/x-context"
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
+  rm -f "$dir/$rid.answered.json" 2>/dev/null || true
+  return 0
 }
 
 # fmx_context_registry_get <state> <request_id>: print the durable per-request

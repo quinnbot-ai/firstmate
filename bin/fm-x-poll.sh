@@ -171,5 +171,10 @@ case "$offer_rc" in
 esac
 # One line of output per poll is the watcher's wake-payload contract, so a failed
 # commit stays silent here: its only cost is the next cycle re-offering.
+# This closes the poll's own window, not every window: the watcher reads this
+# output, deletes the capture, and only then appends the durable wake record, so
+# a watcher that dies in that gap still loses the wake. Closing that one belongs
+# in the watcher's check dispatch, not here. Because a wake can also be repeated,
+# the single public answer per request is enforced in bin/fm-x-reply.sh.
 printf 'x-mention %s\n' "$REQ" || exit 0
 fmx_offer_registry_commit "$STATE" "$REQ" || true

@@ -155,6 +155,8 @@ Treat `state/x-inbox/` as the source of truth and process **every** file you fin
       ```
 
       (`bin/fm-x-reply.sh <request_id> -`, reading the reply on stdin, is equally fine.) It echoes the `request_id` and exits 0 on success; non-zero on a failed live post or failed dry-run record.
+      Exit 10 is not a failure to fix: it means that request was already answered, so the reply was deliberately refused rather than posted twice.
+      Treat it as an answered request - clear the inbox file as in step 2f and move on, without composing another reply.
       When the reply carries one real visual artifact, add `--image <path>`: the helper reads one local PNG, JPEG, GIF, WebP, BMP, or TIFF, detects the media type, base64-encodes it, and sends it in the relay's optional `image` object without ever inlining image bytes into the shell command.
       If the reply auto-splits into a thread, the image rides the first/opener message only.
    e-skip. **For a skip, dismiss it at the relay instead of replying.** A pure acknowledgment gets no reply, but clearing only the local inbox file is not enough: the relay keeps re-offering that request on every poll until it times out to a polite "offline" auto-reply. So before clearing the file, tell the relay to drop the request:

@@ -31,7 +31,18 @@
 # client only ever echoes the relay-issued request_id and NEVER names a platform
 # message id.
 # On success it echoes ONLY that request_id; on a non-2xx (or transport failure)
-# it exits non-zero so the caller knows the post did not land. The confirmed
+# it exits non-zero so the caller knows the post did not land.
+#
+# One public answer per request_id is enforced here, because this is the only
+# place an answer is posted. The poll deliberately offers a mention AT LEAST
+# once (an interrupted offer is re-offered rather than silenced), so a repeated
+# wake can reach this client twice for one request. The initial answer path
+# atomically claims state/x-context/<request_id>.answered.json before posting and
+# REFUSES with exit 10 when that request was already answered or an earlier
+# attempt's outcome is unknown. The claim is released whenever the answer
+# definitely did not land, so an ordinary failure stays retryable; a 2xx and the
+# relay's own 409 already-answered verdict keep it. Follow-ups are legitimately
+# repeated and are governed by the relay's cap instead. The confirmed
 # relay contract for an exhausted follow-up binding is HTTP 409 from
 # /connector/followup, optionally with {"error":"followup_unavailable"} in the
 # response body. This client always maps a follow-up 409 to exit code 9 so
@@ -314,15 +325,59 @@ if [ -z "$FMX_TOKEN" ]; then
   echo "fm-x-reply: X mode not configured (no FMX_PAIRING_TOKEN)" >&2
   exit 1
 fi
+# One public answer per request_id, enforced here because this is the only place
+# a public answer is posted. The poll offers a mention AT LEAST once - an
+# interrupted offer is re-offered rather than silenced - so a repeated wake can
+# genuinely reach this script twice for one request. Claiming before the post
+# turns that into a refusal instead of a second public reply. Follow-ups are
+# legitimately repeated and keep their own relay-side cap, so the claim covers
+# the initial answer only.
+if [ "$FOLLOWUP" = 0 ]; then
+  fmx_answer_registry_claim "$STATE" "$REQ"
+  answer_claim_rc=$?
+  case "$answer_claim_rc" in
+    0) : ;;
+    1)
+      echo "fm-x-reply: $REQ was already answered (or an earlier attempt's outcome is unknown); refusing to post again" >&2
+      exit 10
+      ;;
+    *)
+      # Refuse rather than post what cannot be recorded: an unrecorded answer is
+      # exactly the state that lets a later repeated wake answer twice.
+      echo "fm-x-reply: cannot record the answer claim for $REQ; refusing to post" >&2
+      exit 1
+      ;;
+  esac
+fi
 reply_make_tmp_file RESPONSE_BODY_FILE || {
-  echo "fm-x-reply: cannot create relay response temp file" >&2; exit 1; }
+  echo "fm-x-reply: cannot create relay response temp file" >&2
+  [ "$FOLLOWUP" = 1 ] || fmx_answer_registry_release "$STATE" "$REQ"
+  exit 1
+}
 code=$(fmx_post_json "$ENDPOINT" "$PAYLOAD_FILE" "$RESPONSE_BODY_FILE")
 post_rc=$?
+# An answer claim is released whenever the answer did not land, so a retry stays
+# possible; it is kept for a 2xx and for the relay's own 409 already-answered
+# verdict. A transport failure releases too: the relay rejects a second answer
+# for one request_id with 409, so a lost response cannot become a public double
+# post, while holding the claim would strand an ordinary network blip.
 case "$post_rc" in
   0) : ;;
-  127) echo "fm-x-reply: curl not found" >&2; exit 1 ;;
-  3) echo "fm-x-reply: invalid FMX_PAIRING_TOKEN" >&2; exit 1 ;;
-  *) echo "fm-x-reply: request to relay failed" >&2; exit 1 ;;
+  127)
+    echo "fm-x-reply: curl not found" >&2
+    [ "$FOLLOWUP" = 1 ] || fmx_answer_registry_release "$STATE" "$REQ"
+    exit 1
+    ;;
+  3)
+    echo "fm-x-reply: invalid FMX_PAIRING_TOKEN" >&2
+    [ "$FOLLOWUP" = 1 ] || fmx_answer_registry_release "$STATE" "$REQ"
+    exit 1
+    ;;
+  *)
+    echo "fm-x-reply: request to relay failed" >&2
+    [ "$FOLLOWUP" = 1 ] || fmx_answer_registry_release "$STATE" "$REQ"
+    exit 1
+    ;;
 esac
 
 case "$code" in
@@ -348,5 +403,9 @@ case "$code" in
     echo "fm-x-reply: relay returned HTTP $code" >&2
     exit 1
     ;;
-  *) echo "fm-x-reply: relay returned HTTP $code" >&2; exit 1 ;;
+  *)
+    echo "fm-x-reply: relay returned HTTP $code" >&2
+    [ "$FOLLOWUP" = 1 ] || fmx_answer_registry_release "$STATE" "$REQ"
+    exit 1
+    ;;
 esac
