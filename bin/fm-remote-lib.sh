@@ -19,10 +19,9 @@
 # publish remote and its upstream share the default branch name, and the local
 # main/master fallback already covers a checkout with no origin/HEAD.
 
-# Print the remote name whose <default> branch holds landed work for the git repo
-# at <dir>: `fork` when it exists, else `origin`. Returns 1 without printing when
-# neither exists, so a caller reports a remote-less checkout instead of building a
-# ref that cannot resolve.
+# Print the publish remote resolved above for the git repo at <dir>.
+# Returns 1 without printing when neither candidate exists, so a caller reports a
+# remote-less checkout instead of building a ref that cannot resolve.
 fm_publish_remote() {
   local dir=$1 remote
   for remote in fork origin; do

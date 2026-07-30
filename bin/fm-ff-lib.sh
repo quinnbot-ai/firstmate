@@ -6,10 +6,10 @@
 # clean fast-forward, never forcing, merging, or stashing" used by every sync
 # path:
 #   - /updatefirstmate (bin/fm-update.sh) pulls from the checkout's PUBLISH remote
-#     (bin/fm-remote-lib.sh: `fork` when present, else `origin`): base_mode "publish".
+#     as resolved by bin/fm-remote-lib.sh: base_mode "publish".
 #   - the local-HEAD secondmate sync (bin/fm-spawn.sh on launch, bin/fm-bootstrap.sh
 #     on startup) follows the PRIMARY checkout's current default-branch commit:
-#     base_mode is that local commit, with NO fetch and no origin dependency.
+#     base_mode is that local commit, with NO fetch and no remote dependency.
 #
 # A linked-worktree secondmate home already holds the primary's commit in the
 # shared object store, so its local-HEAD sync is a purely local fast-forward that
@@ -276,9 +276,9 @@ live_secondmate_meta_records() {
 #   FF_INSTR  = comma list of changed instruction paths (only when updated)
 #
 # base_mode selects where the fast-forward base comes from:
-#   publish      - fetch the checkout's publish remote (bin/fm-remote-lib.sh: `fork`
-#                  when present, else `origin`) and advance to <remote>/<default>
-#                  (the /updatefirstmate path); requires one of those remotes and
+#   publish      - fetch the checkout's publish remote (resolved by
+#                  bin/fm-remote-lib.sh) and advance to <remote>/<default>
+#                  (the /updatefirstmate path); requires a resolved remote and
 #                  network reachability.
 #   <commit-ish> - advance to that LOCAL commit with NO fetch and no remote
 #                  dependency (the local-HEAD secondmate sync). The commit must

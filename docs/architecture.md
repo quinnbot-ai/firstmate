@@ -247,7 +247,7 @@ Generalizable firstmate knowledge goes to shared tracked docs through the normal
 The locked session-start bootstrap step, PR-based teardown, and merged-PR wake handling refresh remote-backed project clones when the clone is safe to move.
 Wake-time refreshes can target a single clone by project name, so the primary home also catches up when a secondmate reports a merge from its own home.
 Clean default-branch clones fast-forward to the publish remote's `<default>` branch, and a clean detached HEAD that holds no unique commits is re-attached to the default branch before the same fast-forward path runs.
-The publish remote is resolved per clone as `fork` when that remote exists and `origin` otherwise, so a fork-backed clone follows the remote its own work lands on rather than the upstream it was forked from.
+[`bin/fm-remote-lib.sh`](../bin/fm-remote-lib.sh) owns publish-remote resolution, so a fork-backed clone follows the remote its own work lands on rather than the upstream it was forked from.
 Dirty clones, non-default branches, detached HEADs with unique commits, diverged defaults, and default branches checked out in another worktree are reported as `STUCK:` with their behind count and left untouched.
 Fetches blocked by an orphaned `.git/packed-refs.lock` use bounded retries and remove the lock only when the shared staleness proof can prove it abandoned; [configuration.md](configuration.md#toolchain) owns the recovery details and tuning knobs.
 Local-only projects, clones with no remote at all, and fetch failures remain benign skips.
@@ -255,7 +255,7 @@ The refresh also prunes local branches whose remote is gone and that no worktree
 
 ## Self-updates stay safe
 
-`/updatefirstmate` fast-forwards the running firstmate repo and registered secondmate homes from the same resolved publish remote, then re-reads updated instructions and nudges updated secondmates without touching project clones.
+`/updatefirstmate` fast-forwards the running firstmate repo and registered secondmate homes from each checkout's resolved publish remote, then re-reads updated instructions and nudges updated secondmates without touching project clones.
 The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
 The publish-remote updater and the local secondmate sync share the same guarded fast-forward helper; only the publish mode fetches.
 The mechanics are owned by the `/updatefirstmate` skill and firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) (self-update).

@@ -24,7 +24,7 @@ This touches only the firstmate repo and its own worktrees, never anything under
    ```sh
    bin/fm-update.sh
    ```
-   It fast-forwards this firstmate repo's default branch from its publish remote - `fork` when that remote exists, else `origin` - then fast-forwards every registered secondmate home (each a treehouse worktree of this same repo, leased at a detached HEAD on the default branch) the same way.
+   It fast-forwards this firstmate repo's default branch from the publish remote resolved by [`bin/fm-remote-lib.sh`](../../../bin/fm-remote-lib.sh), then fast-forwards every registered secondmate home (each a treehouse worktree of this same repo, leased at a detached HEAD on the default branch) the same way.
    A checkout whose `origin` is an upstream it was forked from therefore still receives the fleet's own landed updates, instead of skipping forever as diverged.
    It prints one status line per target (`updated <old>..<new>` / `already current` / `skipped: <reason>`), followed by two action lines that tell you exactly what to do next:
    - `reread-firstmate: yes|no`

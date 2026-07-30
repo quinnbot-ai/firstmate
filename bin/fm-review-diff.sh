@@ -4,9 +4,8 @@
 # Pooled project clones do not keep their local default branch current, so this
 # helper compares remote-backed projects against <publish-remote>/<default> after
 # fetching the default branch, and local-only projects against the local default
-# branch. The publish remote comes from bin/fm-remote-lib.sh - `fork` when that
-# remote exists, else `origin` - so a fork-backed clone is reviewed against the
-# branch its own work lands on, not the upstream it was forked from.
+# branch. The publish remote comes from bin/fm-remote-lib.sh, so a fork-backed
+# clone is reviewed against the branch its own work lands on, not its upstream.
 # When state/<id>.meta records pr= (URL or number) for an open PR, the compare
 # side is ALWAYS a freshly fetched refs/pull/<n>/head by default so review stays
 # current after no-mistakes fix rounds push to the PR. A recorded pr_head= is

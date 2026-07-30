@@ -27,8 +27,7 @@
 #   --json <path>   write a deterministic timing artifact after the run
 #   --list          print selected script paths (one per line) and exit 0
 #   --base <ref>    with --changed, compare against this ref (default: the publish
-#                   remote's main - `fork/main` when a `fork` remote exists, else
-#                   `origin/main`; see bin/fm-remote-lib.sh)
+#                   remote's main; see bin/fm-remote-lib.sh)
 #   --exclude-family <name>
 #                   drop scripts whose primary family matches <name> after selection
 #                   (repeatable; portable CI lanes exclude real-herdr-gated so the

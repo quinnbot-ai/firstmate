@@ -13,9 +13,8 @@
 # stashed, or discarded.
 # Still skips (benignly) local-only/no-remote projects, missing remotes/branches,
 # and fetch failures.
-# The publish remote is resolved per clone by bin/fm-remote-lib.sh - `fork` when
-# that remote exists, else `origin` - so a fork-backed clone follows the remote its
-# own work lands on instead of the upstream it was forked from.
+# The publish remote is resolved per clone by bin/fm-remote-lib.sh, so a
+# fork-backed clone follows the remote its own work lands on instead of its upstream.
 # Pruning never deletes the checked-out branch or a branch that still has a
 # worktree, so it cannot discard unlanded work; set FM_FLEET_PRUNE=0 to disable it.
 # When the fetch fails on an orphaned .git/packed-refs.lock (left by a ref rewrite

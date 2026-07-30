@@ -3,10 +3,8 @@
 # default branch.
 #
 # Mechanical half of the /updatefirstmate skill. Fast-forwards the running
-# firstmate repo's default branch from its PUBLISH remote - `fork` when that
-# remote exists, else `origin` (bin/fm-remote-lib.sh owns that resolution, so a
-# fork-backed checkout follows the remote its own work actually lands on rather
-# than the upstream it was forked from) - then fast-forwards every
+# firstmate repo's default branch from its PUBLISH remote, as resolved by
+# bin/fm-remote-lib.sh, then fast-forwards every
 # registered secondmate home (each a treehouse worktree of this same repo, or
 # a standalone clone) the same way. FAST-FORWARD ONLY, exactly like
 # fm-fleet-sync.sh: never force, never create a merge commit, never stash;
