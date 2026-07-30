@@ -11,7 +11,7 @@ The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it 
 This section is the single owner of the top-level operational-home layout; producer script headers and their help own exact child-file fields and mutation contracts.
 The tracked code root contains the shared instruction, skill, documentation, workflow, and `bin/` surfaces, while each effective `FM_HOME` contains private operational directories.
 `data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, and scout reports.
-`state/` holds volatile runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, away-mode state, generated X-mode artifacts, private secondmate config-reread generations with their retry and quarantine state, and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
+`state/` holds volatile runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, away-mode state, generated X-mode artifacts, the generated operational alert watch and its dedupe record, private secondmate config-reread generations with their retry and quarantine state, and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
 `config/` holds local gitignored operating choices, and `projects/` holds the local project clones that Firstmate reads but changes only through the guarded exceptions in `AGENTS.md`.
 
 `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
@@ -115,6 +115,17 @@ Directives are `off` (a position-independent kill switch that disables every act
 An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisely so a wedged away-mode primary is never silent, and it fires at most once per max-defer window after a genuine wedge.
 A missing or failing channel logs and falls through to the next, never crashing the daemon.
 See [`wedge-alarm.md`](wedge-alarm.md) for the current channel reference, [`verification/supervision.md`](verification/supervision.md#wedge-alarm-channels) for active evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
+
+## Operational alert inbox watch (config/ops-inbox.json)
+
+On a machine whose operations runtime records critical alerts into a durable inbox rather than a chat transport, firstmate watches that inbox so an unreviewed backlog wakes the first mate instead of sitting unread.
+Local, gitignored `config/ops-inbox.json` under the effective home holds the local operating choices: `enabled` (`auto`, `true`, or `false`), the watched `state_dir` or its individual `spool`/`acks`/`receipt` paths, and the `age_hours`, `count`, `remind_hours`, `growth`, `receipt_stale_hours`, and `max_lines` thresholds.
+Every key is optional and an unrecognized key is refused rather than ignored, so a mistyped threshold can never read as a configured one.
+By default the watch arms only when the configured alert spool exists, so a home with no such runtime writes nothing and prints nothing.
+The session-start bootstrap sweep arms it as the reserved standing check `state/ops-watch.check.sh` through the ordinary custom-check trust binding, records its dedupe state in `state/.ops-inbox-wake`, and disarms it again when the inbox goes away.
+An armed watch is a supervision need, exactly like an X-mode relay poll, because a standing poll only reaches the first mate through a live watcher.
+This file is deliberately not inherited into secondmate homes, and a secondmate home never auto-arms the watch: one machine has one alert inbox, and the primary owns watching it.
+See [`ops-inbox-wake.md`](ops-inbox-wake.md) for the wake conditions, the digest, the dedupe contract, and the two-paths-named-ops-inbox reconciliation; `bin/fm-ops-inbox-lib.sh`'s header owns the exact resolution mechanics.
 
 ## Gate defaults (.no-mistakes.yaml)
 
@@ -407,6 +418,7 @@ FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartb
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
 FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls, custom checks, or X-mode dispatch)
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
+FM_OPS_INBOX_STATE_DIR= # alternate watched operations state dir for the alert inbox watch, mainly for tests; an explicit config/ops-inbox.json value wins (docs/ops-inbox-wake.md)
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when axi status cannot be attributed to the current code
