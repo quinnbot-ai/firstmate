@@ -16,7 +16,7 @@
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
 # token-tight line firstmate can read every heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
+#   state: <working|parked|done|stopped-short|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
@@ -42,7 +42,12 @@
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#      `resolved` never become current state or detail. On that path a done: line
+#      that a no-mistakes ship task's one done gate does not justify (no PR with
+#      green checks) reports `stopped-short` instead of `done`: the crew stopped
+#      at its implementation commit and validation still has to be started.
+#      fm-classify-lib.sh owns that gate, so scout, local-only, direct-PR, and
+#      metadata with no recorded mode are never reclassified.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log.
@@ -97,6 +102,9 @@ meta_value() {  # <key>
 WT=$(meta_value worktree)
 KIND=$(meta_value kind)
 HARNESS=$(meta_value harness)
+# Delivery mode drives the premature-done gate in the status-log fallback below.
+# Absent for a legacy record, which never gates (fm-classify-lib.sh).
+MODE=$(meta_value mode)
 [ -n "$KIND" ] || KIND=ship
 
 # A torn-down (or never-created) worktree has no current state to read.
@@ -285,12 +293,10 @@ nm_gate_findings_count() {
   case "$rest" in ''|*[!0-9]*) return 0 ;; esac
   printf '%s' "$rest"
 }
+# The crew's own terminal no-mistakes signal. fm-classify-lib.sh owns the
+# PR-checks-green evidence test, shared with the premature-done gate below.
 log_reports_ci_ready() {
-  [ "$LOG_VERB" = "done" ] || return 1
-  case "$(status_line_note "$LOG_LINE")" in
-    *PR*"checks green"*|*"checks green"*PR*) return 0 ;;
-    *) return 1 ;;
-  esac
+  status_done_reports_pr_checks_green "$LOG_LINE"
 }
 
 nm_ci_step_status() {
@@ -608,6 +614,20 @@ pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACK
 # signature is not meaningful for them; read their state from the status log only.
 if [ "$KIND" != secondmate ] && crew_pane_is_busy "$BACKEND_TARGET"; then
   emit working pane "harness busy"
+fi
+
+# Before trusting a done: line, catch the crew that stopped at its implementation
+# commit. A no-mistakes ship task's only done gate is a PR with green checks, and
+# no run was attributed above, so a done: line without that evidence means the
+# implementation landed on the branch and validation never started. Reporting it
+# as `done` here is what let an unvalidated commit read as delivered work to
+# every supervisor, snapshot, and teardown decision downstream; `stopped-short`
+# names the real state and its one required next step instead.
+# fm-classify-lib.sh owns which task this applies to, so scout, local-only,
+# direct-PR, and legacy records keep their previous reading untouched.
+if status_is_premature_ship_done "$LOG_LINE" "$MODE" "$KIND"; then
+  emit stopped-short status-log \
+    "committed without reaching the one done gate (PR with green checks); start or resume validation: $(status_line_note "$LOG_LINE")"
 fi
 
 # Fall back to the status log's last line, but ONLY when its verb maps to a real

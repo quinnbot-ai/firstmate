@@ -264,6 +264,82 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
 }
 
+# The generated no-mistakes contract must offer exactly ONE done gate. A second
+# gate at the implementation commit is what let a crew report done there and end
+# its turn with the task unshipped, so removing it is the structural half of the
+# fix; fm-crew-state.sh's stopped-short verdict is the backstop half.
+test_no_mistakes_dod_has_one_done_gate() {
+  local home id brief done_gates
+  home="$TMP_ROOT/one-done-gate-home"
+  mkdir -p "$home/data"
+  id="brief-one-done-gate-d1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+  # Every done: gate the Definition of done instructs the crew to append.
+  done_gates=$(sed -n '/^# Definition of done/,$p' "$brief" | grep -c 'append `done:' || true)
+  [ "$done_gates" = 1 ] || fail \
+    "no-mistakes Definition of done must instruct exactly one done: append, found $done_gates"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'append `done: PR {url} checks green`' "$brief" \
+    "the one done gate must remain the terminal PR-checks-green signal"
+  assert_grep "never append it at the implementation commit" "$brief" \
+    "no-mistakes DOD must forbid a commit-stage done: outright"
+  assert_no_grep "Firstmate will then instruct you to run" "$brief" \
+    "no-mistakes DOD must not hand back to firstmate to start validation"
+  pass "fm-brief.sh: no-mistakes DOD defines exactly one done gate"
+}
+
+# The commit stage must remain a nonterminal signal the crew works straight
+# through, which is what removes the supervision round-trip entirely rather
+# than only making it easier to recognize.
+test_no_mistakes_dod_self_advances_into_validation() {
+  local home id brief
+  home="$TMP_ROOT/self-advance-home"
+  mkdir -p "$home/data"
+  id="brief-self-advance-d2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'append `working: implementation committed, starting validation`' "$brief" \
+    "the commit stage must use a nonterminal verb, not done:"
+  assert_grep "KEEP GOING in the same turn" "$brief" \
+    "the crew must carry straight on into validation"
+  assert_grep "do not wait for firstmate to tell you to start" "$brief" \
+    "the crew must not idle waiting for a validation trigger"
+  # The nonterminal-working rule in the shared status protocol and this gate now
+  # agree, so a crew reading either one reaches the same behavior.
+  assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
+    "the status protocol's nonterminal-working rule must still back the commit stage"
+  pass "fm-brief.sh: no-mistakes commit stage is nonterminal and self-advancing"
+}
+
+# The other delivery modes keep their own terminal signals untouched: their
+# whole point is that they end somewhere other than a validated PR.
+test_other_modes_keep_their_terminal_done() {
+  local home brief
+  home="$TMP_ROOT/other-modes-done-home"
+  write_registry "$home"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-mode-done-local local-proj >/dev/null 2>&1
+  brief="$home/data/brief-mode-done-local/brief.md"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'append `done: ready in branch fm/brief-mode-done-local`' "$brief" \
+    "local-only must keep its ready-in-branch terminal signal"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-mode-done-direct direct-proj >/dev/null 2>&1
+  brief="$home/data/brief-mode-done-direct/brief.md"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'append `done: PR {url}`' "$brief" \
+    "direct-PR must keep its PR-opened terminal signal"
+  assert_grep "Do NOT run /no-mistakes" "$brief" \
+    "direct-PR must still skip the pipeline"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-mode-done-scout scout-proj --scout >/dev/null 2>&1
+  brief="$home/data/brief-mode-done-scout/brief.md"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'append `done: {one-line conclusion}`' "$brief" \
+    "a scout must keep its report-conclusion terminal signal"
+  pass "fm-brief.sh: local-only, direct-PR, and scout terminal signals are unchanged"
+}
+
 test_ship_project_memory_wording() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
@@ -624,6 +700,9 @@ test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_no_mistakes_dod_has_one_done_gate
+test_no_mistakes_dod_self_advances_into_validation
+test_other_modes_keep_their_terminal_done
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path

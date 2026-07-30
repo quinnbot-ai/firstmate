@@ -29,7 +29,12 @@
 # For ship tasks, the definition of done is shaped by the project's delivery mode
 # (data/projects.md via fm-project-mode.sh; see the project-management skill
 # and AGENTS.md task lifecycle):
-#   no-mistakes  implement -> /no-mistakes pipeline -> PR -> captain merge (default)
+#   no-mistakes  implement -> the worker starts the /no-mistakes pipeline itself,
+#                without stopping at its implementation commit -> PR -> captain merge (default).
+#                Its ONE done gate is "done: PR <url> checks green"; the generated
+#                contract offers no commit-stage done:, so the two stages cannot be
+#                conflated. bin/fm-classify-lib.sh owns the matching structural gate
+#                for a crew that reports done there anyway.
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                captain approves, firstmate merges to local main
@@ -332,9 +337,13 @@ EOF
     RULE1='1. Never push to the default branch. Never merge a PR.'
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
-The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+This project ships **no-mistakes**: one continuous stretch of work from your implementation commit to a PR with green checks.
+\`done:\` has exactly ONE meaning on this task - the PR exists and its checks are green - so never append it at the implementation commit.
+The commit is a mid-task milestone, not the deliverable, and stopping there leaves the task unshipped.
+
+When the implementation is committed, append \`working: implementation committed, starting validation\` and KEEP GOING in the same turn.
+Do not end your turn there, and do not wait for firstmate to tell you to start: invoke the no-mistakes validation skill yourself using your own harness's skill invocation (\`/no-mistakes\` on most harnesses, \`\$no-mistakes\` on codex).
+If your harness has no skill invocation, drive \`no-mistakes axi run\` directly and follow its own help instead.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
@@ -347,6 +356,7 @@ Two firstmate-specific rules layer on top of that guidance:
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+That is the only \`done:\` this task has.
 EOF
     ;;
 esac

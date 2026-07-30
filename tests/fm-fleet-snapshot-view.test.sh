@@ -398,6 +398,58 @@ test_event_hints_follow_reconciled_current_state() {
   pass "snapshot event hints follow reconciled current state"
 }
 
+# A no-mistakes ship crew that appended done: at its implementation commit is
+# not delivered work. It must read as stopped-short in the task rows, and the
+# bounded home summary must carry it as a hold that still needs an action -
+# not as terminal work, which would have made the summary strictly invalid and
+# cleared the fold's open decisions.
+test_stopped_short_crew_is_a_hold_not_terminal_work() {
+  local home fakebin out summary
+  home=$(make_home stopped-short)
+  mkdir -p "$home/projects/nm-worktree" "$home/projects/local-worktree"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] nm-stop-short - Ship the gate (repo: alpha) (kind: ship) (since 2026-07-26)
+- [ ] local-landed - Land locally (repo: alpha) (kind: ship) (since 2026-07-26)
+EOF
+  fm_write_meta "$home/state/nm-stop-short.meta" \
+    "window=firstmate:fm-nm-stop-short" \
+    "worktree=$home/projects/nm-worktree" \
+    "project=alpha" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  printf 'done: implemented and committed\n' > "$home/state/nm-stop-short.status"
+  fm_write_meta "$home/state/local-landed.meta" \
+    "window=firstmate:fm-local-landed" \
+    "worktree=$home/projects/local-worktree" \
+    "project=alpha" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=local-only"
+  printf 'done: ready in branch fm/local-landed\n' > "$home/state/local-landed.status"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    def task($id): (.tasks[] | select(.id == $id));
+    task("nm-stop-short").current_state.state == "stopped-short"
+      and (task("nm-stop-short").current_state.detail | test("start or resume validation"))
+      and task("local-landed").current_state.state == "done"
+  ' >/dev/null || fail "stopped-short must be distinct from a local-only terminal done: $out"
+  summary=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  # The local-only crew IS terminal while still in flight, so it stays a strict
+  # invalidity exactly as before. The stopped-short crew must not join it there;
+  # it belongs in holds, as work that still needs an action.
+  printf '%s' "$summary" | jq -e '
+    (.invalidity.ids | index("local-landed")) != null
+      and (.invalidity.ids | index("nm-stop-short")) == null
+      and (.holds | map(.id) | index("nm-stop-short")) != null
+      and (.holds[] | select(.id == "nm-stop-short")
+           | .source == "child-state" and (.reason | test("start or resume validation")))
+  ' >/dev/null || fail "a stopped-short crew must surface as a child-state hold: $summary"
+  pass "a stopped-short crew is a hold, never terminal or delivered work"
+}
+
 test_scout_reports_include_teardown_reports() {
   local home out
   home=$(make_home teardown-reports)
@@ -760,6 +812,7 @@ test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
 test_event_hints_follow_reconciled_current_state
+test_stopped_short_crew_is_a_hold_not_terminal_work
 test_open_decision_survives_later_unrelated_event
 test_secondmate_open_decision_survives_live_endpoint
 test_open_decision_transfers_to_captain_hold

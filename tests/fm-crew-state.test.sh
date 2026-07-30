@@ -25,6 +25,10 @@
 #       This is the direct regression pair for the 2026-07-02 herdr incident,
 #       proving the watcher's own absorb-only-when-provably-working predicate
 #       benefits from the fix in both directions.
+#   (l) the no-mistakes premature-done gate: a done: line with no PR-checks-green
+#       evidence reports stopped-short, while scout, local-only, direct-PR, an
+#       unrecorded mode, a busy pane, an attributed run, and the real
+#       checks-green line all read exactly as before.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -774,6 +778,159 @@ EOF
   pass "another branch's run is ignored, falls back"
 }
 
+# --- (l) the no-mistakes premature-done gate --------------------------------
+#
+# A no-mistakes ship task has exactly one done gate: a PR with green checks.
+# fm-classify-lib.sh owns the predicate; these cases pin both directions of it,
+# because a gate that fires on the wrong task would misread a scout report,
+# local-only's ready branch, or direct-PR's PR line as unfinished work.
+
+test_premature_ship_done_predicate() {
+  status_is_premature_ship_done "done: implemented and committed" no-mistakes ship \
+    || fail "a bare done: on a no-mistakes ship task must be premature"
+  status_is_premature_ship_done "done: PR https://x/pull/1 checks green" no-mistakes ship \
+    && fail "the terminal checks-green signal must never be premature"
+  status_is_premature_ship_done "done: checks green on PR https://x/pull/1" no-mistakes ship \
+    && fail "terminal evidence must be recognized in either word order"
+  status_is_premature_ship_done "done: ready in branch fm/x" local-only ship \
+    && fail "local-only's own terminal signal must never be premature"
+  status_is_premature_ship_done "done: PR https://x/pull/2" direct-PR ship \
+    && fail "direct-PR's own terminal signal must never be premature"
+  status_is_premature_ship_done "done: report written" no-mistakes scout \
+    && fail "a scout deliverable must never be premature"
+  status_is_premature_ship_done "done: implemented and committed" "" ship \
+    && fail "metadata with no recorded mode must never be reclassified on a guess"
+  status_is_premature_ship_done "working: implementing" no-mistakes ship \
+    && fail "a nonterminal verb is not a premature done"
+  status_is_premature_ship_done "blocked: no credentials" no-mistakes ship \
+    && fail "a blocker is not a premature done"
+  status_is_premature_ship_done "" no-mistakes ship \
+    && fail "an empty status line is not a premature done"
+  # An absent kind defaults to ship, matching how the rest of the fleet reads it.
+  status_is_premature_ship_done "done: implemented and committed" no-mistakes "" \
+    || fail "an absent kind must default to ship"
+  pass "status_is_premature_ship_done: gates only an unvalidated no-mistakes ship done"
+}
+
+# One shared fixture: no attributed run anywhere, idle pane, so every case below
+# reaches the status-log fallback where the gate lives.
+run_idle_no_run_case() {  # <case-name> <id> <status-line> <meta-field>...
+  local name=$1 id=$2 line=$3 d
+  shift 3
+  d=$(new_case "$name")
+  make_repo_on_branch "$d/wt" "fm/$id"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$d/wt" "$@"
+  printf '%s\n' "$line" > "$d/state/$id.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  run_crew_state "$d" "$id"
+}
+
+test_no_mistakes_bare_done_is_stopped_short() {
+  reset_fakes
+  local out
+  out=$(run_idle_no_run_case premature-nm feat-nm-bare "done: implemented and committed" \
+    "kind=ship" "mode=no-mistakes")
+  assert_contains "$out" "state: stopped-short" \
+    "a no-mistakes crew that stopped at its implementation commit must not read as done"
+  assert_contains "$out" "source: status-log" "the gate stays a status-log verdict"
+  assert_contains "$out" "start or resume validation" \
+    "the detail must name the missing step so no supervisor has to infer it"
+  assert_contains "$out" "implemented and committed" \
+    "the crew's own summary must survive into the detail"
+  pass "no-mistakes bare done reports stopped-short, not done"
+}
+
+test_no_mistakes_checks_green_done_stays_terminal() {
+  reset_fakes
+  local out
+  out=$(run_idle_no_run_case terminal-nm feat-nm-green \
+    "done: PR https://example.invalid/pull/7 checks green" "kind=ship" "mode=no-mistakes")
+  assert_contains "$out" "state: done" "the real terminal signal must still read as done"
+  assert_not_contains "$out" "stopped-short" "the terminal signal must never be gated"
+  pass "no-mistakes done with a green PR stays terminal"
+}
+
+test_local_only_ready_branch_stays_terminal() {
+  reset_fakes
+  local out
+  out=$(run_idle_no_run_case terminal-local feat-local-ready "done: ready in branch fm/feat-local-ready" \
+    "kind=ship" "mode=local-only")
+  assert_contains "$out" "state: done" "local-only's ready branch IS its terminal signal"
+  assert_not_contains "$out" "stopped-short" "local-only must never be gated"
+  pass "local-only ready-in-branch stays terminal"
+}
+
+test_direct_pr_done_stays_terminal() {
+  reset_fakes
+  local out
+  out=$(run_idle_no_run_case terminal-direct feat-direct-pr "done: PR https://example.invalid/pull/9" \
+    "kind=ship" "mode=direct-PR")
+  assert_contains "$out" "state: done" "direct-PR opens the PR without the pipeline and ends there"
+  assert_not_contains "$out" "stopped-short" "direct-PR must never be gated"
+  pass "direct-PR done stays terminal"
+}
+
+test_scout_done_stays_terminal() {
+  reset_fakes
+  local out
+  out=$(run_idle_no_run_case terminal-scout feat-scout-done "done: report written" \
+    "kind=scout" "mode=no-mistakes")
+  assert_contains "$out" "state: done" "a scout's deliverable is its report, not a PR"
+  assert_not_contains "$out" "stopped-short" "scouts must never be gated"
+  pass "scout done stays terminal"
+}
+
+test_missing_mode_metadata_is_never_gated() {
+  reset_fakes
+  local out
+  out=$(run_idle_no_run_case legacy-meta feat-legacy-mode "done: implemented and committed" "kind=ship")
+  assert_contains "$out" "state: done" "a record with no recorded mode keeps its previous reading"
+  assert_not_contains "$out" "stopped-short" "an absent mode must never be gated on a guess"
+  pass "metadata with no recorded delivery mode is never reclassified"
+}
+
+# A busy pane still wins: the crew may have appended the line and kept working,
+# so the gate must not convert live work into a stopped-short verdict.
+test_busy_pane_outranks_the_premature_done_gate() {
+  reset_fakes
+  local d out
+  d=$(new_case premature-busy)
+  make_repo_on_branch "$d/wt" fm/feat-nm-busy
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-nm-busy.meta" "window=fm:fm-feat-nm-busy" "worktree=$d/wt" \
+    "kind=ship" "mode=no-mistakes"
+  printf 'done: implemented and committed\n' > "$d/state/feat-nm-busy.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  out=$(run_crew_state "$d" feat-nm-busy)
+  assert_contains "$out" "state: working" "a busy pane outranks the status log as before"
+  assert_not_contains "$out" "stopped-short" "the gate must not fire while the crew is still working"
+  pass "a busy pane still outranks the premature-done gate"
+}
+
+# An attributed run means validation DID start, so the run step stays
+# authoritative and the earlier premature line is simply history.
+test_active_run_outranks_the_premature_done_gate() {
+  reset_fakes
+  local d out
+  d=$(new_case premature-run)
+  make_repo_on_branch "$d/wt" fm/feat-nm-run
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-nm-run.meta" "window=fm:fm-feat-nm-run" "worktree=$d/wt" \
+    "kind=ship" "mode=no-mistakes"
+  printf 'done: implemented and committed\n' > "$d/state/feat-nm-run.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-nm-run)"
+  FM_FAKE_BUSY=0
+  out=$(run_crew_state "$d" feat-nm-run)
+  assert_contains "$out" "source: run-step" "an attributed run stays authoritative"
+  assert_not_contains "$out" "stopped-short" "a started validation is not a stopped-short crew"
+  pass "an attributed run outranks the premature-done gate"
+}
+
 # (f) no run for this crew + a busy pane -> working via pane
 test_no_run_busy_pane() {
   reset_fakes
@@ -1256,6 +1413,15 @@ test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
+test_premature_ship_done_predicate
+test_no_mistakes_bare_done_is_stopped_short
+test_no_mistakes_checks_green_done_stays_terminal
+test_local_only_ready_branch_stays_terminal
+test_direct_pr_done_stays_terminal
+test_scout_done_stays_terminal
+test_missing_mode_metadata_is_never_gated
+test_busy_pane_outranks_the_premature_done_gate
+test_active_run_outranks_the_premature_done_gate
 test_no_run_busy_pane
 test_no_run_herdr_unknown_uses_backend_capture
 test_no_run_herdr_idle_agent_status_corroborated_by_busy_pane

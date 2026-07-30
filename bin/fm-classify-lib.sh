@@ -93,6 +93,52 @@ status_is_terminal_verb() {
   esac
 }
 
+# --- the no-mistakes ship done gate -----------------------------------------
+#
+# A no-mistakes ship task has exactly ONE done gate: its PR exists and its
+# checks are green. The implementation commit before that is a mid-task
+# milestone, not a deliverable, so a done: line carrying no PR-checks-green
+# evidence on such a task is a crew that stopped short of its own contract, with
+# the work committed on a branch and no PR raised for it.
+# This is the ONE owner of both tests. bin/fm-brief.sh generates a no-mistakes
+# definition of done with no commit-stage done: at all, and bin/fm-crew-state.sh
+# reports a crew that appended one anyway as its own current state instead of a
+# terminal done, so an unvalidated commit is never read as delivered work.
+#
+# The delivery paths that legitimately end at a different signal are excluded by
+# construction: local-only ends at "done: ready in branch <branch>", direct-PR
+# ends at "done: PR <url>" with no pipeline, and a scout's deliverable is its
+# report, so the gate applies only to kind=ship under an explicit
+# mode=no-mistakes. An absent or unrecognized mode never gates, which keeps a
+# legacy metadata record reading exactly as it did before rather than being
+# reclassified on a guess. FM_CLASSIFY_NO_MISTAKES_MODE overrides the mode token.
+FM_CLASSIFY_NO_MISTAKES_MODE_DEFAULT='no-mistakes'
+
+# 0 if the given status line is the TERMINAL no-mistakes ship signal: a done:
+# line whose note reports both a PR and green checks.
+status_done_reports_pr_checks_green() {  # <status-line>
+  local line=$1
+  [ -n "$line" ] || return 1
+  [ "$(status_line_verb "$line")" = "done" ] || return 1
+  case "$(status_line_note "$line")" in
+    *PR*"checks green"*|*"checks green"*PR*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# 0 if the given status line is a PREMATURE done for a no-mistakes ship task:
+# the crew reported done without the PR-checks-green evidence its one done gate
+# requires. <mode> and <kind> come from state/<id>.meta; an empty kind defaults
+# to ship, matching how the rest of the fleet reads an absent kind.
+status_is_premature_ship_done() {  # <status-line> <mode> [kind]
+  local line=$1 mode=$2 kind=${3:-ship}
+  [ -n "$line" ] || return 1
+  [ "${kind:-ship}" = ship ] || return 1
+  [ "$mode" = "${FM_CLASSIFY_NO_MISTAKES_MODE:-$FM_CLASSIFY_NO_MISTAKES_MODE_DEFAULT}" ] || return 1
+  [ "$(status_line_verb "$line")" = "done" ] || return 1
+  ! status_done_reports_pr_checks_green "$line"
+}
+
 # 0 if the given (last) status line matches a captain-relevant verb.
 # Verb-aware by default: terminal verbs always match; nonterminal progress verbs
 # (working, resolved, captain-held) and paused never match from free-text prose;

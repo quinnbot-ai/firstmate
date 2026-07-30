@@ -729,7 +729,10 @@ EOF
   fm_write_meta "$mate/state/failed.meta" \
     "window=firstmate:fm-failed" "worktree=$mate/projects/failed" "project=sample" \
     "harness=codex" "kind=ship" "mode=no-mistakes"
-  printf 'done: complete\n' > "$mate/state/done.status"
+  # A no-mistakes ship task is genuinely terminal only at its one done gate, a PR
+  # with green checks; a bare done: there means the crew stopped at its
+  # implementation commit and reads as stopped-short instead (fm-classify-lib.sh).
+  printf 'done: PR https://example.invalid/pull/3 checks green\n' > "$mate/state/done.status"
   printf 'failed: stopped\n' > "$mate/state/failed.status"
   rm "$mate/state/parked.meta" "$mate/state/parked.status"
   canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
