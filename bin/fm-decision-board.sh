@@ -12,9 +12,9 @@
 # Two sources feed the board, both already normalized by the snapshot:
 #   1. backlog records still open with hold_kind == "captain" - the durable
 #      captain-gated queue maintained through bin/fm-decision-hold.sh.
-#   2. tasks whose hints.open_decisions is non-empty - a worker parked right now
-#      on an ask-user finding that the captain (or firstmate's configured
-#      authority) must answer.
+#   2. tasks whose hints.open_decisions carries a needs-decision event - a
+#      worker parked right now on an ask-user finding that the captain (or
+#      firstmate's configured authority) must answer.
 # An id present in both is ONE board entry carrying both facts, never two rows.
 #
 # Entries are split by whether the captain's answer is enough on its own:
@@ -149,7 +149,10 @@ MODEL=$(printf '%s' "$SNAP" | jq \
 
   def date_epoch:
     if . == null then null
-    else try (strptime("%Y-%m-%d") | mktime) catch null
+    else
+      . as $date
+      | (try (strptime("%Y-%m-%d") | mktime) catch null)
+      | if . == null or (strftime("%Y-%m-%d") != $date) then null else . end
     end;
 
   # Whole days between an ISO date prefix and now; null when either is unusable.
@@ -185,11 +188,12 @@ MODEL=$(printf '%s' "$SNAP" | jq \
 
   # Workers parked on an unanswered decision right now.
   | ([ $snap.tasks[]?
-       | select((.hints.open_decisions // []) | length > 0)
+       | select((.hints.open_decisions // []) | any(.verb == "needs-decision"))
        | {
            id: (.id // "unknown"),
            title: ((.backlog.title // .id) | trunc(200)),
            question: (((.hints.open_decisions // [])
+                        | map(select(.verb == "needs-decision"))
                         | map(.summary // "") | map(select(. != ""))
                         | join(" · ")) | trunc(320)),
            repo: ((.backlog.repo // .project) | project_name | trunc(120)),

@@ -31,6 +31,7 @@ export FM_DECISION_BOARD_NOW=2026-07-30T09:00:00Z
 #   gated-ask   captain-owned but waiting on unfinished work
 #   both-ask    captain-owned AND a worker parked on it despite a blocker
 #   parked-only a parked worker with no captain-owned queue entry
+#   blocker-only a firstmate-owned blocked event, never a captain decision
 #   external    a non-captain hold, must never reach the board
 #   settled     a captain-owned entry already done, must never reach the board
 #   markup      backlog text containing HTML, for escaping
@@ -96,7 +97,9 @@ write_snapshot() {  # <path>
       "hints": {
         "pending_decision": true,
         "open_decisions": [{"key": "default", "verb": "needs-decision",
-                            "summary": "the third review round repeats the same family of findings"}]
+                            "summary": "the third review round repeats the same family of findings"},
+                           {"key": "upstream", "verb": "blocked",
+                            "summary": "firstmate must repair the upstream dependency"}]
       }
     },
     {
@@ -107,6 +110,16 @@ write_snapshot() {  # <path>
         "pending_decision": true,
         "open_decisions": [{"key": "default", "verb": "needs-decision",
                             "summary": "a lost confirm can leave admission released"}]
+      }
+    },
+    {
+      "id": "blocker-only",
+      "project": "/home/fixture/ventures/blocked",
+      "backlog": null,
+      "hints": {
+        "pending_decision": false,
+        "open_decisions": [{"key": "default", "verb": "blocked",
+                            "summary": "firstmate owns this blocked task"}]
       }
     },
     {
@@ -130,6 +143,9 @@ assert_contains "$out" "old-ask" "an open captain-owned entry must reach the boa
 assert_not_contains "$out" "external" "a non-captain hold must never reach the board"
 assert_not_contains "$out" "settled" "an already-answered entry must never reach the board"
 assert_not_contains "$out" "quiet-worker" "a worker with no open decision must not reach the board"
+assert_not_contains "$out" "blocker-only" "a firstmate-owned blocker must not reach the board"
+assert_not_contains "$out" "firstmate must repair" \
+  "a firstmate-owned blocker must not join a captain decision summary"
 pass "the board carries only open captain-owned items"
 
 # --- one entry per id -------------------------------------------------------
@@ -199,6 +215,12 @@ schema=$(printf '%s' "$model" | jq -r '.schema')
 [ "$schema" = fm-decision-board.v1 ] || fail "json must carry the board schema (got $schema)"
 totals=$(printf '%s' "$model" | jq -r '[.counts.total, .counts.ready, .counts.gated, .counts.parked] | join(",")')
 [ "$totals" = "6,5,1,2" ] || fail "json counts must match the fixture (got $totals)"
+blocked_json=$(printf '%s' "$model" | jq -r '
+  [.ready[], .gated[]]
+  | map(select(.id == "blocker-only" or (.question // "" | contains("firstmate must repair"))))
+  | length
+')
+[ "$blocked_json" = 0 ] || fail "json must exclude firstmate-owned blockers (got $blocked_json)"
 merged_sources=$(printf '%s' "$model" | jq -r '[.ready[] | select(.id == "both-ask") | .sources[]] | sort | join(",")')
 [ "$merged_sources" = "parked,queue" ] || fail "a merged entry must record both sources (got $merged_sources)"
 pass "the json model exposes the same facts as the rendered board"
@@ -211,6 +233,9 @@ assert_contains "$html" "&lt;script&gt;" "backlog markup must be escaped"
 assert_not_contains "$html" "<script>alert(1)</script>" "backlog markup must never render as live markup"
 assert_not_contains "$html" "http://" "the page must not reference an external host"
 assert_not_contains "$html" "https://" "the page must not reference an external host"
+assert_not_contains "$html" "blocker-only" "html must exclude a firstmate-owned blocker"
+assert_not_contains "$html" "firstmate must repair" \
+  "html must exclude a firstmate-owned blocker from captain decision summaries"
 html_numbers=$(printf '%s\n' "$html" | sed -n 's/.*<span class="num">\([0-9][0-9]*\)<\/span>.*/\1/p')
 html_number_count=$(printf '%s\n' "$html_numbers" | sed '/^$/d' | wc -l | tr -d ' ')
 html_unique_number_count=$(printf '%s\n' "$html_numbers" | sed '/^$/d' | sort -nu | wc -l | tr -d ' ')
@@ -228,7 +253,7 @@ pass "the html surface is standalone and escapes backlog text"
 malformed="$TMP_ROOT/malformed-date.json"
 jq '
   (.backlog.records[] | select(.id == "old-ask") | .since) = "not-a-date"
-  | (.backlog.records[] | select(.id == "gated-ask") | .since) = "2026-99-99"
+  | (.backlog.records[] | select(.id == "gated-ask") | .since) = "2026-02-31"
 ' "$SNAP" > "$malformed"
 set +e
 malformed_out=$("$BOARD" --snapshot "$malformed" --limit 0 2>&1)
@@ -240,8 +265,18 @@ for id in old-ask new-ask gated-ask both-ask parked-only markup; do
 done
 assert_contains "$malformed_out" "Could not read waiting date for old-ask: not-a-date." \
   "a malformed date prefix must surface an error in its section"
-assert_contains "$malformed_out" "Could not read waiting date for gated-ask: 2026-99-99." \
-  "an invalid parsed date must surface an error in its section"
+assert_contains "$malformed_out" "Could not read waiting date for gated-ask: 2026-02-31." \
+  "an impossible calendar date must surface an error in its section"
+assert_contains "$malformed_out" "waiting 1 day" \
+  "an impossible calendar date must not stop valid waiting ages from rendering"
+malformed_model=$("$BOARD" --snapshot "$malformed" --format json --limit 0)
+invalid_waiting=$(printf '%s' "$malformed_model" | jq -r '
+  .gated[] | select(.id == "gated-ask")
+  | [.waiting_days, .waiting_error] | @tsv
+')
+expected_invalid_waiting=$'\tCould not read waiting date for gated-ask: 2026-02-31.'
+[ "$invalid_waiting" = "$expected_invalid_waiting" ] \
+  || fail "an impossible calendar date must not fabricate a waiting age"
 pass "malformed waiting dates stay visible without disrupting the board"
 
 # --- stdin snapshot ---------------------------------------------------------
