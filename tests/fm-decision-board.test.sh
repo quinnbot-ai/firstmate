@@ -153,6 +153,18 @@ assert_contains "$ready_block" "parked-only" "a parked worker with no queue entr
 assert_contains "$out" "quality-program" "a remaining dependency must still be named"
 pass "the ready split honors dependencies and the parked override"
 
+# --- displayed numbering ---------------------------------------------------
+
+numbers=$(printf '%s\n' "$out" | sed -n 's/^\([0-9][0-9]*\)\. \*\*.*/\1/p')
+number_count=$(printf '%s\n' "$numbers" | sed '/^$/d' | wc -l | tr -d ' ')
+unique_number_count=$(printf '%s\n' "$numbers" | sed '/^$/d' | sort -nu | wc -l | tr -d ' ')
+first_gated_number=$(printf '%s\n' "$gated_block" | sed -n 's/^\([0-9][0-9]*\)\. \*\*.*/\1/p' | head -1)
+[ "$first_gated_number" = 6 ] \
+  || fail "the gated section must continue after the five ready entries (got $first_gated_number)"
+[ "$number_count" = "$unique_number_count" ] \
+  || fail "displayed numbers must not repeat across the whole board"
+pass "markdown numbering continues across both sections"
+
 # --- ordering ---------------------------------------------------------------
 
 order=$(printf '%s\n' "$ready_block" | grep -o -E "${TICK}[a-z-]+${TICK}" | tr -d "$TICK")
@@ -199,7 +211,38 @@ assert_contains "$html" "&lt;script&gt;" "backlog markup must be escaped"
 assert_not_contains "$html" "<script>alert(1)</script>" "backlog markup must never render as live markup"
 assert_not_contains "$html" "http://" "the page must not reference an external host"
 assert_not_contains "$html" "https://" "the page must not reference an external host"
+html_numbers=$(printf '%s\n' "$html" | sed -n 's/.*<span class="num">\([0-9][0-9]*\)<\/span>.*/\1/p')
+html_number_count=$(printf '%s\n' "$html_numbers" | sed '/^$/d' | wc -l | tr -d ' ')
+html_unique_number_count=$(printf '%s\n' "$html_numbers" | sed '/^$/d' | sort -nu | wc -l | tr -d ' ')
+html_gated=${html#*<h2>Waiting on other work first}
+html_first_gated_number=$(printf '%s\n' "$html_gated" \
+  | sed -n 's/.*<span class="num">\([0-9][0-9]*\)<\/span>.*/\1/p' | head -1)
+[ "$html_first_gated_number" = 6 ] \
+  || fail "the HTML gated section must continue after the five ready entries (got $html_first_gated_number)"
+[ "$html_number_count" = "$html_unique_number_count" ] \
+  || fail "HTML numbers must not repeat across the whole board"
 pass "the html surface is standalone and escapes backlog text"
+
+# --- malformed waiting dates -----------------------------------------------
+
+malformed="$TMP_ROOT/malformed-date.json"
+jq '
+  (.backlog.records[] | select(.id == "old-ask") | .since) = "not-a-date"
+  | (.backlog.records[] | select(.id == "gated-ask") | .since) = "2026-99-99"
+' "$SNAP" > "$malformed"
+set +e
+malformed_out=$("$BOARD" --snapshot "$malformed" --limit 0 2>&1)
+malformed_rc=$?
+set -e
+expect_code 0 "$malformed_rc" "malformed waiting dates must not abort the board"
+for id in old-ask new-ask gated-ask both-ask parked-only markup; do
+  assert_contains "$malformed_out" "$id" "a malformed waiting date must not drop $id"
+done
+assert_contains "$malformed_out" "Could not read waiting date for old-ask: not-a-date." \
+  "a malformed date prefix must surface an error in its section"
+assert_contains "$malformed_out" "Could not read waiting date for gated-ask: 2026-99-99." \
+  "an invalid parsed date must surface an error in its section"
+pass "malformed waiting dates stay visible without disrupting the board"
 
 # --- stdin snapshot ---------------------------------------------------------
 

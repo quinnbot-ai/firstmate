@@ -142,16 +142,30 @@ MODEL=$(printf '%s' "$SNAP" | jq \
     else tostring | sub("/+$"; "") | split("/") | last
     end;
 
+  def date_prefix:
+    if type != "string" then null
+    else try (([capture("^(?<d>\\d{4}-\\d{2}-\\d{2})").d] | first) // null) catch null
+    end;
+
+  def date_epoch:
+    if . == null then null
+    else try (strptime("%Y-%m-%d") | mktime) catch null
+    end;
+
   # Whole days between an ISO date prefix and now; null when either is unusable.
   def waiting_days($since; $now):
-    ($since | if type == "string" then capture("^(?<d>\\d{4}-\\d{2}-\\d{2})").d else null end) as $s
-    | ($now | capture("^(?<d>\\d{4}-\\d{2}-\\d{2})").d) as $n
-    | if $s == null then null
+    ($since | date_prefix | date_epoch) as $s
+    | ($now | date_prefix | date_epoch) as $n
+    | if $s == null or $n == null then null
       else
-        ((($n | strptime("%Y-%m-%d") | mktime)
-          - ($s | strptime("%Y-%m-%d") | mktime)) / 86400 | floor)
+        (($n - $s) / 86400 | floor)
         | if . < 0 then null else . end
       end;
+
+  def waiting_error($id; $since):
+    if $since == null or ($since | date_prefix | date_epoch) != null then null
+    else "Could not read waiting date for \($id): \($since | trunc(120))."
+    end;
 
   . as $snap
   | ($snap.backlog.present == true) as $backlog_present
@@ -199,6 +213,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | .sources = (if ($parked_ids | index($entry.id)) == null then .sources
                      else (.sources + ["parked"] | unique) end)
        | .waiting_days = waiting_days(.since; $now)
+       | .waiting_error = waiting_error(.id; .since)
        | .ready = (.parked or ((.blocked_by | length) == 0))
      ]) as $entries
 
@@ -265,8 +280,11 @@ render_markdown() {
       + (if ($e.blocked_by | length) > 0
          then "\n   Waiting first on: \($e.blocked_by | join(", "))" else "" end)
       + "\n   _\(facts($e))_ · `\($e.id)`";
+    def errors($entries):
+      [ $entries[] | select(.waiting_error != null) | "_Error: \(.waiting_error)_" ];
 
-    ["## \(.title)", ""]
+    (.ready | length) as $ready_shown
+    | ["## \(.title)", ""]
     + (if .counts.total == 0 then
          ["Nothing is waiting on you."]
        else
@@ -276,12 +294,14 @@ render_markdown() {
           + ".", ""]
          + (if (.ready | length) > 0 then
               ["### Needs your answer (\(.counts.ready))", ""]
+              + errors(.ready)
               + [ .ready | to_entries[] | entry(.value; .key + 1) ]
               + [""]
             else [] end)
          + (if (.gated | length) > 0 then
               ["### Waiting on other work first (\(.counts.gated))", ""]
-              + [ .gated | to_entries[] | entry(.value; .key + 1) ]
+              + errors(.gated)
+              + [ .gated | to_entries[] | entry(.value; .key + $ready_shown + 1) ]
               + [""]
             else [] end)
        end)
@@ -313,10 +333,14 @@ render_html() {
         then "<p class=\"q wait\">Waiting first on: \($e.blocked_by | map(esc) | join(", "))</p>"
         else "" end),
        "<p class=\"meta\">\(facts($e))<span class=\"id\">\($e.id | esc)</span></p>",
-       "</li>"]
+      "</li>"]
       | map(select(. != "")) | join("\n");
+    def errors($entries):
+      [ $entries[] | select(.waiting_error != null)
+        | "<p class=\"error\">\(.waiting_error | esc)</p>" ];
 
-    ["<!doctype html>",
+    (.ready | length) as $ready_shown
+    | ["<!doctype html>",
      "<html lang=\"en\"><head><meta charset=\"utf-8\">",
      "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
      "<title>\(.title | esc)</title>",
@@ -340,6 +364,7 @@ render_html() {
      ".q{margin:.35rem 0 0 2.75rem;color:var(--fg)}",
      ".q.stop{color:var(--stop)}",
      ".q.wait{color:var(--dim)}",
+     ".error{color:var(--stop);margin:.5rem 0}",
      ".meta{margin:.4rem 0 0 2.75rem;color:var(--dim);font-size:.8rem}",
      ".id{margin-left:.6rem;opacity:.55}",
      ".empty,.omitted{color:var(--dim)}",
@@ -354,12 +379,14 @@ render_html() {
           + (if .counts.gated > 0 then " · \(.counts.gated) waiting on other work first" else "" end)
           + ".</p>"]
          + (if (.ready | length) > 0 then
-              ["<h2>Needs your answer (\(.counts.ready))</h2>", "<ol>"]
+              ["<h2>Needs your answer (\(.counts.ready))</h2>"]
+              + errors(.ready) + ["<ol>"]
               + [ .ready | to_entries[] | entry(.value; .key + 1) ] + ["</ol>"]
             else [] end)
          + (if (.gated | length) > 0 then
-              ["<h2>Waiting on other work first (\(.counts.gated))</h2>", "<ol>"]
-              + [ .gated | to_entries[] | entry(.value; .key + 1) ] + ["</ol>"]
+              ["<h2>Waiting on other work first (\(.counts.gated))</h2>"]
+              + errors(.gated) + ["<ol>"]
+              + [ .gated | to_entries[] | entry(.value; .key + $ready_shown + 1) ] + ["</ol>"]
             else [] end)
        end)
     + [ .omitted[] | "<p class=\"omitted\">\(.count) more \(.surface | esc) not shown - reveal with \(.reveal | esc).</p>" ]
