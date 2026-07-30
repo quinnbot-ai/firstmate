@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tests/fm-backend-herdr-respawn-idem-e2e.test.sh - isolated real-herdr
 # regression test for firstmate-restart idempotency against herdr's
-# restored-layout husks (docs/herdr-backend.md "Known gaps" / "ID stability
+# restored-layout husks (docs/herdr-backend.md "Active limits" / "Restart and liveness
 # across a server restart").
 #
 # herdr persists its whole session layout (workspaces/tabs/panes) and
@@ -14,7 +14,7 @@
 # pane first (this reproduced again on 2026-07-03).
 #
 # This test drives a REAL `herdr session stop` + fresh `herdr server` restart
-# (the same "ID stability" mechanism docs/herdr-backend.md already documents:
+# (the same "Restart and liveness behavior" mechanism docs/herdr-backend.md already documents:
 # the pane survives alive, but agent_status resets and nothing is registered
 # in it - exactly the restored-plain-shell husk shape), then proves
 # fm_backend_herdr_create_task now closes-and-replaces the resulting husk
@@ -105,7 +105,7 @@ pass "repro setup: two real fm-<id> task tabs exist (crewmate-shaped and secondm
 
 # --- 2. a REAL herdr session restart - the actual root cause -----------------
 # `session stop` + fresh `herdr server` for the SAME named session: verified
-# in docs/herdr-backend.md "ID stability across a server restart" to preserve
+# in docs/herdr-backend.md "Restart and liveness behavior" to preserve
 # every workspace/tab/pane id and label, while resetting each pane's
 # underlying process (a fresh shell) and its agent_status to unknown - the
 # exact husk shape a restored task tab comes back in.
@@ -116,7 +116,7 @@ sleep 0.5
 fm_backend_herdr_server_ensure "$SESSION" || fail "the isolated session's server did not come back up after the restart"
 
 if ! herdr pane get "$CREW_PANE_ID" --session "$SESSION" >/dev/null 2>&1; then
-  fail "repro setup is wrong: the crewmate-shaped pane should survive a session restart alive (docs/herdr-backend.md 'ID stability'), but it is gone"
+  fail "repro setup is wrong: the crewmate-shaped pane should survive a session restart alive (docs/herdr-backend.md 'Restart and liveness behavior'), but it is gone"
 fi
 if herdr agent get "$CREW_PANE_ID" --session "$SESSION" >/dev/null 2>&1; then
   fail "repro setup is wrong: the restored pane should have NO registered agent (agent_not_found expected)"

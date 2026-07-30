@@ -880,7 +880,7 @@ BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 # below never notices the pane left the project) or false-positive (the
 # isolation guard refuses a spawn that never actually tangled). Canonicalize
 # once here so every downstream comparison uses the same physical form
-# (docs/herdr-backend.md "Known gaps").
+# (docs/herdr-backend.md "Active limits").
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
 
 real_path_or_raw() {  # <path>
@@ -896,7 +896,7 @@ real_path_or_raw() {  # <path>
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
 # a herdr spawn goes through the version-gated, workspace-per-HOME,
 # tab-per-task sequence in bin/backends/herdr.sh instead (D4/D5 as refined by
-# docs/herdr-backend.md's "workspace-per-home" pass, AGENTS.md task
+# docs/herdr-backend.md's "Watching and task containers" pass, AGENTS.md task
 # herdr-sm-spaces-k4). Both branches converge on the same $T ("target") string
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
@@ -1204,7 +1204,7 @@ case "$BACKEND" in
       # rather than creating a fresh one). Split on the guaranteed single tab
       # character; the seeded tab id is threaded through to create_task
       # untouched, which is the only function permitted to prune it (never
-      # re-derived from labels - see docs/herdr-backend.md "Default-tab prune").
+      # re-derived from labels - see docs/herdr-backend.md "Default-tab prune safety").
       CONTAINER=${HERDR_CONTAINER_RAW%%$'\t'*}
       HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
       HERDR_SES=${CONTAINER%%:*}
