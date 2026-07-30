@@ -23,8 +23,8 @@ The invariant behind every exit is that the poll may stay silent only after it h
 | `fm_ops_inbox_config_load`: whitelist validation or the final `jq` read fails. | `FAILS-CLOSED-AND-WAKES` | The poll emits the configuration-error wake. |
 | `fm_ops_inbox_config_load`: a key is unrecognized, including when its value is null. | `FAILS-CLOSED-AND-WAKES` | The poll emits the configuration-error wake. |
 | `fm_ops_inbox_config_load`: `enabled` has an invalid value. | `FAILS-CLOSED-AND-WAKES` | The poll emits the configuration-error wake. |
-| `fm_ops_inbox_config_load`: a path setting is empty or non-string, or any string setting contains a control character. | `FAILS-CLOSED-AND-WAKES` | The poll emits the configuration-error wake instead of resolving an unintended inbox path or accepting an injected setting. |
-| `fm_ops_inbox_config_load`: a numeric setting is empty, negative, fractional, or non-numeric, or `max_lines` is zero. | `FAILS-CLOSED-AND-WAKES` | The poll emits the configuration-error wake. |
+| `fm_ops_inbox_config_load`: a path setting is empty or non-string, or any string setting contains a code point below 32. | `FAILS-CLOSED-AND-WAKES` | The poll emits the configuration-error wake instead of resolving an unintended inbox path or accepting an injected setting. |
+| `fm_ops_inbox_config_load`: a numeric setting is empty, negative, fractional, non-numeric, outside the supported arithmetic range, or a zero `max_lines`. | `FAILS-CLOSED-AND-WAKES` | The poll emits the configuration-error wake. |
 | `fm_ops_inbox_config_load`: all settings are valid, with recognized null values omitted. | `SILENT-BY-DESIGN` | Defaults survive null values and evaluation continues without output. |
 | `fm_ops_inbox_watch_expected`: `enabled` is explicitly true. | `SILENT-BY-DESIGN` | Evaluation continues even when the spool is absent, so the scan can fail closed. |
 | `fm_ops_inbox_watch_expected`: `enabled` is explicitly false. | `SILENT-BY-DESIGN` | The poll exits without reading or waking. |
@@ -38,7 +38,7 @@ The invariant behind every exit is that the poll may stay silent only after it h
 | `fm_ops_inbox_scan`: the acknowledgement log is absent. | `SILENT-BY-DESIGN` | The scan treats the inbox as having no external acknowledgements. |
 | `fm_ops_inbox_scan`: the acknowledgement log cannot be read or parsed. | `FAILS-CLOSED-AND-WAKES` | The poll emits the scan-failure wake. |
 | `fm_ops_inbox_scan`: the spool tail cannot be read. | `FAILS-CLOSED-AND-WAKES` | The poll emits the scan-failure wake. |
-| `fm_ops_inbox_scan`: a complete spool record cannot be parsed. | `FAILS-CLOSED-AND-WAKES` | The poll emits the scan-failure wake because the record cannot be classified safely. |
+| `fm_ops_inbox_scan`: a nonblank complete spool record cannot be parsed. | `FAILS-CLOSED-AND-WAKES` | The poll emits the scan-failure wake because the record cannot be classified safely. |
 | `fm_ops_inbox_scan`: the final non-terminated fragment is malformed. | `SILENT-BY-DESIGN` | The fragment is ignored for overflow detection and parsing as a benign append in progress while complete records remain eligible. |
 | `fm_ops_inbox_scan`: the final non-terminated record is valid JSON. | `SILENT-BY-DESIGN` | The valid record is included in the bounded scan and normal evaluation continues. |
 | `fm_ops_inbox_scan`: a record is excluded by severity, inline acknowledgement, or the acknowledgement log. | `SILENT-BY-DESIGN` | Excluded records cannot trigger timestamp validation or a false scan failure. |
@@ -47,14 +47,14 @@ The invariant behind every exit is that the poll may stay silent only after it h
 | `fm_ops_inbox_scan`: the bounded scan succeeds. | `SILENT-BY-DESIGN` | The result is returned to the poll for threshold evaluation without output. |
 | `fm_ops_inbox_receipt_count`: the receipt is absent. | `WAKES` | The poll marks the receipt missing and reports that state after a successful scan. |
 | `fm_ops_inbox_receipt_count`: `jq` is unavailable. | `FAILS-CLOSED-AND-WAKES` | The poll emits the dedicated missing-`jq` wake before receipt parsing. |
-| `fm_ops_inbox_receipt_count`: JSON parsing fails or the count is missing, negative, fractional, or non-numeric. | `WAKES` | The poll marks the receipt unreadable and falls back to the spool count. |
+| `fm_ops_inbox_receipt_count`: JSON parsing fails or the count is missing, negative, fractional, non-numeric, or outside the supported arithmetic range. | `WAKES` | The poll marks the receipt unreadable and falls back to the spool count. |
 | `fm_ops_inbox_receipt_count`: a usable count is returned. | `SILENT-BY-DESIGN` | A fresh receipt becomes authoritative for the reported total and evaluation continues. |
 | `fm_ops_inbox_epoch_of_iso`: the timestamp shape is invalid. | `FAILS-CLOSED-AND-WAKES` | The poll emits the scan-failure wake instead of omitting the oldest age. |
 | `fm_ops_inbox_epoch_of_iso`: the timestamp is calendar-invalid. | `FAILS-CLOSED-AND-WAKES` | The poll emits the scan-failure wake instead of omitting the oldest age. |
 | `fm_ops_inbox_epoch_of_iso`: date conversion or exact round-trip validation fails. | `FAILS-CLOSED-AND-WAKES` | The poll emits the scan-failure wake instead of omitting the oldest age. |
 | `fm_ops_inbox_epoch_of_iso`: conversion succeeds. | `SILENT-BY-DESIGN` | The poll evaluates the exact oldest age without output. |
-| `fm_ops_inbox_sidecar_read`: the sidecar is absent, symlinked, unreadable, short, truncated, version-mismatched, non-numeric, or missing its state. | `WAKES` | A currently qualifying condition bypasses dedupe and wakes as though there were no prior record. |
-| `fm_ops_inbox_sidecar_read`: the sidecar is valid. | `SILENT-BY-DESIGN` | The poll evaluates growth, class, state, and re-remind dedupe rules. |
+| `fm_ops_inbox_sidecar_read`: the sidecar is absent, symlinked, unreadable, lacks any of its first four lines, is version-mismatched, has a numeric value outside the supported arithmetic range, or is missing its state. | `WAKES` | A currently qualifying condition bypasses dedupe and wakes as though there were no prior record. |
+| `fm_ops_inbox_sidecar_read`: the first four lines are valid. | `SILENT-BY-DESIGN` | The poll evaluates growth, class, state, and re-remind dedupe rules, treating an absent fifth class-list line as empty. |
 | `fm_ops_inbox_sidecar_write`: the directory or existing target is invalid. | `WAKES` | The wake line is still printed and the recording failure is reported on standard error. |
 | `fm_ops_inbox_sidecar_write`: temporary-file creation, content write, permission setting, or rename fails. | `WAKES` | The wake line is still printed and the recording failure is reported on standard error. |
 | `fm_ops_inbox_sidecar_write`: the atomic record succeeds. | `WAKES` | The wake line is printed once and the new dedupe state is durable. |
@@ -119,7 +119,7 @@ ops-inbox: inbox past its 20000-line read cap, so the total and oldest age below
 ```
 
 A valid final JSON record is included even without a trailing newline, while a malformed non-terminated fragment is ignored as an append in progress.
-Malformed complete records fail closed, and timestamp validation runs only after severity and acknowledgement exclusions so benign excluded records cannot create false wakes.
+Malformed nonblank complete records fail closed, blank complete records are ignored, and timestamp validation runs only after severity and acknowledgement exclusions so benign excluded records cannot create false wakes.
 Every included critical timestamp must have the exact UTC shape and represent a real calendar instant before the scan can succeed.
 
 ## When it stays quiet

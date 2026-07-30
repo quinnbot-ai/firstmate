@@ -33,15 +33,30 @@
 # this header owns the mechanics.
 
 FM_OPS_INBOX_SIDECAR_VERSION=fm-ops-inbox-wake-v1
+FM_OPS_INBOX_NUMBER_MAX=999999999999
+
+fm_ops_inbox_canonical_number() {  # <value>
+  local value=$1
+  case "$value" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  while [ "${value#0}" != "$value" ]; do
+    value=${value#0}
+  done
+  [ -n "$value" ] || value=0
+  [ "${#value}" -le 12 ] || return 1
+  printf '%s' "$value"
+}
+
+# Accepted residuals: the overflow probe and parsed tail are separate append-only spool snapshots; blank complete records do not count toward the cap; a sidecar truncated after its state line reads with an empty class list; and control-character rejection covers only code points below 32, not DEL or C1.
+# Each requires pathological configuration or precisely timed concurrency, the worst case is one suppressed or delayed poll, and the 24-hour re-remind bounds all four.
 
 fm_ops_inbox_set_number() {  # <config-key> <var-name> <value>
   local key=$1 var=$2 value=$3
-  case "$value" in
-    ''|*[!0-9]*)
-      FM_OPS_INBOX_CONFIG_ERROR="config/ops-inbox.json $key must be a non-negative integer"
-      return 1
-      ;;
-  esac
+  if ! value=$(fm_ops_inbox_canonical_number "$value"); then
+    FM_OPS_INBOX_CONFIG_ERROR="config/ops-inbox.json $key must be a non-negative integer no greater than $FM_OPS_INBOX_NUMBER_MAX"
+    return 1
+  fi
   printf -v "$var" '%s' "$value"
 }
 
@@ -359,9 +374,7 @@ fm_ops_inbox_receipt_count() {
   [ -f "$receipt" ] || return 1
   command -v jq >/dev/null 2>&1 || return 1
   value=$(jq -r '.unacked_critical_count // empty' "$receipt" 2>/dev/null) || return 1
-  case "$value" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
+  value=$(fm_ops_inbox_canonical_number "$value") || return 1
   printf '%s' "$value"
 }
 
@@ -428,8 +441,8 @@ fm_ops_inbox_sidecar_read() {
   IFS= read -r classes <&8 || classes=
   exec 8<&-
   [ "$version" = "$FM_OPS_INBOX_SIDECAR_VERSION" ] || return 1
-  case "$epoch" in ''|*[!0-9]*) return 1 ;; esac
-  case "$count" in ''|*[!0-9]*) return 1 ;; esac
+  epoch=$(fm_ops_inbox_canonical_number "$epoch") || return 1
+  count=$(fm_ops_inbox_canonical_number "$count") || return 1
   [ -n "$state" ] || return 1
   FM_OPS_INBOX_LAST_EPOCH=$epoch
   FM_OPS_INBOX_LAST_COUNT=$count

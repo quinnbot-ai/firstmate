@@ -126,6 +126,22 @@ run_bootstrap() {  # <home>
     | grep -E 'OPS_INBOX|operational alert watch' || true
 }
 
+run_bootstrap_without_jq() {  # <home>
+  local home=$1 bash_env
+  bash_env="$home/no-jq-bash-env"
+  {
+    printf '%s\n' 'command() {'
+    printf '%s\n' '  if [ "$#" -eq 2 ] && [ "$1" = -v ] && [ "$2" = jq ]; then'
+    printf '%s\n' '    return 1'
+    printf '%s\n' '  fi'
+    printf '%s\n' '  builtin command "$@"'
+    printf '%s\n' '}'
+  } > "$bash_env"
+  BASH_ENV="$bash_env" FM_HOME="$home" FM_OPS_INBOX_STATE_DIR="$home/ops" \
+    FM_BOOTSTRAP_VERBOSE_FACTS=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null \
+    | grep -E 'MISSING: jq|OPS_INBOX|operational alert watch' || true
+}
+
 # The migration gate refuses to let a watcher run without its completed markers.
 seed_migration_markers() {  # <home>
   local home=$1
@@ -229,6 +245,47 @@ test_fresh_receipt_count_is_authoritative() {
   out=$(run_poll "$home")
   assert_contains "$out" "41 unacked critical alerts" "a fresh receipt's own count must be reported"
   pass "a fresh receipt's count is used for the digest total"
+}
+
+test_leading_zero_config_number_is_canonicalized() {
+  local home out
+  home=$(make_home leading-zero-config)
+  configure "$home" '"receipt_stale_hours": "08"'
+  alert "$home" lzc1 600 backup-verify
+  receipt "$home" 1 32400
+  out=$(run_poll "$home")
+  assert_contains "$out" "alert receipt stale 9h" \
+    "a leading-zero receipt staleness threshold must remain safe for arithmetic"
+  pass "a leading-zero configuration number is canonicalized"
+}
+
+test_leading_zero_receipt_count_is_canonicalized() {
+  local home out
+  home=$(make_home leading-zero-receipt)
+  configure "$home" '"count": 0, "growth": 1'
+  alert "$home" lzr1 600 backup-verify
+  receipt "$home" '"08"' 60
+  printf '%s\n%s\n%s\n%s\n%s\n' fm-ops-inbox-wake-v1 "$NOW" 7 fresh backup-verify \
+    > "$home/state/.ops-inbox-wake"
+  out=$(run_poll "$home")
+  assert_contains "$out" "8 unacked critical alerts" \
+    "a leading-zero receipt count must wake through growth evaluation without aborting"
+  pass "a leading-zero receipt count is canonicalized"
+}
+
+test_leading_zero_sidecar_numbers_are_canonicalized() {
+  local home out stale_epoch
+  home=$(make_home leading-zero-sidecar)
+  configure "$home"
+  alert "$home" lzs1 32400 backup-verify
+  receipt "$home" 8 60
+  stale_epoch=$((NOW - 90000))
+  printf '%s\n%s\n%s\n%s\n%s\n' fm-ops-inbox-wake-v1 "000$stale_epoch" 00000008 fresh backup-verify \
+    > "$home/state/.ops-inbox-wake"
+  out=$(run_poll "$home")
+  assert_contains "$out" "ops-inbox:" \
+    "leading-zero sidecar epoch and count values must permit the due re-remind wake"
+  pass "leading-zero sidecar numbers are canonicalized"
 }
 
 test_corrupt_recent_receipt_is_unreadable() {
@@ -578,6 +635,18 @@ test_missing_jq_after_default_configuration_fails_closed() {
   pass "an auto-armed watch without jq wakes fail-closed"
 }
 
+test_bootstrap_missing_jq_reports_alert_watch_outage() {
+  local home out
+  home=$(make_home bootstrap-missing-jq)
+  alert "$home" bootstrap-jq1 600 backup-verify
+  out=$(run_bootstrap_without_jq "$home")
+  assert_contains "$out" "MISSING: jq" \
+    "bootstrap must retain the jq installation diagnostic"
+  assert_contains "$out" "OPS_INBOX: the operational alert watch cannot read the inbox until jq is installed; install jq, then rerun bootstrap" \
+    "bootstrap must classify the missing-jq alert-watch outage with remediation"
+  pass "bootstrap classifies a missing-jq alert-watch outage"
+}
+
 test_current_time_failure_fails_closed() {
   local home out fault_path
   home=$(make_home current-time-failure)
@@ -900,6 +969,9 @@ test_count_threshold_wakes_when_all_alerts_are_new
 test_stale_receipt_is_itself_wake_worthy
 test_missing_receipt_is_wake_worthy
 test_fresh_receipt_count_is_authoritative
+test_leading_zero_config_number_is_canonicalized
+test_leading_zero_receipt_count_is_canonicalized
+test_leading_zero_sidecar_numbers_are_canonicalized
 test_corrupt_recent_receipt_is_unreadable
 test_malformed_spool_fails_closed
 test_malformed_timestamp_fails_closed
@@ -927,6 +999,7 @@ test_explicit_disable_wins
 test_explicit_enable_without_spool_fails_closed
 test_missing_jq_with_configuration_fails_closed
 test_missing_jq_after_default_configuration_fails_closed
+test_bootstrap_missing_jq_reports_alert_watch_outage
 test_current_time_failure_fails_closed
 test_inert_watch_does_not_require_current_time
 test_old_spool_alert_wakes_when_receipt_count_is_zero

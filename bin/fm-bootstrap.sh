@@ -796,6 +796,7 @@ ops_inbox_setup() {
 
   if ! command -v jq >/dev/null 2>&1; then
     echo "MISSING: jq (install: $(install_cmd jq))"
+    echo "OPS_INBOX: the operational alert watch cannot read the inbox until jq is installed; install jq, then rerun bootstrap"
     ops_inbox_disarm "jq is required to read the alert inbox"
     return 0
   fi
