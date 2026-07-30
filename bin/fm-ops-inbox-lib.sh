@@ -29,13 +29,13 @@
 #
 # The check id is the reserved `ops-watch`, so the armed artifacts are
 # state/ops-watch.check.sh and its state/ops-watch.check-trust binding.
-# docs/ops-inbox-wake.md owns the wake contract; this header owns the mechanics.
+# docs/ops-inbox-wake.md#exit-dispositions owns the wake contract and exit table;
+# this header owns the mechanics.
 
 FM_OPS_INBOX_SIDECAR_VERSION=fm-ops-inbox-wake-v1
 
 fm_ops_inbox_set_number() {  # <config-key> <var-name> <value>
   local key=$1 var=$2 value=$3
-  [ -n "$value" ] || return 0
   case "$value" in
     ''|*[!0-9]*)
       FM_OPS_INBOX_CONFIG_ERROR="config/ops-inbox.json $key must be a non-negative integer"
@@ -104,6 +104,27 @@ fm_ops_inbox_config_load() {
       # Configuration errors fail closed through the poll's config-error wake.
       return 1
     fi
+    if ! jq -e '
+      . as $config
+      | (
+          all(["state_dir", "spool", "acks", "receipt"][];
+            . as $key
+            | $config[$key] == null
+              or (
+                ($config[$key] | type) == "string"
+                and ($config[$key] | length) > 0
+              )
+          )
+          and all($config | to_entries[];
+            .value as $value
+            | ($value | type) != "string"
+              or ($value | explode | all(. >= 32))
+          )
+        )
+    ' "$file" >/dev/null 2>&1; then
+      FM_OPS_INBOX_CONFIG_ERROR="config/ops-inbox.json has an invalid path or control character"
+      return 1
+    fi
     # Recognized null settings stay absent so their initialized defaults survive.
     raw=$(jq -r 'to_entries[] | select(.value != null) | .key + "=" + (.value | tostring)' \
       "$file" 2>/dev/null) || {
@@ -139,7 +160,13 @@ fm_ops_inbox_config_load() {
         receipt_stale_hours)
           fm_ops_inbox_set_number receipt_stale_hours FM_OPS_INBOX_RECEIPT_STALE_HOURS "$value" || return 1
           ;;
-        max_lines) fm_ops_inbox_set_number max_lines FM_OPS_INBOX_MAX_LINES "$value" || return 1 ;;
+        max_lines)
+          fm_ops_inbox_set_number max_lines FM_OPS_INBOX_MAX_LINES "$value" || return 1
+          if [ "$FM_OPS_INBOX_MAX_LINES" -eq 0 ]; then
+            FM_OPS_INBOX_CONFIG_ERROR="config/ops-inbox.json max_lines must be greater than zero"
+            return 1
+          fi
+          ;;
         *)
           FM_OPS_INBOX_CONFIG_ERROR="config/ops-inbox.json has an unrecognized setting: $key"
           return 1
@@ -186,12 +213,13 @@ fm_ops_inbox_watch_expected() {
 # per-check timeout no matter how large the spool grows. Hitting that cap is
 # reported rather than hidden: a capped read understates the total and the oldest
 # age, and the spool needs rotating or triaging.
-# A non-terminated final spool record is ignored as a momentary append in progress.
+# A valid non-terminated final record is included, while a malformed final fragment
+# is treated as a momentary append in progress.
 # Every malformed complete input line fails the scan so the caller wakes fail-closed.
 # shellcheck disable=SC2034 # Result globals read by callers after this returns.
 fm_ops_inbox_scan() {
-  local spool=$1 acks=$2 max_lines=${3:-20000} scan classes sample ack_stream alert_stream
-  local last_byte spool_filter spool_tail_lines
+  local spool=$1 acks=$2 max_lines=${3:-20000} scan classes sample
+  local ack_stream alert_stream unacked_stream validated_stream
   FM_OPS_INBOX_SCAN_COUNT=0
   FM_OPS_INBOX_SCAN_OLDEST=
   FM_OPS_INBOX_SCAN_TOP=
@@ -205,23 +233,25 @@ fm_ops_inbox_scan() {
   case "$max_lines" in
     ''|*[!0-9]*|0) max_lines=20000 ;;
   esac
-  last_byte=$(
-    set -o pipefail
-    tail -c 1 "$spool" 2>/dev/null | od -An -tx1 | tr -d '[:space:]'
-  ) || return 1
   sample=$(
     set -o pipefail
-    head -n "$((max_lines + 1))" "$spool" 2>/dev/null | awk 'END { print NR + 0 }'
+    head -n "$((max_lines + 1))" "$spool" 2>/dev/null \
+      | jq -Rrs '
+          (endswith("\n")) as $terminated
+          | (split("\n") | map(select(test("\\S")))) as $records
+          | if (
+              ($terminated | not)
+              and ($records | length) > 0
+              and (try ($records[-1] | fromjson | false) catch true)
+            )
+            then ($records | length) - 1
+            else ($records | length)
+            end
+        ' 2>/dev/null
   ) || return 1
   case "$sample" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  spool_tail_lines=$max_lines
-  spool_filter=p
-  if [ -n "$last_byte" ] && [ "$last_byte" != 0a ]; then
-    spool_tail_lines=$((max_lines + 1))
-    spool_filter='$!p'
-  fi
   [ "$sample" -le "$max_lines" ] || FM_OPS_INBOX_SCAN_TRUNCATED=1
   ack_stream=
   if [ -f "$acks" ]; then
@@ -235,21 +265,58 @@ fm_ops_inbox_scan() {
     set -o pipefail
     # @tsv, not hand-built tabs: an alert field carrying a tab or newline would
     # otherwise forge extra columns in this stream.
-    tail -n "$spool_tail_lines" "$spool" 2>/dev/null \
-      | sed -n "$spool_filter" \
-      | jq -r '
-      select(.severity == "critical" and .ack == false)
-      | ((.ts // "") | tostring) as $ts
-      | if ($ts | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
-        then ["E", ((.id // "") | tostring), $ts, ((.source // "") | tostring)] | @tsv
-        else error("invalid critical alert timestamp")
-        end
-    ' 2>/dev/null
+    tail -n "$((max_lines + 1))" "$spool" 2>/dev/null \
+      | jq -Rrs --argjson max "$max_lines" '
+        def decoded:
+          try {valid: true, value: fromjson} catch {valid: false};
+        (endswith("\n")) as $terminated
+        | (split("\n") | map(select(test("\\S")))) as $records
+        | (
+            if (($terminated | not) and ($records | length) > 0) then
+              ($records[-1] | decoded) as $last
+              | if $last.valid then $records else $records[:-1] end
+            else
+              $records
+            end
+          )
+        | if length > $max then .[-$max:] else . end
+        | .[]
+        | fromjson
+        | select(.severity == "critical" and .ack == false)
+        | ["E", ((.id // "") | tostring), ((.ts // "") | tostring), ((.source // "") | tostring)]
+        | @tsv
+      ' 2>/dev/null
   ) || return 1
-  scan=$(awk -F'\t' '
+  unacked_stream=$(awk -F'\t' '
       $1 == "A" { acked[$2] = 1; next }
       $1 == "E" {
         if ($2 != "" && ($2 in acked)) next
+        print
+      }
+    ' <<EOF
+$ack_stream
+$alert_stream
+EOF
+  ) || return 1
+  validated_stream=$(
+    set -o pipefail
+    printf '%s\n' "$unacked_stream" \
+      | jq -Rr '
+          select(length > 0)
+          | split("\t") as $fields
+          | $fields[2] as $ts
+          | if (
+              ($fields | length) == 4
+              and ($ts | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
+              and (try ($ts | fromdateiso8601 | strftime("%Y-%m-%dT%H:%M:%SZ") == $ts) catch false)
+            )
+            then .
+            else error("invalid critical alert timestamp")
+            end
+        ' 2>/dev/null
+  ) || return 1
+  scan=$(awk -F'\t' '
+      $1 == "E" {
         count++
         ts = $3
         # Fixed-format validation above makes this lexicographic minimum sound.
@@ -265,18 +332,23 @@ fm_ops_inbox_scan() {
         for (c in n) printf "%d\t%s\n", n[c], c
       }
     ' <<EOF
-$ack_stream
-$alert_stream
+$validated_stream
 EOF
   ) || return 1
   IFS=$(printf '\t') read -r FM_OPS_INBOX_SCAN_COUNT FM_OPS_INBOX_SCAN_OLDEST <<EOF
 $scan
 EOF
   case "$FM_OPS_INBOX_SCAN_COUNT" in
-    ''|*[!0-9]*) FM_OPS_INBOX_SCAN_COUNT=0 ;;
+    ''|*[!0-9]*) return 1 ;;
   esac
-  FM_OPS_INBOX_SCAN_TOP=$(printf '%s\n' "$scan" | tail -n +2 | sort -k1,1nr -k2,2 | head -3)
-  classes=$(printf '%s\n' "$scan" | tail -n +2 | cut -f2 | sort -u | tr '\n' ' ')
+  FM_OPS_INBOX_SCAN_TOP=$(
+    set -o pipefail
+    printf '%s\n' "$scan" | tail -n +2 | sort -k1,1nr -k2,2 | sed -n '1,3p'
+  ) || return 1
+  classes=$(
+    set -o pipefail
+    printf '%s\n' "$scan" | tail -n +2 | cut -f2 | sort -u | tr '\n' ' '
+  ) || return 1
   FM_OPS_INBOX_SCAN_CLASSES=${classes% }
 }
 
@@ -296,16 +368,20 @@ fm_ops_inbox_receipt_count() {
 # Epoch seconds for one fixed-format spool timestamp. Rejects anything else
 # rather than guessing, because a bad parse would fake an alert age.
 fm_ops_inbox_epoch_of_iso() {
-  local iso=$1
+  local iso=$1 epoch normalized
   case "$iso" in
     [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;;
     *) return 1 ;;
   esac
   if [ "$(uname)" = Darwin ]; then
-    date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$iso" +%s 2>/dev/null
+    epoch=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$iso" +%s 2>/dev/null) || return 1
+    normalized=$(date -u -r "$epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || return 1
   else
-    date -u -d "$iso" +%s 2>/dev/null
+    epoch=$(date -u -d "$iso" +%s 2>/dev/null) || return 1
+    normalized=$(date -u -d "@$epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || return 1
   fi
+  [ "$normalized" = "$iso" ] || return 1
+  printf '%s' "$epoch"
 }
 
 fm_ops_inbox_age_label() {

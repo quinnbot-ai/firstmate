@@ -79,6 +79,46 @@ run_poll() {  # <home>
   FM_HOME="$1" "$POLL" 2>/dev/null
 }
 
+make_fault_path() {  # <name> <command> <failing-invocation>
+  local name=$1 target=$2 fail_on=$3 dir tool real counter
+  dir="$TMP_ROOT/path-$name"
+  mkdir -p "$dir"
+  for tool in bash dirname date jq head awk tail sort sed cut tr uname stat mktemp chmod mv rm; do
+    real=$(command -v "$tool") || fail "required test command is unavailable: $tool"
+    if [ "$tool" = "$target" ]; then
+      counter="$dir/.$tool-count"
+      {
+        printf '#!/bin/sh\n'
+        printf 'count=0\n'
+        printf '[ ! -f %q ] || read -r count < %q\n' "$counter" "$counter"
+        printf 'count=$((count + 1))\n'
+        printf 'printf "%%s\\n" "$count" > %q\n' "$counter"
+        printf '[ "$count" -ne %q ] || exit 1\n' "$fail_on"
+        printf 'exec %q "$@"\n' "$real"
+      } > "$dir/$tool"
+      chmod 0700 "$dir/$tool"
+    else
+      ln -s "$real" "$dir/$tool"
+    fi
+  done
+  printf '%s\n' "$dir"
+}
+
+make_path_without_jq() {  # <name>
+  local name=$1 dir tool real
+  dir="$TMP_ROOT/path-$name"
+  mkdir -p "$dir"
+  for tool in bash dirname date head awk tail sort sed cut tr uname stat mktemp chmod mv rm; do
+    real=$(command -v "$tool") || fail "required test command is unavailable: $tool"
+    ln -s "$real" "$dir/$tool"
+  done
+  printf '%s\n' "$dir"
+}
+
+run_poll_with_path() {  # <home> <path>
+  PATH="$2" FM_HOME="$1" "$2/bash" "$POLL" 2>/dev/null
+}
+
 # Bootstrap runs many detect steps; these tests only care about its alert-watch
 # behavior, so filter its output to the lines this feature owns.
 run_bootstrap() {  # <home>
@@ -224,16 +264,26 @@ test_malformed_timestamp_fails_closed() {
   local home out
   home=$(make_home malformed-timestamp)
   configure "$home"
-  alert "$home" old-valid 32400 backup-verify
   printf '{"id":"bad-ts","ts":"!","source":"routine-scheduler","severity":"critical","message":"bad timestamp","ack":false}\n' \
     >> "$home/ops/ops-inbox.jsonl"
-  receipt "$home" 2 60
+  receipt "$home" 1 60
   out=$(run_poll "$home")
   assert_contains "$out" "ops-inbox: alert inbox at $home/ops/ops-inbox.jsonl could not be read" \
     "a complete critical alert with a malformed timestamp must wake through scan failure"
-  assert_not_contains "$out" "oldest 9h" \
-    "a malformed timestamp must not hide an old alert behind a normal digest"
   pass "a malformed critical timestamp wakes fail-closed"
+}
+
+test_calendar_invalid_timestamp_fails_closed() {
+  local home out
+  home=$(make_home calendar-invalid-timestamp)
+  configure "$home"
+  printf '{"id":"bad-calendar","ts":"2026-00-00T00:00:00Z","source":"routine-scheduler","severity":"critical","message":"bad timestamp","ack":false}\n' \
+    >> "$home/ops/ops-inbox.jsonl"
+  receipt "$home" 1 60
+  out=$(run_poll "$home")
+  assert_contains "$out" "ops-inbox: alert inbox at $home/ops/ops-inbox.jsonl could not be read" \
+    "a calendar-invalid critical timestamp must wake through scan failure"
+  pass "a calendar-invalid critical timestamp wakes fail-closed"
 }
 
 test_torn_trailing_spool_write_is_tolerated() {
@@ -249,6 +299,49 @@ test_torn_trailing_spool_write_is_tolerated() {
   assert_not_contains "$out" "could not be read" \
     "a torn trailing write must not cause a spurious scan-failure wake"
   pass "a torn trailing spool write is ignored until it completes"
+}
+
+test_torn_trailing_spool_write_does_not_trigger_cap() {
+  local home out
+  home=$(make_home torn-at-cap)
+  configure "$home" '"max_lines": 1'
+  alert "$home" complete-at-cap 600 backup-verify
+  printf '{"id":"still-being-written"' >> "$home/ops/ops-inbox.jsonl"
+  receipt "$home" 1 60
+  out=$(run_poll "$home")
+  [ -z "$out" ] || fail "a torn append at the cap must stay benign (got: $out)"
+  pass "a torn trailing write does not create a spurious cap wake"
+}
+
+test_valid_unterminated_final_record_is_scanned() {
+  local home out
+  home=$(make_home valid-unterminated)
+  configure "$home"
+  printf '{"id":"final","ts":"%s","source":"backup-verify","severity":"critical","message":"complete","ack":false}' \
+    "$(iso_at 32400)" >> "$home/ops/ops-inbox.jsonl"
+  receipt "$home" 1 60
+  out=$(run_poll "$home")
+  assert_contains "$out" "1 unacked critical alert" \
+    "a valid final record without a newline must remain visible to the scan"
+  assert_contains "$out" "oldest 9h" \
+    "a valid final record without a newline must participate in age evaluation"
+  assert_not_contains "$out" "could not be read" \
+    "a valid final record without a newline must not become a scan failure"
+  pass "a valid unterminated final record is scanned"
+}
+
+test_acknowledged_garbage_timestamp_is_ignored() {
+  local home out
+  home=$(make_home acked-garbage-timestamp)
+  configure "$home"
+  alert "$home" quiet 600 backup-verify
+  printf '{"id":"acked-bad","ts":"!","source":"routine-scheduler","severity":"critical","message":"bad timestamp","ack":false}\n' \
+    >> "$home/ops/ops-inbox.jsonl"
+  ack_alert "$home" acked-bad
+  receipt "$home" 1 60
+  out=$(run_poll "$home")
+  [ -z "$out" ] || fail "an acknowledged garbage timestamp must stay excluded and silent (got: $out)"
+  pass "an acknowledged garbage timestamp cannot create a false wake"
 }
 
 test_standing_backlog_does_not_rewake_every_poll() {
@@ -349,6 +442,28 @@ test_unusable_configuration_is_reported_not_guessed() {
   pass "an unusable alert-watch configuration is reported instead of guessed"
 }
 
+test_symlinked_configuration_fails_closed() {
+  local home out
+  home=$(make_home symlinked-config)
+  printf '{"state_dir":"%s/ops"}\n' "$home" > "$home/config/real-ops-inbox.json"
+  ln -s "$home/config/real-ops-inbox.json" "$home/config/ops-inbox.json"
+  out=$(run_poll "$home")
+  assert_contains "$out" "config/ops-inbox.json is not an ordinary file" \
+    "a symlinked watch configuration must wake instead of being trusted"
+  pass "a symlinked watch configuration wakes fail-closed"
+}
+
+test_configuration_jq_read_failure_fails_closed() {
+  local home out fault_path
+  home=$(make_home config-jq-read-failure)
+  configure "$home"
+  fault_path=$(make_fault_path config-jq-read jq 4)
+  out=$(run_poll_with_path "$home" "$fault_path")
+  assert_contains "$out" "alert watch configuration is unusable" \
+    "a failed final configuration read must wake instead of using partial settings"
+  pass "a configuration jq read failure wakes fail-closed"
+}
+
 test_unknown_null_configuration_key_is_refused() {
   local home out
   home=$(make_home unknown-null-config)
@@ -379,6 +494,46 @@ test_rejected_threshold_value_is_reported() {
   pass "a non-numeric threshold is refused with a specific reason"
 }
 
+test_empty_threshold_value_is_reported() {
+  local home out
+  home=$(make_home empty-threshold)
+  configure "$home" '"count": ""'
+  out=$(run_poll "$home")
+  assert_contains "$out" "count must be a non-negative integer" \
+    "an empty threshold must be refused rather than preserving a default silently"
+  pass "an empty numeric threshold is refused"
+}
+
+test_invalid_enabled_value_is_reported() {
+  local home out
+  home=$(make_home invalid-enabled)
+  configure "$home" '"enabled": "sometimes"'
+  out=$(run_poll "$home")
+  assert_contains "$out" "enabled must be true, false, or auto" \
+    "an invalid enabled value must wake instead of changing arming behavior silently"
+  pass "an invalid enabled value is refused"
+}
+
+test_invalid_path_value_is_reported() {
+  local home out
+  home=$(make_home invalid-path)
+  configure "$home" '"spool": 7'
+  out=$(run_poll "$home")
+  assert_contains "$out" "has an invalid path or control character" \
+    "an invalid path setting must wake instead of resolving an unintended inbox"
+  pass "an invalid path setting is refused"
+}
+
+test_zero_read_cap_is_reported() {
+  local home out
+  home=$(make_home zero-read-cap)
+  configure "$home" '"max_lines": 0'
+  out=$(run_poll "$home")
+  assert_contains "$out" "max_lines must be greater than zero" \
+    "a zero-line read cap must wake instead of silently using a different limit"
+  pass "a zero-line read cap is refused"
+}
+
 test_explicit_disable_wins() {
   local home out
   home=$(make_home disabled)
@@ -398,6 +553,154 @@ test_explicit_enable_without_spool_fails_closed() {
   assert_contains "$out" "ops-inbox: alert inbox at $home/ops/ops-inbox.jsonl could not be read" \
     "an explicitly enabled watch must wake when its required spool is missing"
   pass "an explicitly enabled watch with no spool wakes fail-closed"
+}
+
+test_missing_jq_with_configuration_fails_closed() {
+  local home out fault_path
+  home=$(make_home config-missing-jq)
+  configure "$home"
+  fault_path=$(make_path_without_jq config-missing-jq)
+  out=$(run_poll_with_path "$home" "$fault_path")
+  assert_contains "$out" "jq is required to read config/ops-inbox.json" \
+    "a configured watch without jq must wake through configuration failure"
+  pass "a configured watch without jq wakes fail-closed"
+}
+
+test_missing_jq_after_default_configuration_fails_closed() {
+  local home out fault_path
+  home=$(make_home default-missing-jq)
+  alert "$home" jq1 600 backup-verify
+  fault_path=$(make_path_without_jq default-missing-jq)
+  out=$(PATH="$fault_path" FM_HOME="$home" FM_OPS_INBOX_STATE_DIR="$home/ops" \
+    "$fault_path/bash" "$POLL" 2>/dev/null)
+  assert_contains "$out" "jq is not installed" \
+    "an auto-armed default watch without jq must emit the dedicated failure wake"
+  pass "an auto-armed watch without jq wakes fail-closed"
+}
+
+test_current_time_failure_fails_closed() {
+  local home out fault_path
+  home=$(make_home current-time-failure)
+  configure "$home"
+  alert "$home" time1 600 backup-verify
+  receipt "$home" 1 60
+  fault_path=$(make_fault_path current-time-failure date 1)
+  out=$(run_poll_with_path "$home" "$fault_path")
+  assert_contains "$out" "alert watch could not read the current time" \
+    "a current-time failure must wake because age, receipt, and dedupe cannot be evaluated"
+  pass "a current-time failure wakes fail-closed"
+}
+
+test_inert_watch_does_not_require_current_time() {
+  local home out fault_path
+  home=$(make_home inert-time-failure)
+  fault_path=$(make_fault_path inert-time-failure date 1)
+  out=$(run_poll_with_path "$home" "$fault_path")
+  [ -z "$out" ] || fail "an auto-mode home without a spool must stay inert when time is unavailable (got: $out)"
+  pass "an inert watch exits before requiring the current time"
+}
+
+test_old_spool_alert_wakes_when_receipt_count_is_zero() {
+  local home out
+  home=$(make_home zero-receipt-old-alert)
+  configure "$home"
+  alert "$home" receipt-zero-old 32400 backup-verify
+  receipt "$home" 0 60
+  out=$(run_poll "$home")
+  assert_contains "$out" "oldest 9h" \
+    "an old spool alert must remain wake-worthy when the fresh receipt reports zero"
+  pass "spool age remains authoritative when the receipt count is zero"
+}
+
+test_bounded_sample_failure_fails_closed() {
+  local home out fault_path
+  home=$(make_home sample-failure)
+  configure "$home"
+  alert "$home" sample1 600 backup-verify
+  receipt "$home" 1 60
+  fault_path=$(make_fault_path sample-failure head 1)
+  out=$(run_poll_with_path "$home" "$fault_path")
+  assert_contains "$out" "alert inbox at $home/ops/ops-inbox.jsonl could not be read" \
+    "a bounded overflow-sample failure must wake through scan failure"
+  pass "a bounded overflow-sample failure wakes fail-closed"
+}
+
+test_acknowledgement_parse_failure_fails_closed() {
+  local home out
+  home=$(make_home acknowledgement-parse-failure)
+  configure "$home"
+  alert "$home" ack-parse1 600 backup-verify
+  printf '{"event_id":"broken"\n' > "$home/ops/ops-inbox-acks.jsonl"
+  receipt "$home" 1 60
+  out=$(run_poll "$home")
+  assert_contains "$out" "alert inbox at $home/ops/ops-inbox.jsonl could not be read" \
+    "an acknowledgement-log parse failure must wake through scan failure"
+  pass "an acknowledgement-log parse failure wakes fail-closed"
+}
+
+test_spool_tail_failure_fails_closed() {
+  local home out fault_path
+  home=$(make_home spool-tail-failure)
+  configure "$home"
+  alert "$home" tail1 600 backup-verify
+  receipt "$home" 1 60
+  fault_path=$(make_fault_path spool-tail-failure tail 1)
+  out=$(run_poll_with_path "$home" "$fault_path")
+  assert_contains "$out" "alert inbox at $home/ops/ops-inbox.jsonl could not be read" \
+    "a bounded spool-tail failure must wake through scan failure"
+  pass "a bounded spool-tail failure wakes fail-closed"
+}
+
+test_acknowledgement_filter_failure_fails_closed() {
+  local home out fault_path
+  home=$(make_home acknowledgement-filter-failure)
+  configure "$home"
+  alert "$home" awk1 600 backup-verify
+  receipt "$home" 1 60
+  fault_path=$(make_fault_path acknowledgement-filter-failure awk 1)
+  out=$(run_poll_with_path "$home" "$fault_path")
+  assert_contains "$out" "alert inbox at $home/ops/ops-inbox.jsonl could not be read" \
+    "an acknowledgement-filter failure must wake through scan failure"
+  pass "an acknowledgement-filter failure wakes fail-closed"
+}
+
+test_scan_summary_failure_fails_closed() {
+  local home out fault_path
+  home=$(make_home scan-summary-failure)
+  configure "$home"
+  alert "$home" sort1 600 backup-verify
+  receipt "$home" 1 60
+  fault_path=$(make_fault_path scan-summary-failure sort 1)
+  out=$(run_poll_with_path "$home" "$fault_path")
+  assert_contains "$out" "alert inbox at $home/ops/ops-inbox.jsonl could not be read" \
+    "a scan-summary pipeline failure must wake through scan failure"
+  pass "a scan-summary pipeline failure wakes fail-closed"
+}
+
+test_oldest_epoch_conversion_failure_fails_closed() {
+  local home out fault_path
+  home=$(make_home epoch-conversion-failure)
+  configure "$home"
+  alert "$home" epoch1 600 backup-verify
+  receipt "$home" 1 60
+  fault_path=$(make_fault_path epoch-conversion-failure date 2)
+  out=$(run_poll_with_path "$home" "$fault_path")
+  assert_contains "$out" "alert inbox at $home/ops/ops-inbox.jsonl could not be read" \
+    "an oldest-timestamp date failure must wake instead of omitting the age"
+  pass "an oldest-timestamp conversion failure wakes fail-closed"
+}
+
+test_dedupe_clear_failure_fails_closed() {
+  local home out
+  home=$(make_home dedupe-clear-failure)
+  configure "$home"
+  alert "$home" clear1 600 backup-verify
+  receipt "$home" 1 60
+  mkdir "$home/state/.ops-inbox-wake"
+  out=$(run_poll "$home")
+  assert_contains "$out" "wake dedupe state at $home/state/.ops-inbox-wake could not be cleared" \
+    "a dedupe-clear failure must wake instead of risking suppression of the next backlog"
+  pass "a dedupe-clear failure wakes fail-closed"
 }
 
 test_bootstrap_arms_registers_and_is_idempotent() {
@@ -600,18 +903,40 @@ test_fresh_receipt_count_is_authoritative
 test_corrupt_recent_receipt_is_unreadable
 test_malformed_spool_fails_closed
 test_malformed_timestamp_fails_closed
+test_calendar_invalid_timestamp_fails_closed
 test_torn_trailing_spool_write_is_tolerated
+test_torn_trailing_spool_write_does_not_trigger_cap
+test_valid_unterminated_final_record_is_scanned
+test_acknowledged_garbage_timestamp_is_ignored
 test_standing_backlog_does_not_rewake_every_poll
 test_material_growth_wakes_again
 test_new_alert_class_wakes_again
 test_reremind_interval_wakes_again
 test_cleared_backlog_resets_dedupe
 test_unusable_configuration_is_reported_not_guessed
+test_symlinked_configuration_fails_closed
+test_configuration_jq_read_failure_fails_closed
 test_unknown_null_configuration_key_is_refused
 test_recognized_null_configuration_keeps_default
 test_rejected_threshold_value_is_reported
+test_empty_threshold_value_is_reported
+test_invalid_enabled_value_is_reported
+test_invalid_path_value_is_reported
+test_zero_read_cap_is_reported
 test_explicit_disable_wins
 test_explicit_enable_without_spool_fails_closed
+test_missing_jq_with_configuration_fails_closed
+test_missing_jq_after_default_configuration_fails_closed
+test_current_time_failure_fails_closed
+test_inert_watch_does_not_require_current_time
+test_old_spool_alert_wakes_when_receipt_count_is_zero
+test_bounded_sample_failure_fails_closed
+test_acknowledgement_parse_failure_fails_closed
+test_spool_tail_failure_fails_closed
+test_acknowledgement_filter_failure_fails_closed
+test_scan_summary_failure_fails_closed
+test_oldest_epoch_conversion_failure_fails_closed
+test_dedupe_clear_failure_fails_closed
 test_read_cap_is_reported_not_hidden
 test_bootstrap_arms_registers_and_is_idempotent
 test_bootstrap_disarms_when_the_inbox_goes_away

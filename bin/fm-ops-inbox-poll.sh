@@ -23,8 +23,9 @@
 # Dedupe: a standing backlog must not re-wake every poll. state/.ops-inbox-wake
 # records the last wake's count, receipt state, and class set; a further wake
 # needs a materially larger count, a class not seen at the last wake, a changed
-# receipt state, or the configured re-remind interval to have passed. A cleared
-# backlog removes that record, so the next backlog wakes immediately.
+# receipt state, or the configured re-remind interval to have passed. A backlog
+# below every wake threshold removes that record, so the next qualifying one
+# wakes immediately.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -36,8 +37,6 @@ SIDECAR="$STATE/.ops-inbox-wake"
 
 # shellcheck source=bin/fm-ops-inbox-lib.sh
 . "$SCRIPT_DIR/fm-ops-inbox-lib.sh"
-
-NOW=$(date +%s)
 
 # Emit one deduplicated wake line, then record it. A recording failure is
 # reported on stderr and the line is still printed: an unnoticed alert backlog is
@@ -68,7 +67,18 @@ wake_once() {  # <state> <count> <classes> <line>
   printf '%s\n' "$line"
 }
 
+set_now() {
+  NOW=$(date +%s 2>/dev/null) || return 1
+  case "$NOW" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+}
+
 if ! fm_ops_inbox_config_load "$CONFIG"; then
+  if ! set_now; then
+    printf '%s\n' 'ops-inbox: alert watch could not read the current time'
+    exit 0
+  fi
   wake_once config-error 0 '' "ops-inbox: alert watch configuration is unusable - $FM_OPS_INBOX_CONFIG_ERROR"
   exit 0
 fi
@@ -76,6 +86,11 @@ fi
 # Disabled and auto-without-spool homes stay silent; explicit watches continue
 # and fail closed below when their required spool cannot be read.
 fm_ops_inbox_watch_expected "$FM_HOME" || exit 0
+
+if ! set_now; then
+  printf '%s\n' 'ops-inbox: alert watch could not read the current time'
+  exit 0
+fi
 
 if ! command -v jq >/dev/null 2>&1; then
   wake_once no-jq 0 '' 'ops-inbox: alert watch cannot read the inbox because jq is not installed'
@@ -133,13 +148,16 @@ if [ -n "$FM_OPS_INBOX_SCAN_OLDEST" ]; then
   if oldest_epoch=$(fm_ops_inbox_epoch_of_iso "$FM_OPS_INBOX_SCAN_OLDEST"); then
     OLDEST_AGE=$((NOW - oldest_epoch))
     [ "$OLDEST_AGE" -ge 0 ] || OLDEST_AGE=0
+  else
+    wake_once scan-failed 0 '' "ops-inbox: alert inbox at $FM_OPS_INBOX_SPOOL could not be read"
+    exit 0
   fi
 fi
 
 over_count=0
 [ "$COUNT" -gt "$FM_OPS_INBOX_COUNT" ] && over_count=1
 over_age=0
-if [ "$COUNT" -gt 0 ] && [ -n "$OLDEST_AGE" ] \
+if [ -n "$OLDEST_AGE" ] \
   && [ "$OLDEST_AGE" -ge $((FM_OPS_INBOX_AGE_HOURS * 3600)) ]; then
   over_age=1
 fi
@@ -148,7 +166,10 @@ if [ "$RECEIPT_STATE" = fresh ] && [ "$over_count" -eq 0 ] && [ "$over_age" -eq 
   && [ "$FM_OPS_INBOX_SCAN_TRUNCATED" -eq 0 ]; then
   # Nothing to report. Drop any prior wake record so a fresh backlog is not
   # silently deduplicated against an already-resolved one.
-  rm -f -- "$SIDECAR" 2>/dev/null || true
+  if ! rm -f -- "$SIDECAR" 2>/dev/null; then
+    wake_once sidecar-clear-failed "$COUNT" "$FM_OPS_INBOX_SCAN_CLASSES" \
+      "ops-inbox: wake dedupe state at $SIDECAR could not be cleared"
+  fi
   exit 0
 fi
 
