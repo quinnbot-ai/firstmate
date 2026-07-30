@@ -23,7 +23,7 @@
 #                                - persist the durable per-request reply context;
 #                                refresh=1 resets its retention timestamp
 #   fmx_offer_registry_claim <state> <request_id> - atomically claim the durable
-#                                one-wake offer marker; 0=new, 1=existing, 2=error
+#                                offer-delivery marker; 0=new, 1=existing, 2=error
 #   fmx_offer_registry_commit <state> <request_id> - record that the claimed
 #                                marker's wake was emitted
 #   fmx_offer_registry_emitted <state> <request_id> - true only for a marker
@@ -548,7 +548,7 @@ fmx_context_registry_set() {
 }
 
 # fmx_offer_registry_claim <state> <request_id>: atomically claim the durable
-# one-wake marker at state/x-context/<request_id>.offered.json. The marker uses
+# offer-delivery marker at state/x-context/<request_id>.offered.json. It uses
 # the context registry's recorded_at retention contract, so its first claim
 # survives inbox cleanup and expires with the relay's bounded follow-up window.
 # Returns 0 only to the caller that created the marker, 1 when a valid marker

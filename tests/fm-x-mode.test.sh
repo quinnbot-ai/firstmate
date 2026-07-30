@@ -350,10 +350,9 @@ test_poll_mentions_wake_once_per_durable_offer() {
   pass "fm-x-poll wakes once per durable request offer across inbox cleanup"
 }
 
-# The offer marker suppresses every later relay re-offer of a request, so a
-# marker recorded before its wake reached firstmate loses the mention outright.
-# Both halves reproduce that window: an offer whose wake could not be written,
-# and the marker a poll killed at the same point leaves behind.
+# An uncommitted offer marker must not suppress a later relay re-offer.
+# Both halves pin the crash window: an offer whose wake could not be written,
+# and the durable state a poll killed at the same point leaves behind.
 test_poll_reoffers_a_mention_whose_wake_was_never_delivered() {
   local home fakebin out rc body
   home="$TMP_ROOT/poll-offer-crash-window"; mkdir -p "$home"

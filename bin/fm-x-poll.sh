@@ -17,7 +17,7 @@
 #       claim state/x-context/<request_id>.offered.json, print one compact line
 #       "x-mention <request_id>" (which becomes the watcher wake payload), and
 #       only then commit that marker as emitted
-#   an already offered request_id                -> print nothing, exit 0
+#   a request_id with an emitted wake marker     -> print nothing, exit 0
 # The full object is stashed verbatim, so any conversation context the relay
 # includes (in_reply_to: {author_handle, text}, null for a fresh mention) is
 # preserved for fmx-respond to handle follow-ups with continuity. The durable
