@@ -117,29 +117,56 @@ FM_CLASSIFY_NO_MISTAKES_MODE_DEFAULT='no-mistakes'
 # 0 if the given status line is the TERMINAL no-mistakes ship signal: a done:
 # line whose note reports both a URL-shaped PR reference and green checks.
 status_done_reports_pr_checks_green() {  # <status-line>
-  local line=$1 note token normalized_token pr_url=
+  local line=$1 note pr_url= url_rest= url_prefix= pr_number=
   local -a note_tokens
   [ -n "$line" ] || return 1
   [ "$(status_line_verb "$line")" = "done" ] || return 1
   note=$(status_line_note "$line")
+  note=${note#"${note%%[![:space:]]*}"}
+  note=${note%"${note##*[![:space:]]}"}
   case "$note" in
-    *"checks green"*) ;;
-    *) return 1 ;;
+    *.) note=${note%.} ;;
   esac
   IFS=$' \t' read -r -a note_tokens <<< "$note"
-  for token in "${note_tokens[@]}"; do
-    case "$token" in
-      ?*://*/pull/?*|?*://*/pulls/?*|?*://*/merge-request/?*|?*://*/merge-requests/?*|?*://*/merge_request/?*|?*://*/merge_requests/?*)
-        pr_url=$token
-        continue
-        ;;
-    esac
-    normalized_token=$(printf '%s' "$token" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]')
-    case "$normalized_token" in
-      pending|not|never|isnt|arent) return 1 ;;
-    esac
-  done
-  [ -n "$pr_url" ]
+  case "${#note_tokens[@]}" in
+    4)
+      case "${note_tokens[0]} ${note_tokens[2]} ${note_tokens[3]}" in
+        [Pp][Rr]\ [Cc][Hh][Ee][Cc][Kk][Ss]\ [Gg][Rr][Ee][Ee][Nn])
+          pr_url=${note_tokens[1]}
+          ;;
+        *) return 1 ;;
+      esac
+      ;;
+    5)
+      case "${note_tokens[0]} ${note_tokens[1]} ${note_tokens[2]} ${note_tokens[3]}" in
+        [Cc][Hh][Ee][Cc][Kk][Ss]\ [Gg][Rr][Ee][Ee][Nn]\ [Oo][Nn]\ [Pp][Rr])
+          pr_url=${note_tokens[4]}
+          ;;
+        *) return 1 ;;
+      esac
+      ;;
+    *) return 1 ;;
+  esac
+  case "$pr_url" in
+    http://?*|https://?*) url_rest=${pr_url#*://} ;;
+    *) return 1 ;;
+  esac
+  case "$url_rest" in
+    */pull/*)
+      url_prefix=${url_rest%%/pull/*}
+      pr_number=${url_rest##*/pull/}
+      ;;
+    */merge_requests/*)
+      url_prefix=${url_rest%%/merge_requests/*}
+      pr_number=${url_rest##*/merge_requests/}
+      ;;
+    *) return 1 ;;
+  esac
+  [ -n "$url_prefix" ] || return 1
+  case "$pr_number" in
+    ''|*[!0-9]*) return 1 ;;
+    *) return 0 ;;
+  esac
 }
 
 # 0 if the given status line is a PREMATURE done for a no-mistakes ship task:

@@ -794,10 +794,16 @@ test_premature_ship_done_predicate() {
     && fail "terminal evidence must be recognized in either word order"
   status_is_premature_ship_done "done: implementation committed; PR and checks green still pending" no-mistakes ship \
     || fail "bare PR prose with pending checks must be premature"
-  status_is_premature_ship_done "done: PR https://x/pull/1 checks green pending" no-mistakes ship \
-    || fail "a URL and green phrase with a pending qualifier must be premature"
+  status_is_premature_ship_done "done: PR https://x/pull/1 checks green still-pending" no-mistakes ship \
+    || fail "a compound pending qualifier must be premature"
+  status_is_premature_ship_done "done: PR https://x/pull/1 checks green still pending" no-mistakes ship \
+    || fail "trailing pending prose must be premature"
   status_is_premature_ship_done "done: PR https://x/pull/1 checks not green" no-mistakes ship \
     || fail "negated green checks must be premature"
+  status_is_premature_ship_done "done: PR checks green" no-mistakes ship \
+    || fail "a bare PR with no URL must be premature"
+  status_is_premature_ship_done $'done:\tPr  https://x/pull/1\tCHECKS green.  ' no-mistakes ship \
+    && fail "canonical evidence must allow normalized whitespace, case, and a trailing period"
   status_is_premature_ship_done "done: ready in branch fm/x" local-only ship \
     && fail "local-only's own terminal signal must never be premature"
   status_is_premature_ship_done "done: PR https://x/pull/2" direct-PR ship \
