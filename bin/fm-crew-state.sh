@@ -44,8 +44,9 @@
 #      when its verb maps to a recognized run-state. Decision-only events such as
 #      `resolved` never become current state or detail. On that path a done: line
 #      that a no-mistakes ship task's one done gate does not justify (no PR with
-#      green checks) reports `stopped-short` instead of `done`: the crew stopped
-#      at its implementation commit and validation still has to be started.
+#      green checks) reports `stopped-short` instead of `done`: the crew declared
+#      completion before its validated PR deliverable, so validation must start
+#      or resume.
 #      fm-classify-lib.sh owns that gate, so scout, local-only, direct-PR, and
 #      metadata with no recorded mode are never reclassified.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
@@ -616,13 +617,13 @@ if [ "$KIND" != secondmate ] && crew_pane_is_busy "$BACKEND_TARGET"; then
   emit working pane "harness busy"
 fi
 
-# Before trusting a done: line, catch the crew that stopped at its implementation
-# commit. A no-mistakes ship task's only done gate is a PR with green checks, and
-# no run was attributed above, so a done: line without that evidence means the
-# implementation landed on the branch and validation never started. Reporting it
-# as `done` here is what let an unvalidated commit read as delivered work to
-# every supervisor, snapshot, and teardown decision downstream; `stopped-short`
-# names the real state and its one required next step instead.
+# Before trusting a done: line, catch a crew that declared completion before its
+# one done gate. A no-mistakes ship task's only done gate is a PR with green
+# checks, and no run was attributed above, so a done: line without that evidence
+# cannot establish the validated deliverable. Reporting it as `done` here is what
+# let incomplete validation read as delivered work to every supervisor, snapshot,
+# and teardown decision downstream; `stopped-short` names the real state and its
+# one required next step instead.
 # fm-classify-lib.sh owns which task this applies to, so scout, local-only,
 # direct-PR, and legacy records keep their previous reading untouched.
 if status_is_premature_ship_done "$LOG_LINE" "$MODE" "$KIND"; then

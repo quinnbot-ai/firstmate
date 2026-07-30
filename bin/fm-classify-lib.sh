@@ -99,7 +99,7 @@ status_is_terminal_verb() {
 # checks are green. The implementation commit before that is a mid-task
 # milestone, not a deliverable, so a done: line carrying no PR-checks-green
 # evidence on such a task is a crew that stopped short of its own contract, with
-# the work committed on a branch and no PR raised for it.
+# the work committed on a branch but no validated PR deliverable yet evidenced.
 # This is the ONE owner of both tests. bin/fm-brief.sh generates a no-mistakes
 # definition of done with no commit-stage done: at all, and bin/fm-crew-state.sh
 # reports a crew that appended one anyway as its own current state instead of a
