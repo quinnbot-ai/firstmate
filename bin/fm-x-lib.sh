@@ -24,6 +24,10 @@
 #                                refresh=1 resets its retention timestamp
 #   fmx_offer_registry_claim <state> <request_id> - atomically claim the durable
 #                                one-wake offer marker; 0=new, 1=existing, 2=error
+#   fmx_offer_registry_commit <state> <request_id> - record that the claimed
+#                                marker's wake was emitted
+#   fmx_offer_registry_emitted <state> <request_id> - true only for a marker
+#                                whose wake was emitted
 #   fmx_context_registry_prune <state> - remove records older than seven days
 #   fmx_context_registry_get <state> <request_id> - read the durable per-request
 #                                reply context, or the empty shape when absent
@@ -540,6 +544,11 @@ fmx_context_registry_set() {
 # survives inbox cleanup and expires with the relay's bounded follow-up window.
 # Returns 0 only to the caller that created the marker, 1 when a valid marker
 # already exists, and 2 on invalid input or a publication failure.
+#
+# The claim records wake_emitted:false because claiming is not offering: the
+# offer only exists once the wake line is written. fmx_offer_registry_commit
+# flips that field afterwards, and only a committed marker suppresses a later
+# relay re-offer, so an interrupted claim cannot silence the mention.
 fmx_offer_registry_claim() {
   local state=$1 rid=$2 dir now record rc
   case "$rid" in
@@ -552,12 +561,53 @@ fmx_offer_registry_claim() {
   esac
   [ "${#now}" -le 18 ] || return 2
   record=$(jq -cn --arg rid "$rid" --argjson recorded_at "$now" \
-    '{request_id:$rid, recorded_at:$recorded_at}') || return 2
+    '{request_id:$rid, recorded_at:$recorded_at, wake_emitted:false}') || return 2
   dir="$state/x-context"
   printf '%s\n' "$record" \
     | fmx_private_artifact_publish_stdin_once "$dir" "$rid.offered.json" 600
   rc=$?
   return "$rc"
+}
+
+# fmx_offer_registry_commit <state> <request_id>: record that the claimed
+# marker's wake was emitted, preserving the claim's recorded_at so retention
+# still runs from the first claim. Callers commit only after the wake line is
+# written, so a failure here costs one repeated offer rather than a lost
+# mention. Returns non-zero when no valid marker exists or the write fails.
+fmx_offer_registry_commit() {
+  local state=$1 rid=$2 dir file now recorded_at
+  case "$rid" in
+    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  dir="$state/x-context"
+  file="$dir/$rid.offered.json"
+  fmx_private_artifact_file_valid "$dir" "$rid.offered.json" 600 || return 1
+  now=${FMX_NOW_OVERRIDE:-$(date +%s)}
+  case "$now" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "${#now}" -le 18 ] || return 1
+  recorded_at=$(fmx_context_registry_recorded_at "$file" "$now") || recorded_at=$now
+  (set -o pipefail; jq -cn --arg rid "$rid" --argjson recorded_at "$recorded_at" \
+    '{request_id:$rid, recorded_at:$recorded_at, wake_emitted:true}' \
+    | fmx_private_artifact_publish_stdin "$dir" "$rid.offered.json" 600) || return 1
+}
+
+# fmx_offer_registry_emitted <state> <request_id>: true only when a valid marker
+# records an emitted wake. A marker written before this field existed is treated
+# as emitted, so upgrading firstmate never replays a mention that was already
+# answered; an unreadable marker is treated as not emitted, which at worst
+# repeats one offer and lets the retention prune clear the record.
+fmx_offer_registry_emitted() {
+  local state=$1 rid=$2 dir emitted
+  case "$rid" in
+    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  dir="$state/x-context"
+  fmx_private_artifact_file_valid "$dir" "$rid.offered.json" 600 || return 1
+  emitted=$(jq -r 'if has("wake_emitted") then (.wake_emitted == true) else true end' \
+    "$dir/$rid.offered.json" 2>/dev/null) || return 1
+  [ "$emitted" = true ]
 }
 
 # fmx_context_registry_get <state> <request_id>: print the durable per-request

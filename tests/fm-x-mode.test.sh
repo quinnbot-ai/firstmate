@@ -346,6 +346,73 @@ test_poll_mentions_wake_once_per_durable_offer() {
   pass "fm-x-poll wakes once per durable request offer across inbox cleanup"
 }
 
+# The offer marker suppresses every later relay re-offer of a request, so a
+# marker recorded before its wake reached firstmate loses the mention outright.
+# Both halves reproduce that window: an offer whose wake could not be written,
+# and the marker a poll killed at the same point leaves behind.
+test_poll_reoffers_a_mention_whose_wake_was_never_delivered() {
+  local home fakebin out rc body
+  home="$TMP_ROOT/poll-offer-crash-window"; mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  printf 'FMX_PAIRING_TOKEN=tok-crash\n' > "$home/.env"
+  body='{"request_id":"req-lost","platform":"discord","reply_max_chars":1900,"text":"status?"}'
+  # Closing stdout makes the wake line undeliverable exactly where a killed poll
+  # would stop: after the marker exists, before firstmate ever hears the mention.
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000000 \
+    FMX_RELAY_URL="https://relay.test" FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" \
+    "$ROOT/bin/fm-x-poll.sh" >&- 2>/dev/null
+  assert_present "$home/state/x-inbox/req-lost.json" \
+    "an interrupted offer must still leave its stashed mention pending"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000030 \
+    FMX_RELAY_URL="https://relay.test" FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "re-offer after an undelivered wake exit"
+  [ "$out" = "x-mention req-lost" ] \
+    || fail "a mention whose wake was never delivered must be re-offered (got: $out)"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000060 \
+    FMX_RELAY_URL="https://relay.test" FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "recovered offer dedupe exit"
+  [ -z "$out" ] || fail "a recovered offer must still wake only once (got: $out)"
+  [ "$(jq -r .recorded_at "$home/state/x-context/req-lost.offered.json")" = 1700000000 ] \
+    || fail "a recovered offer must keep the first claim's retention timestamp"
+  # The same durable state a poll killed between the two steps leaves behind.
+  body='{"request_id":"req-killed","platform":"discord","reply_max_chars":1900,"text":"still there?"}'
+  FMX_NOW_OVERRIDE=1700000090 bash -c \
+    '. "$1/bin/fm-x-lib.sh"; fmx_offer_registry_claim "$2/state" req-killed' _ "$ROOT" "$home" \
+    || fail "the interrupted-offer fixture must claim its marker"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000120 \
+    FMX_RELAY_URL="https://relay.test" FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "re-offer after an interrupted claim exit"
+  [ "$out" = "x-mention req-killed" ] \
+    || fail "a claimed but never offered mention must be re-offered (got: $out)"
+  pass "fm-x-poll re-offers a mention whose wake never reached firstmate"
+}
+
+# A marker written before the emission field existed came from a path that
+# printed its wake immediately, so an upgraded poll must keep honoring it rather
+# than replaying an answered mention into a public reply.
+test_poll_treats_a_legacy_offer_marker_as_delivered() {
+  local home fakebin dir out rc body
+  home="$TMP_ROOT/poll-offer-legacy-marker"; mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  printf 'FMX_PAIRING_TOKEN=tok-legacy\n' > "$home/.env"
+  dir="$home/state/x-context"
+  private_artifact_dir "$dir"
+  jq -cn '{request_id:"req-legacy-offer",recorded_at:1700000000}' > "$dir/req-legacy-offer.offered.json"
+  private_artifact_file "$dir/req-legacy-offer.offered.json"
+  body='{"request_id":"req-legacy-offer","platform":"discord","reply_max_chars":1900,"text":"status?"}'
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000030 \
+    FMX_RELAY_URL="https://relay.test" FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" \
+    "$ROOT/bin/fm-x-poll.sh"); rc=$?
+  expect_code 0 "$rc" "legacy offer marker poll exit"
+  [ -z "$out" ] || fail "a legacy offer marker must keep suppressing the re-offer (got: $out)"
+  assert_absent "$home/state/x-inbox/req-legacy-offer.json" \
+    "a legacy offer marker must not recreate the drained inbox"
+  pass "fm-x-poll honors an offer marker written before the emission field"
+}
+
 test_poll_offer_claim_failure_reports_once() {
   local home fakebin out rc body
   home="$TMP_ROOT/poll-offer-claim-failure"; mkdir -p "$home/state" "$home/external-context"
@@ -2774,6 +2841,8 @@ test_poll_auth_error_reports_once
 test_poll_error_private_publication_rejects_unsafe_paths
 test_poll_question_stashes_and_marks
 test_poll_mentions_wake_once_per_durable_offer
+test_poll_reoffers_a_mention_whose_wake_was_never_delivered
+test_poll_treats_a_legacy_offer_marker_as_delivered
 test_poll_offer_claim_failure_reports_once
 test_poll_preserves_conversation_context
 test_poll_inbox_commit_failure_reports_error

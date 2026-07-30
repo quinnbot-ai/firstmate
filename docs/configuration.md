@@ -331,7 +331,8 @@ Its request handling remains in X-specific `bin/` scripts and the `fmx-respond` 
 `bin/fm-x-poll.sh` calls `GET /connector/poll` with `Authorization: Bearer <FMX_PAIRING_TOKEN>`.
 HTTP 204 is silent.
 A newly offered pending mention with non-empty `text` is stored at `state/x-inbox/<request_id>.json` and wakes firstmate exactly once with `x-mention <request_id>`.
-The poll atomically claims `state/x-context/<request_id>.offered.json` before emitting that wake, and subsequent offers of the same request stay silent even after the inbox is drained following an answer or dismiss.
+The poll atomically claims `state/x-context/<request_id>.offered.json` before emitting that wake and marks the marker `wake_emitted` only after the wake line is written, and subsequent offers of the same request stay silent even after the inbox is drained following an answer or dismiss.
+Only an emitted marker suppresses a later offer, so a poll that dies between the claim and the wake re-offers the mention on its next cycle instead of silencing it; a marker written before this field existed counts as emitted.
 Offer markers share the context registry's bounded seven-day retention, so losing or expiring the local marker lets a relay offer wake firstmate again.
 The full relay object is preserved, including `in_reply_to: {author_handle, text}` when the mention is a reply in a conversation or `null` for fresh mentions.
 At the same time the poll records a durable per-request reply context at `state/x-context/<request_id>.json` (`{request_id, platform, reply_max_chars, recorded_at}`) from the same authoritative relay payload, best-effort and keyed by `request_id` so concurrent requests never overwrite each other; it survives the inbox cleanup that follows the acknowledgement, so a delayed follow-up can recover the original platform and split budget even with no task link.
