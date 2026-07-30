@@ -87,6 +87,8 @@ make_fault_path() {  # <name> <command> <failing-invocation>
     real=$(command -v "$tool") || fail "required test command is unavailable: $tool"
     if [ "$tool" = "$target" ]; then
       counter="$dir/.$tool-count"
+      # Single quotes are deliberate: these printf templates are written verbatim into a generated helper script and must not expand here.
+      # shellcheck disable=SC2016
       {
         printf '#!/bin/sh\n'
         printf 'count=0\n'
@@ -129,6 +131,8 @@ run_bootstrap() {  # <home>
 run_bootstrap_without_jq() {  # <home>
   local home=$1 bash_env
   bash_env="$home/no-jq-bash-env"
+  # Single quotes are deliberate: these printf templates are written verbatim into a generated helper script and must not expand here.
+  # shellcheck disable=SC2016
   {
     printf '%s\n' 'command() {'
     printf '%s\n' '  if [ "$#" -eq 2 ] && [ "$1" = -v ] && [ "$2" = jq ]; then'
