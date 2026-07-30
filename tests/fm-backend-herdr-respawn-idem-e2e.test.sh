@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # tests/fm-backend-herdr-respawn-idem-e2e.test.sh - isolated real-herdr
 # regression test for firstmate-restart idempotency against herdr's
-# restored-layout husks (docs/herdr-backend.md "Active limits" / "Restart and liveness
-# across a server restart").
+# restored-layout husks (docs/herdr-backend.md "Restart and liveness behavior").
 #
 # herdr persists its whole session layout (workspaces/tabs/panes) and
 # restores it after a server restart, including a reboot. Before this fix, a

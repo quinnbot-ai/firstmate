@@ -5,15 +5,14 @@
 # decisions D1-D6) and the empirical verification recorded in
 # data/fm-backend-design-d7/herdr-verification-p2.md (real herdr v0.7.1,
 # protocol 14, macOS aarch64), refined by docs/herdr-backend.md's
-# "workspace-per-home" pass (AGENTS.md task herdr-sm-spaces-k4). Herdr is a
+# "Watching and task containers" section. Herdr is a
 # session provider ONLY (D3): the worktree provider stays treehouse, exactly
 # like tmux. Sourced only through bin/fm-backend.sh's fm_backend_source in
 # normal operation; the unit tests source it directly, so the FM_HOME fallback
 # below keeps that path sane without fm-backend.sh's preamble.
 #
-# Default container shape (D4, decided empirically - see
-# docs/herdr-backend.md "Watching and task containers", refined by
-# docs/herdr-backend.md "Watching and task containers"): ONE herdr workspace PER
+# Default container shape (docs/herdr-backend.md "Watching and task containers"):
+# ONE herdr workspace PER
 # FIRSTMATE HOME (the primary, and each secondmate, gets its own), ONE herdr TAB
 # per task inside its home's workspace. An optional, default-off presentation
 # flag creates a disposable workspace for a clean fresh task instead. That
@@ -1469,8 +1468,8 @@ fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_
 #                                      (fm_backend_herdr_launcher_identity) or
 #                                      a single label match
 #                                      (fm_backend_herdr_workspace_find_all -
-#                                      docs/herdr-backend.md "Label
-#                                      collisions": that match can never
+#                                      docs/herdr-backend.md "Watching and task
+#                                      containers": that match can never
 #                                      distinguish an explicitly
 #                                      `--label`-created workspace from one
 #                                      whose label only coincidentally
@@ -1633,8 +1632,8 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
 #              registered in it - exactly what a herdr session-layout restore
 #              produces (verified empirically: `session stop` + fresh `herdr
 #              server` restart leaves the pane alive, agent_status "unknown",
-#              agent get -> agent_not_found - docs/herdr-backend.md "ID
-#              stability across a server restart"), and what a future
+#              agent get -> agent_not_found - docs/herdr-backend.md "Restart
+#              and liveness behavior"), and what a future
 #              `resume_agents_on_restore = false` restore would produce too
 #              (a plain shell, never an agent).
 #   live     - `agent get` succeeds and reports a real agent_status (working,
@@ -2390,7 +2389,7 @@ fm_backend_herdr_strip_ansi() {  # <text>
 #              matches either.
 #   bare     - an UNBORDERED composer (verified real claude 2.x and codex
 #              0.142.x, both under herdr 0.7.1, docs/herdr-backend.md
-#              "Incident (2026-07-07)"): the row's TRIMMED content starts with
+#              "Composer and injection safety"): the row's TRIMMED content starts with
 #              one of the verified agent-specific prompt glyphs but carries no
 #              closing border at all - claude's own live input row is a bare
 #              "❯ …" with no surrounding │, and codex's is a bare "› …". Both
@@ -2869,8 +2868,8 @@ fm_backend_herdr_busy_state() {  # <target>
 #   busy    - a submit-active status was observed at least once. This is
 #             confirmation that a real turn started or reached a prompt -
 #             the submit landed - independent of
-#             whatever the composer's own text happens to show (docs/
-#             herdr-backend.md "Incident (2026-07-07)": composer content is
+#             whatever the composer's own text happens to show
+#             (docs/herdr-backend.md "Current transport behavior": composer content is
 #             what fooled the OLD confirmation on codex's dynamic idle-tip
 #             text). Returned the INSTANT it is seen, without waiting out the
 #             rest of the budget.

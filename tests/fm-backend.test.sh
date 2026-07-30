@@ -248,7 +248,7 @@ test_backend_detect_precedence() {
 }
 
 # fm_backend_detect's cmux FALLBACK signals (docs/cmux-backend.md "Runtime
-# auto-detection"): cmux's bundled claude wrapper strips every CMUX_* env var
+# detection"): cmux's bundled claude wrapper strips every CMUX_* env var
 # on its passthrough path, so a claude-under-cmux firstmate has no
 # CMUX_WORKSPACE_ID; detection then falls back to __CFBundleIdentifier and,
 # after that, a process-ancestry walk - macOS-only, and never outranking the

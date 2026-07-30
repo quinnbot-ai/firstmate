@@ -20,7 +20,7 @@
 # embedded colon, so splitting on the FIRST colon is trivially correct and
 # mirrors herdr's target-string convention).
 #
-# Home-scoped tab titles (closes a cross-home collision gap): because every
+# Task shape and home isolation (closes a cross-home collision gap): because every
 # task in every firstmate home - primary or secondmate - shares this ONE
 # session's tab bar with no per-home split, and zellij enforces no tab-name
 # uniqueness at all, two firstmate homes whose task ids happen to collide
@@ -62,7 +62,7 @@
 #      contradicts the design report's assumption ("acceptable for tmux and
 #      zellij") and required a different implementation strategy - see
 #      fm_backend_zellij_current_path below and docs/zellij-backend.md
-#      "Worktree-path discovery: pane_cwd does not track a subshell".
+#      "Current operation and safety".
 #   5. `new-tab` DOES steal focus from an attached client with NO flag to
 #      suppress it (unlike herdr's --no-focus and tmux's new-window -d).
 #      Mitigated (fm_backend_zellij_create_task): capture the previously
@@ -565,7 +565,7 @@ fm_backend_zellij_kill() {  # <target> [tab_id] [expected_label]
 # telling apart "our own pre-migration tab" from "another home's same-shaped
 # bare title" in a bulk, no-numeric-id-in-hand sweep is not something this
 # adapter can do safely - see docs/zellij-backend.md "Task shape and home
-# titles"). A pre-migration task is still reachable through its recorded
+# isolation"). A pre-migration task is still reachable through its recorded
 # window= meta, which target_ready/kill DO accept via that bare-title
 # fallback. One "<session>:<pane_id>\t<plain fm-<id> label>" line per live,
 # in-home task tab (the home tag is stripped back off before printing, so

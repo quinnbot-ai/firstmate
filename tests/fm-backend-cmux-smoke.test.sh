@@ -141,8 +141,7 @@ pass "real cmux: fm_backend_busy_state reports unknown (watcher falls back to pa
 
 # --- window_of_workspace: real-cmux window/count detection -------------------
 # The last-workspace-in-a-window teardown fix (docs/cmux-backend.md "Current
-# operation and safety"),
-# last workspace in a window") pivots on window_of_workspace reading the live
+# operation and safety") pivots on window_of_workspace reading the live
 # `list-windows` / `workspace list --window` JSON correctly (the version-fragile
 # part the fake-CLI suite cannot prove). This task workspace shares its window
 # with at least the app's own workspace, so it reports "<window_id> <count>"

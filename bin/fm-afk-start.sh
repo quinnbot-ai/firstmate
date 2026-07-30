@@ -56,8 +56,7 @@ fm_afk_start_usage() {
 # true (a crew still blocked, a check still firing) is re-derived and re-escalated
 # fresh by the daemon's heartbeat catch-all scan and the durable
 # state/.wake-queue replay (see docs/herdr-backend.md "Away-mode supervisor
-# support")
-# lifecycle" and bin/fm-supervise-daemon.sh's escalate_add/inject_wedge_alarm).
+# support" and bin/fm-supervise-daemon.sh's escalate_add/inject_wedge_alarm).
 # NOT called on a refresh (daemon already alive), so the current session's own
 # buffered escalations are preserved.
 fm_afk_clear_stale_artifacts() {  # <state-dir>
