@@ -158,7 +158,7 @@ Every key is optional, and an unrecognized key is refused rather than ignored, s
 ```json
 {
   "enabled": "auto",
-  "state_dir": "/Users/you/.openclaw/state",
+  "state_dir": "/absolute/path/to/.openclaw/state",
   "age_hours": 6,
   "count": 25,
   "remind_hours": 24,
