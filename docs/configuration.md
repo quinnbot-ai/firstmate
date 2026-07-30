@@ -335,7 +335,7 @@ The poll atomically claims `state/x-context/<request_id>.offered.json` before em
 Only an emitted marker suppresses a later offer, so a poll that dies between the claim and the wake re-offers the mention on its next cycle instead of silencing it; a marker written before this field existed counts as emitted.
 The wake is therefore at least once rather than exactly once, because a repeated wake is recoverable and a silenced mention is not.
 Exactly-once is enforced where the public action happens: `bin/fm-x-reply.sh` atomically claims `state/x-context/<request_id>.answered.json` before posting an initial answer and refuses with exit 10 when that request was already answered or an earlier attempt's outcome is unknown, so a repeated wake cannot become a second public reply.
-That claim is released whenever the answer definitely did not land, keeping an ordinary failure retryable, and it does not apply to follow-ups, which the relay caps instead.
+That claim is released only when the answer provably did not land and held when the outcome is unknown, and it does not apply to follow-ups, which the relay caps instead.
 A residual delivery window remains outside the poll: the watcher reads the poll's output, deletes the capture, and only then appends the durable wake record, so a watcher that dies in that gap still loses the wake.
 Offer markers share the context registry's bounded seven-day retention, so losing or expiring the local marker lets a relay offer wake firstmate again.
 The full relay object is preserved, including `in_reply_to: {author_handle, text}` when the mention is a reply in a conversation or `null` for fresh mentions.

@@ -30,8 +30,9 @@
 # binds the reply to the exact post it recorded for that request_id, so this
 # client only ever echoes the relay-issued request_id and NEVER names a platform
 # message id.
-# On success it echoes ONLY that request_id; on a non-2xx (or transport failure)
-# it exits non-zero so the caller knows the post did not land.
+# On success it echoes ONLY that request_id.
+# A relay non-2xx proves the post did not land, but a transport failure or an
+# unreadable HTTP status leaves the outcome unknown.
 #
 # One public answer per request_id is enforced here, because this is the only
 # place an answer is posted. The poll deliberately offers a mention AT LEAST
@@ -51,6 +52,9 @@
 # relay-side 409 is secondary: after the relay's own cleanup sweep, a very-late
 # call can instead see a benign no-op 200, so fm-x-followup.sh's local
 # window/cap pruning remains the primary guard.
+# Exit 11 is reserved for an initial answer whose outcome is unknown after an
+# ambiguous transport failure or unreadable HTTP status.
+# Its answer claim stays held, and a later attempt refuses with exit 10.
 #
 # Reply platform + split budget are resolved per axis: an explicit
 # FMX_REPLY_PLATFORM / FMX_REPLY_MAX_CHARS env override wins (fm-x-followup passes
@@ -356,11 +360,10 @@ reply_make_tmp_file RESPONSE_BODY_FILE || {
 }
 code=$(fmx_post_json "$ENDPOINT" "$PAYLOAD_FILE" "$RESPONSE_BODY_FILE")
 post_rc=$?
-# An answer claim is released whenever the answer did not land, so a retry stays
-# possible; it is kept for a 2xx and for the relay's own 409 already-answered
-# verdict. A transport failure releases too: the relay rejects a second answer
-# for one request_id with 409, so a lost response cannot become a public double
-# post, while holding the claim would strand an ordinary network blip.
+# An answer claim is released only when the answer provably did not land.
+# Failures before transmission and a readable non-2xx other than 409 are
+# definite; transport failures and unreadable statuses are ambiguous and keep
+# the claim so a later wake cannot post a second public answer.
 case "$post_rc" in
   0) : ;;
   127)
@@ -375,7 +378,10 @@ case "$post_rc" in
     ;;
   *)
     echo "fm-x-reply: request to relay failed" >&2
-    [ "$FOLLOWUP" = 1 ] || fmx_answer_registry_release "$STATE" "$REQ"
+    if [ "$FOLLOWUP" = 0 ]; then
+      echo "fm-x-reply: the answer's outcome is unknown; its claim is deliberately held, and a later attempt for this request will refuse with exit 10" >&2
+      exit 11
+    fi
     exit 1
     ;;
 esac
@@ -403,9 +409,17 @@ case "$code" in
     echo "fm-x-reply: relay returned HTTP $code" >&2
     exit 1
     ;;
-  *)
+  [1-5][0-9][0-9])
     echo "fm-x-reply: relay returned HTTP $code" >&2
     [ "$FOLLOWUP" = 1 ] || fmx_answer_registry_release "$STATE" "$REQ"
+    exit 1
+    ;;
+  *)
+    echo "fm-x-reply: relay returned an unreadable HTTP status" >&2
+    if [ "$FOLLOWUP" = 0 ]; then
+      echo "fm-x-reply: the answer's outcome is unknown; its claim is deliberately held, and a later attempt for this request will refuse with exit 10" >&2
+      exit 11
+    fi
     exit 1
     ;;
 esac

@@ -26,6 +26,8 @@ TMP_ROOT=$(fm_test_tmproot fm-x-mode-tests)
 # FAKE_REQCTX_CODE/FAKE_REQCTX_BODY for the request-context lookup), records each
 # call to FAKE_CURL_LOG, writes the poll/lookup body to the script's -o file, and
 # prints the HTTP code to stdout exactly as the real `-w '%{http_code}'` would.
+# FAKE_ANSWER_TRANSPORT_FAIL makes only the answer endpoint fail after recording
+# the request, without printing an HTTP status.
 make_fake_curl() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -69,6 +71,7 @@ case "$url" in
     ;;
   */connector/answer)
     [ -n "$ofile" ] && printf '%s' "${FAKE_ANSWER_BODY:-}" > "$ofile"
+    [ -n "${FAKE_ANSWER_TRANSPORT_FAIL:-}" ] && exit 28
     printf '%s' "${FAKE_ANSWER_CODE:-200}"
     ;;
   */connector/followup)
@@ -1571,6 +1574,40 @@ test_reply_failed_answer_stays_retryable() {
   pass "fm-x-reply keeps a failed answer retryable"
 }
 
+# A timeout can happen after the relay accepted an answer.
+# Its claim must stay held because retrying could create a second public post.
+test_reply_ambiguous_transport_failure_holds_answer_claim() {
+  local home fakebin log out rc err posts marker
+  home="$TMP_ROOT/reply-answer-ambiguous"; mkdir -p "$home"
+  fakebin=$(make_fake_curl "$home")
+  log="$home/curl.log"
+  err="$home/err.txt"
+  marker="$home/state/x-context/req-ambiguous.answered.json"
+  printf 'FMX_PAIRING_TOKEN=tok-ambiguous\n' > "$home/.env"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_CURL_LOG="$log" FAKE_ANSWER_TRANSPORT_FAIL=1 \
+    "$ROOT/bin/fm-x-reply.sh" "req-ambiguous" "First answer." 2>"$err"); rc=$?
+  expect_code 11 "$rc" "ambiguous answer transport exit"
+  [ -z "$out" ] || fail "an ambiguous answer must not echo the request_id (got: $out)"
+  assert_present "$marker" "an ambiguous answer must keep its durable claim"
+  assert_grep "answer's outcome is unknown" "$err" \
+    "an ambiguous answer must report that its outcome is unknown"
+  assert_grep "claim is deliberately held" "$err" \
+    "an ambiguous answer must report that its claim remains held"
+  assert_grep "refuse with exit 10" "$err" \
+    "an ambiguous answer must explain how a later attempt is refused"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FAKE_CURL_LOG="$log" FAKE_ANSWER_CODE=200 \
+    "$ROOT/bin/fm-x-reply.sh" "req-ambiguous" "Second answer." 2>"$err"); rc=$?
+  expect_code 10 "$rc" "answer retry after ambiguous transport exit"
+  [ -z "$out" ] || fail "a refused answer retry must not echo the request_id (got: $out)"
+  posts=$(grep -c 'url=https://relay.test/connector/answer' "$log")
+  [ "$posts" = 1 ] \
+    || fail "an ambiguous answer must reach the relay only once (answer posts: $posts)"
+  assert_present "$marker" "a refused retry must keep the ambiguous answer claim"
+  pass "fm-x-reply holds ambiguous answer outcomes against duplicate posts"
+}
+
 # The claim covers the initial answer only: follow-ups are legitimately repeated
 # and keep the relay's own cap, and a preview must never consume a real answer.
 test_reply_answer_claim_spares_followups_and_dry_runs() {
@@ -2963,6 +3000,7 @@ test_reply_followup_409_without_marker_still_exits_distinctly
 test_reply_answer_409_is_generic_failure
 test_reply_answers_one_request_id_once
 test_reply_failed_answer_stays_retryable
+test_reply_ambiguous_transport_failure_holds_answer_claim
 test_reply_answer_claim_spares_followups_and_dry_runs
 test_reply_followup_image_live_posts_image_object
 test_reply_followup_flag_position_is_flexible
