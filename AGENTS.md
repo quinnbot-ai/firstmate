@@ -101,7 +101,7 @@ state/               volatile runtime signals; gitignored
   .pr-check-migration.log  private per-task outcomes distinguishing rebuilt or canonically registered replacement polls, quarantined unarmed polls, and incomplete migrations
   .pr-check-migration-scan-v1  private marker proving the non-executing scan disabled every unsafe legacy check; .pr-check-migration-v1 separately records completed private repairs
   x-watch.check.sh   generated X-mode relay poll shim; present only when opted in (section 14)
-  ops-watch.check.sh  generated operational alert inbox watch, registered like any custom check; present only when this home has an alert inbox, with its dedupe record in .ops-inbox-wake (docs/ops-inbox-wake.md)
+  ops-watch.check.sh  generated operational alert inbox watch, registered like any custom check; present when auto mode finds this home's alert inbox or config explicitly enables the watch, with its dedupe record in .ops-inbox-wake (docs/ops-inbox-wake.md)
   pending-replies/   parent-owned secondmate pending-reply records (correlation id, delivery vs reply, recovery, escalation); fm-pending-reply-lib.sh
   x-inbox/           generated X-mode pending mention payloads; fmx-respond drains it (section 14)
   x-context/         generated X-mode durable per-request reply context and one-wake offer markers, keyed by request_id; survives inbox cleanup and expires within seven days (section 14; bin/fm-x-lib.sh)
@@ -352,7 +352,7 @@ Handle actionable wakes as follows:
 
 1. For `signal:`, read the listed event lines first, then reconcile current state only where action depends on it.
 2. For `stale:`, inspect the recorded endpoint and load `stuck-crewmate-recovery` for a stopped, looping, confused, or unresponsive worker; a deep-inspection reason also requires current-state and validation-log inspection.
-3. For `check:`, act on the named poll result, including merges, X-mode events, and an `ops-inbox:` operational alert digest, which reports this machine's unreviewed critical alerts for triage rather than any one task's progress.
+3. For `check:`, act on the named poll result, including merges, X-mode events, and an `ops-inbox:` operational alert or monitoring-failure digest, which reports this machine's unreviewed critical alerts or alert-pipeline health for triage rather than any one task's progress.
 4. For `heartbeat:`, review the whole fleet from the structured fleet view, reconcile suspicious tasks and PR state, update the backlog, and never report an unchanged fleet as progress.
 
 Every mutable wake is one complete closeout-and-refill transaction before the next wait or turn boundary.

@@ -33,7 +33,6 @@ The invariant behind every exit is that the poll may stay silent only after it h
 | `fm_ops_inbox_watch_expected`: auto mode does not find the spool. | `SILENT-BY-DESIGN` | The poll exits because this home has no inbox to watch. |
 | `fm_ops_inbox_scan`: the active spool is absent. | `FAILS-CLOSED-AND-WAKES` | The poll emits the scan-failure wake. |
 | `fm_ops_inbox_scan`: `jq` is unavailable. | `FAILS-CLOSED-AND-WAKES` | The poll emits the dedicated missing-`jq` wake before scanning. |
-| `fm_ops_inbox_scan`: a separate last-byte probe fails. | `SILENT-BY-DESIGN` | No such exit remains because the bounded tail snapshot classifies its own final record atomically. |
 | `fm_ops_inbox_scan`: the bounded overflow sample cannot be read or counted. | `FAILS-CLOSED-AND-WAKES` | The poll emits the scan-failure wake. |
 | `fm_ops_inbox_scan`: the acknowledgement log is absent. | `SILENT-BY-DESIGN` | The scan treats the inbox as having no external acknowledgements. |
 | `fm_ops_inbox_scan`: the acknowledgement log cannot be read or parsed. | `FAILS-CLOSED-AND-WAKES` | The poll emits the scan-failure wake. |
@@ -142,7 +141,10 @@ That shim only exports the home and runs `bin/fm-ops-inbox-poll.sh`; the watcher
 Arming is a session-start bootstrap sweep, so it converges on its own rather than depending on anyone remembering to arm it.
 
 By default a home arms the watch only when the configured alert spool actually exists, so a machine with no operations runtime writes nothing and prints nothing.
-Bootstrap disarms it again when the inbox goes away, refuses to arm over a live task holding the reserved `ops-watch` id, and reports an arming failure as an actionable `OPS_INBOX:` line.
+Secondmate homes never auto-arm, because the primary home owns the one machine-wide inbox, but an explicit `enabled: true` still arms a secondmate home.
+The local config is not inherited into secondmate homes.
+In auto mode, bootstrap disarms it again when the inbox goes away.
+Bootstrap also refuses to arm over a live task holding the reserved `ops-watch` id and reports an arming failure as an actionable `OPS_INBOX:` line.
 Arming and disarming are otherwise silent; `FM_BOOTSTRAP_VERBOSE_FACTS=1` prints them as `BOOTSTRAP_INFO` facts.
 
 An armed watch counts as a supervision need in `bin/fm-supervision-lib.sh`, exactly like an X-mode relay poll.

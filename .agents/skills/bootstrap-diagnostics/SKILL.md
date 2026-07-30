@@ -50,7 +50,8 @@ When any diagnostic needs captain attention, report the plain consequence and re
   Inspect the reason, keep the pending marker under `state/.secondmate-nudge-pending/` intact, and rerun session start after the endpoint or metadata issue is fixed so bootstrap can retry the exact same marked send.
 - `FMX: X mode on ...` / `FMX: X mode off ...` - bootstrap confirmed or removed the local X-mode poll artifacts (`docs/configuration.md` "X mode (.env)").
   Only when a running watcher needs the cadence transition applied immediately, restart the home-scoped watcher through the emitted harness supervision protocol; bootstrap deliberately never restarts the watcher itself.
-- `OPS_INBOX: <remediation>` - the operational alert inbox watch is NOT armed, so this machine's critical alerts currently reach nobody.
-  Treat it as an alerting outage rather than a cosmetic startup warning: every dead-man timer and tripwire that reports into that inbox is effectively silent while this line persists.
-  Apply the printed remediation - correct `config/ops-inbox.json`, retire or rename the task holding the reserved `ops-watch` id, or repair the named private state path - then rerun session start and confirm the line is gone.
+- `OPS_INBOX: <remediation>` - bootstrap could not prove that the operational alert inbox watch reached its requested armed or disarmed state.
+  An arming, configuration, or dependency failure means this machine's critical alerts are not guaranteed to reach Firstmate, so treat it as an alerting outage rather than a cosmetic startup warning.
+  A disarming or foreign-artifact failure means bootstrap could not safely converge the reserved `ops-watch` state, so leave the named artifacts in place and follow the printed remediation.
+  Apply the printed remediation, then rerun session start and confirm the line is gone.
   `docs/ops-inbox-wake.md` owns the watch contract and its configuration.

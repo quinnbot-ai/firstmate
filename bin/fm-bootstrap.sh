@@ -59,13 +59,15 @@
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
-#          The operational alert inbox watch is armed only when this home has an
-#          alert inbox to watch (bin/fm-ops-inbox-lib.sh owns that decision and
-#          docs/ops-inbox-wake.md owns the contract). Arming registers the
-#          reserved standing check state/ops-watch.check.sh through the ordinary
-#          custom-check trust binding. Arming and disarming are silent unless
-#          FM_BOOTSTRAP_VERBOSE_FACTS=1 requests the BOOTSTRAP_INFO fact; only a
-#          failure prints an actionable OPS_INBOX line.
+#          The operational alert inbox watch follows fm-ops-inbox-lib.sh's
+#          decision: auto mode arms only when this home has an alert inbox, while
+#          explicit enablement arms fail-closed even when the spool is absent.
+#          docs/ops-inbox-wake.md owns the contract.
+#          Arming registers the reserved standing check state/ops-watch.check.sh
+#          through the ordinary custom-check trust binding.
+#          Arming and disarming are silent unless FM_BOOTSTRAP_VERBOSE_FACTS=1
+#          requests the BOOTSTRAP_INFO fact.
+#          Only a failure prints an actionable OPS_INBOX line.
 #          FM_OPS_INBOX_STATE_DIR overrides the default watched operations state
 #          directory for tests and specialized setups.
 #          Fleet sync fetches, fast-forwards safe default-branch states, reports

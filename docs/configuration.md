@@ -119,13 +119,9 @@ See [`wedge-alarm.md`](wedge-alarm.md) for the current channel reference, [`veri
 ## Operational alert inbox watch (config/ops-inbox.json)
 
 On a machine whose operations runtime records critical alerts into a durable inbox rather than a chat transport, firstmate watches that inbox so an unreviewed backlog wakes the first mate instead of sitting unread.
-Local, gitignored `config/ops-inbox.json` under the effective home holds the local operating choices: `enabled` (`auto`, `true`, or `false`), the watched `state_dir` or its individual `spool`/`acks`/`receipt` paths, and the `age_hours`, `count`, `remind_hours`, `growth`, `receipt_stale_hours`, and `max_lines` thresholds.
-Every key is optional and an unrecognized key is refused rather than ignored, so a mistyped threshold can never read as a configured one.
-By default the watch arms only when the configured alert spool exists, so a home with no such runtime writes nothing and prints nothing.
-The session-start bootstrap sweep arms it as the reserved standing check `state/ops-watch.check.sh` through the ordinary custom-check trust binding, records its dedupe state in `state/.ops-inbox-wake`, and disarms it again when the inbox goes away.
-An armed watch is a supervision need, exactly like an X-mode relay poll, because a standing poll only reaches the first mate through a live watcher.
+Local, gitignored `config/ops-inbox.json` under the effective home holds this watch's operating choices.
 This file is deliberately not inherited into secondmate homes, and a secondmate home never auto-arms the watch: one machine has one alert inbox, and the primary owns watching it.
-See [`ops-inbox-wake.md`](ops-inbox-wake.md) for the wake conditions, the digest, the dedupe contract, and the two-paths-named-ops-inbox reconciliation; `bin/fm-ops-inbox-lib.sh`'s header owns the exact resolution mechanics.
+[`ops-inbox-wake.md`](ops-inbox-wake.md) owns the settings, defaults, arming, wake, dedupe, and two-paths-named-ops-inbox contracts; `bin/fm-ops-inbox-lib.sh`'s header owns the exact resolution mechanics.
 
 ## Gate defaults (.no-mistakes.yaml)
 
