@@ -1565,6 +1565,7 @@ test_reply_unconfirmed_answer_claim_refuses_as_unresolved() {
   log="$home/curl.log"
   err="$home/err.txt"
   printf 'FMX_PAIRING_TOKEN=tok-unconfirmed\n' > "$home/.env"
+  # shellcheck disable=SC2016  # single quotes are deliberate: positional parameters must expand in the inner shell
   FMX_NOW_OVERRIDE=1700000000 "$BASH" -c \
     '. "$1"; fmx_answer_registry_claim "$2" "$3"' \
     _ "$ROOT/bin/fm-x-lib.sh" "$home/state" "req-unconfirmed" \
@@ -1654,6 +1655,7 @@ test_reply_unreadable_payload_is_pretransmission_failure() {
   response="$home/response.json"
   printf '{"request_id":"req-unreadable","text":"Answer."}\n' > "$payload"
   chmod 000 "$payload"
+  # shellcheck disable=SC2016  # single quotes are deliberate: positional parameters must expand in the inner shell
   PATH="$fakebin:$BASE_PATH" FMX_RELAY_URL="https://relay.test" FMX_TOKEN=tok \
     FAKE_CURL_LOG="$log" "$BASH" -c \
     '. "$1"; fmx_post_json answer "$2" "$3"' \
