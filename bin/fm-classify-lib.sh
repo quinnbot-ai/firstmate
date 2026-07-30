@@ -117,35 +117,42 @@ FM_CLASSIFY_NO_MISTAKES_MODE_DEFAULT='no-mistakes'
 # 0 if the given status line is the TERMINAL no-mistakes ship signal: a done:
 # line whose note reports both a URL-shaped PR reference and green checks.
 status_done_reports_pr_checks_green() {  # <status-line>
-  local line=$1 note pr_url= url_rest= url_prefix= pr_number=
-  local -a note_tokens
+  local line=$1 note prefix= rest= suffix= pr_url= url_rest= url_prefix= pr_number=
   [ -n "$line" ] || return 1
   [ "$(status_line_verb "$line")" = "done" ] || return 1
   note=$(status_line_note "$line")
-  note=${note#"${note%%[![:space:]]*}"}
-  note=${note%"${note##*[![:space:]]}"}
+  note=${note//[[:space:]]/ }
+  note=${note#"${note%%[! ]*}"}
+  note=${note%"${note##*[! ]}"}
+  while [ "${note#*  }" != "$note" ]; do
+    note=${note//  / }
+  done
   case "$note" in
     *.) note=${note%.} ;;
   esac
-  IFS=$' \t' read -r -a note_tokens <<< "$note"
-  case "${#note_tokens[@]}" in
-    4)
-      case "${note_tokens[0]} ${note_tokens[2]} ${note_tokens[3]}" in
-        [Pp][Rr]\ [Cc][Hh][Ee][Cc][Kk][Ss]\ [Gg][Rr][Ee][Ee][Nn])
-          pr_url=${note_tokens[1]}
-          ;;
+  [ -n "$note" ] || return 1
+  prefix=${note%% *}
+  rest=${note#* }
+  case "$prefix" in
+    [Pp][Rr])
+      [ "$rest" != "$note" ] || return 1
+      pr_url=${rest%% *}
+      suffix=${rest#* }
+      [ "$suffix" != "$rest" ] || return 1
+      case "$suffix" in
+        [Cc][Hh][Ee][Cc][Kk][Ss]\ [Gg][Rr][Ee][Ee][Nn]) ;;
         *) return 1 ;;
       esac
       ;;
-    5)
-      case "${note_tokens[0]} ${note_tokens[1]} ${note_tokens[2]} ${note_tokens[3]}" in
-        [Cc][Hh][Ee][Cc][Kk][Ss]\ [Gg][Rr][Ee][Ee][Nn]\ [Oo][Nn]\ [Pp][Rr])
-          pr_url=${note_tokens[4]}
-          ;;
+    *)
+      pr_url=${note##* }
+      prefix=${note% *}
+      [ "$prefix" != "$note" ] || return 1
+      case "$prefix" in
+        [Cc][Hh][Ee][Cc][Kk][Ss]\ [Gg][Rr][Ee][Ee][Nn]\ [Oo][Nn]\ [Pp][Rr]) ;;
         *) return 1 ;;
       esac
       ;;
-    *) return 1 ;;
   esac
   case "$pr_url" in
     http://?*|https://?*) url_rest=${pr_url#*://} ;;

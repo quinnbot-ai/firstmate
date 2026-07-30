@@ -802,6 +802,10 @@ test_premature_ship_done_predicate() {
     || fail "negated green checks must be premature"
   status_is_premature_ship_done "done: PR checks green" no-mistakes ship \
     || fail "a bare PR with no URL must be premature"
+  status_is_premature_ship_done "done:" no-mistakes ship \
+    || fail "an empty done note must be premature"
+  status_is_premature_ship_done "done: " no-mistakes ship \
+    || fail "a whitespace-only done note must be premature"
   status_is_premature_ship_done $'done:\tPr  https://x/pull/1\tCHECKS green.  ' no-mistakes ship \
     && fail "canonical evidence must allow normalized whitespace, case, and a trailing period"
   status_is_premature_ship_done "done: ready in branch fm/x" local-only ship \
@@ -853,6 +857,18 @@ test_no_mistakes_bare_done_is_stopped_short() {
   assert_contains "$out" "implemented and committed" \
     "the crew's own summary must survive into the detail"
   pass "no-mistakes bare done reports stopped-short, not done"
+}
+
+test_no_mistakes_empty_done_is_stopped_short() {
+  reset_fakes
+  local out rc
+  out=$(run_idle_no_run_case premature-nm-empty feat-nm-empty "done:" \
+    "kind=ship" "mode=no-mistakes")
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "an empty done note must not abort fm-crew-state"
+  assert_contains "$out" "state: stopped-short" \
+    "an empty done note must reach the premature-done gate"
+  pass "no-mistakes empty done reports stopped-short without aborting"
 }
 
 test_no_mistakes_checks_green_done_stays_terminal() {
@@ -1427,6 +1443,7 @@ test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_premature_ship_done_predicate
 test_no_mistakes_bare_done_is_stopped_short
+test_no_mistakes_empty_done_is_stopped_short
 test_no_mistakes_checks_green_done_stays_terminal
 test_local_only_ready_branch_stays_terminal
 test_direct_pr_done_stays_terminal
