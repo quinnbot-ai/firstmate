@@ -30,6 +30,12 @@
 # answers these surfaces in bulk by position ("1 yes, 2 yes, 3 sure"); the
 # durable id trails each entry so firstmate can act on the answer.
 #
+# Titles and questions are relayed VERBATIM from the durable record, bounded but
+# never paraphrased: a generator that reworded them would be inventing the very
+# thing the captain is answering. Section 9 translation is therefore a duty of
+# whoever WRITES a backlog entry, and this renderer only enforces the parts it
+# can carry honestly - project names instead of paths, and plain group wording.
+#
 # Usage:
 #   fm-decision-board.sh [--format markdown|html|json] [--snapshot <path>]
 #                        [--limit <n>] [--title <text>]
