@@ -670,6 +670,7 @@ families_for_changed_path() {
       printf '%s\n' session-bootstrap
       printf '%s\n' pr-forge
       printf '%s\n' pure-contract-unit
+      printf '%s\n' backend-dispatch
       ;;
     bin/fm-session-start.sh|bin/fm-bootstrap.sh|bin/fm-fleet-sync.sh|\
     bin/fm-sessionstart-nudge.sh|bin/fm-tangle*|bin/fm-update.sh|\
