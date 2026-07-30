@@ -31,8 +31,8 @@
 # client only ever echoes the relay-issued request_id and NEVER names a platform
 # message id.
 # On success it echoes ONLY that request_id.
-# A relay non-2xx proves the post did not land, but a transport failure or an
-# unreadable HTTP status leaves the outcome unknown.
+# A relay non-2xx other than 409 proves the post did not land, but a 409,
+# transport failure, or unreadable HTTP status leaves the outcome unknown.
 #
 # One public answer per request_id is enforced here, because this is the only
 # place an answer is posted. The poll deliberately offers a mention AT LEAST
