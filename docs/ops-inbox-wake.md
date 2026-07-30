@@ -47,11 +47,11 @@ ops-inbox: alert receipt stale 9h; 3 unacked critical alerts, oldest 8h, top: ba
 
 Alert class is the spool's `source` field, sanitized and length-capped so a hostile or malformed alert cannot forge extra fields, split the line, or corrupt the durable wake record.
 
-The read itself is bounded: only the most recent `max_lines` of the spool and of the acknowledgement log are parsed, so the check stays well inside the watcher's per-check timeout however large the inbox grows.
-Reaching that cap is reported in the digest rather than hidden, because a capped read understates both the total and the oldest age:
+The read itself is bounded: the check samples at most `max_lines + 1` spool lines to detect overflow, then parses only the most recent `max_lines` of the spool and acknowledgement log, so its work stays bounded however large the inbox grows.
+Exceeding that cap is reported without claiming the exact spool length, because a capped read understates both the total and the oldest age:
 
 ```
-ops-inbox: inbox past its read cap at 41902 lines, so the total and oldest age below are understated; 20000 unacked critical alerts, oldest 6d, top: routine-scheduler 5104
+ops-inbox: inbox past its 20000-line read cap, so the total and oldest age below are understated; 20000 unacked critical alerts, oldest 6d, top: routine-scheduler 5104
 ```
 
 ## When it stays quiet

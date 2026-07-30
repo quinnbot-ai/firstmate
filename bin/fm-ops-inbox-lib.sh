@@ -168,49 +168,56 @@ fm_ops_inbox_watch_expected() {
 # Sets FM_OPS_INBOX_SCAN_COUNT, FM_OPS_INBOX_SCAN_OLDEST (an ISO-8601 Z string, or
 # empty), FM_OPS_INBOX_SCAN_TOP (up to three "<count> <class>" lines, busiest
 # first), FM_OPS_INBOX_SCAN_CLASSES (every class name, sorted, space-joined), and
-# FM_OPS_INBOX_SCAN_TOTAL_LINES plus FM_OPS_INBOX_SCAN_TRUNCATED when the spool is
-# longer than <max-lines>.
+# FM_OPS_INBOX_SCAN_TRUNCATED when the spool is longer than <max-lines>.
 # Unacked means exactly what the spool's own reader means: a critical event with
 # an inline false ack flag and no entry in the acknowledgement log.
-# Streams both files line by line so a growing spool is never slurped, and reads
-# only the most recent <max-lines> of each so this stays well inside the watcher's
+# Samples at most <max-lines + 1> spool lines to detect overflow, then parses only
+# the most recent <max-lines> of each input so this stays well inside the watcher's
 # per-check timeout no matter how large the spool grows. Hitting that cap is
 # reported rather than hidden: a capped read understates the total and the oldest
 # age, and the spool needs rotating or triaging.
+# Any malformed input line, including a partial trailing write, fails the scan so
+# the caller wakes fail-closed instead of treating a partial parse as clean.
 # shellcheck disable=SC2034 # Result globals read by callers after this returns.
 fm_ops_inbox_scan() {
-  local spool=$1 acks=$2 max_lines=${3:-20000} scan classes total
+  local spool=$1 acks=$2 max_lines=${3:-20000} scan classes sample ack_stream alert_stream
   FM_OPS_INBOX_SCAN_COUNT=0
   FM_OPS_INBOX_SCAN_OLDEST=
   FM_OPS_INBOX_SCAN_TOP=
   FM_OPS_INBOX_SCAN_CLASSES=
-  FM_OPS_INBOX_SCAN_TOTAL_LINES=0
   FM_OPS_INBOX_SCAN_TRUNCATED=0
   [ -f "$spool" ] || return 0
   command -v jq >/dev/null 2>&1 || return 1
   case "$max_lines" in
     ''|*[!0-9]*|0) max_lines=20000 ;;
   esac
-  total=$(wc -l < "$spool" 2>/dev/null | tr -d '[:space:]')
-  case "$total" in
-    ''|*[!0-9]*) total=0 ;;
+  sample=$(
+    set -o pipefail
+    head -n "$((max_lines + 1))" "$spool" 2>/dev/null | awk 'END { print NR + 0 }'
+  ) || return 1
+  case "$sample" in
+    ''|*[!0-9]*) return 1 ;;
   esac
-  FM_OPS_INBOX_SCAN_TOTAL_LINES=$total
-  [ "$total" -le "$max_lines" ] || FM_OPS_INBOX_SCAN_TRUNCATED=1
-  scan=$(
-    {
-      # @tsv, not hand-built tabs: an alert field carrying a tab or newline would
-      # otherwise forge extra columns in this stream.
-      if [ -f "$acks" ]; then
-        tail -n "$max_lines" "$acks" 2>/dev/null \
-          | jq -r 'select(has("event_id")) | ["A", (.event_id | tostring)] | @tsv' 2>/dev/null || true
-      fi
-      tail -n "$max_lines" "$spool" 2>/dev/null | jq -r '
-        select(.severity == "critical" and .ack == false)
-        | ["E", ((.id // "") | tostring), ((.ts // "") | tostring), ((.source // "") | tostring)]
-        | @tsv
-      ' 2>/dev/null || true
-    } | awk -F'\t' '
+  [ "$sample" -le "$max_lines" ] || FM_OPS_INBOX_SCAN_TRUNCATED=1
+  ack_stream=
+  if [ -f "$acks" ]; then
+    ack_stream=$(
+      set -o pipefail
+      tail -n "$max_lines" "$acks" 2>/dev/null \
+        | jq -r 'select(has("event_id")) | ["A", (.event_id | tostring)] | @tsv' 2>/dev/null
+    ) || return 1
+  fi
+  alert_stream=$(
+    set -o pipefail
+    # @tsv, not hand-built tabs: an alert field carrying a tab or newline would
+    # otherwise forge extra columns in this stream.
+    tail -n "$max_lines" "$spool" 2>/dev/null | jq -r '
+      select(.severity == "critical" and .ack == false)
+      | ["E", ((.id // "") | tostring), ((.ts // "") | tostring), ((.source // "") | tostring)]
+      | @tsv
+    ' 2>/dev/null
+  ) || return 1
+  scan=$(awk -F'\t' '
       $1 == "A" { acked[$2] = 1; next }
       $1 == "E" {
         if ($2 != "" && ($2 in acked)) next
@@ -227,7 +234,10 @@ fm_ops_inbox_scan() {
         printf "%d\t%s\n", count + 0, oldest
         for (c in n) printf "%d\t%s\n", n[c], c
       }
-    '
+    ' <<EOF
+$ack_stream
+$alert_stream
+EOF
   ) || return 1
   IFS=$(printf '\t') read -r FM_OPS_INBOX_SCAN_COUNT FM_OPS_INBOX_SCAN_OLDEST <<EOF
 $scan

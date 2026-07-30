@@ -191,6 +191,35 @@ test_fresh_receipt_count_is_authoritative() {
   pass "a fresh receipt's count is used for the digest total"
 }
 
+test_corrupt_recent_receipt_is_unreadable() {
+  local home out
+  home=$(make_home corrupt-receipt)
+  configure "$home"
+  alert "$home" cr1 600 backup-verify
+  printf 'not json\n' > "$home/ops/ops-inbox-receipt.json"
+  touch -t "$(receipt_stamp 60)" "$home/ops/ops-inbox-receipt.json"
+  out=$(run_poll "$home")
+  assert_contains "$out" "alert receipt unreadable" \
+    "a recent receipt with no usable count must wake as unreadable"
+  assert_contains "$out" "1 unacked critical alert" \
+    "an unreadable receipt must fall back to the spool-scanned count"
+  pass "a corrupt recent receipt wakes as unreadable"
+}
+
+test_malformed_spool_fails_closed() {
+  local home out
+  home=$(make_home malformed-spool)
+  configure "$home"
+  printf '{"id":"broken"\n' > "$home/ops/ops-inbox.jsonl"
+  receipt "$home" 0 60
+  out=$(run_poll "$home")
+  assert_contains "$out" "ops-inbox: alert inbox at $home/ops/ops-inbox.jsonl could not be read" \
+    "a malformed spool must wake through the scan-failure path"
+  assert_not_contains "$out" "0 unacked critical alerts" \
+    "a malformed spool must not be reported as a clean zero"
+  pass "a malformed spool wakes fail-closed"
+}
+
 test_standing_backlog_does_not_rewake_every_poll() {
   local home first second
   home=$(make_home dedupe)
@@ -355,6 +384,45 @@ test_bootstrap_refuses_to_take_a_live_task_id() {
   pass "bootstrap refuses to arm the watch over a live task holding its reserved id"
 }
 
+test_live_task_artifacts_survive_disarm() {
+  local home out sum_before sum_after
+  home=$(make_home live-task-disarm)
+  configure "$home"
+  printf 'foreign check\n' > "$home/state/ops-watch.check.sh"
+  chmod 0700 "$home/state/ops-watch.check.sh"
+  FM_HOME="$home" "$ROOT/bin/fm-check-register.sh" ops-watch >/dev/null
+  sum_before=$(cat "$home/state/ops-watch.check.sh" "$home/state/ops-watch.check-trust" | shasum)
+  fm_write_meta "$home/state/ops-watch.meta" "window=firstmate:fm-ops-watch" "harness=echo"
+  out=$(run_bootstrap "$home")
+  assert_contains "$out" "OPS_INBOX: task id ops-watch is in use" \
+    "live work must win before a disarm-triggering path examines artifacts"
+  assert_grep "foreign check" "$home/state/ops-watch.check.sh" \
+    "bootstrap must not remove a live task's foreign check"
+  sum_after=$(cat "$home/state/ops-watch.check.sh" "$home/state/ops-watch.check-trust" | shasum)
+  [ "$sum_before" = "$sum_after" ] \
+    || fail "bootstrap must not alter a live task's registered foreign check"
+  pass "live task artifacts survive a disarm-triggering bootstrap run"
+}
+
+test_foreign_check_survives_disarm() {
+  local home out sum_before sum_after
+  home=$(make_home foreign-check-disarm)
+  configure "$home"
+  printf 'foreign check\n' > "$home/state/ops-watch.check.sh"
+  chmod 0700 "$home/state/ops-watch.check.sh"
+  FM_HOME="$home" "$ROOT/bin/fm-check-register.sh" ops-watch >/dev/null
+  sum_before=$(cat "$home/state/ops-watch.check.sh" "$home/state/ops-watch.check-trust" | shasum)
+  out=$(run_bootstrap "$home")
+  assert_contains "$out" "OPS_INBOX: state/ops-watch.check.sh is not this operational alert watch" \
+    "bootstrap must report a foreign reserved-id check instead of deleting it"
+  assert_grep "foreign check" "$home/state/ops-watch.check.sh" \
+    "a foreign reserved-id check must survive disarm"
+  sum_after=$(cat "$home/state/ops-watch.check.sh" "$home/state/ops-watch.check-trust" | shasum)
+  [ "$sum_before" = "$sum_after" ] \
+    || fail "a foreign registered check and its trust record must survive disarm"
+  pass "a foreign reserved-id check survives disarm"
+}
+
 test_armed_watch_needs_supervision() {
   local home needed desc
   home=$(make_home supervision)
@@ -395,7 +463,7 @@ test_read_cap_is_reported_not_hidden() {
   done
   receipt "$home" 8 60
   out=$(run_poll "$home")
-  assert_contains "$out" "inbox past its read cap at 8 lines" \
+  assert_contains "$out" "inbox past its 5-line read cap" \
     "a spool too long to read inside one check must say so instead of failing quietly"
   assert_contains "$out" "understated" "the digest must warn that a capped total understates the backlog"
   [ "$(printf '%s' "$out" | wc -l | tr -d ' ')" = 0 ] || fail "the capped wake must still be one line"
@@ -466,6 +534,8 @@ test_count_threshold_wakes_when_all_alerts_are_new
 test_stale_receipt_is_itself_wake_worthy
 test_missing_receipt_is_wake_worthy
 test_fresh_receipt_count_is_authoritative
+test_corrupt_recent_receipt_is_unreadable
+test_malformed_spool_fails_closed
 test_standing_backlog_does_not_rewake_every_poll
 test_material_growth_wakes_again
 test_new_alert_class_wakes_again
@@ -478,6 +548,8 @@ test_read_cap_is_reported_not_hidden
 test_bootstrap_arms_registers_and_is_idempotent
 test_bootstrap_disarms_when_the_inbox_goes_away
 test_bootstrap_refuses_to_take_a_live_task_id
+test_live_task_artifacts_survive_disarm
+test_foreign_check_survives_disarm
 test_armed_watch_needs_supervision
 test_secondmate_home_does_not_auto_arm
 test_watcher_dispatches_the_registered_check

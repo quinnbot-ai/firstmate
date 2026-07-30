@@ -751,8 +751,22 @@ ops_inbox_setup() {
   sidecar="$STATE/.ops-inbox-wake"
 
   ops_inbox_disarm() {  # <reason-when-removed>
-    local reason=$1 failed=0
-    bootstrap_artifact_present "$check" || bootstrap_artifact_present "$trust" || return 0
+    local reason=$1 failed=0 disarm_home disarm_body
+    if ! bootstrap_artifact_present "$check"; then
+      bootstrap_artifact_present "$trust" || return 0
+      echo "OPS_INBOX: state/$OPS_INBOX_CHECK_ID.check-trust has no owned operational alert check; inspect and remove or rename it, then rerun bootstrap"
+      return 0
+    fi
+    disarm_home=$(bootstrap_home_abs) || {
+      echo "OPS_INBOX: the operational alert watch cannot prove ownership of state/$OPS_INBOX_CHECK_ID.check.sh because the firstmate home path is unresolved; leave it in place and rerun bootstrap after repairing the home"
+      return 0
+    }
+    disarm_body=$(fm_ops_inbox_shim_content "$disarm_home" "$FM_ROOT")
+    if [ ! -f "$check" ] || [ -L "$check" ] \
+      || ! cmp -s "$check" <(printf '%s\n' "$disarm_body"); then
+      echo "OPS_INBOX: state/$OPS_INBOX_CHECK_ID.check.sh is not this operational alert watch; leave it in place and retire or rename its owner, then rerun bootstrap"
+      return 0
+    fi
     bootstrap_artifact_remove "$check" || failed=1
     bootstrap_artifact_remove "$trust" || failed=1
     bootstrap_artifact_remove "$sidecar" || failed=1
@@ -765,6 +779,11 @@ ops_inbox_setup() {
     fi
   }
 
+  if bootstrap_artifact_present "$STATE/$OPS_INBOX_CHECK_ID.meta"; then
+    echo "OPS_INBOX: task id $OPS_INBOX_CHECK_ID is in use by live work, so the operational alert watch cannot arm; retire that task, then rerun bootstrap"
+    return 0
+  fi
+
   if ! fm_ops_inbox_config_load "$CONFIG"; then
     echo "OPS_INBOX: $FM_OPS_INBOX_CONFIG_ERROR; fix config/ops-inbox.json, then rerun bootstrap"
     return 0
@@ -772,11 +791,6 @@ ops_inbox_setup() {
 
   if ! fm_ops_inbox_watch_expected "$FM_HOME"; then
     ops_inbox_disarm "no alert inbox at $FM_OPS_INBOX_SPOOL"
-    return 0
-  fi
-
-  if bootstrap_artifact_present "$STATE/$OPS_INBOX_CHECK_ID.meta"; then
-    echo "OPS_INBOX: task id $OPS_INBOX_CHECK_ID is in use by live work, so the operational alert watch cannot arm; retire that task, then rerun bootstrap"
     return 0
   fi
 

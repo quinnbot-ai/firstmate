@@ -108,6 +108,14 @@ else
   esac
 fi
 
+if [ "$RECEIPT_STATE" = fresh ] || [ "$RECEIPT_STATE" = stale ]; then
+  if ! RECEIPT_COUNT=$(fm_ops_inbox_receipt_count "$FM_OPS_INBOX_RECEIPT"); then
+    RECEIPT_COUNT=
+    RECEIPT_STATE=unreadable
+    RECEIPT_NOTE='alert receipt unreadable'
+  fi
+fi
+
 if ! fm_ops_inbox_scan "$FM_OPS_INBOX_SPOOL" "$FM_OPS_INBOX_ACKS" "$FM_OPS_INBOX_MAX_LINES"; then
   wake_once scan-failed 0 '' "ops-inbox: alert inbox at $FM_OPS_INBOX_SPOOL could not be read"
   exit 0
@@ -115,8 +123,7 @@ fi
 
 COUNT=$FM_OPS_INBOX_SCAN_COUNT
 if [ "$RECEIPT_STATE" = fresh ]; then
-  RECEIPT_COUNT=$(fm_ops_inbox_receipt_count "$FM_OPS_INBOX_RECEIPT") || RECEIPT_COUNT=
-  [ -z "$RECEIPT_COUNT" ] || COUNT=$RECEIPT_COUNT
+  COUNT=$RECEIPT_COUNT
 fi
 
 OLDEST_AGE=
@@ -157,7 +164,7 @@ EOF
 
 line="ops-inbox: "
 if [ "$FM_OPS_INBOX_SCAN_TRUNCATED" -eq 1 ]; then
-  line="${line}inbox past its read cap at $FM_OPS_INBOX_SCAN_TOTAL_LINES lines, so the total and oldest age below are understated; "
+  line="${line}inbox past its $FM_OPS_INBOX_MAX_LINES-line read cap, so the total and oldest age below are understated; "
 fi
 [ -z "$RECEIPT_NOTE" ] || line="$line$RECEIPT_NOTE; "
 if [ "$COUNT" -eq 1 ]; then
