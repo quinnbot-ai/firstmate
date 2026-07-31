@@ -113,7 +113,7 @@ Press Tab in the picker to switch to `all` configured providers, including OpenR
 The responsive footer uses Pi's native local session data to show run state, model and thinking level, project or directory name, git branch, context tokens and percentage, cumulative input and output tokens, session cost, and extension status text without dropping complete values at narrow widths.
 When supported, the terminal title becomes `Firstmate · <project> · <branch> · <model>`.
 The presentation does not poll quotas or providers, start background processes, or invent Codex-only fields.
-Pi's `/calm` toggle hides supported transcript chrome, including canonically classified Firstmate operational user rows, while retaining native working activity and all model context and session data.
+Pi's `/calm` toggle hides supported transcript chrome, including canonically classified Firstmate operational user rows, and uses a Calm-only animated working boat during active runs while preserving all model context and session data.
 The hidden operational inputs remain ordinary user-role messages with unchanged delivery, ordering, authority, persistence, and exports.
 The preference persists for the effective Firstmate home, and toggling it off restores ordinary rendering.
 [Calm's current behavior and supported limits](docs/calm.md) are separate from its [version-scoped maintainer evidence](docs/calm-mode-feasibility.md).
