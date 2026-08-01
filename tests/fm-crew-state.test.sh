@@ -68,14 +68,28 @@ case "${1:-}" in
     case "${1:-}" in
       status)
         shift
-        if [ "${1:-}" = --run ]; then printf '%s\n' "${FM_FAKE_AXI_STATUS_RUN:-}"
-        else printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"; fi ;;
+        if [ "${1:-}" = --run ]; then
+          printf '%s\n' "${FM_FAKE_AXI_STATUS_RUN:-}"
+        elif [ -n "${FM_FAKE_AXI_STATUS_COUNT_FILE:-}" ]; then
+          count=$(cat "$FM_FAKE_AXI_STATUS_COUNT_FILE" 2>/dev/null || printf 0)
+          count=$((count + 1))
+          printf '%s\n' "$count" > "$FM_FAKE_AXI_STATUS_COUNT_FILE"
+          if [ "$count" -eq 1 ]; then
+            printf '%s\n' "${FM_FAKE_AXI_STATUS_FIRST:-}"
+          else
+            printf '%s\n' "${FM_FAKE_AXI_STATUS_SECOND:-}"
+          fi
+        else
+          printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"
+        fi
+        exit "${FM_FAKE_AXI_STATUS_RC:-0}" ;;
       logs)
         printf '%s\n' "${FM_FAKE_CI_LOGS:-}" ;;
     esac
     ;;
   runs)
-    printf '%s\n' "${FM_FAKE_RUNS_LIST:-}" ;;
+    printf '%s\n' "${FM_FAKE_RUNS_LIST:-}"
+    exit "${FM_FAKE_RUNS_RC:-0}" ;;
 esac
 exit 0
 SH
@@ -174,8 +188,14 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
+  FM_FAKE_AXI_STATUS_COUNT_FILE=
+  FM_FAKE_AXI_STATUS_FIRST=
+  FM_FAKE_AXI_STATUS_SECOND=
+  FM_FAKE_AXI_STATUS_RC=0
+  FM_FAKE_RUNS_RC=0
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
+  export FM_FAKE_AXI_STATUS_COUNT_FILE FM_FAKE_AXI_STATUS_FIRST FM_FAKE_AXI_STATUS_SECOND FM_FAKE_AXI_STATUS_RC FM_FAKE_RUNS_RC
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -750,6 +770,42 @@ test_validation_lane_record_distinguishes_same_minute_runs() {
   [ "$out" = $'fm-crew-validation-v2\nstate=done\nsource=run-step\nrun-kind=coarse\nrun-id=\nrun-start=2026-08-01T12:00#2' ] \
     || fail "validation lane record did not distinguish same-minute runs (got: $out)"
   pass "validation lane record distinguishes same-minute coarse run starts"
+}
+
+test_validation_lane_rejects_changing_full_run_snapshot() {
+  reset_fakes
+  local d short out
+  d=$(new_case validation-lane-changing-snapshot)
+  make_repo_on_branch "$d/wt" fm/feat-lane-changing
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/lane-changing.meta" "window=fm:fm-lane-changing" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS_COUNT_FILE="$d/status-count"
+  FM_FAKE_AXI_STATUS_FIRST="$(run_passed fm/feat-lane-changing)"
+  FM_FAKE_AXI_STATUS_SECOND="$(run_running fm/feat-lane-changing | sed 's/01RUN/02RUN/')"
+  FM_FAKE_RUNS_LIST="running fm/feat-lane-changing ${short} 2026-08-01 12:01"
+  out=$(run_crew_validation "$d" lane-changing)
+  assert_contains "$out" "run-kind=unavailable" "changing full-run snapshot was not rejected"
+  assert_not_contains "$out" "run-start=2026" "changing full-run snapshot retained mixed start evidence"
+  assert_not_contains "$out" "source=run-step" "changing full-run snapshot retained stale terminal state"
+  pass "validation lane rejects a changing full-run snapshot"
+}
+
+test_validation_lane_distinguishes_runs_failure_from_absence() {
+  reset_fakes
+  local d out
+  d=$(new_case validation-lane-runs-failure)
+  make_repo_on_branch "$d/wt" fm/feat-lane-runs-failure
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/lane-runs-failure.meta" "window=fm:fm-lane-runs-failure" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_RC=7
+  out=$(run_crew_validation "$d" lane-runs-failure)
+  assert_contains "$out" "run-kind=unavailable" "failed runs lookup was classified as absent"
+  FM_FAKE_RUNS_RC=0
+  out=$(run_crew_validation "$d" lane-runs-failure)
+  assert_contains "$out" "run-kind=absent" "successful empty runs lookup was not affirmative absence"
+  pass "validation lane distinguishes runs lookup failure from absence"
 }
 
 # (e) cross-branch attribution: `axi status` returns ANOTHER branch's run (the
@@ -1401,6 +1457,8 @@ test_validation_lane_record_binds_full_run_identity
 test_validation_lane_record_marks_coarse_run_without_identity
 test_validation_lane_record_starts_unavailable_identity
 test_validation_lane_record_distinguishes_same_minute_runs
+test_validation_lane_rejects_changing_full_run_snapshot
+test_validation_lane_distinguishes_runs_failure_from_absence
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status

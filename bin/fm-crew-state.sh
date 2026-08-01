@@ -201,7 +201,7 @@ strip_quotes() {
   trim "$s"
 }
 
-# Bounded no-mistakes call in the worktree; stdout only, never fails the script.
+# Bounded no-mistakes call in the worktree; stdout only.
 HAVE_TIMEOUT=none
 if command -v timeout >/dev/null 2>&1; then HAVE_TIMEOUT=timeout
 elif command -v gtimeout >/dev/null 2>&1; then HAVE_TIMEOUT=gtimeout
@@ -209,10 +209,10 @@ elif command -v perl >/dev/null 2>&1; then HAVE_TIMEOUT=perl
 fi
 nm_run() {  # <args...>
   case "$HAVE_TIMEOUT" in
-    timeout)  ( cd "$WT" && timeout "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null || true ;;
-    gtimeout) ( cd "$WT" && gtimeout "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null || true ;;
-    perl)     ( cd "$WT" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null || true ;;
-    *)        true ;;
+    timeout)  ( cd "$WT" && timeout "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null ;;
+    gtimeout) ( cd "$WT" && gtimeout "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null ;;
+    perl)     ( cd "$WT" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$NM_TIMEOUT" no-mistakes "$@" ) 2>/dev/null ;;
+    *)        return 127 ;;
   esac
 }
 
@@ -377,7 +377,7 @@ nm_runs_observation_for_branch() {  # <branch>
   COARSE_START=
   limit=$FM_CREW_STATE_RUNS_LIMIT
   [ "$VALIDATION_LANE_MODE" -eq 0 ] || limit=0
-  out=$(nm_run runs --limit "$limit")
+  out=$(nm_run runs --limit "$limit") || return 1
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
     row=$(trim "$row")
@@ -485,20 +485,67 @@ COARSE_START=""
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
-  RUN_OUT=$(nm_run axi status)
-  if [ -n "$RUN_OUT" ]; then
+  status_ok=0
+  if RUN_OUT=$(nm_run axi status); then
+    status_ok=1
+  fi
+  if [ "$status_ok" -eq 1 ] && [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
     if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
-      HAVE_RUN=1
-      RUN_ID=$(strip_quotes "$(nm_field id)")
-      if [ -n "$RUN_ID" ]; then
-        RUN_KIND=full
-      else
-        RUN_KIND=unavailable
-      fi
       if [ "$VALIDATION_LANE_MODE" -eq 1 ]; then
-        nm_runs_observation_for_branch "$CREW_BRANCH"
-        RUN_START=$COARSE_START
+        initial_run_id=$(strip_quotes "$(nm_field id)")
+        initial_run_status=$(strip_quotes "$(nm_field status)")
+        initial_run_outcome=$(strip_quotes "$(nm_field outcome)")
+        initial_run_head=$(strip_quotes "$(nm_field head)")
+        if nm_runs_observation_for_branch "$CREW_BRANCH"; then
+          observed_start=$COARSE_START
+          if recheck_out=$(nm_run axi status); then
+            RUN_OUT=$recheck_out
+            recheck_branch=$(strip_quotes "$(nm_field branch)")
+            recheck_run_id=$(strip_quotes "$(nm_field id)")
+            recheck_run_status=$(strip_quotes "$(nm_field status)")
+            recheck_run_outcome=$(strip_quotes "$(nm_field outcome)")
+            recheck_run_head=$(strip_quotes "$(nm_field head)")
+            snapshot_matches=0
+            if [ "$recheck_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
+              if [ -n "$initial_run_id" ] && [ "$recheck_run_id" = "$initial_run_id" ]; then
+                snapshot_matches=1
+              elif [ -z "$initial_run_id" ] && [ -z "$recheck_run_id" ] \
+                && [ "$recheck_run_head" = "$initial_run_head" ] \
+                && [ "$recheck_run_status" = "$initial_run_status" ] \
+                && [ "$recheck_run_outcome" = "$initial_run_outcome" ]; then
+                snapshot_matches=1
+              fi
+            fi
+            if [ "$snapshot_matches" -eq 1 ]; then
+              HAVE_RUN=1
+              RUN_ID=$recheck_run_id
+              RUN_START=$observed_start
+              if [ -n "$RUN_ID" ]; then
+                RUN_KIND=full
+              else
+                RUN_KIND=unavailable
+              fi
+            else
+              RUN_OUT=
+              RUN_KIND=unavailable
+            fi
+          else
+            RUN_OUT=
+            RUN_KIND=unavailable
+          fi
+        else
+          RUN_OUT=
+          RUN_KIND=unavailable
+        fi
+      else
+        HAVE_RUN=1
+        RUN_ID=$(strip_quotes "$(nm_field id)")
+        if [ -n "$RUN_ID" ]; then
+          RUN_KIND=full
+        else
+          RUN_KIND=unavailable
+        fi
       fi
     else
       # The active-or-most-recent run is for another branch, or same branch with
@@ -508,7 +555,21 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       # primary call means the CLI itself did not respond, so retrying it
       # immediately with a second bounded call would just double the wait
       # for no better answer.
-      nm_runs_observation_for_branch "$CREW_BRANCH"
+      if nm_runs_observation_for_branch "$CREW_BRANCH"; then
+        if [ -n "$COARSE_STATUS" ]; then
+          HAVE_RUN=1
+          RUN_SOURCE=coarse
+          RUN_KIND=coarse
+          RUN_START=$COARSE_START
+        else
+          RUN_KIND=absent
+        fi
+      else
+        RUN_KIND=unavailable
+      fi
+    fi
+  elif [ "$VALIDATION_LANE_MODE" -eq 1 ]; then
+    if nm_runs_observation_for_branch "$CREW_BRANCH"; then
       if [ -n "$COARSE_STATUS" ]; then
         HAVE_RUN=1
         RUN_SOURCE=coarse
@@ -517,14 +578,8 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       else
         RUN_KIND=absent
       fi
-    fi
-  elif [ "$VALIDATION_LANE_MODE" -eq 1 ]; then
-    nm_runs_observation_for_branch "$CREW_BRANCH"
-    if [ -n "$COARSE_STATUS" ]; then
-      HAVE_RUN=1
-      RUN_SOURCE=coarse
-      RUN_KIND=coarse
-      RUN_START=$COARSE_START
+    else
+      RUN_KIND=unavailable
     fi
   fi
 fi

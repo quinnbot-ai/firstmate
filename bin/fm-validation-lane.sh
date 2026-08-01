@@ -466,8 +466,7 @@ holder_terminal() {
     && [ "$CREW_OBS_RUN" != "$LANE_RESERVATION_RUN" ]; then
     identity_started=1
   fi
-  if [ "$LANE_RESERVATION_START" != none ] && [ "$CREW_OBS_START" != none ] \
-    && [ "$CREW_OBS_START" != "$LANE_RESERVATION_START" ]; then
+  if [ "$CREW_OBS_START" != none ] && [ "$CREW_OBS_START" != "$LANE_RESERVATION_START" ]; then
     identity_started=1
   fi
   if [ "$identity_started" -eq 1 ] \

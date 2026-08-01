@@ -271,6 +271,18 @@ test_run_start_binds_unavailable_completion_between_checks() {
   pass "validation lane: run-start evidence binds unavailable completion"
 }
 
+test_absent_reservation_binds_new_unavailable_run_start() {
+  local dir out
+  dir=$(make_case absent-to-unavailable)
+  FM_TEST_CREW_STATE='state: unknown · source: none · no run' \
+    FM_TEST_CREW_RUN_KIND=absent FM_TEST_CREW_RUN_START='' run_lane "$dir" enqueue alpha >/dev/null
+  run_lane "$dir" enqueue beta >/dev/null
+  out=$(FM_TEST_CREW_RUN_KIND=unavailable FM_TEST_CREW_RUN_START="$NEXT_START" run_lane "$dir" check)
+  assert_contains "$out" "released beta" "new unavailable run-start did not release an absent reservation"
+  assert_state "$dir" "$(owner_state holder beta unavailable none "$NEXT_START" terminal 0)" "new unavailable run-start did not transfer the slot"
+  pass "validation lane: absent reservation binds a new unavailable run start"
+}
+
 test_unavailable_empty_evidence_keeps_head_queued() {
   local dir status=0 out
   dir=$(make_case unavailable-empty)
@@ -351,6 +363,7 @@ test_prior_terminal_run_cannot_clear_a_new_reservation
 test_post_reservation_transition_binds_coarse_run_completion
 test_run_start_binds_coarse_completion_between_checks
 test_run_start_binds_unavailable_completion_between_checks
+test_absent_reservation_binds_new_unavailable_run_start
 test_unavailable_empty_evidence_keeps_head_queued
 test_unavailable_empty_terminal_retains_started_holder
 test_concurrent_releasers_have_one_sender
