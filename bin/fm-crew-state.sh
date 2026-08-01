@@ -18,6 +18,9 @@
 #
 #   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
 #
+# `--validation-lane <id>` emits the same verdict as a strict five-line record
+# with full, coarse, absent, or unavailable run identity evidence.
+#
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
 #   2. Matching no-mistakes run for this crew's branch AND current code identity,
@@ -65,8 +68,15 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 
-ID=${1:-}
-[ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
+VALIDATION_LANE_MODE=0
+if [ "${1:-}" = --validation-lane ]; then
+  [ "$#" -eq 2 ] || { echo "usage: fm-crew-state.sh [--validation-lane] <id>" >&2; exit 2; }
+  VALIDATION_LANE_MODE=1
+  ID=$2
+else
+  ID=${1:-}
+  [ -n "$ID" ] || { echo "usage: fm-crew-state.sh [--validation-lane] <id>" >&2; exit 2; }
+fi
 
 META="$STATE/$ID.meta"
 LOG="$STATE/$ID.status"
@@ -79,10 +89,17 @@ case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
 FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
 SEP=' · '
+RUN_KIND=unavailable
+RUN_ID=
 
 # Emit the one canonical line and exit 0. Detail is optional.
 emit() {  # <state> <source> [detail]
   local line="state: $1${SEP}source: $2"
+  if [ "$VALIDATION_LANE_MODE" -eq 1 ]; then
+    printf 'fm-crew-validation-v1\nstate=%s\nsource=%s\nrun-kind=%s\nrun-id=%s\n' \
+      "$1" "$2" "$RUN_KIND" "$RUN_ID"
+    exit 0
+  fi
   [ -n "${3:-}" ] && line="$line${SEP}$3"
   printf '%s\n' "$line"
   exit 0
@@ -436,6 +453,12 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
     run_branch=$(strip_quotes "$(nm_field branch)")
     if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
       HAVE_RUN=1
+      RUN_ID=$(strip_quotes "$(nm_field id)")
+      if [ -n "$RUN_ID" ]; then
+        RUN_KIND=full
+      else
+        RUN_KIND=unavailable
+      fi
     else
       # The active-or-most-recent run is for another branch, or same branch with
       # a rewritten/diverged head (the CLI is alive and answered; only the
@@ -448,6 +471,9 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       if [ -n "$COARSE_STATUS" ]; then
         HAVE_RUN=1
         RUN_SOURCE=coarse
+        RUN_KIND=coarse
+      else
+        RUN_KIND=absent
       fi
     fi
   fi

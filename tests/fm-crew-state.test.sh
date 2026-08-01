@@ -143,6 +143,10 @@ run_crew_state() {  # <case-dir> <id>
   PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" "$2"
 }
 
+run_crew_validation() {  # <case-dir> <id>
+  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" --validation-lane "$2"
+}
+
 new_case() {  # <name> -> echoes case dir with an empty state/
   local d="$TMP_ROOT/$1"
   mkdir -p "$d/state"
@@ -682,6 +686,36 @@ test_terminal_failed() {
   assert_contains "$out" "state: failed" "failed run -> failed"
   assert_contains "$out" "source: run-step" "failed -> run-step source"
   pass "terminal failed run is authoritative"
+}
+
+test_validation_lane_record_binds_full_run_identity() {
+  reset_fakes
+  local d out
+  d=$(new_case validation-lane-full)
+  make_repo_on_branch "$d/wt" fm/feat-lane-full
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/lane-full.meta" "window=fm:fm-lane-full" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-lane-full)"
+  out=$(run_crew_validation "$d" lane-full)
+  [ "$out" = $'fm-crew-validation-v1\nstate=done\nsource=run-step\nrun-kind=full\nrun-id=01RUN' ] \
+    || fail "validation lane record did not expose the full run identity (got: $out)"
+  pass "validation lane record binds a full authoritative run identity"
+}
+
+test_validation_lane_record_marks_coarse_run_without_identity() {
+  reset_fakes
+  local d short out
+  d=$(new_case validation-lane-coarse)
+  make_repo_on_branch "$d/wt" fm/feat-lane-coarse
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/lane-coarse.meta" "window=fm:fm-lane-coarse" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="running fm/feat-lane-coarse ${short} 2026-08-01 12:00"
+  out=$(run_crew_validation "$d" lane-coarse)
+  [ "$out" = $'fm-crew-validation-v1\nstate=working\nsource=run-step\nrun-kind=coarse\nrun-id=' ] \
+    || fail "validation lane record did not preserve coarse evidence (got: $out)"
+  pass "validation lane record marks coarse run evidence without inventing identity"
 }
 
 # (e) cross-branch attribution: `axi status` returns ANOTHER branch's run (the
@@ -1329,6 +1363,8 @@ test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
 test_terminal_failed
+test_validation_lane_record_binds_full_run_identity
+test_validation_lane_record_marks_coarse_run_without_identity
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status

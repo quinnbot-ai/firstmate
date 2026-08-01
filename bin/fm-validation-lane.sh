@@ -6,9 +6,11 @@
 #
 # State lives in state/validation-lane as fm-validation-lane-v1.  It has one
 # optional holder=<task-id>, one optional release=<task-id>, and zero or more
-# queued=<task-id> records in FIFO order.  release is the queue head reserved
-# for delivery but not yet confirmed by fm-send; keeping it durable means a
-# failed delivery is retried and never silently skipped.
+# queued=<task-id> records in FIFO order.  An owner also has reservation-kind,
+# reservation-run, reservation-state, and reservation-started records binding
+# completion to run evidence observed after that reservation.  release is the
+# queue head reserved for delivery but not yet confirmed by fm-send; keeping it
+# durable means a failed delivery is retried and never silently skipped.
 #
 # enqueue records a task, installs the authenticated watcher check, and releases
 # immediately when the slot is free.  check is executed through that registered
@@ -78,12 +80,27 @@ lane_unlock() {
 
 LANE_HOLDER=
 LANE_RELEASE=
+LANE_RESERVATION_KIND=
+LANE_RESERVATION_RUN=
+LANE_RESERVATION_STATE=
+LANE_RESERVATION_STARTED=
 LANE_QUEUE=()
 
 reset_lane() {
   LANE_HOLDER=
   LANE_RELEASE=
+  LANE_RESERVATION_KIND=
+  LANE_RESERVATION_RUN=
+  LANE_RESERVATION_STATE=
+  LANE_RESERVATION_STARTED=
   LANE_QUEUE=()
+}
+
+clear_reservation() {
+  LANE_RESERVATION_KIND=
+  LANE_RESERVATION_RUN=
+  LANE_RESERVATION_STATE=
+  LANE_RESERVATION_STARTED=
 }
 
 lane_id_seen() {  # <id>
@@ -98,6 +115,7 @@ lane_id_seen() {  # <id>
 
 read_lane() {
   local line value first=1 holder_seen=0 release_seen=0
+  local reservation_kind_seen=0 reservation_run_seen=0 reservation_state_seen=0 reservation_started_seen=0
   reset_lane
   [ -e "$LANE" ] || return 0
   fm_pr_private_file_valid "$LANE" 600 "$LANE_DEVICE" || {
@@ -130,6 +148,34 @@ read_lane() {
         LANE_RELEASE=$value
         release_seen=1
         ;;
+      reservation-kind=*)
+        [ "$reservation_kind_seen" -eq 0 ] || { lane_error "state has duplicate reservation kind"; return 1; }
+        value=${line#reservation-kind=}
+        case "$value" in full|coarse|absent|unavailable) ;; *) lane_error "state has invalid reservation kind"; return 1 ;; esac
+        LANE_RESERVATION_KIND=$value
+        reservation_kind_seen=1
+        ;;
+      reservation-run=*)
+        [ "$reservation_run_seen" -eq 0 ] || { lane_error "state has duplicate reservation run"; return 1; }
+        value=${line#reservation-run=}
+        case "$value" in none) ;; *) [[ "$value" =~ ^[0-9a-f]{64}$ ]] || { lane_error "state has invalid reservation run"; return 1; } ;; esac
+        LANE_RESERVATION_RUN=$value
+        reservation_run_seen=1
+        ;;
+      reservation-state=*)
+        [ "$reservation_state_seen" -eq 0 ] || { lane_error "state has duplicate reservation state"; return 1; }
+        value=${line#reservation-state=}
+        case "$value" in active|terminal|other) ;; *) lane_error "state has invalid reservation state"; return 1 ;; esac
+        LANE_RESERVATION_STATE=$value
+        reservation_state_seen=1
+        ;;
+      reservation-started=*)
+        [ "$reservation_started_seen" -eq 0 ] || { lane_error "state has duplicate reservation start"; return 1; }
+        value=${line#reservation-started=}
+        case "$value" in 0|1) ;; *) lane_error "state has invalid reservation start"; return 1 ;; esac
+        LANE_RESERVATION_STARTED=$value
+        reservation_started_seen=1
+        ;;
       queued=*)
         value=${line#queued=}
         fm_pr_task_id_valid "$value" || { lane_error "state has invalid queue entry"; return 1; }
@@ -144,6 +190,26 @@ read_lane() {
     lane_error "state has both holder and pending release"
     return 1
   }
+  if [ -n "$LANE_HOLDER" ] || [ -n "$LANE_RELEASE" ]; then
+    [ "$reservation_kind_seen" -eq 1 ] && [ "$reservation_run_seen" -eq 1 ] \
+      && [ "$reservation_state_seen" -eq 1 ] && [ "$reservation_started_seen" -eq 1 ] || {
+      lane_error "state has an owner without reservation evidence"
+      return 1
+    }
+    if [ "$LANE_RESERVATION_KIND" = full ]; then
+      [ "$LANE_RESERVATION_RUN" != none ] || { lane_error "state has a full reservation without a run"; return 1; }
+    else
+      [ "$LANE_RESERVATION_RUN" = none ] || { lane_error "state has a non-full reservation with a run"; return 1; }
+    fi
+    [ -n "$LANE_HOLDER" ] || [ "$LANE_RESERVATION_STARTED" = 0 ] || {
+      lane_error "pending release claims a started run"
+      return 1
+    }
+  elif [ "$reservation_kind_seen" -ne 0 ] || [ "$reservation_run_seen" -ne 0 ] \
+    || [ "$reservation_state_seen" -ne 0 ] || [ "$reservation_started_seen" -ne 0 ]; then
+    lane_error "state has reservation evidence without an owner"
+    return 1
+  fi
 }
 
 write_lane() {
@@ -169,6 +235,12 @@ write_lane() {
     printf '%s\n' fm-validation-lane-v1
     [ -z "$LANE_HOLDER" ] || printf 'holder=%s\n' "$LANE_HOLDER"
     [ -z "$LANE_RELEASE" ] || printf 'release=%s\n' "$LANE_RELEASE"
+    if [ -n "$LANE_HOLDER" ] || [ -n "$LANE_RELEASE" ]; then
+      printf 'reservation-kind=%s\n' "$LANE_RESERVATION_KIND"
+      printf 'reservation-run=%s\n' "$LANE_RESERVATION_RUN"
+      printf 'reservation-state=%s\n' "$LANE_RESERVATION_STATE"
+      printf 'reservation-started=%s\n' "$LANE_RESERVATION_STARTED"
+    fi
     for queued in "${LANE_QUEUE[@]}"; do
       printf 'queued=%s\n' "$queued"
     done
@@ -226,27 +298,89 @@ refresh_check() {
 }
 
 reserve_next() {
+  local task
   [ -n "$LANE_HOLDER" ] && return 0
   [ -n "$LANE_RELEASE" ] && return 0
   [ "${#LANE_QUEUE[@]}" -gt 0 ] || return 0
-  LANE_RELEASE=${LANE_QUEUE[0]}
+  task=${LANE_QUEUE[0]}
+  capture_reservation "$task" || return 1
+  LANE_RELEASE=$task
   LANE_QUEUE=("${LANE_QUEUE[@]:1}")
+}
+
+CREW_OBS_STATE=
+CREW_OBS_SOURCE=
+CREW_OBS_KIND=
+CREW_OBS_RUN=
+
+hash_run_id() {  # <run-id>
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$1" | sha256sum | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+read_crew_observation() {  # <task-id>
+  local task=$1 out lines run_id
+  CREW_OBS_STATE=
+  CREW_OBS_SOURCE=
+  CREW_OBS_KIND=
+  CREW_OBS_RUN=none
+  out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$CREW_STATE_BIN" --validation-lane "$task" 2>/dev/null) || {
+    lane_error "cannot read reservation state for $task"
+    return 1
+  }
+  lines=$(printf '%s\n' "$out" | wc -l | tr -d '[:space:]')
+  [ "$lines" = 5 ] || { lane_error "reservation state for $task is malformed"; return 1; }
+  [ "$(printf '%s\n' "$out" | sed -n '1p')" = fm-crew-validation-v1 ] \
+    || { lane_error "reservation state for $task has an unknown format"; return 1; }
+  CREW_OBS_STATE=$(printf '%s\n' "$out" | sed -n '2s/^state=//p')
+  CREW_OBS_SOURCE=$(printf '%s\n' "$out" | sed -n '3s/^source=//p')
+  CREW_OBS_KIND=$(printf '%s\n' "$out" | sed -n '4s/^run-kind=//p')
+  run_id=$(printf '%s\n' "$out" | sed -n '5s/^run-id=//p')
+  case "$CREW_OBS_STATE" in working|parked|done|blocked|paused|failed|unknown) ;; *) lane_error "reservation state for $task has an invalid state"; return 1 ;; esac
+  case "$CREW_OBS_SOURCE" in run-step|pane|status-log|none) ;; *) lane_error "reservation state for $task has an invalid source"; return 1 ;; esac
+  case "$CREW_OBS_KIND" in full|coarse|absent|unavailable) ;; *) lane_error "reservation state for $task has an invalid run kind"; return 1 ;; esac
+  if [ "$CREW_OBS_KIND" = full ]; then
+    [ -n "$run_id" ] || { lane_error "reservation state for $task is missing its run id"; return 1; }
+    CREW_OBS_RUN=$(hash_run_id "$run_id") || { lane_error "cannot bind reservation run for $task"; return 1; }
+    [[ "$CREW_OBS_RUN" =~ ^[0-9a-f]{64}$ ]] || { lane_error "cannot bind reservation run for $task"; return 1; }
+  else
+    [ -z "$run_id" ] || { lane_error "reservation state for $task has an unexpected run id"; return 1; }
+  fi
+}
+
+capture_reservation() {  # <task-id>
+  read_crew_observation "$1" || return 1
+  LANE_RESERVATION_KIND=$CREW_OBS_KIND
+  LANE_RESERVATION_RUN=$CREW_OBS_RUN
+  case "$CREW_OBS_SOURCE:$CREW_OBS_STATE" in
+    run-step:done|run-step:failed) LANE_RESERVATION_STATE=terminal ;;
+    run-step:*) LANE_RESERVATION_STATE=active ;;
+    *) LANE_RESERVATION_STATE=other ;;
+  esac
+  LANE_RESERVATION_STARTED=0
 }
 
 deliver_release() {
   local task=$1 out rc
   [ -n "$task" ] || return 0
+  lane_lock || return 1
+  if ! read_lane; then lane_unlock; return 1; fi
+  if [ "$LANE_RELEASE" != "$task" ]; then
+    lane_unlock
+    return 0
+  fi
   if out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SEND_BIN" "$task" \
     'Validation slot reserved. Start the no-mistakes validation pipeline now and follow its active gates.' 2>&1); then
-    lane_lock || return 1
-    if ! read_lane; then lane_unlock; return 1; fi
-    if [ "$LANE_RELEASE" = "$task" ]; then
-      LANE_RELEASE=
-      LANE_HOLDER=$task
-      if ! write_lane || ! refresh_check; then
-        lane_unlock
-        return 1
-      fi
+    LANE_RELEASE=
+    LANE_HOLDER=$task
+    if ! write_lane || ! refresh_check; then
+      lane_unlock
+      return 1
     fi
     lane_unlock
     printf 'released %s\n' "$task"
@@ -254,6 +388,7 @@ deliver_release() {
   else
     rc=$?
   fi
+  lane_unlock
   out=$(printf '%s' "$out" | tr '\r\n' ' ' | cut -c1-500)
   [ -n "$out" ] || out="fm-send exited $rc"
   printf 'release failed for %s: %s\n' "$task" "$out"
@@ -261,20 +396,27 @@ deliver_release() {
 }
 
 enqueue() {  # <task-id>
-  local task=$1 release=
+  local task=$1 release= reserve_ok=1
   fm_pr_task_id_valid "$task" || { lane_error "invalid task id"; return 2; }
   lane_lock || return 1
   if ! read_lane; then lane_unlock; return 1; fi
   if lane_id_seen "$task"; then
+    release=$LANE_RELEASE
+    if ! refresh_check; then lane_unlock; return 1; fi
     lane_unlock
-    printf 'already queued %s\n' "$task"
+    if [ -n "$release" ]; then
+      deliver_release "$release"
+    else
+      printf 'already queued %s\n' "$task"
+    fi
     return 0
   fi
   LANE_QUEUE+=("$task")
-  reserve_next
+  reserve_next || reserve_ok=0
   release=$LANE_RELEASE
   if ! write_lane || ! refresh_check; then lane_unlock; return 1; fi
   lane_unlock
+  [ "$reserve_ok" -eq 1 ] || return 1
   if [ -n "$release" ]; then
     deliver_release "$release"
   else
@@ -283,25 +425,45 @@ enqueue() {  # <task-id>
 }
 
 holder_terminal() {
-  local task=$1 current
-  current=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$CREW_STATE_BIN" "$task" 2>/dev/null || true)
-  case "$current" in
-    'state: done · source: run-step'*|'state: failed · source: run-step'*) return 0 ;;
-    *) return 1 ;;
-  esac
+  local task=$1 identity_started=0
+  read_crew_observation "$task" || return 2
+  if [ "$LANE_RESERVATION_KIND" = absent ]; then
+    case "$CREW_OBS_KIND" in full|coarse) identity_started=1 ;; esac
+  elif [ "$LANE_RESERVATION_KIND" = full ] && [ "$CREW_OBS_KIND" = full ] \
+    && [ "$CREW_OBS_RUN" != "$LANE_RESERVATION_RUN" ]; then
+    identity_started=1
+  fi
+  if [ "$identity_started" -eq 1 ] \
+    || { [ "$LANE_RESERVATION_STATE" = terminal ] \
+      && [ "$CREW_OBS_SOURCE" = run-step ] \
+      && [ "$CREW_OBS_STATE" != done ] && [ "$CREW_OBS_STATE" != failed ]; }; then
+    LANE_RESERVATION_STARTED=1
+  fi
+  [ "$LANE_RESERVATION_STARTED" = 1 ] \
+    && [ "$CREW_OBS_SOURCE" = run-step ] \
+    && { [ "$CREW_OBS_STATE" = done ] || [ "$CREW_OBS_STATE" = failed ]; }
 }
 
 check() {
-  local release=
+  local release= reserve_ok=1 terminal_rc
   lane_lock || return 1
   if ! read_lane; then lane_unlock; return 1; fi
-  if [ -n "$LANE_HOLDER" ] && holder_terminal "$LANE_HOLDER"; then
-    LANE_HOLDER=
+  if [ -n "$LANE_HOLDER" ]; then
+    holder_terminal "$LANE_HOLDER"
+    terminal_rc=$?
+    if [ "$terminal_rc" -eq 0 ]; then
+      LANE_HOLDER=
+      clear_reservation
+    elif [ "$terminal_rc" -eq 2 ]; then
+      lane_unlock
+      return 1
+    fi
   fi
-  reserve_next
+  reserve_next || reserve_ok=0
   release=$LANE_RELEASE
   if ! write_lane || ! refresh_check; then lane_unlock; return 1; fi
   lane_unlock
+  [ "$reserve_ok" -eq 1 ] || return 1
   [ -z "$release" ] || deliver_release "$release"
 }
 
