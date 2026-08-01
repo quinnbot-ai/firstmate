@@ -10,14 +10,16 @@
 # reservation-run, reservation-start, reservation-state, and
 # reservation-started records binding completion to run evidence observed after
 # that reservation.  release is the queue head reserved for delivery but not
-# yet confirmed by fm-send; keeping it
-# durable means a failed delivery is retried and never silently skipped.
+# yet confirmed by fm-send; keeping it durable means a failed delivery is
+# retried and never silently skipped.
 #
 # enqueue records a task, installs the authenticated watcher check, and releases
 # immediately when the slot is free.  check is executed through that registered
 # check: it reads the holder's authoritative fm-crew-state result, frees only a
-# terminal no-mistakes run-step, then sends the next reservation through
-# fm-send.  The task receiving that message starts and owns its own pipeline.
+# reservation-bound terminal no-mistakes run-step, then sends the next
+# reservation through fm-send.  The task receiving that message starts and owns
+# its own pipeline.  Unavailable identity without comparable run-start evidence
+# leaves a new head queued or an existing holder held instead of guessing.
 #
 # A failed send leaves release intact and prints one diagnostic so the watcher
 # emits a check wake.  This script never invokes no-mistakes, responds to its
