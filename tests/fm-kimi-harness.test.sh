@@ -106,17 +106,19 @@ case "${1:-}" in
       'eval "$FM_SPAWN_LAUNCH"')
         cat "$staged_launch" >> "$FM_FAKE_LAUNCH_LOG"
         printf '\n' >> "$FM_FAKE_LAUNCH_LOG"
-        printf 'launched\n' > "$FM_FAKE_KIMI_STATE"
+        if [ "${FM_FAKE_KIMI_READY:-yes}" = yes ]; then
+          printf 'ready\n' > "$FM_FAKE_KIMI_STATE"
+        else
+          printf 'launched\n' > "$FM_FAKE_KIMI_STATE"
+        fi
         exit 0
         ;;
     esac
     case " $* " in
       *' Enter '*)
         case "$state" in
-          launched)
-            if [ "${FM_FAKE_KIMI_READY:-yes}" = yes ]; then
-              printf 'ready\n' > "$FM_FAKE_KIMI_STATE"
-            fi
+          ready)
+            printf 'unexpected-enter\n' > "$FM_FAKE_KIMI_STATE"
             ;;
           pointer-typed)
             if [ "${FM_FAKE_KIMI_DELIVERY:-yes}" = yes ]; then

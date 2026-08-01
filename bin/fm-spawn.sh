@@ -1295,11 +1295,13 @@ spawn_stage_launch() {  # <target> <launch> <token>
 
 spawn_deliver_launch() {  # <target> <launch>
   local target=$1 launch=$2 retries=${FM_SPAWN_LAUNCH_DELIVERY_RETRIES:-3}
-  local token attempt=1
+  local token token_sum attempt=1
   case "$retries" in ''|*[!0-9]*) retries=3 ;; esac
   [ "$retries" -gt 0 ] || retries=3
   while [ "$attempt" -le "$retries" ]; do
-    token="${ID}-${RANDOM}-${attempt}"
+    token_sum=$(printf '%s' "$RANDOM:$attempt" | cksum) || return 1
+    token_sum=${token_sum%% *}
+    printf -v token '%010u' "$token_sum"
     if spawn_wait_for_shell_ready "$target" "$token" \
       && spawn_stage_launch "$target" "$launch" "$token"; then
       spawn_send_text_line "$target" 'eval "$FM_SPAWN_LAUNCH"' || return 1
@@ -1644,7 +1646,6 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
-spawn_send_key "$T" Enter
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"

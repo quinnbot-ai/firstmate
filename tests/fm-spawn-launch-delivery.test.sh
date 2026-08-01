@@ -18,6 +18,9 @@ set -u
 screen=${FM_FAKE_SCREEN:?}
 log=${FM_FAKE_TMUX_LOG:?}
 attempts=${FM_FAKE_ATTEMPTS:?}
+write_screen_line() {
+  printf '%s\n' "$1" | fold -w "${FM_FAKE_PANE_COLUMNS:-80}" > "$screen"
+}
 case "${1:-}" in
   display-message)
     case "$*" in
@@ -35,7 +38,7 @@ case "${1:-}" in
     case "$text" in
       *"__FM_SPAWN_READY_"*)
         token=$(printf '%s\n' "$text" | sed -n "s/.*'__FM_SPAWN_READY_' '\([^']*\)'.*/\1/p")
-        [ -n "$token" ] && printf '__FM_SPAWN_READY_%s\n' "$token" > "$screen"
+        [ -n "$token" ] && write_screen_line "__FM_SPAWN_READY_$token"
         ;;
       *"__FM_SPAWN_LAUNCH_OK_"*)
         token=$(printf '%s\n' "$text" | sed -n "s/.*'__FM_SPAWN_LAUNCH_OK_' '\([^']*\)'.*/\1/p")
@@ -45,7 +48,7 @@ case "${1:-}" in
           # The fixed-offset env-scrub prefix is the live truncation signature.
           printf '/usr/bin/env -u FM_ROOT_OVERRIDE -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE FM_H\n' > "$screen"
         else
-          printf '__FM_SPAWN_LAUNCH_OK_%s\n' "$token" > "$screen"
+          write_screen_line "__FM_SPAWN_LAUNCH_OK_$token"
         fi
         ;;
     esac
@@ -136,7 +139,20 @@ test_refuses_to_report_success_when_every_delivery_check_is_truncated() {
   pass "fm-spawn fails loudly when bounded launch verification never succeeds"
 }
 
+test_long_task_id_keeps_verification_markers_on_one_pane_line() {
+  local id rec out rc
+  id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  rec=$(make_case long-id "$id")
+  read_case "$rec"
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$(long_raw_launch)")
+  rc=$?
+  expect_code 0 "$rc" "64-character task ID should not wrap launch verification markers"$'\n'"$out"
+  assert_contains "$out" "spawned $id" "long task ID did not complete verified launch delivery"
+  pass "fm-spawn keeps verification markers bounded independently of task ID length"
+}
+
 test_retries_the_recorded_truncation_signature_and_never_types_a_long_line
 test_refuses_to_report_success_when_every_delivery_check_is_truncated
+test_long_task_id_keeps_verification_markers_on_one_pane_line
 
 echo "# all fm-spawn-launch-delivery tests passed"
