@@ -376,6 +376,10 @@ read_crew_observation() {  # <task-id>
 
 capture_reservation() {  # <task-id>
   read_crew_observation "$1" || return 1
+  if [ "$CREW_OBS_KIND" = unavailable ] && [ "$CREW_OBS_START" = none ]; then
+    lane_error "cannot reserve validation slot for $1 without comparable run evidence"
+    return 1
+  fi
   LANE_RESERVATION_KIND=$CREW_OBS_KIND
   LANE_RESERVATION_RUN=$CREW_OBS_RUN
   LANE_RESERVATION_START=$CREW_OBS_START

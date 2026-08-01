@@ -45,8 +45,10 @@ if [ "${1:-}" = --validation-lane ]; then
   else
     run_id=
   fi
-  if [ "$source" = run-step ]; then
-    run_start=${FM_TEST_CREW_RUN_START:-2026-08-01T12:00#1}
+  if [ "${FM_TEST_CREW_RUN_START+x}" = x ]; then
+    run_start=$FM_TEST_CREW_RUN_START
+  elif [ "$source" = run-step ]; then
+    run_start=2026-08-01T12:00#1
   else
     run_start=
   fi
@@ -269,6 +271,22 @@ test_run_start_binds_unavailable_completion_between_checks() {
   pass "validation lane: run-start evidence binds unavailable completion"
 }
 
+test_unavailable_empty_evidence_keeps_head_queued() {
+  local dir status=0 out
+  dir=$(make_case unavailable-empty)
+  FM_TEST_CREW_RUN_KIND=unavailable FM_TEST_CREW_RUN_START= \
+    run_lane "$dir" enqueue alpha > "$dir/enqueue.out" 2> "$dir/enqueue.err" || status=$?
+  expect_code 1 "$status" "unavailable empty reservation evidence"
+  assert_contains "$(cat "$dir/enqueue.err")" "without comparable run evidence" "unavailable empty evidence was not diagnosed"
+  assert_state "$dir" $'fm-validation-lane-v2\nqueued=alpha' "unavailable empty evidence did not retain the FIFO head"
+  [ ! -s "$dir/send.log" ] || fail "unavailable empty evidence delivered the FIFO head"
+  [ -f "$dir/home/state/validation-lane.check-trust" ] || fail "unavailable empty evidence did not retain its watcher"
+  out=$(FM_TEST_CREW_RUN_KIND=unavailable FM_TEST_CREW_RUN_START="$PRIOR_START" run_lane "$dir" check)
+  assert_contains "$out" "released alpha" "comparable evidence did not release the retained FIFO head"
+  assert_state "$dir" "$(owner_state holder alpha unavailable none "$PRIOR_START" terminal 0)" "comparable evidence did not preserve reservation ownership"
+  pass "validation lane: unavailable empty evidence retains the watched FIFO head"
+}
+
 test_concurrent_releasers_have_one_sender() {
   local dir first_pid second_pid first_status=0 second_status=0 sends out
   dir=$(make_case one-sender)
@@ -315,5 +333,6 @@ test_prior_terminal_run_cannot_clear_a_new_reservation
 test_post_reservation_transition_binds_coarse_run_completion
 test_run_start_binds_coarse_completion_between_checks
 test_run_start_binds_unavailable_completion_between_checks
+test_unavailable_empty_evidence_keeps_head_queued
 test_concurrent_releasers_have_one_sender
 test_duplicate_enqueue_repairs_registration_and_pending_delivery
