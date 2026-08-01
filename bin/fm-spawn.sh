@@ -1266,7 +1266,8 @@ spawn_wait_for_marker() {  # <target> <marker>
 }
 
 spawn_wait_for_shell_ready() {  # <target> <token>
-  local target=$1 token=$2 marker="__FM_SPAWN_READY_$token"
+  local target=$1 token=$2
+  local marker="__FM_SPAWN_READY_$token"
   # The full marker is intentionally absent from the typed command, so seeing
   # an exact marker line proves the shell executed the probe rather than merely
   # echoing bytes that arrived before its line editor was ready.
@@ -1312,6 +1313,7 @@ spawn_deliver_launch() {  # <target> <launch>
     printf -v token '%010u' "$token_sum"
     if spawn_wait_for_shell_ready "$target" "$token" \
       && spawn_stage_launch "$target" "$launch" "$token"; then
+      # shellcheck disable=SC2016 # Expand the staged launch in the target shell.
       spawn_send_text_line "$target" 'eval "$FM_SPAWN_LAUNCH"' || return 1
       return 0
     fi

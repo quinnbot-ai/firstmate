@@ -129,8 +129,8 @@ long_raw_launch() {
 }
 
 test_retries_the_recorded_truncation_signature_and_never_types_a_long_line() {
-  local id=launch-retry-z1 rec out rc launch
-  id=launch-retry-z1
+  local id rec out rc
+  id='launch-retry-z1'
   rec=$(make_case retry "$id")
   read_case "$rec"
   out=$(FM_FAKE_TRUNCATE_ATTEMPTS=1 FM_SPAWN_LAUNCH_DELIVERY_RETRIES=3 \
@@ -165,8 +165,8 @@ test_retries_the_recorded_truncation_signature_and_never_types_a_long_line() {
 }
 
 test_refuses_to_report_success_when_every_delivery_check_is_truncated() {
-  local id=launch-refuse-z2 rec out rc
-  id=launch-refuse-z2
+  local id rec out rc
+  id='launch-refuse-z2'
   rec=$(make_case refuse "$id")
   read_case "$rec"
   out=$(FM_FAKE_TRUNCATE_ATTEMPTS=3 FM_SPAWN_LAUNCH_DELIVERY_RETRIES=2 \
