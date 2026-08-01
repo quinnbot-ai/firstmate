@@ -193,7 +193,7 @@ test_generated_check_executes_scheduler_without_live_runtime() {
   pass "validation lane: registered watcher check releases a terminal holder through fixture transport"
 }
 
-test_watcher_check_releases_and_queues_a_wake() {
+test_terminal_status_event_releases_and_queues_a_wake() {
   local dir out status drained
   dir=$(make_case watcher)
   printf '%s\n' fm-pr-check-migration-scan-v1 > "$dir/home/state/.pr-check-migration-scan-v1"
@@ -201,6 +201,8 @@ test_watcher_check_releases_and_queues_a_wake() {
   chmod 0600 "$dir/home/state/.pr-check-migration-scan-v1" "$dir/home/state/.pr-check-migration-v1"
   run_lane "$dir" enqueue alpha >/dev/null
   run_lane "$dir" enqueue beta >/dev/null
+  touch "$dir/home/state/.last-check"
+  printf 'done: implementation complete\n' > "$dir/home/state/alpha.status"
   status=0
   FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
     FM_VALIDATION_LANE_SEND_BIN="$dir/fakebin/send" \
@@ -208,7 +210,7 @@ test_watcher_check_releases_and_queues_a_wake() {
     FM_TEST_SEND_LOG="$dir/send.log" \
     FM_TEST_CREW_STATE='state: done · source: run-step · checks green' \
     FM_TEST_CREW_RUN_ID=run-alpha FM_TEST_CREW_RUN_START="$NEXT_START" \
-    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     "$CHECKPOINT" --seconds 5 > "$dir/checkpoint.out" 2> "$dir/checkpoint.err" || status=$?
   expect_code 0 "$status" "watcher checkpoint exit"
   out=$(cat "$dir/checkpoint.out")
@@ -217,7 +219,7 @@ test_watcher_check_releases_and_queues_a_wake() {
   drained=$(FM_HOME="$dir/home" "$ROOT/bin/fm-wake-drain.sh")
   assert_contains "$drained" $'\tcheck\t' "watcher release wake was not queued"
   assert_contains "$drained" 'released beta' "queued watcher wake lost release diagnostic"
-  pass "validation lane: watcher check releases through the authenticated check path"
+  pass "validation lane: terminal status event runs the authenticated release check"
 }
 
 test_prior_terminal_run_cannot_clear_a_new_reservation() {
@@ -234,18 +236,36 @@ test_prior_terminal_run_cannot_clear_a_new_reservation() {
   pass "validation lane: completion is bound to a post-reservation run identity"
 }
 
+test_same_run_state_changes_do_not_start_reservation() {
+  local dir out
+  dir=$(make_case same-run-state)
+  run_lane "$dir" enqueue alpha >/dev/null
+  run_lane "$dir" enqueue beta >/dev/null
+  FM_TEST_CREW_STATE='state: working · source: run-step · validating' \
+    run_lane "$dir" check > "$dir/working.out"
+  [ ! -s "$dir/working.out" ] || fail "same run working state released the reservation"
+  assert_state "$dir" "$(owner_state holder alpha full prior "$PRIOR_START" terminal 0 beta)" \
+    "same run state change marked the reservation started"
+  out=$(run_lane "$dir" check)
+  [ -z "$out" ] || fail "same run terminal state released the reservation"
+  assert_state "$dir" "$(owner_state holder alpha full prior "$PRIOR_START" terminal 0 beta)" \
+    "same run terminal state changed validation ownership"
+  pass "validation lane: same run state changes cannot prove a new start"
+}
+
 test_post_reservation_transition_binds_coarse_run_completion() {
   local dir out
   dir=$(make_case transition)
   run_lane "$dir" enqueue alpha >/dev/null
   run_lane "$dir" enqueue beta >/dev/null
   FM_TEST_CREW_STATE='state: working · source: run-step · validating' \
-    FM_TEST_CREW_RUN_KIND=coarse run_lane "$dir" check > "$dir/active.out"
+    FM_TEST_CREW_RUN_KIND=coarse FM_TEST_CREW_RUN_START="$NEXT_START" \
+    run_lane "$dir" check > "$dir/active.out"
   [ ! -s "$dir/active.out" ] || fail "active coarse run released the slot"
   assert_state "$dir" "$(owner_state holder alpha full prior "$PRIOR_START" terminal 1 beta)" "post-reservation transition was not recorded"
-  out=$(FM_TEST_CREW_RUN_KIND=coarse run_lane "$dir" check)
+  out=$(FM_TEST_CREW_RUN_KIND=coarse FM_TEST_CREW_RUN_START="$NEXT_START" run_lane "$dir" check)
   assert_contains "$out" "released beta" "terminal coarse transition did not release the next task"
-  assert_state "$dir" "$(owner_state holder beta coarse none "$PRIOR_START" terminal 0)" "coarse transition did not transfer the slot"
+  assert_state "$dir" "$(owner_state holder beta coarse none "$NEXT_START" terminal 0)" "coarse transition did not transfer the slot"
   pass "validation lane: post-reservation run transition binds coarse completion"
 }
 
@@ -358,8 +378,9 @@ test_status_log_terminal_does_not_free_a_slot
 test_empty_lane_retires_its_watcher_artifacts
 test_failed_delivery_remains_pending_and_is_retried
 test_generated_check_executes_scheduler_without_live_runtime
-test_watcher_check_releases_and_queues_a_wake
+test_terminal_status_event_releases_and_queues_a_wake
 test_prior_terminal_run_cannot_clear_a_new_reservation
+test_same_run_state_changes_do_not_start_reservation
 test_post_reservation_transition_binds_coarse_run_completion
 test_run_start_binds_coarse_completion_between_checks
 test_run_start_binds_unavailable_completion_between_checks

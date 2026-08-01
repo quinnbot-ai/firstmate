@@ -88,6 +88,9 @@ case "${1:-}" in
     esac
     ;;
   runs)
+    if [ "${FM_FAKE_RUNS_TERM:-0}" = 1 ]; then
+      kill -TERM "$$"
+    fi
     printf '%s\n' "${FM_FAKE_RUNS_LIST:-}"
     exit "${FM_FAKE_RUNS_RC:-0}" ;;
 esac
@@ -1240,6 +1243,23 @@ SH
   pass "no timeout command uses perl bound"
 }
 
+test_perl_bound_preserves_signaled_runs_failure() {
+  reset_fakes
+  local d toolbin out
+  d=$(new_case signaled-runs)
+  make_repo_on_branch "$d/wt" fm/feat-signaled-runs
+  make_fakebin "$d" >/dev/null
+  toolbin=$(make_no_timeout_toolbin "$d")
+  fm_write_meta "$d/state/feat-signaled-runs.meta" "window=fm:fm-feat-signaled-runs" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  out=$(FM_FAKE_RUNS_TERM=1 PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" \
+    "$CREW_STATE" --validation-lane feat-signaled-runs)
+  assert_contains "$out" "run-kind=unavailable" "signaled runs lookup was not unavailable"
+  assert_not_contains "$out" "run-kind=absent" "signaled runs lookup was classified as absent"
+  pass "perl bound preserves signaled runs lookup failure"
+}
+
 # (i) kind=scout skips the run lookup entirely (its deliverable is a report).
 test_scout_skips_run_lookup() {
   reset_fakes
@@ -1478,6 +1498,7 @@ test_dead_window_ignores_stale_status_log
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step
 test_no_timeout_uses_perl_bound
+test_perl_bound_preserves_signaled_runs_failure
 test_scout_skips_run_lookup
 test_torn_down_worktree
 test_missing_meta

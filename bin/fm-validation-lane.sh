@@ -469,10 +469,7 @@ holder_terminal() {
   if [ "$CREW_OBS_START" != none ] && [ "$CREW_OBS_START" != "$LANE_RESERVATION_START" ]; then
     identity_started=1
   fi
-  if [ "$identity_started" -eq 1 ] \
-    || { [ "$LANE_RESERVATION_STATE" = terminal ] \
-      && [ "$CREW_OBS_SOURCE" = run-step ] \
-      && [ "$CREW_OBS_STATE" != "done" ] && [ "$CREW_OBS_STATE" != "failed" ]; }; then
+  if [ "$identity_started" -eq 1 ]; then
     LANE_RESERVATION_STARTED=1
   fi
   [ "$LANE_RESERVATION_STARTED" = 1 ] \

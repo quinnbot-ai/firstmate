@@ -539,6 +539,24 @@ run_check_capture() {
   fm_check_output_cleanup
 }
 
+FM_VALIDATION_LANE_EVENT_RESULT=
+run_validation_lane_event_check() {
+  local c="$STATE/validation-lane.check.sh" custom_snapshot
+  FM_VALIDATION_LANE_EVENT_RESULT=
+  [ -e "$c" ] || return 0
+  if ! fm_custom_check_snapshot_prepare "$STATE" validation-lane; then
+    fm_custom_check_snapshot_cleanup
+    return 2
+  fi
+  custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
+  run_check_capture "$custom_snapshot" || {
+    fm_custom_check_snapshot_cleanup
+    return 1
+  }
+  FM_VALIDATION_LANE_EVENT_RESULT=$FM_CHECK_RESULT
+  fm_custom_check_snapshot_cleanup
+}
+
 # Surfaced-marker bookkeeping for the heartbeat backstop is owned by
 # fm-push-transition-lib.sh because push and poll paths must write one format.
 # Mark every current captain-relevant status as surfaced. Called after the
@@ -825,12 +843,18 @@ while :; do
   # signature for an already-pending file (last write wins below).
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
+    terminal_status_event=0
     sleep "$SIGNAL_GRACE"
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
     files=""
     while IFS=$(printf '\t') read -r sf sig f; do
       [ -n "$sf" ] || continue
       case " $files " in *" $f "*) ;; *) files="$files $f" ;; esac
+      case "$f" in
+        *.status)
+          status_is_terminal_verb "$(last_status_line "$f")" && terminal_status_event=1
+          ;;
+      esac
     done <<EOF
 $pending
 EOF
@@ -863,6 +887,27 @@ EOF
       done <<EOF
 $pending
 EOF
+      if [ "$terminal_status_event" -eq 1 ]; then
+        terminal_check_rc=0
+        run_validation_lane_event_check || terminal_check_rc=$?
+        case "$terminal_check_rc" in
+          0)
+            if [ -n "$FM_VALIDATION_LANE_EVENT_RESULT" ]; then
+              check_path="$STATE/validation-lane.check.sh"
+              reason="check: $check_path: $FM_VALIDATION_LANE_EVENT_RESULT"
+              fm_wake_append check "$check_path" "$reason" || exit 1
+              wake "$reason"
+            fi
+            ;;
+          2)
+            check_path="$STATE/validation-lane.check.sh"
+            reason="check: rejected unauthenticated state checks: $check_path"
+            fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
+            wake "$reason"
+            ;;
+          *) exit 1 ;;
+        esac
+      fi
       wake "$reason"
     else
       while IFS=$(printf '\t') read -r sf sig f; do
