@@ -27,8 +27,12 @@ printf '%s|%s\n' "$1" "${*:2}" >> "$FM_TEST_SEND_LOG"
 printf '%s\n' "${FM_TEST_SEND_OUTPUT:-}"
 exit "${FM_TEST_SEND_RC:-0}"
 SH
-  cat > "$dir/fakebin/crew-state" <<'SH'
+cat > "$dir/fakebin/crew-state" <<'SH'
 #!/usr/bin/env bash
+if [ "${FM_TEST_CREW_STATE_RC:-0}" -ne 0 ]; then
+  printf '%s\n' "${FM_TEST_CREW_STATE_ERROR:-fixture crew-state failure}" >&2
+  exit "$FM_TEST_CREW_STATE_RC"
+fi
 line=${FM_TEST_CREW_STATE:-state: done · source: run-step · prior validation}
 if [ "${1:-}" = --validation-lane ]; then
   state=${line#state: }
@@ -222,6 +226,77 @@ test_terminal_status_event_releases_and_queues_a_wake() {
   pass "validation lane: terminal status event runs the authenticated release check"
 }
 
+test_terminal_status_event_surfaces_and_retries_lane_failure() {
+  local dir out status drained
+  dir=$(make_case watcher-failure)
+  printf '%s\n' fm-pr-check-migration-scan-v1 > "$dir/home/state/.pr-check-migration-scan-v1"
+  printf '%s\n' fm-pr-check-migration-v1 > "$dir/home/state/.pr-check-migration-v1"
+  chmod 0600 "$dir/home/state/.pr-check-migration-scan-v1" "$dir/home/state/.pr-check-migration-v1"
+  run_lane "$dir" enqueue alpha >/dev/null
+  run_lane "$dir" enqueue beta >/dev/null
+  touch "$dir/home/state/.last-check"
+  printf 'done: implementation complete\n' > "$dir/home/state/alpha.status"
+  status=0
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+    FM_VALIDATION_LANE_SEND_BIN="$dir/fakebin/send" \
+    FM_VALIDATION_LANE_CREW_STATE_BIN="$dir/fakebin/crew-state" \
+    FM_TEST_SEND_LOG="$dir/send.log" FM_TEST_CREW_STATE_RC=7 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$CHECKPOINT" --seconds 5 > "$dir/failed.out" 2> "$dir/failed.err" || status=$?
+  expect_code 0 "$status" "failing lane event checkpoint exit"
+  out=$(cat "$dir/failed.out")
+  assert_contains "$out" \
+    "check: $dir/home/state/validation-lane.check.sh failed (exit 1): validation-lane: cannot read reservation state for alpha" \
+    "watcher did not surface the lane check failure"
+  assert_state "$dir" "$(owner_state holder alpha full prior "$PRIOR_START" terminal 0 beta)" \
+    "lane check failure changed validation ownership"
+  [ ! -e "$dir/home/state/.seen-alpha_status" ] || fail "lane check failure consumed its retry signal"
+  drained=$(FM_HOME="$dir/home" "$ROOT/bin/fm-wake-drain.sh")
+  assert_contains "$drained" $'\tcheck\t' "lane check failure wake was not queued"
+  assert_contains "$drained" 'cannot read reservation state for alpha' \
+    "lane check failure wake lost its diagnostic"
+  status=0
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+    FM_VALIDATION_LANE_SEND_BIN="$dir/fakebin/send" \
+    FM_VALIDATION_LANE_CREW_STATE_BIN="$dir/fakebin/crew-state" \
+    FM_TEST_SEND_LOG="$dir/send.log" \
+    FM_TEST_CREW_STATE='state: done · source: run-step · checks green' \
+    FM_TEST_CREW_RUN_ID=run-alpha FM_TEST_CREW_RUN_START="$NEXT_START" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$CHECKPOINT" --seconds 5 > "$dir/retry.out" 2> "$dir/retry.err" || status=$?
+  expect_code 0 "$status" "retried lane event checkpoint exit"
+  assert_contains "$(cat "$dir/retry.out")" "released beta" \
+    "unconsumed terminal event did not retry the lane check"
+  assert_state "$dir" "$(owner_state holder beta full run-alpha "$NEXT_START" terminal 0)" \
+    "retried lane check did not transfer validation ownership"
+  pass "validation lane: terminal event failures stay loud and retryable"
+}
+
+test_periodic_lane_failure_is_loud() {
+  local dir out status
+  dir=$(make_case periodic-failure)
+  printf '%s\n' fm-pr-check-migration-scan-v1 > "$dir/home/state/.pr-check-migration-scan-v1"
+  printf '%s\n' fm-pr-check-migration-v1 > "$dir/home/state/.pr-check-migration-v1"
+  chmod 0600 "$dir/home/state/.pr-check-migration-scan-v1" "$dir/home/state/.pr-check-migration-v1"
+  run_lane "$dir" enqueue alpha >/dev/null
+  run_lane "$dir" enqueue beta >/dev/null
+  status=0
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+    FM_VALIDATION_LANE_SEND_BIN="$dir/fakebin/send" \
+    FM_VALIDATION_LANE_CREW_STATE_BIN="$dir/fakebin/crew-state" \
+    FM_TEST_SEND_LOG="$dir/send.log" FM_TEST_CREW_STATE_RC=7 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 \
+    "$CHECKPOINT" --seconds 5 > "$dir/checkpoint.out" 2> "$dir/checkpoint.err" || status=$?
+  expect_code 0 "$status" "failing periodic lane checkpoint exit"
+  out=$(cat "$dir/checkpoint.out")
+  assert_contains "$out" \
+    "check: $dir/home/state/validation-lane.check.sh failed (exit 1): validation-lane: cannot read reservation state for alpha" \
+    "periodic lane failure was silent"
+  assert_state "$dir" "$(owner_state holder alpha full prior "$PRIOR_START" terminal 0 beta)" \
+    "periodic lane failure changed validation ownership"
+  pass "validation lane: periodic check failures stay loud"
+}
+
 test_prior_terminal_run_cannot_clear_a_new_reservation() {
   local dir out
   dir=$(make_case stale-terminal)
@@ -379,6 +454,8 @@ test_empty_lane_retires_its_watcher_artifacts
 test_failed_delivery_remains_pending_and_is_retried
 test_generated_check_executes_scheduler_without_live_runtime
 test_terminal_status_event_releases_and_queues_a_wake
+test_terminal_status_event_surfaces_and_retries_lane_failure
+test_periodic_lane_failure_is_loud
 test_prior_terminal_run_cannot_clear_a_new_reservation
 test_same_run_state_changes_do_not_start_reservation
 test_post_reservation_transition_binds_coarse_run_completion
