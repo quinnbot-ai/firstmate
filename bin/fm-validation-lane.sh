@@ -428,7 +428,7 @@ deliver_release() {
 }
 
 enqueue() {  # <task-id>
-  local task=$1 release= reserve_ok=1
+  local task=$1 release='' reserve_ok=1
   fm_pr_task_id_valid "$task" || { lane_error "invalid task id"; return 2; }
   lane_lock || return 1
   if ! read_lane; then lane_unlock; return 1; fi
@@ -473,16 +473,16 @@ holder_terminal() {
   if [ "$identity_started" -eq 1 ] \
     || { [ "$LANE_RESERVATION_STATE" = terminal ] \
       && [ "$CREW_OBS_SOURCE" = run-step ] \
-      && [ "$CREW_OBS_STATE" != done ] && [ "$CREW_OBS_STATE" != failed ]; }; then
+      && [ "$CREW_OBS_STATE" != "done" ] && [ "$CREW_OBS_STATE" != "failed" ]; }; then
     LANE_RESERVATION_STARTED=1
   fi
   [ "$LANE_RESERVATION_STARTED" = 1 ] \
     && [ "$CREW_OBS_SOURCE" = run-step ] \
-    && { [ "$CREW_OBS_STATE" = done ] || [ "$CREW_OBS_STATE" = failed ]; }
+    && { [ "$CREW_OBS_STATE" = "done" ] || [ "$CREW_OBS_STATE" = "failed" ]; }
 }
 
 check() {
-  local release= reserve_ok=1 terminal_rc
+  local release='' reserve_ok=1 terminal_rc
   lane_lock || return 1
   if ! read_lane; then lane_unlock; return 1; fi
   if [ -n "$LANE_HOLDER" ]; then

@@ -274,7 +274,7 @@ test_run_start_binds_unavailable_completion_between_checks() {
 test_unavailable_empty_evidence_keeps_head_queued() {
   local dir status=0 out
   dir=$(make_case unavailable-empty)
-  FM_TEST_CREW_RUN_KIND=unavailable FM_TEST_CREW_RUN_START= \
+  FM_TEST_CREW_RUN_KIND=unavailable FM_TEST_CREW_RUN_START='' \
     run_lane "$dir" enqueue alpha > "$dir/enqueue.out" 2> "$dir/enqueue.err" || status=$?
   expect_code 1 "$status" "unavailable empty reservation evidence"
   assert_contains "$(cat "$dir/enqueue.err")" "without comparable run evidence" "unavailable empty evidence was not diagnosed"
@@ -296,7 +296,7 @@ test_unavailable_empty_terminal_retains_started_holder() {
     FM_TEST_CREW_RUN_ID=run-alpha FM_TEST_CREW_RUN_START="$NEXT_START" run_lane "$dir" check > "$dir/active.out"
   [ ! -s "$dir/active.out" ] || fail "active run released the holder"
   assert_state "$dir" "$(owner_state holder alpha full prior "$PRIOR_START" terminal 1 beta)" "active run was not recorded for the holder"
-  out=$(FM_TEST_CREW_RUN_KIND=unavailable FM_TEST_CREW_RUN_START= run_lane "$dir" check)
+  out=$(FM_TEST_CREW_RUN_KIND=unavailable FM_TEST_CREW_RUN_START='' run_lane "$dir" check)
   [ -z "$out" ] || fail "unavailable empty terminal evidence released the holder"
   assert_state "$dir" "$(owner_state holder alpha full prior "$PRIOR_START" terminal 1 beta)" "unavailable empty terminal evidence changed the holder"
   [ "$(wc -l < "$dir/send.log" | tr -d '[:space:]')" = 1 ] || fail "unavailable empty terminal evidence sent the queued task"

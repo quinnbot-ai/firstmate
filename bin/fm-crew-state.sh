@@ -372,7 +372,7 @@ nm_ci_checks_state() {
 # matching row's status word (running/completed/cancelled/failed), or empty
 # when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
 nm_runs_observation_for_branch() {  # <branch>
-  local branch=$1 out row st rest br sha date_part time_part limit selected_date= selected_time= occurrence=0
+  local branch=$1 out row st rest br sha date_part time_part limit selected_date='' selected_time='' occurrence=0
   COARSE_STATUS=
   COARSE_START=
   limit=$FM_CREW_STATE_RUNS_LIMIT
