@@ -159,6 +159,8 @@ The helper's header owns the exact signal detection, relocated-home limitation, 
 Each Firstmate home has one no-mistakes validation slot so the shared validator is not started concurrently by multiple crews.
 After an implementation commit, Firstmate enqueues the task through `bin/fm-validation-lane.sh`; a terminal crew-status event makes the watcher run the registered lane check immediately, and the scheduler releases the next FIFO task through `fm-send` only after observing a reservation-bound authoritative terminal run-step.
 `bin/fm-crew-state.sh` owns current-run attribution and exposes comparable run-start evidence so a run that completes between watcher checks remains bound to its reservation.
+A stale terminal observation from before delivery cannot release a new reservation; only an authoritative terminal run-step carrying affirmative evidence that its run started after the reservation can do so.
+Unavailable run identity with empty run-start evidence always fails closed: an unreserved FIFO head stays queued and an existing holder stays held, even after the scheduler previously observed that holder's run as active.
 The released crew starts and owns its own no-mistakes run, including every later gate response, while the scheduler only reserves and delivers the slot.
 Failed delivery remains a durable pending release and emits a check diagnostic, so the queue head is never silently skipped.
 `bin/fm-validation-lane.sh` owns the state format, locking, check registration, and exact delivery mechanics.
