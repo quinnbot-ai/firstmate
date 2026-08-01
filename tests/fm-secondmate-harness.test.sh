@@ -394,6 +394,31 @@ make_noop_tmux() {
   mkdir -p "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  capture-pane) cat "$(dirname "$0")/.spawn-screen" 2>/dev/null || true; exit 0 ;;
+  send-keys)
+    screen="$(dirname "$0")/.spawn-screen"
+    staged="$screen.staged"
+    text=${4:-}
+    case "$text" in
+      *"__FM_SPAWN_READY_"*)
+        token=$(printf '%s\n' "$text" | sed -n "s/.*'__FM_SPAWN_READY_' '\([^']*\)'.*/\1/p")
+        [ -z "$token" ] || printf '__FM_SPAWN_READY_%s\n' "$token" > "$screen"
+        ;;
+      "FM_SPAWN_LAUNCH=''") : > "$staged" ;;
+      FM_SPAWN_LAUNCH=*)
+        rebuilt=$(FM_SPAWN_LAUNCH="$(cat "$staged")" bash -c "$text; printf '%s' \"\$FM_SPAWN_LAUNCH\"")
+        printf '%s' "$rebuilt" > "$staged"
+        ;;
+      *"__FM_SPAWN_LAUNCH_OK_"*)
+        token=$(printf '%s\n' "$text" | sed -n "s/.*'__FM_SPAWN_LAUNCH_OK_' '\([^']*\)'.*/\1/p")
+        [ -z "$token" ] || printf '__FM_SPAWN_LAUNCH_OK_%s\n' "$token" > "$screen"
+        ;;
+    esac
+    exit 0
+    ;;
+esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
@@ -580,16 +605,29 @@ case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
+  capture-pane) cat "$(dirname "$0")/.spawn-screen" 2>/dev/null || true; exit 0 ;;
   send-keys)
-    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
-      prev=
-      for a in "$@"; do
-        if [ "$prev" = "-l" ]; then
-          printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
-        fi
-        prev=$a
-      done
-    fi
+    screen="$(dirname "$0")/.spawn-screen"
+    staged="$screen.staged"
+    text=${4:-}
+    case "$text" in
+      *"__FM_SPAWN_READY_"*)
+        token=$(printf '%s\n' "$text" | sed -n "s/.*'__FM_SPAWN_READY_' '\([^']*\)'.*/\1/p")
+        [ -z "$token" ] || printf '__FM_SPAWN_READY_%s\n' "$token" > "$screen"
+        ;;
+      "FM_SPAWN_LAUNCH=''") : > "$staged" ;;
+      FM_SPAWN_LAUNCH=*)
+        rebuilt=$(FM_SPAWN_LAUNCH="$(cat "$staged")" bash -c "$text; printf '%s' \"\$FM_SPAWN_LAUNCH\"")
+        printf '%s' "$rebuilt" > "$staged"
+        ;;
+      *"__FM_SPAWN_LAUNCH_OK_"*)
+        token=$(printf '%s\n' "$text" | sed -n "s/.*'__FM_SPAWN_LAUNCH_OK_' '\([^']*\)'.*/\1/p")
+        [ -z "$token" ] || printf '__FM_SPAWN_LAUNCH_OK_%s\n' "$token" > "$screen"
+        ;;
+      'eval "$FM_SPAWN_LAUNCH"')
+        [ -z "${FM_FAKE_LAUNCH_LOG:-}" ] || cat "$staged" >> "$FM_FAKE_LAUNCH_LOG"
+        ;;
+    esac
     exit 0
     ;;
 esac
