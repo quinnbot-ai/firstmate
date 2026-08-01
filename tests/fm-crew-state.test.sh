@@ -690,16 +690,18 @@ test_terminal_failed() {
 
 test_validation_lane_record_binds_full_run_identity() {
   reset_fakes
-  local d out
+  local d short out
   d=$(new_case validation-lane-full)
   make_repo_on_branch "$d/wt" fm/feat-lane-full
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/lane-full.meta" "window=fm:fm-lane-full" "worktree=$d/wt" "kind=ship"
   FM_FAKE_AXI_STATUS="$(run_passed fm/feat-lane-full)"
+  FM_FAKE_RUNS_LIST="completed fm/feat-lane-full ${short} 2026-08-01 12:00"
   out=$(run_crew_validation "$d" lane-full)
-  [ "$out" = $'fm-crew-validation-v1\nstate=done\nsource=run-step\nrun-kind=full\nrun-id=01RUN' ] \
+  [ "$out" = $'fm-crew-validation-v2\nstate=done\nsource=run-step\nrun-kind=full\nrun-id=01RUN\nrun-start=2026-08-01T12:00#1' ] \
     || fail "validation lane record did not expose the full run identity (got: $out)"
-  pass "validation lane record binds a full authoritative run identity"
+  pass "validation lane record binds full identity and run-start evidence"
 }
 
 test_validation_lane_record_marks_coarse_run_without_identity() {
@@ -713,9 +715,41 @@ test_validation_lane_record_marks_coarse_run_without_identity() {
   FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
   FM_FAKE_RUNS_LIST="running fm/feat-lane-coarse ${short} 2026-08-01 12:00"
   out=$(run_crew_validation "$d" lane-coarse)
-  [ "$out" = $'fm-crew-validation-v1\nstate=working\nsource=run-step\nrun-kind=coarse\nrun-id=' ] \
+  [ "$out" = $'fm-crew-validation-v2\nstate=working\nsource=run-step\nrun-kind=coarse\nrun-id=\nrun-start=2026-08-01T12:00#1' ] \
     || fail "validation lane record did not preserve coarse evidence (got: $out)"
   pass "validation lane record marks coarse run evidence without inventing identity"
+}
+
+test_validation_lane_record_starts_unavailable_identity() {
+  reset_fakes
+  local d short out
+  d=$(new_case validation-lane-unavailable)
+  make_repo_on_branch "$d/wt" fm/feat-lane-unavailable
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/lane-unavailable.meta" "window=fm:fm-lane-unavailable" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS=$(run_passed fm/feat-lane-unavailable | grep -v '^  id:')
+  FM_FAKE_RUNS_LIST="completed fm/feat-lane-unavailable ${short} 2026-08-01 12:00"
+  out=$(run_crew_validation "$d" lane-unavailable)
+  [ "$out" = $'fm-crew-validation-v2\nstate=done\nsource=run-step\nrun-kind=unavailable\nrun-id=\nrun-start=2026-08-01T12:00#1' ] \
+    || fail "validation lane record lost run-start evidence for unavailable identity (got: $out)"
+  pass "validation lane record preserves run-start evidence without identity"
+}
+
+test_validation_lane_record_distinguishes_same_minute_runs() {
+  reset_fakes
+  local d short out
+  d=$(new_case validation-lane-same-minute)
+  make_repo_on_branch "$d/wt" fm/feat-lane-same-minute
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/lane-same-minute.meta" "window=fm:fm-lane-same-minute" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST=$(printf 'completed fm/feat-lane-same-minute %s 2026-08-01 12:00\ncompleted fm/feat-lane-same-minute %s 2026-08-01 12:00' "$short" "$short")
+  out=$(run_crew_validation "$d" lane-same-minute)
+  [ "$out" = $'fm-crew-validation-v2\nstate=done\nsource=run-step\nrun-kind=coarse\nrun-id=\nrun-start=2026-08-01T12:00#2' ] \
+    || fail "validation lane record did not distinguish same-minute runs (got: $out)"
+  pass "validation lane record distinguishes same-minute coarse run starts"
 }
 
 # (e) cross-branch attribution: `axi status` returns ANOTHER branch's run (the
@@ -1365,6 +1399,8 @@ test_terminal_passed
 test_terminal_failed
 test_validation_lane_record_binds_full_run_identity
 test_validation_lane_record_marks_coarse_run_without_identity
+test_validation_lane_record_starts_unavailable_identity
+test_validation_lane_record_distinguishes_same_minute_runs
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status

@@ -4,12 +4,13 @@
 #        fm-validation-lane.sh check
 #        fm-validation-lane.sh show
 #
-# State lives in state/validation-lane as fm-validation-lane-v1.  It has one
+# State lives in state/validation-lane as fm-validation-lane-v2.  It has one
 # optional holder=<task-id>, one optional release=<task-id>, and zero or more
 # queued=<task-id> records in FIFO order.  An owner also has reservation-kind,
-# reservation-run, reservation-state, and reservation-started records binding
-# completion to run evidence observed after that reservation.  release is the
-# queue head reserved for delivery but not yet confirmed by fm-send; keeping it
+# reservation-run, reservation-start, reservation-state, and
+# reservation-started records binding completion to run evidence observed after
+# that reservation.  release is the queue head reserved for delivery but not
+# yet confirmed by fm-send; keeping it
 # durable means a failed delivery is retried and never silently skipped.
 #
 # enqueue records a task, installs the authenticated watcher check, and releases
@@ -82,6 +83,7 @@ LANE_HOLDER=
 LANE_RELEASE=
 LANE_RESERVATION_KIND=
 LANE_RESERVATION_RUN=
+LANE_RESERVATION_START=
 LANE_RESERVATION_STATE=
 LANE_RESERVATION_STARTED=
 LANE_QUEUE=()
@@ -91,6 +93,7 @@ reset_lane() {
   LANE_RELEASE=
   LANE_RESERVATION_KIND=
   LANE_RESERVATION_RUN=
+  LANE_RESERVATION_START=
   LANE_RESERVATION_STATE=
   LANE_RESERVATION_STARTED=
   LANE_QUEUE=()
@@ -99,6 +102,7 @@ reset_lane() {
 clear_reservation() {
   LANE_RESERVATION_KIND=
   LANE_RESERVATION_RUN=
+  LANE_RESERVATION_START=
   LANE_RESERVATION_STATE=
   LANE_RESERVATION_STARTED=
 }
@@ -115,7 +119,7 @@ lane_id_seen() {  # <id>
 
 read_lane() {
   local line value first=1 holder_seen=0 release_seen=0
-  local reservation_kind_seen=0 reservation_run_seen=0 reservation_state_seen=0 reservation_started_seen=0
+  local reservation_kind_seen=0 reservation_run_seen=0 reservation_start_seen=0 reservation_state_seen=0 reservation_started_seen=0
   reset_lane
   [ -e "$LANE" ] || return 0
   fm_pr_private_file_valid "$LANE" 600 "$LANE_DEVICE" || {
@@ -125,7 +129,7 @@ read_lane() {
   while IFS= read -r line || [ -n "$line" ]; do
     if [ "$first" -eq 1 ]; then
       first=0
-      [ "$line" = fm-validation-lane-v1 ] || {
+      [ "$line" = fm-validation-lane-v2 ] || {
         lane_error "state file has an unknown format"
         return 1
       }
@@ -162,6 +166,13 @@ read_lane() {
         LANE_RESERVATION_RUN=$value
         reservation_run_seen=1
         ;;
+      reservation-start=*)
+        [ "$reservation_start_seen" -eq 0 ] || { lane_error "state has duplicate reservation start evidence"; return 1; }
+        value=${line#reservation-start=}
+        case "$value" in none) ;; *) [[ "$value" =~ ^[0-9a-f]{64}$ ]] || { lane_error "state has invalid reservation start evidence"; return 1; } ;; esac
+        LANE_RESERVATION_START=$value
+        reservation_start_seen=1
+        ;;
       reservation-state=*)
         [ "$reservation_state_seen" -eq 0 ] || { lane_error "state has duplicate reservation state"; return 1; }
         value=${line#reservation-state=}
@@ -191,7 +202,7 @@ read_lane() {
     return 1
   }
   if [ -n "$LANE_HOLDER" ] || [ -n "$LANE_RELEASE" ]; then
-    [ "$reservation_kind_seen" -eq 1 ] && [ "$reservation_run_seen" -eq 1 ] \
+    [ "$reservation_kind_seen" -eq 1 ] && [ "$reservation_run_seen" -eq 1 ] && [ "$reservation_start_seen" -eq 1 ] \
       && [ "$reservation_state_seen" -eq 1 ] && [ "$reservation_started_seen" -eq 1 ] || {
       lane_error "state has an owner without reservation evidence"
       return 1
@@ -205,7 +216,7 @@ read_lane() {
       lane_error "pending release claims a started run"
       return 1
     }
-  elif [ "$reservation_kind_seen" -ne 0 ] || [ "$reservation_run_seen" -ne 0 ] \
+  elif [ "$reservation_kind_seen" -ne 0 ] || [ "$reservation_run_seen" -ne 0 ] || [ "$reservation_start_seen" -ne 0 ] \
     || [ "$reservation_state_seen" -ne 0 ] || [ "$reservation_started_seen" -ne 0 ]; then
     lane_error "state has reservation evidence without an owner"
     return 1
@@ -232,12 +243,13 @@ write_lane() {
   tmp=$(mktemp "$STATE/.fm-validation-lane.XXXXXX") || return 1
   trap 'rm -f -- "${tmp:-}"' RETURN
   {
-    printf '%s\n' fm-validation-lane-v1
+    printf '%s\n' fm-validation-lane-v2
     [ -z "$LANE_HOLDER" ] || printf 'holder=%s\n' "$LANE_HOLDER"
     [ -z "$LANE_RELEASE" ] || printf 'release=%s\n' "$LANE_RELEASE"
     if [ -n "$LANE_HOLDER" ] || [ -n "$LANE_RELEASE" ]; then
       printf 'reservation-kind=%s\n' "$LANE_RESERVATION_KIND"
       printf 'reservation-run=%s\n' "$LANE_RESERVATION_RUN"
+      printf 'reservation-start=%s\n' "$LANE_RESERVATION_START"
       printf 'reservation-state=%s\n' "$LANE_RESERVATION_STATE"
       printf 'reservation-started=%s\n' "$LANE_RESERVATION_STARTED"
     fi
@@ -312,6 +324,7 @@ CREW_OBS_STATE=
 CREW_OBS_SOURCE=
 CREW_OBS_KIND=
 CREW_OBS_RUN=
+CREW_OBS_START=
 
 hash_run_id() {  # <run-id>
   if command -v shasum >/dev/null 2>&1; then
@@ -324,23 +337,25 @@ hash_run_id() {  # <run-id>
 }
 
 read_crew_observation() {  # <task-id>
-  local task=$1 out lines run_id
+  local task=$1 out lines run_id run_start
   CREW_OBS_STATE=
   CREW_OBS_SOURCE=
   CREW_OBS_KIND=
   CREW_OBS_RUN=none
+  CREW_OBS_START=none
   out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$CREW_STATE_BIN" --validation-lane "$task" 2>/dev/null) || {
     lane_error "cannot read reservation state for $task"
     return 1
   }
   lines=$(printf '%s\n' "$out" | wc -l | tr -d '[:space:]')
-  [ "$lines" = 5 ] || { lane_error "reservation state for $task is malformed"; return 1; }
-  [ "$(printf '%s\n' "$out" | sed -n '1p')" = fm-crew-validation-v1 ] \
+  [ "$lines" = 6 ] || { lane_error "reservation state for $task is malformed"; return 1; }
+  [ "$(printf '%s\n' "$out" | sed -n '1p')" = fm-crew-validation-v2 ] \
     || { lane_error "reservation state for $task has an unknown format"; return 1; }
   CREW_OBS_STATE=$(printf '%s\n' "$out" | sed -n '2s/^state=//p')
   CREW_OBS_SOURCE=$(printf '%s\n' "$out" | sed -n '3s/^source=//p')
   CREW_OBS_KIND=$(printf '%s\n' "$out" | sed -n '4s/^run-kind=//p')
   run_id=$(printf '%s\n' "$out" | sed -n '5s/^run-id=//p')
+  run_start=$(printf '%s\n' "$out" | sed -n '6s/^run-start=//p')
   case "$CREW_OBS_STATE" in working|parked|done|blocked|paused|failed|unknown) ;; *) lane_error "reservation state for $task has an invalid state"; return 1 ;; esac
   case "$CREW_OBS_SOURCE" in run-step|pane|status-log|none) ;; *) lane_error "reservation state for $task has an invalid source"; return 1 ;; esac
   case "$CREW_OBS_KIND" in full|coarse|absent|unavailable) ;; *) lane_error "reservation state for $task has an invalid run kind"; return 1 ;; esac
@@ -351,12 +366,19 @@ read_crew_observation() {  # <task-id>
   else
     [ -z "$run_id" ] || { lane_error "reservation state for $task has an unexpected run id"; return 1; }
   fi
+  if [ -n "$run_start" ]; then
+    [[ "$run_start" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}#[1-9][0-9]*$ ]] \
+      || { lane_error "reservation state for $task has invalid run-start evidence"; return 1; }
+    CREW_OBS_START=$(hash_run_id "$run_start") || { lane_error "cannot bind reservation start for $task"; return 1; }
+    [[ "$CREW_OBS_START" =~ ^[0-9a-f]{64}$ ]] || { lane_error "cannot bind reservation start for $task"; return 1; }
+  fi
 }
 
 capture_reservation() {  # <task-id>
   read_crew_observation "$1" || return 1
   LANE_RESERVATION_KIND=$CREW_OBS_KIND
   LANE_RESERVATION_RUN=$CREW_OBS_RUN
+  LANE_RESERVATION_START=$CREW_OBS_START
   case "$CREW_OBS_SOURCE:$CREW_OBS_STATE" in
     run-step:done|run-step:failed) LANE_RESERVATION_STATE=terminal ;;
     run-step:*) LANE_RESERVATION_STATE=active ;;
@@ -431,6 +453,10 @@ holder_terminal() {
     case "$CREW_OBS_KIND" in full|coarse) identity_started=1 ;; esac
   elif [ "$LANE_RESERVATION_KIND" = full ] && [ "$CREW_OBS_KIND" = full ] \
     && [ "$CREW_OBS_RUN" != "$LANE_RESERVATION_RUN" ]; then
+    identity_started=1
+  fi
+  if [ "$LANE_RESERVATION_START" != none ] && [ "$CREW_OBS_START" != none ] \
+    && [ "$CREW_OBS_START" != "$LANE_RESERVATION_START" ]; then
     identity_started=1
   fi
   if [ "$identity_started" -eq 1 ] \

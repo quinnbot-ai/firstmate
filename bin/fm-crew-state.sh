@@ -18,8 +18,8 @@
 #
 #   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
 #
-# `--validation-lane <id>` emits the same verdict as a strict five-line record
-# with full, coarse, absent, or unavailable run identity evidence.
+# `--validation-lane <id>` emits the same verdict as a strict six-line record
+# with full, coarse, absent, or unavailable run identity plus run-start evidence.
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
@@ -91,13 +91,14 @@ case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;;
 SEP=' · '
 RUN_KIND=unavailable
 RUN_ID=
+RUN_START=
 
 # Emit the one canonical line and exit 0. Detail is optional.
 emit() {  # <state> <source> [detail]
   local line="state: $1${SEP}source: $2"
   if [ "$VALIDATION_LANE_MODE" -eq 1 ]; then
-    printf 'fm-crew-validation-v1\nstate=%s\nsource=%s\nrun-kind=%s\nrun-id=%s\n' \
-      "$1" "$2" "$RUN_KIND" "$RUN_ID"
+    printf 'fm-crew-validation-v2\nstate=%s\nsource=%s\nrun-kind=%s\nrun-id=%s\nrun-start=%s\n' \
+      "$1" "$2" "$RUN_KIND" "$RUN_ID" "$RUN_START"
     exit 0
   fi
   [ -n "${3:-}" ] && line="$line${SEP}$3"
@@ -370,9 +371,13 @@ nm_ci_checks_state() {
 # is a run for THIS branch active right now. Echoes the first (most recent)
 # matching row's status word (running/completed/cancelled/failed), or empty
 # when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
-nm_runs_status_for_branch() {  # <branch>
-  local branch=$1 out row st rest br sha
-  out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
+nm_runs_observation_for_branch() {  # <branch>
+  local branch=$1 out row st rest br sha date_part time_part limit selected_date= selected_time= occurrence=0
+  COARSE_STATUS=
+  COARSE_START=
+  limit=$FM_CREW_STATE_RUNS_LIMIT
+  [ "$VALIDATION_LANE_MODE" -eq 0 ] || limit=0
+  out=$(nm_run runs --limit "$limit")
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
     row=$(trim "$row")
@@ -390,10 +395,41 @@ nm_runs_status_for_branch() {  # <branch>
       if ! nm_coarse_head_matches_worktree "$sha"; then
         continue
       fi
-      printf '%s' "$st"
-      return 0
+      rest=${rest#* }
+      rest=$(trim "$rest")
+      selected_date=${rest%% *}
+      rest=${rest#* }
+      rest=$(trim "$rest")
+      selected_time=${rest%% *}
+      COARSE_STATUS=$st
+      break
     fi
   done <<< "$out"
+  [ -n "$COARSE_STATUS" ] || return 0
+  while IFS= read -r row; do
+    row=$(trim "$row")
+    [ -n "$row" ] || continue
+    rest=${row#* }
+    rest=$(trim "$rest")
+    br=${rest%% *}
+    rest=${rest#* }
+    rest=$(trim "$rest")
+    sha=${rest%% *}
+    rest=${rest#* }
+    rest=$(trim "$rest")
+    date_part=${rest%% *}
+    rest=${rest#* }
+    rest=$(trim "$rest")
+    time_part=${rest%% *}
+    if [ "$br" = "$branch" ] && [ "$date_part" = "$selected_date" ] && [ "$time_part" = "$selected_time" ] \
+      && nm_coarse_head_matches_worktree "$sha"; then
+      occurrence=$((occurrence + 1))
+    fi
+  done <<< "$out"
+  if [[ "$selected_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] \
+    && [[ "$selected_time" =~ ^[0-9]{2}:[0-9]{2}$ ]] && [ "$occurrence" -gt 0 ]; then
+    COARSE_START="${selected_date}T${selected_time}#${occurrence}"
+  fi
   return 0
 }
 
@@ -445,6 +481,7 @@ HAVE_RUN=0
 # run-step block below skips the TOON field parsing entirely for this crew.
 RUN_SOURCE=full
 COARSE_STATUS=""
+COARSE_START=""
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
@@ -459,6 +496,10 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       else
         RUN_KIND=unavailable
       fi
+      if [ "$VALIDATION_LANE_MODE" -eq 1 ]; then
+        nm_runs_observation_for_branch "$CREW_BRANCH"
+        RUN_START=$COARSE_START
+      fi
     else
       # The active-or-most-recent run is for another branch, or same branch with
       # a rewritten/diverged head (the CLI is alive and answered; only the
@@ -467,14 +508,23 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       # primary call means the CLI itself did not respond, so retrying it
       # immediately with a second bounded call would just double the wait
       # for no better answer.
-      COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
+      nm_runs_observation_for_branch "$CREW_BRANCH"
       if [ -n "$COARSE_STATUS" ]; then
         HAVE_RUN=1
         RUN_SOURCE=coarse
         RUN_KIND=coarse
+        RUN_START=$COARSE_START
       else
         RUN_KIND=absent
       fi
+    fi
+  elif [ "$VALIDATION_LANE_MODE" -eq 1 ]; then
+    nm_runs_observation_for_branch "$CREW_BRANCH"
+    if [ -n "$COARSE_STATUS" ]; then
+      HAVE_RUN=1
+      RUN_SOURCE=coarse
+      RUN_KIND=coarse
+      RUN_START=$COARSE_START
     fi
   fi
 fi

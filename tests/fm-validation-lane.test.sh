@@ -12,6 +12,8 @@ set -u
 LANE="$ROOT/bin/fm-validation-lane.sh"
 CHECKPOINT="$ROOT/bin/fm-watch-checkpoint.sh"
 TMP_ROOT=$(fm_test_tmproot fm-validation-lane)
+PRIOR_START='2026-08-01T12:00#1'
+NEXT_START='2026-08-01T12:00#2'
 
 make_case() {
   local name=$1 dir
@@ -43,8 +45,13 @@ if [ "${1:-}" = --validation-lane ]; then
   else
     run_id=
   fi
-  printf 'fm-crew-validation-v1\nstate=%s\nsource=%s\nrun-kind=%s\nrun-id=%s\n' \
-    "$state" "$source" "$kind" "$run_id"
+  if [ "$source" = run-step ]; then
+    run_start=${FM_TEST_CREW_RUN_START:-2026-08-01T12:00#1}
+  else
+    run_start=
+  fi
+  printf 'fm-crew-validation-v2\nstate=%s\nsource=%s\nrun-kind=%s\nrun-id=%s\nrun-start=%s\n' \
+    "$state" "$source" "$kind" "$run_id" "$run_start"
 else
   printf '%s\n' "$line"
 fi
@@ -79,12 +86,14 @@ hash_text() {  # <text>
   fi
 }
 
-owner_state() {  # <holder|release> <task> <kind> <run-id|none> <state> <started> [queued...]
-  local owner=$1 task=$2 kind=$3 run_id=$4 state=$5 started=$6 queued token=none
-  shift 6
+owner_state() {  # <holder|release> <task> <kind> <run-id|none> <run-start|none> <state> <started> [queued...]
+  local owner=$1 task=$2 kind=$3 run_id=$4 run_start=$5 state=$6 started=$7 queued token=none start_token=none
+  shift 7
   [ "$kind" != full ] || token=$(hash_text "$run_id")
-  printf 'fm-validation-lane-v1\n%s=%s\n' "$owner" "$task"
+  [ "$run_start" = none ] || start_token=$(hash_text "$run_start")
+  printf 'fm-validation-lane-v2\n%s=%s\n' "$owner" "$task"
   printf 'reservation-kind=%s\nreservation-run=%s\n' "$kind" "$token"
+  printf 'reservation-start=%s\n' "$start_token"
   printf 'reservation-state=%s\nreservation-started=%s\n' "$state" "$started"
   for queued in "$@"; do
     printf 'queued=%s\n' "$queued"
@@ -102,7 +111,7 @@ test_enqueue_reserves_and_delivers_first_task() {
   dir=$(make_case first)
   out=$(run_lane "$dir" enqueue alpha)
   assert_contains "$out" "released alpha" "first enqueue did not release alpha"
-  assert_state "$dir" "$(owner_state holder alpha full prior terminal 0)" "first task was not recorded as holder"
+  assert_state "$dir" "$(owner_state holder alpha full prior "$PRIOR_START" terminal 0)" "first task was not recorded as holder"
   [ -x "$dir/home/state/validation-lane.check.sh" ] || fail "watcher check was not installed"
   [ -f "$dir/home/state/validation-lane.check-trust" ] || fail "watcher check was not registered"
   assert_contains "$(cat "$dir/send.log")" "alpha|Validation slot reserved." "release did not use the send boundary"
@@ -115,14 +124,14 @@ test_queue_is_fifo_and_terminal_check_releases_next() {
   run_lane "$dir" enqueue alpha >/dev/null
   out=$(run_lane "$dir" enqueue beta)
   assert_contains "$out" "queued beta" "second task was not queued"
-  assert_state "$dir" "$(owner_state holder alpha full prior terminal 0 beta)" "queue did not preserve alpha then beta"
+  assert_state "$dir" "$(owner_state holder alpha full prior "$PRIOR_START" terminal 0 beta)" "queue did not preserve alpha then beta"
   FM_TEST_CREW_STATE='state: working · source: run-step · validating' \
-    FM_TEST_CREW_RUN_ID=run-alpha run_lane "$dir" check > "$dir/check-working.out"
+    FM_TEST_CREW_RUN_ID=run-alpha FM_TEST_CREW_RUN_START="$NEXT_START" run_lane "$dir" check > "$dir/check-working.out"
   [ ! -s "$dir/check-working.out" ] || fail "working holder released its slot"
   FM_TEST_CREW_STATE='state: done · source: run-step · checks green' \
-    FM_TEST_CREW_RUN_ID=run-alpha run_lane "$dir" check > "$dir/check-terminal.out"
+    FM_TEST_CREW_RUN_ID=run-alpha FM_TEST_CREW_RUN_START="$NEXT_START" run_lane "$dir" check > "$dir/check-terminal.out"
   assert_contains "$(cat "$dir/check-terminal.out")" "released beta" "terminal holder did not release beta"
-  assert_state "$dir" "$(owner_state holder beta full run-alpha terminal 0)" "beta was not promoted from the FIFO queue"
+  assert_state "$dir" "$(owner_state holder beta full run-alpha "$NEXT_START" terminal 0)" "beta was not promoted from the FIFO queue"
   [ "$(wc -l < "$dir/send.log" | tr -d '[:space:]')" = 2 ] || fail "release delivered an unexpected number of messages"
   pass "validation lane: queued work releases in FIFO order only after a terminal run-step"
 }
@@ -134,7 +143,7 @@ test_status_log_terminal_does_not_free_a_slot() {
   run_lane "$dir" enqueue beta >/dev/null
   FM_TEST_CREW_STATE='state: done · source: status-log · stale event' run_lane "$dir" check > "$dir/check.out"
   [ ! -s "$dir/check.out" ] || fail "status-log terminal result released its slot"
-  assert_state "$dir" "$(owner_state holder alpha full prior terminal 0 beta)" "status-log result changed validation ownership"
+  assert_state "$dir" "$(owner_state holder alpha full prior "$PRIOR_START" terminal 0 beta)" "status-log result changed validation ownership"
   pass "validation lane: only an authoritative run-step terminal result frees a slot"
 }
 
@@ -156,12 +165,12 @@ test_failed_delivery_remains_pending_and_is_retried() {
   FM_TEST_SEND_RC=7 FM_TEST_SEND_OUTPUT='fixture transport down' run_lane "$dir" enqueue alpha > "$dir/enqueue.out"
   out=$(cat "$dir/enqueue.out")
   assert_contains "$out" "release failed for alpha: fixture transport down" "failed delivery was not loud"
-  assert_state "$dir" "$(owner_state release alpha full prior terminal 0)" "failed delivery lost its durable release reservation"
+  assert_state "$dir" "$(owner_state release alpha full prior "$PRIOR_START" terminal 0)" "failed delivery lost its durable release reservation"
   FM_TEST_SEND_RC=7 FM_TEST_SEND_OUTPUT='fixture transport down' run_lane "$dir" enqueue beta >/dev/null
-  assert_state "$dir" "$(owner_state release alpha full prior terminal 0 beta)" "failed head was skipped when beta queued"
+  assert_state "$dir" "$(owner_state release alpha full prior "$PRIOR_START" terminal 0 beta)" "failed head was skipped when beta queued"
   out=$(run_lane "$dir" check)
   assert_contains "$out" "released alpha" "pending release was not retried"
-  assert_state "$dir" "$(owner_state holder alpha full prior terminal 0 beta)" "retry did not retain FIFO ordering"
+  assert_state "$dir" "$(owner_state holder alpha full prior "$PRIOR_START" terminal 0 beta)" "retry did not retain FIFO ordering"
   pass "validation lane: failed delivery stays loud and preserves the queue head for retry"
 }
 
@@ -175,10 +184,10 @@ test_generated_check_executes_scheduler_without_live_runtime() {
     FM_VALIDATION_LANE_CREW_STATE_BIN="$dir/fakebin/crew-state" \
     FM_TEST_SEND_LOG="$dir/send.log" \
     FM_TEST_CREW_STATE='state: failed · source: run-step · validation failed' \
-    FM_TEST_CREW_RUN_ID=run-alpha \
+    FM_TEST_CREW_RUN_ID=run-alpha FM_TEST_CREW_RUN_START="$NEXT_START" \
     "$dir/home/state/validation-lane.check.sh")
   assert_contains "$out" "released beta" "generated watcher check did not release the next task"
-  assert_state "$dir" "$(owner_state holder beta full run-alpha terminal 0)" "generated watcher check did not commit beta as holder"
+  assert_state "$dir" "$(owner_state holder beta full run-alpha "$NEXT_START" terminal 0)" "generated watcher check did not commit beta as holder"
   pass "validation lane: registered watcher check releases a terminal holder through fixture transport"
 }
 
@@ -196,13 +205,13 @@ test_watcher_check_releases_and_queues_a_wake() {
     FM_VALIDATION_LANE_CREW_STATE_BIN="$dir/fakebin/crew-state" \
     FM_TEST_SEND_LOG="$dir/send.log" \
     FM_TEST_CREW_STATE='state: done · source: run-step · checks green' \
-    FM_TEST_CREW_RUN_ID=run-alpha \
+    FM_TEST_CREW_RUN_ID=run-alpha FM_TEST_CREW_RUN_START="$NEXT_START" \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 \
     "$CHECKPOINT" --seconds 5 > "$dir/checkpoint.out" 2> "$dir/checkpoint.err" || status=$?
   expect_code 0 "$status" "watcher checkpoint exit"
   out=$(cat "$dir/checkpoint.out")
   assert_contains "$out" "check: $dir/home/state/validation-lane.check.sh: released beta" "watcher did not surface validation release"
-  assert_state "$dir" "$(owner_state holder beta full run-alpha terminal 0)" "watcher check did not commit beta as holder"
+  assert_state "$dir" "$(owner_state holder beta full run-alpha "$NEXT_START" terminal 0)" "watcher check did not commit beta as holder"
   drained=$(FM_HOME="$dir/home" "$ROOT/bin/fm-wake-drain.sh")
   assert_contains "$drained" $'\tcheck\t' "watcher release wake was not queued"
   assert_contains "$drained" 'released beta' "queued watcher wake lost release diagnostic"
@@ -216,10 +225,10 @@ test_prior_terminal_run_cannot_clear_a_new_reservation() {
   run_lane "$dir" enqueue beta >/dev/null
   out=$(run_lane "$dir" check)
   [ -z "$out" ] || fail "prior terminal run released a new reservation"
-  assert_state "$dir" "$(owner_state holder alpha full prior terminal 0 beta)" "prior terminal run changed the lane"
-  out=$(FM_TEST_CREW_RUN_ID=new-run run_lane "$dir" check)
+  assert_state "$dir" "$(owner_state holder alpha full prior "$PRIOR_START" terminal 0 beta)" "prior terminal run changed the lane"
+  out=$(FM_TEST_CREW_RUN_ID=new-run FM_TEST_CREW_RUN_START="$NEXT_START" run_lane "$dir" check)
   assert_contains "$out" "released beta" "new terminal run identity did not release the next task"
-  assert_state "$dir" "$(owner_state holder beta full new-run terminal 0)" "new run did not transfer the slot"
+  assert_state "$dir" "$(owner_state holder beta full new-run "$NEXT_START" terminal 0)" "new run did not transfer the slot"
   pass "validation lane: completion is bound to a post-reservation run identity"
 }
 
@@ -231,11 +240,33 @@ test_post_reservation_transition_binds_coarse_run_completion() {
   FM_TEST_CREW_STATE='state: working · source: run-step · validating' \
     FM_TEST_CREW_RUN_KIND=coarse run_lane "$dir" check > "$dir/active.out"
   [ ! -s "$dir/active.out" ] || fail "active coarse run released the slot"
-  assert_state "$dir" "$(owner_state holder alpha full prior terminal 1 beta)" "post-reservation transition was not recorded"
+  assert_state "$dir" "$(owner_state holder alpha full prior "$PRIOR_START" terminal 1 beta)" "post-reservation transition was not recorded"
   out=$(FM_TEST_CREW_RUN_KIND=coarse run_lane "$dir" check)
   assert_contains "$out" "released beta" "terminal coarse transition did not release the next task"
-  assert_state "$dir" "$(owner_state holder beta coarse none terminal 0)" "coarse transition did not transfer the slot"
+  assert_state "$dir" "$(owner_state holder beta coarse none "$PRIOR_START" terminal 0)" "coarse transition did not transfer the slot"
   pass "validation lane: post-reservation run transition binds coarse completion"
+}
+
+test_run_start_binds_coarse_completion_between_checks() {
+  local dir out
+  dir=$(make_case coarse-between-checks)
+  run_lane "$dir" enqueue alpha >/dev/null
+  run_lane "$dir" enqueue beta >/dev/null
+  out=$(FM_TEST_CREW_RUN_KIND=coarse FM_TEST_CREW_RUN_START="$NEXT_START" run_lane "$dir" check)
+  assert_contains "$out" "released beta" "coarse run completed between checks did not release the next task"
+  assert_state "$dir" "$(owner_state holder beta coarse none "$NEXT_START" terminal 0)" "coarse run-start evidence did not transfer the slot"
+  pass "validation lane: run-start evidence binds completion between watcher checks"
+}
+
+test_run_start_binds_unavailable_completion_between_checks() {
+  local dir out
+  dir=$(make_case unavailable-between-checks)
+  FM_TEST_CREW_RUN_KIND=unavailable run_lane "$dir" enqueue alpha >/dev/null
+  run_lane "$dir" enqueue beta >/dev/null
+  out=$(FM_TEST_CREW_RUN_KIND=unavailable FM_TEST_CREW_RUN_START="$NEXT_START" run_lane "$dir" check)
+  assert_contains "$out" "released beta" "run with unavailable identity completed between checks did not release the next task"
+  assert_state "$dir" "$(owner_state holder beta unavailable none "$NEXT_START" terminal 0)" "unavailable run-start evidence did not transfer the slot"
+  pass "validation lane: run-start evidence binds unavailable completion"
 }
 
 test_concurrent_releasers_have_one_sender() {
@@ -255,7 +286,7 @@ test_concurrent_releasers_have_one_sender() {
   [ "$sends" = 1 ] || fail "concurrent release sent $sends messages"
   out=$(cat "$dir/first.out" "$dir/second.out")
   [ "$(printf '%s\n' "$out" | grep -c '^released alpha$')" = 1 ] || fail "concurrent release reported multiple senders"
-  assert_state "$dir" "$(owner_state holder alpha full prior terminal 0)" "concurrent release corrupted ownership"
+  assert_state "$dir" "$(owner_state holder alpha full prior "$PRIOR_START" terminal 0)" "concurrent release corrupted ownership"
   pass "validation lane: concurrent releasers serialize one sender"
 }
 
@@ -264,12 +295,12 @@ test_duplicate_enqueue_repairs_registration_and_pending_delivery() {
   dir=$(make_case registration-retry)
   FM_TEST_REGISTER_RC=9 run_lane "$dir" enqueue alpha > "$dir/first.out" 2> "$dir/first.err" || status=$?
   expect_code 1 "$status" "transient registration failure"
-  assert_state "$dir" "$(owner_state release alpha full prior terminal 0)" "registration failure lost the reservation"
+  assert_state "$dir" "$(owner_state release alpha full prior "$PRIOR_START" terminal 0)" "registration failure lost the reservation"
   [ ! -s "$dir/send.log" ] || fail "registration failure delivered before the watcher was repaired"
   out=$(run_lane "$dir" enqueue alpha)
   assert_contains "$out" "released alpha" "duplicate enqueue did not resume pending delivery"
   [ -f "$dir/home/state/validation-lane.check-trust" ] || fail "duplicate enqueue did not repair watcher registration"
-  assert_state "$dir" "$(owner_state holder alpha full prior terminal 0)" "registration retry did not commit the holder"
+  assert_state "$dir" "$(owner_state holder alpha full prior "$PRIOR_START" terminal 0)" "registration retry did not commit the holder"
   pass "validation lane: duplicate enqueue repairs registration and resumes release"
 }
 
@@ -282,5 +313,7 @@ test_generated_check_executes_scheduler_without_live_runtime
 test_watcher_check_releases_and_queues_a_wake
 test_prior_terminal_run_cannot_clear_a_new_reservation
 test_post_reservation_transition_binds_coarse_run_completion
+test_run_start_binds_coarse_completion_between_checks
+test_run_start_binds_unavailable_completion_between_checks
 test_concurrent_releasers_have_one_sender
 test_duplicate_enqueue_repairs_registration_and_pending_delivery
