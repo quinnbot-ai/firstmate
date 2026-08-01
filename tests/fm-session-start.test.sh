@@ -349,6 +349,8 @@ state=${FM_FAKE_HERDR_STATE:?}
 mate_id=${FM_FAKE_SECOND_MATE_ID:?}
 killed="${state}.killed"
 spawned="${state}.spawned"
+screen="${state}.spawn-screen"
+staged="${screen}.staged"
 printf '%s\n' "$*" >> "$log"
 case "${1:-} ${2:-}" in
   "status --json")
@@ -404,7 +406,28 @@ case "${1:-} ${2:-}" in
   "pane close")
     [ "${3:-}" = p-old ] && : > "$killed"
     ;;
-  "pane run"|"pane send-text"|"pane send-keys"|"tab close")
+  "pane read")
+    cat "$screen" 2>/dev/null || true
+    ;;
+  "pane run"|"pane send-text")
+    text=${4:-}
+    case "$text" in
+      *"__FM_SPAWN_READY_"*)
+        token=$(printf '%s\n' "$text" | sed -n "s/.*'__FM_SPAWN_READY_' '\([^']*\)'.*/\1/p")
+        [ -z "$token" ] || printf '__FM_SPAWN_READY_%s\n' "$token" > "$screen"
+        ;;
+      "FM_SPAWN_LAUNCH=''") : > "$staged" ;;
+      FM_SPAWN_LAUNCH=*)
+        rebuilt=$(FM_SPAWN_LAUNCH="$(cat "$staged")" bash -c "$text; printf '%s' \"\$FM_SPAWN_LAUNCH\"")
+        printf '%s' "$rebuilt" > "$staged"
+        ;;
+      *"__FM_SPAWN_LAUNCH_OK_"*)
+        token=$(printf '%s\n' "$text" | sed -n "s/.*'__FM_SPAWN_LAUNCH_OK_' '\([^']*\)'.*/\1/p")
+        [ -z "$token" ] || printf '__FM_SPAWN_LAUNCH_OK_%s\n' "$token" > "$screen"
+        ;;
+    esac
+    ;;
+  "pane send-keys"|"tab close")
     ;;
   *)
     exit 1
