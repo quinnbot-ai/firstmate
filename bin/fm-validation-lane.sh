@@ -374,9 +374,13 @@ read_crew_observation() {  # <task-id>
   fi
 }
 
+crew_observation_is_unavailable_empty() {
+  [ "$CREW_OBS_KIND" = unavailable ] && [ "$CREW_OBS_START" = none ]
+}
+
 capture_reservation() {  # <task-id>
   read_crew_observation "$1" || return 1
-  if [ "$CREW_OBS_KIND" = unavailable ] && [ "$CREW_OBS_START" = none ]; then
+  if crew_observation_is_unavailable_empty; then
     lane_error "cannot reserve validation slot for $1 without comparable run evidence"
     return 1
   fi
@@ -453,6 +457,7 @@ enqueue() {  # <task-id>
 holder_terminal() {
   local task=$1 identity_started=0
   read_crew_observation "$task" || return 2
+  crew_observation_is_unavailable_empty && return 1
   if [ "$LANE_RESERVATION_KIND" = absent ]; then
     case "$CREW_OBS_KIND" in full|coarse) identity_started=1 ;; esac
   elif [ "$LANE_RESERVATION_KIND" = full ] && [ "$CREW_OBS_KIND" = full ] \
