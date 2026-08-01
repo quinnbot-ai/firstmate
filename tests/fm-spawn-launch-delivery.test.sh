@@ -18,8 +18,12 @@ set -u
 screen=${FM_FAKE_SCREEN:?}
 log=${FM_FAKE_TMUX_LOG:?}
 attempts=${FM_FAKE_ATTEMPTS:?}
+staged=${FM_FAKE_STAGED:?}
+evaluated=${FM_FAKE_EVALUATED:?}
+screen_history=${FM_FAKE_SCREEN_HISTORY:?}
 write_screen_line() {
   printf '%s\n' "$1" | fold -w "${FM_FAKE_PANE_COLUMNS:-80}" > "$screen"
+  cat "$screen" >> "$screen_history"
 }
 case "${1:-}" in
   display-message)
@@ -40,16 +44,30 @@ case "${1:-}" in
         token=$(printf '%s\n' "$text" | sed -n "s/.*'__FM_SPAWN_READY_' '\([^']*\)'.*/\1/p")
         [ -n "$token" ] && write_screen_line "__FM_SPAWN_READY_$token"
         ;;
-      *"__FM_SPAWN_LAUNCH_OK_"*)
-        token=$(printf '%s\n' "$text" | sed -n "s/.*'__FM_SPAWN_LAUNCH_OK_' '\([^']*\)'.*/\1/p")
+      "FM_SPAWN_LAUNCH=''" )
         count=$(($(cat "$attempts" 2>/dev/null || printf 0) + 1))
         printf '%s\n' "$count" > "$attempts"
-        if [ "$count" -le "${FM_FAKE_TRUNCATE_ATTEMPTS:-0}" ]; then
-          # The fixed-offset env-scrub prefix is the live truncation signature.
-          printf '/usr/bin/env -u FM_ROOT_OVERRIDE -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE FM_H\n' > "$screen"
-        else
-          write_screen_line "__FM_SPAWN_LAUNCH_OK_$token"
+        : > "$staged"
+        ;;
+      FM_SPAWN_LAUNCH=*)
+        rebuilt=$(FM_SPAWN_LAUNCH="$(cat "$staged")" bash -c "$text; printf '%s' \"\$FM_SPAWN_LAUNCH\"")
+        if [ "$(cat "$attempts")" -le "${FM_FAKE_TRUNCATE_ATTEMPTS:-0}" ] && [ -n "$rebuilt" ]; then
+          rebuilt=${rebuilt%?}
         fi
+        printf '%s' "$rebuilt" > "$staged"
+        ;;
+      *"__FM_SPAWN_LAUNCH_OK_"*)
+        result=$(FM_SPAWN_LAUNCH="$(cat "$staged")" bash -c "$text")
+        if [ "$(cat "$attempts")" -le "${FM_FAKE_TRUNCATE_ATTEMPTS:-0}" ]; then
+          # The fixed-offset env-scrub prefix is the live truncation signature.
+          printf '/usr/bin/env -u FM_ROOT_OVERRIDE -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE FM_H\n%s\n' "$result" > "$screen"
+          cat "$screen" >> "$screen_history"
+        else
+          write_screen_line "$result"
+        fi
+        ;;
+      'eval "$FM_SPAWN_LAUNCH"')
+        FM_SPAWN_LAUNCH="$(cat "$staged")" bash -c "$text" > "$evaluated"
         ;;
     esac
     exit 0
@@ -77,6 +95,9 @@ make_case() {
   : > "$case_dir/screen"
   : > "$case_dir/tmux.log"
   : > "$case_dir/attempts"
+  : > "$case_dir/staged"
+  : > "$case_dir/evaluated"
+  : > "$case_dir/screen-history"
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin"
 }
 
@@ -88,7 +109,8 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_SCREEN="$case_dir/screen" FM_FAKE_TMUX_LOG="$case_dir/tmux.log" \
-    FM_FAKE_ATTEMPTS="$case_dir/attempts" \
+    FM_FAKE_ATTEMPTS="$case_dir/attempts" FM_FAKE_STAGED="$case_dir/staged" \
+    FM_FAKE_EVALUATED="$case_dir/evaluated" FM_FAKE_SCREEN_HISTORY="$case_dir/screen-history" \
     FM_SPAWN_LAUNCH_POLL_INTERVAL=0 FM_SPAWN_LAUNCH_CHUNK_DELAY=0 \
     PATH="$fakebin:$PATH" \
     "$SPAWN" "$id" "$proj" "$@" 2>&1
@@ -120,7 +142,25 @@ test_retries_the_recorded_truncation_signature_and_never_types_a_long_line() {
   awk 'length($0) > 450 { exit 1 }' "$CASE_DIR/tmux.log" \
     || fail "fm-spawn sent a line larger than the bounded delivery chunk"
   assert_grep 'C-c' "$CASE_DIR/tmux.log" "failed delivery did not clear the pending shell line before retry"
+  [ "$(wc -c < "$CASE_DIR/evaluated" | tr -d ' ')" = 1801 ] \
+    || fail "verified retry did not evaluate the complete 1,800-byte payload"
+  [ -z "$(tr -d 'x\n' < "$CASE_DIR/evaluated")" ] \
+    || fail "verified retry evaluated bytes other than the complete launch payload"
   assert_contains "$out" "spawned $id" "verified retry did not finish the spawn"
+  if [ -n "${FM_TEST_EVIDENCE_DIR:-}" ]; then
+    mkdir -p "$FM_TEST_EVIDENCE_DIR"
+    {
+      printf '$ fm-spawn.sh %s <1,800-byte raw launch>\n' "$id"
+      printf '%s\n' "$out"
+      printf '\nObserved shell output across delivery attempts:\n'
+      cat "$CASE_DIR/screen-history"
+      printf '\nDelivery facts:\n'
+      printf 'attempts=%s\n' "$(cat "$CASE_DIR/attempts")"
+      printf 'largest_typed_line_bytes=%s\n' "$(awk '{ if (length > max) max=length } END { print max + 0 }' "$CASE_DIR/tmux.log")"
+      printf 'evaluated_payload_bytes=%s\n' "$(wc -c < "$CASE_DIR/evaluated" | tr -d ' ')"
+      printf 'evaluated_payload_non_x_bytes=%s\n' "$(tr -d 'x\n' < "$CASE_DIR/evaluated" | wc -c | tr -d ' ')"
+    } > "$FM_TEST_EVIDENCE_DIR/launch-retry-transcript.txt"
+  fi
   pass "fm-spawn retries the recorded canonical-buffer truncation and stages only bounded lines"
 }
 
@@ -136,6 +176,21 @@ test_refuses_to_report_success_when_every_delivery_check_is_truncated() {
     "failed delivery did not name the bounded verification refusal"
   assert_grep 'failed: launch command delivery could not be verified after 2 attempts' \
     "$HOME_DIR/state/$id.status" "failed delivery was not recorded for supervision"
+  [ ! -s "$CASE_DIR/evaluated" ] || fail "failed launch verification still evaluated the staged command"
+  if [ -n "${FM_TEST_EVIDENCE_DIR:-}" ]; then
+    mkdir -p "$FM_TEST_EVIDENCE_DIR"
+    {
+      printf '$ fm-spawn.sh %s <1,800-byte raw launch>\n' "$id"
+      printf '%s\n' "$out"
+      printf '\nPersisted supervision status:\n'
+      cat "$HOME_DIR/state/$id.status"
+      printf '\nObserved shell output across delivery attempts:\n'
+      cat "$CASE_DIR/screen-history"
+      printf '\nRefusal facts:\n'
+      printf 'attempts=%s\n' "$(cat "$CASE_DIR/attempts")"
+      printf 'evaluated_payload_bytes=%s\n' "$(wc -c < "$CASE_DIR/evaluated" | tr -d ' ')"
+    } > "$FM_TEST_EVIDENCE_DIR/launch-refusal-transcript.txt"
+  fi
   pass "fm-spawn fails loudly when bounded launch verification never succeeds"
 }
 

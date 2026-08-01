@@ -67,6 +67,14 @@
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. pi-signed launches that exact executable name from PATH and
 #   refuses before endpoint creation when it is unavailable; it never falls back to pi.
+#   Before any harness command runs, launch delivery waits for an executed shell
+#   round-trip, stages the command through bounded submitted assignments using the
+#   selected backend's send/capture primitives, and verifies the complete staged
+#   bytes before evaluation. A failed check clears the shell line and retries a
+#   bounded number of times; exhaustion records a failed task status and exits
+#   nonzero rather than reporting a spawn. This launch-delivery contract does not
+#   alter the backend adapters' text-submit verification contracts; its regression
+#   coverage lives in tests/fm-spawn-launch-delivery.test.sh.
 #   config/secondmate-harness may also carry an optional model and effort as extra
 #   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
 #   --secondmate spawn, those tokens apply only when this spawn also resolves its
