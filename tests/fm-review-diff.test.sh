@@ -11,7 +11,7 @@
 #   (d) pr= present but PR head unreachable -> fallback to local branch + warning
 #   (e) pr= + STALE recorded pr_head= + newer remote pull head -> must use fetched head
 #       (this is the class that bit reviewers holding merges over "missing" fixes)
-#   (f) host diff.external=/GIT_EXTERNAL_DIFF= viewer -> patch output is unaffected
+#   (f) trusted host diff.external=/GIT_EXTERNAL_DIFF= viewer -> change detection and patch output are unaffected
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -145,9 +145,11 @@ test_host_external_diff_cannot_replace_the_patch() {
   cat > "$case_dir/fake-ext-diff" <<'EXT'
 #!/usr/bin/env bash
 echo "EXTERNAL VIEWER OUTPUT"
+exit 0
 EXT
   chmod +x "$case_dir/fake-ext-diff"
   git -C "$case_dir/project" config diff.external "$case_dir/fake-ext-diff"
+  git -C "$case_dir/project" config diff.trustExitCode true
 
   out=$(GIT_EXTERNAL_DIFF="$case_dir/fake-ext-diff" \
     run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
