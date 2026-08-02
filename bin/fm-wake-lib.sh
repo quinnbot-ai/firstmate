@@ -431,18 +431,25 @@ fm_wake_append() {
 
 # fm_wake_cycle_has_records <cycle-id>
 # Return 0 when the durable queue contains a row produced by exactly this
-# watcher cycle, 1 when it does not, and 2 when its bounded lock cannot be
-# acquired.  The queue is deliberately the only attribution authority.
+# watcher cycle, 1 when it does not, and 2 when the queue cannot be locked or
+# read.  The queue is deliberately the only attribution authority.
 fm_wake_cycle_has_records() {
-  local cycle_id=$1 attempts=${FM_WAKE_CLASSIFY_LOCK_ATTEMPTS:-20} delay=${FM_WAKE_CLASSIFY_LOCK_DELAY:-0.05}
+  local cycle_id=$1 attempts=${FM_WAKE_CLASSIFY_LOCK_ATTEMPTS:-20} delay=${FM_WAKE_CLASSIFY_LOCK_DELAY:-0.05} status
   [ -n "$cycle_id" ] || return 1
   fm_lock_acquire_bounded "$FM_WAKE_QUEUE_LOCK" "$attempts" "$delay" || return 2
-  if awk -F '\t' -v cycle="$cycle_id" 'NF >= 6 && $6 == cycle { found = 1; exit } END { exit !found }' "$FM_WAKE_QUEUE" 2>/dev/null; then
-    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
-    return 0
+  status=2
+  if [ -f "$FM_WAKE_QUEUE" ]; then
+    if awk -F '\t' -v cycle="$cycle_id" 'NF >= 6 && $6 == cycle { found = 1; exit } END { exit !found }' "$FM_WAKE_QUEUE" 2>/dev/null; then
+      status=0
+    else
+      status=$?
+    fi
+  elif [ ! -e "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ]; then
+    status=1
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
-  return 1
+  [ "$status" -le 1 ] || return 2
+  return "$status"
 }
 
 # fm_wake_watcher_pid_has_records <watcher-pid>
@@ -451,15 +458,22 @@ fm_wake_cycle_has_records() {
 # cycle token, whose watcher-pid prefix identifies that just-reaped child.
 # Return values match fm_wake_cycle_has_records.
 fm_wake_watcher_pid_has_records() {
-  local watcher_pid=$1 attempts=${FM_WAKE_CLASSIFY_LOCK_ATTEMPTS:-20} delay=${FM_WAKE_CLASSIFY_LOCK_DELAY:-0.05}
+  local watcher_pid=$1 attempts=${FM_WAKE_CLASSIFY_LOCK_ATTEMPTS:-20} delay=${FM_WAKE_CLASSIFY_LOCK_DELAY:-0.05} status
   case "$watcher_pid" in ''|*[!0-9]*) return 1 ;; esac
   fm_lock_acquire_bounded "$FM_WAKE_QUEUE_LOCK" "$attempts" "$delay" || return 2
-  if awk -F '\t' -v prefix="watcher:${watcher_pid}:" 'NF >= 6 && index($6, prefix) == 1 { found = 1; exit } END { exit !found }' "$FM_WAKE_QUEUE" 2>/dev/null; then
-    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
-    return 0
+  status=2
+  if [ -f "$FM_WAKE_QUEUE" ]; then
+    if awk -F '\t' -v prefix="watcher:${watcher_pid}:" 'NF >= 6 && index($6, prefix) == 1 { found = 1; exit } END { exit !found }' "$FM_WAKE_QUEUE" 2>/dev/null; then
+      status=0
+    else
+      status=$?
+    fi
+  elif [ ! -e "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ]; then
+    status=1
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
-  return 1
+  [ "$status" -le 1 ] || return 2
+  return "$status"
 }
 
 fm_wake_restore_queue() {

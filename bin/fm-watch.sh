@@ -757,7 +757,6 @@ printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 FM_WATCH_CYCLE_ID="watcher:${WATCHER_PID}:$(date +%s):${RANDOM}${RANDOM}"
 export FM_WATCH_CYCLE_ID
 printf '%s\n' "$FM_WATCH_CYCLE_ID" > "$WATCH_LOCK/cycle-id" || true
-fm_pid_identity "$WATCHER_PID" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 
@@ -769,6 +768,12 @@ if ! fm_pr_poll_retirement_recover_all "$STATE" "$SCRIPT_DIR/fm-pr-poll.sh"; the
   fm_wake_append check pr-poll-retirement "$reason" || exit 1
   touch "$STATE/.last-check"
   wake "$reason"
+fi
+
+if ! touch "$STATE/.last-watcher-beat" \
+  || ! fm_pid_identity "$WATCHER_PID" > "$WATCH_LOCK/pid-identity" 2>/dev/null; then
+  echo "watcher: FAILED - could not publish watcher health"
+  exit 1
 fi
 
 while :; do

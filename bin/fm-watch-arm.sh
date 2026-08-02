@@ -340,7 +340,7 @@ attach_and_wait() {
       return 1
     fi
     if healthy_watcher; then
-      if [ "$HEALTHY_PID" != "$attached_pid" ]; then
+      if [ "$HEALTHY_CYCLE_ID" != "$attached_cycle_id" ]; then
         followed_cycle_may_transition "$attached_cycle_id" || { cycle_log_append unknown unknown attached-cycle-ended wake-delivered; return 1; }
         cycle_log_append unknown unknown lock-replaced "attached:$HEALTHY_PID"
         attached_pid=$HEALTHY_PID
@@ -522,7 +522,6 @@ owned_child_finished() {
     attribution=$?
     if [ "$attribution" -ne 0 ]; then
       cycle_log_append "$rc" "$signal" wake-attribution-missing none
-      print_watch_output "$child_out"
       rm -f "$child_out" 2>/dev/null || true
       child=
       child_out=
