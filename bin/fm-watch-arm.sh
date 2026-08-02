@@ -32,6 +32,9 @@
 #   watcher: FAILED - cycle ended without an actionable reason
 #                                                        - an OWNED child returned clean and empty
 #                                                          with no verified healthy successor
+#   watcher: cycle-ended - the followed watcher cycle delivered an actionable wake; drain the wake queue
+#                                                        - a FOLLOWED cycle wrote a matching durable row;
+#                                                          its reason went to the owning arm
 #   watcher: cycle-ended - the followed watcher cycle closed with no successor; drain the wake queue
 #                                                        - a FOLLOWED cycle closed; its reason, if
 #                                                          any, went to the owning arm and is in the
@@ -40,12 +43,12 @@
 # stale-beacon or dead-pid holder either self-heals (the fresh child steals the
 # dead lock per the singleton self-eviction/steal path and is confirmed) or this
 # returns the FAILED line. On started it waits the child and propagates the wake
-# reason; on attached it stays live across identity-matched successors. Both
-# terminal closes above are typed and nonzero, never a clean empty completion, but
-# only the OWNED one is a supervision failure: an arm that merely followed another
-# arm's cycle cannot see that cycle's reason line and must not report its ordinary
-# close as supervision going down. A live cycle already present means re-arm
-# attaches - do not start a second watcher.
+# reason; on attached it stays live across identity-matched successors. The owned
+# unexplained close and both followed-cycle closes above are typed and nonzero,
+# never a clean empty completion, but only the OWNED one is a supervision failure:
+# an arm that merely followed another arm's cycle cannot see that cycle's reason
+# line and must not report its ordinary close as supervision going down. A live
+# cycle already present means re-arm attaches - do not start a second watcher.
 #
 # Every observed watcher cycle appends one tab-separated lifecycle record to
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
