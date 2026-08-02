@@ -31,6 +31,7 @@
 #   (y) current parent ignores cannot hide a narrower target directory boundary
 #   (z) untouched ignored runtime-file churn during the merge window is informational
 #   (aa) an ignored path that disappears after the fast-forward still fails loudly
+#   (ab) a pre-merge preservation failure leaves the checkout index unchanged
 set -u
 
 # shellcheck disable=SC1091
@@ -328,6 +329,54 @@ test_branch_ignored_runtime_loss_after_merge_still_errors() {
     "$case_dir/stderr" \
     "ignored-runtime-loss: loss was not reported loudly"
   pass "fm-merge-local still errors when an ignored runtime path is lost"
+}
+
+test_preservation_failure_before_merge_leaves_index_unchanged() {
+  local after_hash before before_hash before_index case_dir fakebin rc real_mv
+  case_dir=$(make_case preservation-failure-index)
+  printf 'runtime-state.txt\n' >"$case_dir/branch/.gitignore"
+  printf 'resolved target\n' >"$case_dir/branch/resolved.txt"
+  git -C "$case_dir/branch" add .gitignore resolved.txt
+  git -C "$case_dir/branch" rm -q runtime-state.txt
+  git -C "$case_dir/branch" commit -qm "ignore runtime state"
+  printf 'resolved target\n' >"$case_dir/project/resolved.txt"
+  printf 'runtime base\nruntime append\n' >"$case_dir/project/runtime-state.txt"
+  before=$(git -C "$case_dir/project" rev-parse main)
+  before_hash=$(git -C "$case_dir/project" hash-object -- runtime-state.txt)
+  before_index=$(git -C "$case_dir/project" write-tree)
+
+  fakebin=$(fm_fakebin "$case_dir")
+  real_mv=$(command -v mv)
+  cat >"$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+set -eu
+
+if [ "${1:-}" = -- ] && [ "${2:-}" = "$FM_FAIL_MOVE_PATH" ]; then
+  printf 'injected preservation move failure\n' >&2
+  exit 73
+fi
+
+exec "$FM_REAL_MV" "$@"
+SH
+  chmod +x "$fakebin/mv"
+
+  set +e
+  FM_FAIL_MOVE_PATH="$case_dir/project/runtime-state.txt" \
+  FM_REAL_MV="$real_mv" \
+  PATH="$fakebin:$PATH" \
+    run_merge_local "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "preservation-failure-index: injected move failure should stop the merge"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$before" ] \
+    || fail "preservation-failure-index: preservation failure advanced main"
+  [ "$(git -C "$case_dir/project" write-tree)" = "$before_index" ] \
+    || fail "preservation-failure-index: preservation failure changed the index"
+  after_hash=$(git -C "$case_dir/project" hash-object -- runtime-state.txt)
+  [ "$after_hash" = "$before_hash" ] \
+    || fail "preservation-failure-index: preservation failure changed runtime content"
+  pass "fm-merge-local preserves the index when pre-merge preservation fails"
 }
 
 test_branch_ignored_untracked_directory_permits_without_descending() {
@@ -1073,6 +1122,7 @@ test_untracked_conversion_refuses_divergent_staged_mode
 test_branch_ignored_untracked_file_permits
 test_branch_ignored_runtime_churn_during_merge_is_info
 test_branch_ignored_runtime_loss_after_merge_still_errors
+test_preservation_failure_before_merge_leaves_index_unchanged
 test_branch_ignored_untracked_directory_permits_without_descending
 test_nested_branch_ignored_untracked_file_permits
 test_branch_ignored_directory_with_incoming_collision_refuses

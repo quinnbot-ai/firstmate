@@ -668,6 +668,12 @@ if ! git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BRANCH"; then
 fi
 
 for ((i = 0; i < ${#RESOLVED_PATHS[@]}; i++)); do
+  if [ "${RESOLVED_ACTIONS[$i]}" = "remove-index" ]; then
+    move_preserved_path_out_of_merge "${RESOLVED_PATHS[$i]}"
+  fi
+done
+
+for ((i = 0; i < ${#RESOLVED_PATHS[@]}; i++)); do
   path=${RESOLVED_PATHS[$i]}
   case "${RESOLVED_ACTIONS[$i]}" in
     set-index)
@@ -676,7 +682,6 @@ for ((i = 0; i < ${#RESOLVED_PATHS[@]}; i++)); do
       ;;
     remove-index)
       git -C "$PROJ" update-index --force-remove -- "$path"
-      move_preserved_path_out_of_merge "$path"
       ;;
     remove-index-preserve-directory)
       git -C "$PROJ" update-index --force-remove -- "$path"
