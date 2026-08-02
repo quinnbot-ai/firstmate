@@ -752,6 +752,11 @@ trap 'exit 1' HUP INT TERM
 WATCHER_PID=${BASHPID:-$$}
 printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
 printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
+# This token is a watcher-generation identity, not a timing baseline.  It is
+# published before pid-identity, then stamped on every durable wake row.
+FM_WATCH_CYCLE_ID="watcher:${WATCHER_PID}:$(date +%s):${RANDOM}${RANDOM}"
+export FM_WATCH_CYCLE_ID
+printf '%s\n' "$FM_WATCH_CYCLE_ID" > "$WATCH_LOCK/cycle-id" || true
 fm_pid_identity "$WATCHER_PID" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
