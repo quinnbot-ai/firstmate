@@ -495,7 +495,9 @@ test_generated_commands_use_the_authoritative_home_and_quote_arguments() {
   task_id=$(scout_id_from "$output")
   brief=$(scout_brief_for "$home" "$task_id")
   printf 'Retained transcript text.\n' > "$home/data/$task_id/source.txt"
+  # shellcheck disable=SC2016
   success_command=$(sed -n 's/^   `\(FM_HOME=.*--transcript-file.*--no-scout\)`$/\1/p' "$brief")
+  # shellcheck disable=SC2016
   failure_command=$(sed -n 's/^   `\(FM_HOME=.*--failure.*--no-scout\)`$/\1/p' "$brief")
   [ -n "$success_command" ] || fail 'brief has no executable transcript-retaining command'
   [ -n "$failure_command" ] || fail 'brief has no executable retrieval-failure command'
@@ -558,6 +560,7 @@ test_retrievable_link_prepares_one_queued_ingest_scout() {
   assert_grep 'Potential blindspots' "$brief" 'ingest scout brief omits the blindspots section'
   assert_grep 'Other angles worth taking' "$brief" 'ingest scout brief omits the other-angles section'
   assert_grep 'tasks-axi add' "$brief" 'ingest scout brief does not have promising ideas filed as backlog items'
+  # shellcheck disable=SC2016
   idea_command=$(sed -n 's/^   `\(tasks-axi add .*\)`$/\1/p' "$brief")
   [ -n "$idea_command" ] || fail 'brief did not render the promising-idea command'
   assert_contains "$idea_command" "--repo '<mapped-lane-repo>'" 'promising-idea command did not require its mapped lane repository'
