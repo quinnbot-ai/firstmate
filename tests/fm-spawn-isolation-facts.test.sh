@@ -23,13 +23,18 @@ TMP_ROOT=$(fm_test_tmproot fm-spawn-isolation-facts)
 
 # A fake tmux whose pane_current_path always reports the settled worktree, plus
 # a no-op treehouse: the settle loop itself is covered by
-# tests/fm-spawn-worktree-settle.test.sh and is not the subject here.
+# tests/fm-spawn-worktree-settle.test.sh and is not the subject here. The pane
+# answers fm-spawn's launch-delivery protocol through the shared owner in
+# tests/lib.sh, so this suite verifies real delivery rather than a local
+# imitation of it.
 make_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+# shellcheck source=/dev/null
+. "$(dirname "$0")/pane-shell.sh"
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
@@ -37,11 +42,16 @@ case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
-  send-keys) exit 0 ;;
+  capture-pane) fm_fake_pane_capture; exit 0 ;;
+  send-keys)
+    fm_fake_pane_send "$@"
+    exit 0
+    ;;
 esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  fm_fake_pane_shell "$fakebin"
   fm_fake_exit0 "$fakebin" treehouse
   printf '%s\n' "$fakebin"
 }
