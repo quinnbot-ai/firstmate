@@ -1,6 +1,6 @@
 # Operational alert inbox wake
 
-Some machines run an operations runtime that records critical alerts - dead-man timers, tripwires, backup and service health checks - into a durable inbox instead of a chat transport.
+Some machines run an operations runtime that records critical alerts into a durable inbox instead of a chat transport.
 An inbox nobody reads disarms every one of those checks silently, because each check still "fires" and still records its alert while no one is told.
 This watch closes that gap by turning an unreviewed critical backlog into an ordinary Firstmate wake, so a stalled alert queue reaches the first mate the same way a crew signal or a merged pull request does.
 
@@ -102,11 +102,11 @@ The oldest age and the alert classes always come from the spool, since the recei
 The wake is one compact digest line, enough to triage without reading the whole inbox:
 
 ```
-ops-inbox: 621 unacked critical alerts, oldest 13d, top: routine-scheduler 154, pipeline-verifier 96, scheduled-work-inventory 60
+ops-inbox: 621 unacked critical alerts, oldest 13d, top: source-beta 154, source-delta 96, source-epsilon 60
 ```
 
 ```
-ops-inbox: alert receipt stale 9h; 3 unacked critical alerts, oldest 8h, top: backup-verify 3
+ops-inbox: alert receipt stale 9h; 3 unacked critical alerts, oldest 8h, top: source-alpha 3
 ```
 
 Alert class is the spool's `source` field, sanitized and length-capped so a hostile or malformed alert cannot forge extra fields, split the line, or corrupt the durable wake record.
@@ -115,7 +115,7 @@ The read itself is bounded: the check samples at most `max_lines + 1` spool line
 Exceeding that cap is reported without claiming the exact spool length, because a capped read understates both the total and the oldest age:
 
 ```
-ops-inbox: inbox past its 20000-line read cap, so the total and oldest age below are understated; 20000 unacked critical alerts, oldest 6d, top: routine-scheduler 5104
+ops-inbox: inbox past its 20000-line read cap, so the total and oldest age below are understated; 20000 unacked critical alerts, oldest 6d, top: source-beta 5104
 ```
 
 A valid final JSON record is included even without a trailing newline, while a malformed non-terminated fragment is ignored as an append in progress.
@@ -178,13 +178,3 @@ An unrecognized key is refused rather than ignored, so a mistyped threshold can 
 - `max_lines` bounds how many recent spool and acknowledgement lines one check reads (default 20000).
 
 `docs/configuration.md` owns where this file sits among the other local operating choices, and `bin/fm-ops-inbox-lib.sh`'s header owns the exact resolution mechanics.
-
-## Two paths named "ops-inbox"
-
-The JSONL spool above is the alert inbox this watch reads.
-A second, unrelated path shares the name: some operations routines drop plain-text `.event` files into `<firstmate-home>/ops-inbox/<source>/`, a spool with no severity field, no acknowledgement model, and no reader on the Firstmate side.
-
-Those two are not two views of one inbox; they are one watched inbox and one unread drop directory.
-Firstmate treats the JSONL spool plus its receipt as the single alert surface, and gitignores the drop directory so its machine-local files can never be committed into this shared repo.
-Converging the routines that write `.event` files onto the JSONL spool belongs to the operations repository that owns those routines, not here: an alert only reaches this watch once its producer records it in the spool.
-Until that convergence lands, an alert written only as an `.event` file is not covered by this watch.

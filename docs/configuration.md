@@ -122,7 +122,7 @@ On a machine whose operations runtime records critical alerts into a durable inb
 Local, gitignored `config/ops-inbox.json` under the effective home holds this watch's operating choices and source paths.
 Absent configuration leaves the optional watch disabled.
 This file is deliberately not inherited into secondmate homes, and a secondmate home never auto-arms the watch: one machine has one alert inbox, and the primary owns watching it.
-[`ops-inbox-wake.md`](ops-inbox-wake.md) owns the settings, defaults, arming, wake, dedupe, and two-paths-named-ops-inbox contracts; `bin/fm-ops-inbox-lib.sh`'s header owns the exact resolution mechanics.
+[`ops-inbox-wake.md`](ops-inbox-wake.md) owns the settings, defaults, arming, wake, and dedupe contracts; `bin/fm-ops-inbox-lib.sh`'s header owns the exact resolution mechanics.
 
 ## Gate defaults (.no-mistakes.yaml)
 

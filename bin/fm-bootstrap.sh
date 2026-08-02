@@ -794,6 +794,9 @@ ops_inbox_setup() {
   fi
 
   if ! fm_ops_inbox_config_load "$CONFIG"; then
+    if [ "$FM_OPS_INBOX_CONFIG_ERROR" = "jq is required to read config/ops-inbox.json" ]; then
+      echo "MISSING: jq (install: $(install_cmd jq))"
+    fi
     echo "OPS_INBOX: $FM_OPS_INBOX_CONFIG_ERROR; fix config/ops-inbox.json, then rerun bootstrap"
     return 0
   fi
