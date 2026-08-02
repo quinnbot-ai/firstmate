@@ -1318,7 +1318,13 @@ spawn_capture() {  # <target>
 }
 
 spawn_capture_has_line() {  # <capture> <exact-line>
-  printf '%s\n' "$1" | grep -Fqx "$2"
+  # Herdr's pane read exposes terminal-row wrapping literally.  A marker can
+  # therefore be split across adjacent rows even though the shell emitted one
+  # newline-terminated line.  The full marker is deliberately absent from the
+  # submitted probe, so joining captured rows cannot mistake typed input for
+  # execution proof.
+  printf '%s\n' "$1" | grep -Fqx "$2" \
+    || printf '%s' "$1" | tr -d '\r\n' | grep -Fq "$2"
 }
 
 spawn_wait_for_marker() {  # <target> <marker>
