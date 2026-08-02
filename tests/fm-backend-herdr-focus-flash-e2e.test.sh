@@ -88,15 +88,18 @@ focus_snapshot() {
 # incoherent while Herdr is changing workspaces, whereas tab get returns the
 # exact response-derived tab identity and its focus state in one object.
 focus_sample_exact_tab() {  # <workspace-id> <tab-id>
-  local workspace=$1 tab=$2 attempt=0 info
+  local workspace=$1 tab=$2 attempt=0 info focused
   while [ "$attempt" -lt 8 ]; do
     info=$(lab tab get "$tab" 2>/dev/null) || info=
-    if printf '%s' "$info" | jq -e --arg workspace "$workspace" --arg tab "$tab" '
-      .result.tab.workspace_id == $workspace
-      and .result.tab.tab_id == $tab
-      and .result.tab.focused == true
-    ' >/dev/null 2>&1; then
-      printf '%s\t%s' "$workspace" "$tab"
+    focused=$(printf '%s' "$info" | jq -er --arg workspace "$workspace" --arg tab "$tab" '
+      .result.tab
+      | select(.workspace_id == $workspace and .tab_id == $tab)
+      | .focused
+      | select(type == "boolean")
+      | tostring
+    ' 2>/dev/null) || focused=
+    if [ -n "$focused" ]; then
+      printf '%s\t%s\t%s' "$workspace" "$tab" "$focused"
       return 0
     fi
     sleep 0.01
@@ -146,7 +149,7 @@ read -r B_ANCHOR_WS B_ANCHOR_TAB _ <<<"$(mkws flash-b-anchor)" || fail 'could no
 read -r _ _ _ <<<"$(mkws flash-b-tail)" || fail 'could not create the Part B tail workspace'
 lab tab focus "$B_ANCHOR_TAB" >/dev/null || fail 'could not focus the Part B anchor'
 B_BEFORE=$(focus_sample_exact_tab "$B_ANCHOR_WS" "$B_ANCHOR_TAB") || fail 'could not capture the Part B pre-close focus'
-[ "$B_BEFORE" = "$(printf '%s\t%s' "$B_ANCHOR_WS" "$B_ANCHOR_TAB")" ] \
+[ "$B_BEFORE" = "$(printf '%s\t%s\ttrue' "$B_ANCHOR_WS" "$B_ANCHOR_TAB")" ] \
   || fail 'Part B anchor focus does not match the intended workspace and tab'
 B_SURVIVOR_ORDER=$(ws_order | tr ',' '\n' | grep -v "^$B_DOOMED_WS\$" | paste -sd, -) \
   || fail 'could not capture the Part B survivor order'
