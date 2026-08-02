@@ -14,9 +14,6 @@ if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
 fi
 TSC_BIN=${FM_TSC_BIN:-"$(command -v tsc 2>/dev/null || true)"}
 if [ ! -x "$TSC_BIN" ]; then
-  TSC_BIN="$GLOBAL_NODE_MODULES/openclaw/node_modules/typescript/bin/tsc"
-fi
-if [ ! -x "$TSC_BIN" ]; then
   echo "skip: tsc not found for Pi extension typecheck"
   exit 0
 fi

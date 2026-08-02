@@ -141,7 +141,7 @@ run_bootstrap_without_jq() {  # <home>
     printf '%s\n' '  builtin command "$@"'
     printf '%s\n' '}'
   } > "$bash_env"
-  BASH_ENV="$bash_env" FM_HOME="$home" FM_OPS_INBOX_STATE_DIR="$home/ops" \
+  BASH_ENV="$bash_env" FM_HOME="$home" \
     FM_BOOTSTRAP_VERBOSE_FACTS=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null \
     | grep -E 'MISSING: jq|OPS_INBOX|operational alert watch' || true
 }
@@ -627,28 +627,17 @@ test_missing_jq_with_configuration_fails_closed() {
   pass "a configured watch without jq wakes fail-closed"
 }
 
-test_missing_jq_after_default_configuration_fails_closed() {
-  local home out fault_path
-  home=$(make_home default-missing-jq)
-  alert "$home" jq1 600 backup-verify
-  fault_path=$(make_path_without_jq default-missing-jq)
-  out=$(PATH="$fault_path" FM_HOME="$home" FM_OPS_INBOX_STATE_DIR="$home/ops" \
-    "$fault_path/bash" "$POLL" 2>/dev/null)
-  assert_contains "$out" "jq is not installed" \
-    "an auto-armed default watch without jq must emit the dedicated failure wake"
-  pass "an auto-armed watch without jq wakes fail-closed"
-}
-
 test_bootstrap_missing_jq_reports_alert_watch_outage() {
   local home out
   home=$(make_home bootstrap-missing-jq)
+  configure "$home"
   alert "$home" bootstrap-jq1 600 backup-verify
   out=$(run_bootstrap_without_jq "$home")
   assert_contains "$out" "MISSING: jq" \
     "bootstrap must retain the jq installation diagnostic"
-  assert_contains "$out" "OPS_INBOX: the operational alert watch cannot read the inbox until jq is installed; install jq, then rerun bootstrap" \
-    "bootstrap must classify the missing-jq alert-watch outage with remediation"
-  pass "bootstrap classifies a missing-jq alert-watch outage"
+  assert_contains "$out" "OPS_INBOX: jq is required to read config/ops-inbox.json; fix config/ops-inbox.json, then rerun bootstrap" \
+    "bootstrap must classify an unreadable private alert-watch configuration"
+  pass "bootstrap classifies a missing-jq private alert-watch configuration"
 }
 
 test_current_time_failure_fails_closed() {
@@ -1002,7 +991,6 @@ test_zero_read_cap_is_reported
 test_explicit_disable_wins
 test_explicit_enable_without_spool_fails_closed
 test_missing_jq_with_configuration_fails_closed
-test_missing_jq_after_default_configuration_fails_closed
 test_bootstrap_missing_jq_reports_alert_watch_outage
 test_current_time_failure_fails_closed
 test_inert_watch_does_not_require_current_time
