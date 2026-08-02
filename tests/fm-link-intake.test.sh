@@ -19,6 +19,20 @@ make_home() {  # <name>
   printf '%s\n' "$home"
 }
 
+make_incompatible_tasks_axi() {  # <home>
+  local fakebin="$1/fake-tasks-bin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' '0.0.0'
+fi
+exit 0
+SH
+  chmod +x "$fakebin/tasks-axi"
+  printf '%s\n' "$fakebin"
+}
+
 run_intake() {  # <home> <arguments...>
   local home=$1
   shift
@@ -469,6 +483,37 @@ test_odd_urls_never_control_filenames_or_shell() {
   pass 'odd URLs preserve query case, use digest paths, and stay data in prepared scouts'
 }
 
+test_generated_commands_use_the_authoritative_home_and_quote_arguments() {
+  local home url output task_id brief success_command failure_command scratch record
+  home=$(make_home generated-commands)
+  url="https://hostile.example.test/watch?x=\$(touch\${IFS}$home/injected);quote='x'&next=1"
+  output=$(run_intake "$home" upsert --url "$url" --source-type video \
+    --title 'Hostile URL video' --summary 'A URL whose query must remain inert shell data.' \
+    --terms 'hostile,commands' --claim 'Rendered commands preserve argument boundaries.' \
+    --transcript-unavailable 'not retrieved yet' --scout-repo media-lane) \
+    || fail 'hostile URL intake failed'
+  task_id=$(scout_id_from "$output")
+  brief=$(scout_brief_for "$home" "$task_id")
+  printf 'Retained transcript text.\n' > "$home/data/$task_id/source.txt"
+  success_command=$(sed -n 's/^   `\(FM_HOME=.*--transcript-file.*--no-scout\)`$/\1/p' "$brief")
+  failure_command=$(sed -n 's/^   `\(FM_HOME=.*--failure.*--no-scout\)`$/\1/p' "$brief")
+  [ -n "$success_command" ] || fail 'brief has no executable transcript-retaining command'
+  [ -n "$failure_command" ] || fail 'brief has no executable retrieval-failure command'
+  scratch="$home/disposable-worktree"
+  mkdir -p "$scratch"
+  (cd "$scratch" && bash -c "$success_command") > "$home/success-command.out" \
+    || fail 'transcript-retaining command failed outside the authoritative home'
+  assert_absent "$home/injected" 'hostile URL executed shell syntax in the transcript-retaining command'
+  record=$(record_for "$home" "$url")
+  assert_grep 'Transcript: stored at transcripts/' "$record" 'transcript-retaining command wrote outside the authoritative record'
+  (cd "$scratch" && bash -c "$failure_command") > "$home/failure-command.out" \
+    || fail 'retrieval-failure command failed outside the authoritative home'
+  assert_absent "$home/injected" 'hostile URL executed shell syntax in the retrieval-failure command'
+  record=$(record_for "$home" "$url")
+  assert_grep 'Retrieval status: inaccessible' "$record" 'retrieval-failure command missed the authoritative record'
+  pass 'generated commands quote arguments and target the authoritative home from scratch'
+}
+
 test_agents_trigger_is_concise_and_agent_agnostic() {
   local line
   line=$(grep -F 'Link intake:' "$ROOT/AGENTS.md" || true)
@@ -497,7 +542,7 @@ test_retrievable_link_prepares_one_queued_ingest_scout() {
   output=$(run_intake "$home" upsert --url 'https://lecture.example.test/talk?id=7' --source-type video \
     --title 'A talk worth mining' --summary 'A recorded talk about operating agent fleets.' \
     --terms 'agents,fleet' --claim 'The talk makes a testable claim.' \
-    --transcript-unavailable 'captions are not published yet') \
+    --transcript-unavailable 'captions are not published yet' --scout-repo lecture-lane) \
     || fail 'intake with scout preparation failed'
   task_id=$(scout_id_from "$output")
   [ -n "$task_id" ] || fail 'intake did not report a prepared ingest scout'
@@ -513,12 +558,19 @@ test_retrievable_link_prepares_one_queued_ingest_scout() {
   assert_grep 'Potential blindspots' "$brief" 'ingest scout brief omits the blindspots section'
   assert_grep 'Other angles worth taking' "$brief" 'ingest scout brief omits the other-angles section'
   assert_grep 'tasks-axi add' "$brief" 'ingest scout brief does not have promising ideas filed as backlog items'
+  assert_grep "--repo 'lecture-lane'" "$brief" 'promising-idea command lost the selected repository'
   assert_grep 'Never start, dispatch, promote, or spawn anything' "$brief" 'ingest scout brief does not withhold dispatch authority'
+  assert_grep "Outside it, you may write only under \`$home/data/$task_id/\`" "$brief" 'ingest scout brief does not permit its authoritative artifacts'
+  assert_grep 'Every other file must stay inside the disposable worktree' "$brief" 'ingest scout brief does not preserve its disposable-worktree boundary'
+  assert_not_contains "$(cat "$brief")" 'The report is the only thing that survives' 'generic scout survival contract contradicts link-intake artifacts'
+  assert_not_contains "$(cat "$brief")" 'the only files you may write outside it are the report and the status file' 'generic scout write contract contradicts link-intake artifacts'
   backlog="$home/data/backlog.md"
   assert_grep "$task_id" "$backlog" 'ingest scout is absent from the backlog'
   assert_grep 'Ingest: A talk worth mining' "$backlog" 'queued scout item lost its source title'
   [ "$(tasks-axi list --state queued --file "$backlog" 2>/dev/null | grep -c -F "$task_id")" -ge 1 ] \
     || fail 'ingest scout backlog item is not queued'
+  [ "$(tasks-axi list --state queued --repo lecture-lane --file "$backlog" 2>/dev/null | grep -c -F "$task_id")" -eq 1 ] \
+    || fail 'ingest scout backlog item lost its selected repository'
   assert_absent "$home/state/$task_id.meta" 'link intake dispatched the ingest scout itself'
   pass 'a retrievable link prepares one queued, undispatched ingest scout'
 }
@@ -572,32 +624,61 @@ test_scout_preparation_is_skippable_and_repairable() {
 }
 
 test_scout_preparation_failure_preserves_the_stored_record() {
-  local home task_id rc=0
+  local home url task_id repair_command scratch rc=0
   home=$(make_home scout-failure)
-  task_id="ingest-blocked-example-test-$(printf '%s' 'https://blocked.example.test/item' | shasum -a 256 | cut -c1-8)"
+  url="https://blocked.example.test/item?x=\$(touch\${IFS}$home/repair-injected);quote='x'"
+  task_id="ingest-blocked-example-test-$(printf '%s' "$url" | shasum -a 256 | cut -c1-8)"
   mkdir -p "$home/data/$task_id/brief.md"
-  run_intake "$home" upsert --url 'https://blocked.example.test/item' --source-type article \
+  run_intake "$home" upsert --url "$url" --source-type article \
     --title 'A blocked scout' --summary 'The scout brief cannot be written.' --terms 'blocked' \
     --claim 'A claim.' > "$home/blocked.out" 2> "$home/blocked.err" || rc=$?
   expect_code 3 "$rc" 'a failed scout preparation after a stored record'
   assert_grep 'link record is stored' "$home/blocked.err" 'failure did not state that the record survived'
-  assert_grep 'prepare-scout --url https://blocked.example.test/item' "$home/blocked.err" 'failure did not name the repair command'
-  run_intake "$home" validate 'https://blocked.example.test/item' >/dev/null \
+  repair_command=$(sed -n 's/.*rerun: //p' "$home/blocked.err")
+  [ -n "$repair_command" ] || fail 'failure did not name the repair command'
+  run_intake "$home" validate "$url" >/dev/null \
     || fail 'a failed scout preparation cost the stored link record'
-  pass 'a failed scout preparation keeps the link record and reports the repair'
+  rmdir "$home/data/$task_id/brief.md"
+  scratch="$home/disposable-worktree"
+  mkdir -p "$scratch"
+  (cd "$scratch" && bash -c "$repair_command") > "$home/repaired.out" \
+    || fail 'printed repair command failed outside the authoritative home'
+  assert_grep "scout: $task_id prepared, not dispatched" "$home/repaired.out" 'repair command did not prepare the original scout'
+  assert_absent "$home/repair-injected" 'hostile URL executed shell syntax in the repair command'
+  pass 'a failed preparation keeps its record and prints a safe executable repair'
+}
+
+test_unavailable_tasks_backend_fails_after_record_publication() {
+  local home fakebin record rc=0
+  home=$(make_home unavailable-tasks)
+  fakebin=$(make_incompatible_tasks_axi "$home")
+  PATH="$fakebin:$PATH" FM_HOME="$home" "$INTAKE" upsert \
+    --url 'https://unavailable.example.test/page' --source-type article \
+    --title 'Unavailable tasks backend' --summary 'The record must survive preparation failure.' \
+    --terms 'backend,unavailable' --claim 'Preparation fails closed.' \
+    > "$home/unavailable.out" 2> "$home/unavailable.err" || rc=$?
+  expect_code 3 "$rc" 'an unavailable configured tasks-axi backend'
+  assert_grep 'configured tasks-axi backlog backend is unavailable or incompatible' "$home/unavailable.err" 'backend failure was not visible'
+  assert_not_contains "$(cat "$home/unavailable.out")" 'manual backlog:' 'unavailable tasks-axi was mistaken for explicit manual mode'
+  record=$(head -1 "$home/unavailable.out")
+  assert_present "$record" 'backend failure did not preserve the published record path first'
+  assert_absent "$home/data/backlog.md" 'backend failure falsely filed a queued backlog item'
+  pass 'an unavailable tasks backend fails preparation after publishing the record'
 }
 
 test_manual_backlog_backend_prepares_the_brief_and_the_exact_item() {
-  local home output task_id
+  local home fakebin output task_id
   home=$(make_home manual-backlog)
+  fakebin=$(make_incompatible_tasks_axi "$home")
   printf 'manual\n' > "$home/config/backlog-backend"
-  output=$(run_intake "$home" upsert --url 'https://manual.example.test/page' --source-type article \
+  output=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$INTAKE" upsert --url 'https://manual.example.test/page' --source-type article \
     --title 'A manual home' --summary 'This home files backlog items by hand.' --terms 'manual' \
     --claim 'A claim.') || fail 'intake under a manual backlog backend failed'
   task_id=$(scout_id_from "$output")
   [ -n "$task_id" ] || fail 'manual backend prepared no ingest scout'
   assert_present "$(scout_brief_for "$home" "$task_id")" 'manual backend wrote no scout brief'
   assert_contains "$output" "manual backlog: add queued scout item $task_id" 'manual backend did not print the exact queued item'
+  assert_contains "$output" 'with repo firstmate' 'manual backend item lost its selected repository'
   assert_absent "$home/data/backlog.md" 'manual backend mutated the backlog itself'
   pass 'a manual backlog backend prepares the brief and prints the item to add'
 }
@@ -612,9 +693,11 @@ test_retrieval_dates_are_real_and_path_safe
 test_atomic_generation_switch_is_process_crash_safe
 test_validation_rejects_bidirectional_divergence
 test_odd_urls_never_control_filenames_or_shell
+test_generated_commands_use_the_authoritative_home_and_quote_arguments
 test_agents_trigger_is_concise_and_agent_agnostic
 test_retrievable_link_prepares_one_queued_ingest_scout
 test_repeated_intake_converges_on_one_ingest_scout
 test_scout_preparation_is_skippable_and_repairable
 test_scout_preparation_failure_preserves_the_stored_record
+test_unavailable_tasks_backend_fails_after_record_publication
 test_manual_backlog_backend_prepares_the_brief_and_the_exact_item

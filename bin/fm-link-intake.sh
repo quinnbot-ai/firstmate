@@ -31,7 +31,8 @@
 # same link converges on the same brief and backlog item instead of duplicating work.
 # An inaccessible record prepares no scout because there is nothing to ingest.
 # Scout preparation happens after the record is published: when it fails, the record is
-# still stored and the command exits 3 so the failure is visible and repairable.
+# still stored and the command exits 3 so the failure is visible and repairable. Explicit
+# manual mode prints the item to add; an unavailable tasks-axi backend fails preparation.
 # Bash 3.2 compatible.
 
 set -u
@@ -162,7 +163,8 @@ dispatches anything - firstmate decides what runs and when. `--no-scout` skips i
 for this invocation, `--scout-repo` names the repo the scout works in (default
 firstmate), and `prepare-scout` prepares or repairs one for a stored record.
 Preparation is idempotent per canonical URL and exits 3 when the record was stored
-but its scout could not be prepared.
+but its scout could not be prepared. Explicit manual backlog mode prints the item
+to add by hand; a missing or incompatible tasks-axi backend fails preparation.
 EOF
 }
 
@@ -642,13 +644,30 @@ scout_error() {
   return 1
 }
 
+shell_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
 scout_task_text() {
-  local record=$1 canonical=$2 task_id=$3 data=$4
-  local title summary source terms
+  local record=$1 canonical=$2 task_id=$3 data=$4 repo=$5
+  local title summary source terms helper_q home_q canonical_q source_q source_file_q
+  local repo_q backlog_q success_command failure_command idea_command
   title=$(record_field Title "$record")
   summary=$(record_field Summary "$record")
   source=$(record_field 'Source type' "$record")
   terms=$(record_field 'Search terms' "$record")
+  helper_q=$(shell_quote "$SCRIPT_DIR/fm-link-intake.sh")
+  home_q=$(shell_quote "$FM_HOME")
+  canonical_q=$(shell_quote "$canonical")
+  source_q=$(shell_quote "$source")
+  source_file_q=$(shell_quote "$data/$task_id/source.txt")
+  repo_q=$(shell_quote "$repo")
+  backlog_q=$(shell_quote "$data/backlog.md")
+  success_command="FM_HOME=$home_q $helper_q upsert --url $canonical_q --source-type $source_q --title '<title>' --summary '<summary>' --terms '<terms>' --claim '<claim>' --transcript-file $source_file_q --no-scout"
+  failure_command="FM_HOME=$home_q $helper_q upsert --url $canonical_q --source-type $source_q --failure '<reason>' --no-scout"
+  idea_command="tasks-axi add '<slug-id>' '<title>' --kind ship --repo $repo_q --queue --file $backlog_q --body $(shell_quote "from $task_id: <one line>; see $data/$task_id/report.md")"
   cat <<EOF
 Ingest scout for a link the captain sent: $title
 
@@ -666,10 +685,10 @@ Do these three things, in order.
    That file survives cleanup alongside the report, so every claim in the report must be
    traceable to it; never leave the only copy in a temporary directory.
    For video or audio, also retain it in the searchable record:
-   \`bin/fm-link-intake.sh upsert --url $canonical --source-type $source --title '<title>' --summary '<summary>' --terms '<terms>' --claim '<claim>' --transcript-file $data/$task_id/source.txt --no-scout\`
+   \`$success_command\`
    Keep the existing title, summary, terms, and claims unless the ingest corrects them.
    If the source cannot be retrieved, record the visible failure with
-   \`bin/fm-link-intake.sh upsert --url $canonical --source-type $source --failure '<reason>' --no-scout\`
+   \`$failure_command\`
    and report what you tried; do not guess at the content.
 
 2. Write the report at \`$data/$task_id/report.md\`, citing the stored artifact for
@@ -685,7 +704,7 @@ Do these three things, in order.
    anything the artifact does not support.
 
 3. File each promising idea as its own queued backlog item, one per idea:
-   \`tasks-axi add <slug-id> "<title>" --kind ship --queue --file $data/backlog.md --body "from $task_id: <one line>; see $data/$task_id/report.md"\`
+   \`$idea_command\`
    Use \`--kind scout\` for an idea that still needs investigation before it can ship.
    Queue them only. Never start, dispatch, promote, or spawn anything, and never edit a
    project: firstmate decides what gets worked and when. List every item you filed in
@@ -693,14 +712,21 @@ Do these three things, in order.
 EOF
 }
 
-fill_brief_task() {
-  local brief=$1 task=$2 directory tmp
+specialize_link_intake_brief() {
+  local brief=$1 task_id=$2 data=$3 directory tmp
   directory=${brief%/*}
-  tmp=$(mktemp "$directory/.brief.XXXXXX") || return 1
-  if ! awk -v taskfile="$task" '
-    $0 == "{TASK}" {
-      while ((getline line < taskfile) > 0) print line
-      close(taskfile)
+  tmp=$(mktemp "$directory/.brief-contract.XXXXXX") || return 1
+  if ! awk -v task_dir="$data/$task_id/" -v status="$FM_HOME/state/$task_id.status" \
+    -v helper="$SCRIPT_DIR/fm-link-intake.sh" -v home="$FM_HOME" -v backlog="$data/backlog.md" '
+    $0 == "The report is the only thing that survives, so anything worth keeping must be in it." {
+      print "The durable source artifacts, report, link-intake record, and queued backlog items survive teardown."
+      print "Scratch work in the disposable worktree does not."
+      next
+    }
+    $0 == "2. Stay inside this worktree; the only files you may write outside it are the report and the status file below." {
+      print "2. Stay inside this worktree except for the authoritative-home outputs named below."
+      print "   Outside it, you may write only under `" task_dir "`, the status file `" status "`, link-intake record updates performed through `" helper "` with explicit `FM_HOME=" home "`, and queued backlog items filed through `tasks-axi` in `" backlog "`."
+      print "   Every other file must stay inside the disposable worktree."
       next
     }
     { print }
@@ -711,17 +737,53 @@ fill_brief_task() {
   mv "$tmp" "$brief" || { rm -f "$tmp"; return 1; }
 }
 
+fill_brief_task() {
+  local brief=$1 task=$2 directory tmp
+  directory=${brief%/*}
+  tmp=$(mktemp "$directory/.brief.XXXXXX") || return 1
+  if ! awk -v taskfile="$task" '
+    $0 == "# Task" {
+      print
+      while ((getline line < taskfile) > 0) print line
+      close(taskfile)
+      replaced = 1
+      replacing = 1
+      next
+    }
+    replacing && /^# Herdr / {
+      print ""
+      replacing = 0
+      print
+      next
+    }
+    replacing { next }
+    { print }
+    END { if (!replaced || replacing) exit 1 }
+  ' "$brief" > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv "$tmp" "$brief" || { rm -f "$tmp"; return 1; }
+}
+
 file_scout_backlog_item() {
-  local task_id=$1 title=$2 canonical=$3 brief=$4 data=$5
+  local task_id=$1 title=$2 canonical=$3 brief=$4 data=$5 repo=$6
   local backlog output
   backlog="$data/backlog.md"
-  if ! fm_tasks_axi_backend_available "$FM_HOME/config"; then
-    printf 'manual backlog: add queued scout item %s "Ingest: %s" for %s to %s\n' \
-      "$task_id" "$title" "$canonical" "$backlog"
+  if fm_backlog_backend_manual "$FM_HOME/config"; then
+    printf 'manual backlog: add queued scout item %s "Ingest: %s" for %s to %s with repo %s\n' \
+      "$task_id" "$title" "$canonical" "$backlog" "$repo"
     return 0
   fi
-  if ! tasks-axi show "$task_id" --file "$backlog" >/dev/null 2>&1; then
-    output=$(tasks-axi add "$task_id" "Ingest: $title" --kind scout --queue --file "$backlog" \
+  if ! fm_tasks_axi_backend_available "$FM_HOME/config"; then
+    scout_error 'the configured tasks-axi backlog backend is unavailable or incompatible'
+    return 1
+  fi
+  if tasks-axi show "$task_id" --file "$backlog" >/dev/null 2>&1; then
+    output=$(tasks-axi update "$task_id" --repo "$repo" --file "$backlog" 2>&1) \
+      || { scout_error "could not repair the ingest scout backlog repository: $output"; return 1; }
+  else
+    output=$(tasks-axi add "$task_id" "Ingest: $title" --kind scout --repo "$repo" --queue --file "$backlog" \
       --body "queued by link intake for $canonical; brief $brief; report $data/$task_id/report.md" 2>&1) \
       || { scout_error "could not file the queued ingest scout backlog item: $output"; return 1; }
   fi
@@ -750,26 +812,28 @@ prepare_scout() {
     output=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-brief.sh" "$task_id" "$repo" --scout 2>&1) \
       || { scout_error "could not scaffold the ingest scout brief: $output"; return 1; }
   fi
-  if grep -F -x -q '{TASK}' "$brief"; then
-    task_tmp=$(mktemp "$data/$task_id/.task.XXXXXX") \
-      || { scout_error 'could not stage the ingest scout task text'; return 1; }
-    if ! scout_task_text "$record" "$canonical" "$task_id" "$data" > "$task_tmp"; then
-      rm -f "$task_tmp"
-      scout_error 'could not write the ingest scout task text'
-      return 1
-    fi
-    if ! fill_brief_task "$brief" "$task_tmp"; then
-      rm -f "$task_tmp"
-      scout_error 'could not fill the ingest scout brief'
-      return 1
-    fi
+  specialize_link_intake_brief "$brief" "$task_id" "$data" \
+    || { scout_error 'could not apply the link-intake scout write contract'; return 1; }
+  task_tmp=$(mktemp "$data/$task_id/.task.XXXXXX") \
+    || { scout_error 'could not stage the ingest scout task text'; return 1; }
+  if ! scout_task_text "$record" "$canonical" "$task_id" "$data" "$repo" > "$task_tmp"; then
     rm -f "$task_tmp"
+    scout_error 'could not write the ingest scout task text'
+    return 1
   fi
+  if ! fill_brief_task "$brief" "$task_tmp"; then
+    rm -f "$task_tmp"
+    scout_error 'could not fill the ingest scout brief'
+    return 1
+  fi
+  rm -f "$task_tmp"
   grep -F -x -q '{TASK}' "$brief" \
     && { scout_error "the ingest scout brief still has an unfilled task: $brief"; return 1; }
   grep -F -q "$canonical" "$brief" \
     || { scout_error "the ingest scout brief does not name its source link: $brief"; return 1; }
-  file_scout_backlog_item "$task_id" "$title" "$canonical" "$brief" "$data" || return 1
+  grep -F -q "Outside it, you may write only under \`$data/$task_id/\`" "$brief" \
+    || { scout_error "the ingest scout brief lacks its authoritative-home write contract: $brief"; return 1; }
+  file_scout_backlog_item "$task_id" "$title" "$canonical" "$brief" "$data" "$repo" || return 1
   printf 'scout: %s prepared, not dispatched\n' "$task_id"
   printf 'scout brief: %s\n' "$brief"
 }
@@ -799,7 +863,7 @@ command_prepare_scout() {
 command_upsert() {
   local original='' canonical='' canonical_input='' source='' title='' summary='' terms='' retrieved='' transcript_file='' transcript_unavailable='' failure='' argument claim
   local claims='' id current='' record existing transcript note status host path record_tmp logical_record
-  local scout=1 scout_repo=$SCOUT_REPO_DEFAULT published
+  local scout=1 scout_repo=$SCOUT_REPO_DEFAULT published repair_command
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --url) shift; original=${1:-} ;;
@@ -915,8 +979,9 @@ command_upsert() {
   if [ "$scout" = 1 ] && [ "$status" = captured ]; then
     require_one_line 'scout repo' "$scout_repo"
     if ! prepare_scout "$published" "$canonical" "$scout_repo"; then
-      printf 'error: the link record is stored, but its ingest scout was not prepared; rerun: bin/fm-link-intake.sh prepare-scout --url %s\n' \
-        "$canonical" >&2
+      repair_command="FM_HOME=$(shell_quote "$FM_HOME") $(shell_quote "$SCRIPT_DIR/fm-link-intake.sh") prepare-scout --url $(shell_quote "$canonical") --scout-repo $(shell_quote "$scout_repo")"
+      printf 'error: the link record is stored, but its ingest scout was not prepared; rerun: %s\n' \
+        "$repair_command" >&2
       return 3
     fi
   fi

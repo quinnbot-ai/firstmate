@@ -13,10 +13,14 @@ Repeated intake of a canonical URL updates one current record while retaining or
 
 Storing a retrievable record also prepares one ingest scout for that link: a scout brief under `FM_HOME/data/<task-id>/` and a queued backlog item.
 The scout's own instructions have it ingest the source with the existing browser or media tool, keep the ingested text as a durable artifact beside its report, report what the fleet can build from it along with out-of-the-box ideas, blindspots, and other angles mapped to current lanes, and file promising ideas as further queued backlog items.
+Its specialized write contract permits authoritative output only under its own `FM_HOME/data/<task-id>/` directory, link-record updates through the absolute intake helper with explicit `FM_HOME`, queued backlog additions through `tasks-axi`, and its status file.
+Every other file stays inside the disposable worktree.
+The selected scout repository is stored on the queued scout item and required on every promising-idea command in the generated brief.
 Preparation stops there: the scout is never spawned, started, or dispatched, so firstmate keeps dispatch authority, spawn safety, dispatch-profile consultation, and capacity judgment.
 The task id derives from the canonical URL alone, so re-recording the same link converges on the one brief and backlog item instead of queueing a second scout.
 An inaccessible record prepares no scout because there is nothing to ingest, `--no-scout` skips preparation for one invocation, and `prepare-scout` prepares or repairs one for an already-stored record.
 A home whose backlog backend is manual gets the brief plus the exact queued item to add by hand.
+A missing or incompatible `tasks-axi` under the default backend fails scout preparation after the link record is published instead of being treated as manual mode.
 
 Video and audio intake retains a legally and technically accessible transcript under the same private location or records why no transcript can be obtained.
 An inaccessible, private, deleted, or otherwise unreadable source still receives a visible record with its failure reason.
