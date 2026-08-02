@@ -17,7 +17,7 @@ Claude's `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-au
 The hook fires on every Stop, and an eligible primary with supervision need admits one home-scoped owner that foregrounds `bin/fm-watch-arm.sh` inside the hook-owned process tree.
 A numeric session-lock owner that fails the shared `fm_harness_pid_alive` predicate is reclaimed through `bin/fm-lock.sh` before auto-arm state changes, while a live owner, absent lock, or malformed lock keeps the competing hook inert.
 The stale-owner claim occurs only after the existing AFK and supervision-need gates pass.
-While supervision is still needed and away mode remains inactive, an actionable close or typed failure wakes the idle session through exit 2.
+While supervision is still needed and away mode remains inactive, an actionable close, typed followed-cycle close, or typed failure wakes the idle session through exit 2.
 
 ## Session-owner fence
 
@@ -42,7 +42,7 @@ The watcher is therefore parked for the whole handling turn by design, so a mid-
 The durable wake queue preserves actionable events during the residual active-turn window, and the unchanged bounded turn-end guard enforces recovery at Stop when no watcher or auto-arm claim is present.
 No PreToolUse hook denies fleet commands based on watcher status.
 The model no longer re-arms after ordinary wakes.
-Terminal arm-output classification (`started`, `attached`, or `FAILED`) remains defense in depth for the manual recovery path.
+Terminal arm-output classification remains defense in depth for the manual recovery path; [Arm-layer cycle contract](#arm-layer-cycle-contract) owns the exact status semantics.
 Codex retains its bounded foreground checkpoint protocol.
 Grok retains its tracked background-task notification protocol.
 No adapter starts a replacement with shell `&`.
@@ -56,7 +56,7 @@ An actionable child output returns that reason normally.
 A zero/empty return from an OWNED child rechecks the home lock and beacon, attaches to a verified healthy successor when one exists, or emits `watcher: FAILED - cycle ended without an actionable reason` and exits nonzero.
 An attached arm follows verified identity-matched successors and, when that chain ends without one, emits the separate typed `watcher: cycle-ended - the followed watcher cycle closed with no successor; drain the wake queue` and exits nonzero.
 The two typed closes are distinct because only the arm that forked a watcher can see that watcher's reason line: a followed cycle's reason went to the owning arm and reaches this arm only through the durable queue, so reporting that close as a supervision failure alarmed on every wake-delivering cycle and pushed the model into arming a second relay.
-Consumers must therefore classify a followed close as a drain-and-handle event and reserve the supervision-down alarm for `watcher: FAILED`; `bin/fm-claude-stop-autoarm.sh` does exactly that, and both closes stay nonzero so no adapter can read either as a clean empty completion.
+Consumers that interpret the arm-layer status line must therefore classify a followed close as a drain-and-handle event and reserve the raw supervision-down alarm for `watcher: FAILED`; `bin/fm-claude-stop-autoarm.sh` does exactly that, and both closes stay nonzero so no adapter can read either as a clean empty completion.
 
 The arm layer appends one tab-separated record per observed cycle to `state/.watch-cycle-exits.log`.
 Each record includes arm and watcher PIDs, start and end timestamps, exit code and signal, classified reason, beacon age, lock identity before and after close, and successor disposition.
