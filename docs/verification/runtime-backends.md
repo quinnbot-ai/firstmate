@@ -360,6 +360,7 @@ ok - real Herdr lab validation completed on Herdr 0.7.3 with the default-session
 ```
 
 The runner exited with status 0.
+The `fm-hibit-resume-r1` case held the named-session presentation lock for six seconds, beyond fresh projection's five-second budget, and the same-identity recovery completed after release instead of falling back or refusing the resume.
 The guard exercised only a generated non-default `fm-lab-` session and captured the server-log window before and after the run.
 ### Workspace-removal focus safety
 
