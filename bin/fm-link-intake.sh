@@ -651,9 +651,9 @@ shell_quote() {
 }
 
 scout_task_text() {
-  local record=$1 canonical=$2 task_id=$3 data=$4 repo=$5
+  local record=$1 canonical=$2 task_id=$3 data=$4
   local title summary source terms helper_q home_q canonical_q source_q source_file_q
-  local repo_q backlog_q success_command failure_command idea_command
+  local lane_repo_q backlog_q success_command failure_command idea_command
   title=$(record_field Title "$record")
   summary=$(record_field Summary "$record")
   source=$(record_field 'Source type' "$record")
@@ -663,11 +663,11 @@ scout_task_text() {
   canonical_q=$(shell_quote "$canonical")
   source_q=$(shell_quote "$source")
   source_file_q=$(shell_quote "$data/$task_id/source.txt")
-  repo_q=$(shell_quote "$repo")
+  lane_repo_q=$(shell_quote '<mapped-lane-repo>')
   backlog_q=$(shell_quote "$data/backlog.md")
   success_command="FM_HOME=$home_q $helper_q upsert --url $canonical_q --source-type $source_q --title '<title>' --summary '<summary>' --terms '<terms>' --claim '<claim>' --transcript-file $source_file_q --no-scout"
   failure_command="FM_HOME=$home_q $helper_q upsert --url $canonical_q --source-type $source_q --failure '<reason>' --no-scout"
-  idea_command="tasks-axi add '<slug-id>' '<title>' --kind ship --repo $repo_q --queue --file $backlog_q --body $(shell_quote "from $task_id: <one line>; see $data/$task_id/report.md")"
+  idea_command="tasks-axi add '<slug-id>' '<title>' --kind ship --repo $lane_repo_q --queue --file $backlog_q --body $(shell_quote "from $task_id: <one line>; see $data/$task_id/report.md")"
   cat <<EOF
 Ingest scout for a link the captain sent: $title
 
@@ -705,6 +705,7 @@ Do these three things, in order.
 
 3. File each promising idea as its own queued backlog item, one per idea:
    \`$idea_command\`
+   Replace \`<mapped-lane-repo>\` with the repository for the current lane that idea is mapped to in the report.
    Use \`--kind scout\` for an idea that still needs investigation before it can ship.
    Queue them only. Never start, dispatch, promote, or spawn anything, and never edit a
    project: firstmate decides what gets worked and when. List every item you filed in
@@ -816,7 +817,7 @@ prepare_scout() {
     || { scout_error 'could not apply the link-intake scout write contract'; return 1; }
   task_tmp=$(mktemp "$data/$task_id/.task.XXXXXX") \
     || { scout_error 'could not stage the ingest scout task text'; return 1; }
-  if ! scout_task_text "$record" "$canonical" "$task_id" "$data" "$repo" > "$task_tmp"; then
+  if ! scout_task_text "$record" "$canonical" "$task_id" "$data" > "$task_tmp"; then
     rm -f "$task_tmp"
     scout_error 'could not write the ingest scout task text'
     return 1

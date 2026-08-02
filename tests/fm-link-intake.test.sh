@@ -535,7 +535,7 @@ scout_id_from() {  # <intake output>
 }
 
 test_retrievable_link_prepares_one_queued_ingest_scout() {
-  local home output task_id brief backlog
+  local home output task_id brief backlog idea_command
   command -v tasks-axi >/dev/null 2>&1 \
     || { echo 'skip: tasks-axi not found (required by the queued backlog item)'; return 0; }
   home=$(make_home prepared-scout)
@@ -558,7 +558,10 @@ test_retrievable_link_prepares_one_queued_ingest_scout() {
   assert_grep 'Potential blindspots' "$brief" 'ingest scout brief omits the blindspots section'
   assert_grep 'Other angles worth taking' "$brief" 'ingest scout brief omits the other-angles section'
   assert_grep 'tasks-axi add' "$brief" 'ingest scout brief does not have promising ideas filed as backlog items'
-  assert_grep "--repo 'lecture-lane'" "$brief" 'promising-idea command lost the selected repository'
+  idea_command=$(sed -n 's/^   `\(tasks-axi add .*\)`$/\1/p' "$brief")
+  [ -n "$idea_command" ] || fail 'brief did not render the promising-idea command'
+  assert_contains "$idea_command" "--repo '<mapped-lane-repo>'" 'promising-idea command did not require its mapped lane repository'
+  assert_not_contains "$idea_command" "--repo 'lecture-lane'" 'promising-idea command inherited the scout execution repository'
   assert_grep 'Never start, dispatch, promote, or spawn anything' "$brief" 'ingest scout brief does not withhold dispatch authority'
   assert_grep "Outside it, you may write only under \`$home/data/$task_id/\`" "$brief" 'ingest scout brief does not permit its authoritative artifacts'
   assert_grep 'Every other file must stay inside the disposable worktree' "$brief" 'ingest scout brief does not preserve its disposable-worktree boundary'
