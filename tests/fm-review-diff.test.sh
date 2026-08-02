@@ -11,6 +11,7 @@
 #   (d) pr= present but PR head unreachable -> fallback to local branch + warning
 #   (e) pr= + STALE recorded pr_head= + newer remote pull head -> must use fetched head
 #       (this is the class that bit reviewers holding merges over "missing" fixes)
+#   (f) host diff.external=/GIT_EXTERNAL_DIFF= viewer -> patch output is unaffected
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -133,6 +134,31 @@ test_pr_meta_fetches_pull_head_without_recorded_sha() {
   pass "fm-review-diff fetches refs/pull/<n>/head when pr_head= is absent"
 }
 
+test_host_external_diff_cannot_replace_the_patch() {
+  local case_dir out
+  case_dir=$(make_case external-diff)
+  stale_and_pr_commits "$case_dir"
+  write_task_meta "$case_dir"
+
+  # A host diff.external=/GIT_EXTERNAL_DIFF= viewer (difftastic, delta, ...)
+  # must never stand in for the reviewed patch.
+  cat > "$case_dir/fake-ext-diff" <<'EXT'
+#!/usr/bin/env bash
+echo "EXTERNAL VIEWER OUTPUT"
+EXT
+  chmod +x "$case_dir/fake-ext-diff"
+  git -C "$case_dir/project" config diff.external "$case_dir/fake-ext-diff"
+
+  out=$(GIT_EXTERNAL_DIFF="$case_dir/fake-ext-diff" \
+    run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+stale-local' \
+    "external-diff: review must still print a unified patch"
+  assert_not_contains "$out" 'EXTERNAL VIEWER OUTPUT' \
+    "external-diff: host diff viewer must not replace the patch"
+  pass "fm-review-diff ignores a host external diff viewer"
+}
+
 test_no_pr_meta_uses_local_branch() {
   local case_dir out
   case_dir=$(make_case no-pr-meta)
@@ -174,3 +200,4 @@ test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
+test_host_external_diff_cannot_replace_the_patch
