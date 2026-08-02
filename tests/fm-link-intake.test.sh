@@ -147,6 +147,10 @@ test_process_start_identity() {
   TZ=UTC0 LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | awk 'NF { $1=$1; print; exit }'
 }
 
+record_path_from() {  # <upsert output>
+  printf '%s\n' "$1" | head -1
+}
+
 record_for() {  # <home> <url>
   local home=$1 url=$2 result
   result=$(run_intake "$home" validate "$url") || fail 'expected record did not validate'
@@ -160,6 +164,8 @@ test_canonical_duplicate_converges_and_preserves_evidence() {
     || fail 'first URL intake failed'
   second=$(run_intake "$home" upsert --url 'https://example.com/watch?b=2' --source-type web --title 'Updated title' --summary 'A newer searchable summary.' --terms 'updated,example' --claim 'Updated claim.') \
     || fail 'duplicate URL intake failed'
+  first=$(record_path_from "$first")
+  second=$(record_path_from "$second")
   [ "$first" = "$second" ] || fail 'canonical duplicate created a second record path'
   count=$(find "$(current_root "$home")/records" -type f -name '*.md' | wc -l | tr -d ' ')
   [ "$count" = 1 ] || fail 'canonical duplicate created multiple records'
@@ -439,7 +445,7 @@ test_validation_rejects_bidirectional_divergence() {
 }
 
 test_odd_urls_never_control_filenames_or_shell() {
-  local home record files query_record
+  local home record files query_record scout
   home=$(make_home odd-url)
   run_intake "$home" upsert --url 'https://EXAMPLE.test/a/../../%24%28touch%20nope%29?x=%3B%26' --source-type web --title 'Odd URL title' --summary 'Odd but valid URL summary.' --terms 'odd,url' --claim 'Odd URL remains data.' >/dev/null \
     || fail 'odd URL intake failed'
@@ -455,7 +461,12 @@ test_odd_urls_never_control_filenames_or_shell() {
     || fail 'query containing a slash was rejected'
   query_record=$(record_for "$home" 'https://example.test?Token=ABC/Path')
   assert_grep 'Canonical URL: https://example.test?Token=ABC/Path' "$query_record" 'query content was lowercased as authority'
-  pass 'odd URLs preserve query case and use digest paths'
+  scout=$(run_intake "$home" prepare-scout --url 'https://EXAMPLE.test/a/../../%24%28touch%20nope%29?x=%3B%26' \
+    | sed -n 's/^scout: \(.*\) prepared, not dispatched$/\1/p') || fail 'odd URL scout preparation failed'
+  case "$scout" in ingest-example-test-[0-9a-f][0-9a-f]*) ;; *) fail "odd URL controlled the scout task id: $scout" ;; esac
+  assert_absent "$home/nope" 'odd URL executed a command during scout preparation'
+  assert_grep '%24%28touch%20nope%29' "$home/data/$scout/brief.md" 'odd URL was not carried into the brief as data'
+  pass 'odd URLs preserve query case, use digest paths, and stay data in prepared scouts'
 }
 
 test_agents_trigger_is_concise_and_agent_agnostic() {
@@ -464,9 +475,131 @@ test_agents_trigger_is_concise_and_agent_agnostic() {
   [ -n "$line" ] || fail 'AGENTS link-intake trigger is absent'
   assert_contains "$line" 'captain sends meaningful URL input' 'trigger does not cover meaningful captain URLs'
   assert_contains "$line" 'bin/fm-link-intake.sh' 'trigger does not name the authoritative helper'
+  assert_contains "$line" 'ingest scout' 'trigger does not cover the prepared ingest scout'
   [ "$(printf '%s\n' "$line" | wc -l | tr -d ' ')" = 1 ] || fail 'AGENTS link-intake trigger is not one concise line'
   assert_not_contains "$line" 'Claude' 'trigger is not agent-agnostic'
   pass 'AGENTS has one concise agent-agnostic link-intake trigger'
+}
+
+scout_brief_for() {  # <home> <task-id>
+  printf '%s\n' "$1/data/$2/brief.md"
+}
+
+scout_id_from() {  # <intake output>
+  printf '%s\n' "$1" | sed -n 's/^scout: \(.*\) prepared, not dispatched$/\1/p'
+}
+
+test_retrievable_link_prepares_one_queued_ingest_scout() {
+  local home output task_id brief backlog
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo 'skip: tasks-axi not found (required by the queued backlog item)'; return 0; }
+  home=$(make_home prepared-scout)
+  output=$(run_intake "$home" upsert --url 'https://lecture.example.test/talk?id=7' --source-type video \
+    --title 'A talk worth mining' --summary 'A recorded talk about operating agent fleets.' \
+    --terms 'agents,fleet' --claim 'The talk makes a testable claim.' \
+    --transcript-unavailable 'captions are not published yet') \
+    || fail 'intake with scout preparation failed'
+  task_id=$(scout_id_from "$output")
+  [ -n "$task_id" ] || fail 'intake did not report a prepared ingest scout'
+  assert_contains "$output" 'not dispatched' 'intake did not state that the scout is undispatched'
+  brief=$(scout_brief_for "$home" "$task_id")
+  assert_present "$brief" 'prepared ingest scout has no brief'
+  ! grep -F -x -q '{TASK}' "$brief" || fail 'ingest scout brief was left unfilled'
+  assert_grep 'https://lecture.example.test/talk?id=7' "$brief" 'ingest scout brief does not name its source link'
+  assert_grep "$home/data/$task_id/source.txt" "$brief" 'ingest scout brief does not require a durable artifact'
+  assert_grep "$home/data/$task_id/report.md" "$brief" 'ingest scout brief does not require a report'
+  assert_grep 'What we can build from it' "$brief" 'ingest scout brief omits the buildable-ideas section'
+  assert_grep 'Out-of-the-box ideas' "$brief" 'ingest scout brief omits the out-of-the-box section'
+  assert_grep 'Potential blindspots' "$brief" 'ingest scout brief omits the blindspots section'
+  assert_grep 'Other angles worth taking' "$brief" 'ingest scout brief omits the other-angles section'
+  assert_grep 'tasks-axi add' "$brief" 'ingest scout brief does not have promising ideas filed as backlog items'
+  assert_grep 'Never start, dispatch, promote, or spawn anything' "$brief" 'ingest scout brief does not withhold dispatch authority'
+  backlog="$home/data/backlog.md"
+  assert_grep "$task_id" "$backlog" 'ingest scout is absent from the backlog'
+  assert_grep 'Ingest: A talk worth mining' "$backlog" 'queued scout item lost its source title'
+  [ "$(tasks-axi list --state queued --file "$backlog" 2>/dev/null | grep -c -F "$task_id")" -ge 1 ] \
+    || fail 'ingest scout backlog item is not queued'
+  assert_absent "$home/state/$task_id.meta" 'link intake dispatched the ingest scout itself'
+  pass 'a retrievable link prepares one queued, undispatched ingest scout'
+}
+
+test_repeated_intake_converges_on_one_ingest_scout() {
+  local home first second briefs queued
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo 'skip: tasks-axi not found (required by the queued backlog item)'; return 0; }
+  home=$(make_home converging-scout)
+  first=$(run_intake "$home" upsert --url 'https://media.example.test/watch?v=9' --source-type video \
+    --title 'Original title' --summary 'First pass summary.' --terms 'media' --claim 'A claim.' \
+    --transcript-unavailable 'not retrieved yet') || fail 'first intake failed'
+  printf 'The retained transcript.\n' > "$home/transcript.txt"
+  second=$(run_intake "$home" upsert --url 'https://media.example.test/watch?v=9' --source-type video \
+    --title 'A completely different title' --summary 'Second pass summary.' --terms 'media' --claim 'A claim.' \
+    --transcript-file "$home/transcript.txt") || fail 'second intake failed'
+  [ "$(scout_id_from "$first")" = "$(scout_id_from "$second")" ] \
+    || fail 'a changed title queued a second ingest scout for the same link'
+  briefs=$(find "$home/data" -mindepth 2 -maxdepth 2 -name brief.md | wc -l | tr -d ' ')
+  [ "$briefs" = 1 ] || fail "repeated intake left $briefs ingest scout briefs"
+  queued=$(grep -c -F -- "- [ ] $(scout_id_from "$first") " "$home/data/backlog.md")
+  [ "$queued" = 1 ] || fail "repeated intake left $queued queued backlog items for one link"
+  pass 'repeated intake of one link converges on a single ingest scout'
+}
+
+test_scout_preparation_is_skippable_and_repairable() {
+  local home output task_id
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo 'skip: tasks-axi not found (required by the queued backlog item)'; return 0; }
+  home=$(make_home skipped-scout)
+  run_intake "$home" upsert --url 'https://forge.example.test/pull/12' --source-type web \
+    --title 'A pull request' --summary 'A link that needs no ingest.' --terms 'forge' --claim 'A claim.' \
+    --no-scout > "$home/skipped.out" || fail 'intake with --no-scout failed'
+  assert_not_contains "$(cat "$home/skipped.out")" 'scout:' '--no-scout still prepared a scout'
+  [ "$(find "$home/data" -mindepth 2 -maxdepth 2 -name brief.md | wc -l | tr -d ' ')" = 0 ] \
+    || fail '--no-scout left a scout brief behind'
+  output=$(run_intake "$home" prepare-scout --url 'https://forge.example.test/pull/12') \
+    || fail 'prepare-scout failed for a stored record'
+  task_id=$(scout_id_from "$output")
+  [ -n "$task_id" ] || fail 'prepare-scout did not report a prepared ingest scout'
+  assert_present "$(scout_brief_for "$home" "$task_id")" 'prepare-scout wrote no brief'
+  run_intake "$home" upsert --url 'https://private.example.test/paywalled' --source-type article \
+    --failure 'HTTP 402 paywalled' > "$home/failure.out" || fail 'inaccessible intake failed'
+  assert_not_contains "$(cat "$home/failure.out")" 'scout:' 'an inaccessible record prepared an ingest scout'
+  if run_intake "$home" prepare-scout --url 'https://private.example.test/paywalled' \
+    > "$home/refused.out" 2> "$home/refused.err"; then
+    fail 'prepare-scout accepted an inaccessible record'
+  fi
+  assert_grep 'nothing to ingest' "$home/refused.err" 'refusal reason for an inaccessible record is not visible'
+  pass 'scout preparation is skippable, repairable, and refused for inaccessible records'
+}
+
+test_scout_preparation_failure_preserves_the_stored_record() {
+  local home task_id rc=0
+  home=$(make_home scout-failure)
+  task_id="ingest-blocked-example-test-$(printf '%s' 'https://blocked.example.test/item' | shasum -a 256 | cut -c1-8)"
+  mkdir -p "$home/data/$task_id/brief.md"
+  run_intake "$home" upsert --url 'https://blocked.example.test/item' --source-type article \
+    --title 'A blocked scout' --summary 'The scout brief cannot be written.' --terms 'blocked' \
+    --claim 'A claim.' > "$home/blocked.out" 2> "$home/blocked.err" || rc=$?
+  expect_code 3 "$rc" 'a failed scout preparation after a stored record'
+  assert_grep 'link record is stored' "$home/blocked.err" 'failure did not state that the record survived'
+  assert_grep 'prepare-scout --url https://blocked.example.test/item' "$home/blocked.err" 'failure did not name the repair command'
+  run_intake "$home" validate 'https://blocked.example.test/item' >/dev/null \
+    || fail 'a failed scout preparation cost the stored link record'
+  pass 'a failed scout preparation keeps the link record and reports the repair'
+}
+
+test_manual_backlog_backend_prepares_the_brief_and_the_exact_item() {
+  local home output task_id
+  home=$(make_home manual-backlog)
+  printf 'manual\n' > "$home/config/backlog-backend"
+  output=$(run_intake "$home" upsert --url 'https://manual.example.test/page' --source-type article \
+    --title 'A manual home' --summary 'This home files backlog items by hand.' --terms 'manual' \
+    --claim 'A claim.') || fail 'intake under a manual backlog backend failed'
+  task_id=$(scout_id_from "$output")
+  [ -n "$task_id" ] || fail 'manual backend prepared no ingest scout'
+  assert_present "$(scout_brief_for "$home" "$task_id")" 'manual backend wrote no scout brief'
+  assert_contains "$output" "manual backlog: add queued scout item $task_id" 'manual backend did not print the exact queued item'
+  assert_absent "$home/data/backlog.md" 'manual backend mutated the backlog itself'
+  pass 'a manual backlog backend prepares the brief and prints the item to add'
 }
 
 test_canonical_duplicate_converges_and_preserves_evidence
@@ -480,3 +613,8 @@ test_atomic_generation_switch_is_process_crash_safe
 test_validation_rejects_bidirectional_divergence
 test_odd_urls_never_control_filenames_or_shell
 test_agents_trigger_is_concise_and_agent_agnostic
+test_retrievable_link_prepares_one_queued_ingest_scout
+test_repeated_intake_converges_on_one_ingest_scout
+test_scout_preparation_is_skippable_and_repairable
+test_scout_preparation_failure_preserves_the_stored_record
+test_manual_backlog_backend_prepares_the_brief_and_the_exact_item

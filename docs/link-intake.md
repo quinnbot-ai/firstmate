@@ -11,6 +11,13 @@ An interrupted updater leaves the prior or next complete generation selected, an
 The helper does not issue filesystem sync barriers, so power-loss durability depends on the host filesystem.
 Repeated intake of a canonical URL updates one current record while retaining original URLs and preserving the replaced record as private history.
 
+Storing a retrievable record also prepares one ingest scout for that link: a scout brief under `FM_HOME/data/<task-id>/` and a queued backlog item.
+The scout's own instructions have it ingest the source with the existing browser or media tool, keep the ingested text as a durable artifact beside its report, report what the fleet can build from it along with out-of-the-box ideas, blindspots, and other angles mapped to current lanes, and file promising ideas as further queued backlog items.
+Preparation stops there: the scout is never spawned, started, or dispatched, so firstmate keeps dispatch authority, spawn safety, dispatch-profile consultation, and capacity judgment.
+The task id derives from the canonical URL alone, so re-recording the same link converges on the one brief and backlog item instead of queueing a second scout.
+An inaccessible record prepares no scout because there is nothing to ingest, `--no-scout` skips preparation for one invocation, and `prepare-scout` prepares or repairs one for an already-stored record.
+A home whose backlog backend is manual gets the brief plus the exact queued item to add by hand.
+
 Video and audio intake retains a legally and technically accessible transcript under the same private location or records why no transcript can be obtained.
 An inaccessible, private, deleted, or otherwise unreadable source still receives a visible record with its failure reason.
 Link intake preserves attribution and verification evidence only.

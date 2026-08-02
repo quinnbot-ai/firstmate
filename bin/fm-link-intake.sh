@@ -2,7 +2,8 @@
 # fm-link-intake.sh - idempotently store validated, private Firstmate link-intake records.
 #
 # Usage:
-#   bin/fm-link-intake.sh upsert --url URL --source-type TYPE --title TITLE --summary SUMMARY --terms TERMS --claim TEXT [--claim TEXT ...] [--canonical-url URL] [--retrieved-at YYYY-MM-DD] [--transcript-file PATH | --transcript-unavailable REASON] [--failure REASON]
+#   bin/fm-link-intake.sh upsert --url URL --source-type TYPE --title TITLE --summary SUMMARY --terms TERMS --claim TEXT [--claim TEXT ...] [--canonical-url URL] [--retrieved-at YYYY-MM-DD] [--transcript-file PATH | --transcript-unavailable REASON] [--failure REASON] [--no-scout] [--scout-repo NAME]
+#   bin/fm-link-intake.sh prepare-scout --url URL [--scout-repo NAME]
 #   bin/fm-link-intake.sh validate <URL>
 #   bin/fm-link-intake.sh validate --all
 #   bin/fm-link-intake.sh --help
@@ -19,6 +20,18 @@
 # Video and audio require either a transcript file to retain privately or an explicit
 # unavailable reason, unless the retrieval itself failed, in which case that failure is
 # recorded as the transcript reason too.
+#
+# Storing a retrievable record also prepares one queued ingest scout for that link:
+# a scout brief scaffolded through bin/fm-brief.sh and a queued backlog item filed
+# through the configured backlog backend. It never spawns, dispatches, or starts the
+# scout, so firstmate keeps dispatch authority, spawn safety, dispatch-profile
+# consultation, and capacity judgment. `--no-scout` skips preparation for this
+# invocation, and `prepare-scout` prepares or repairs one for an already-stored record.
+# The scout task id is derived from the canonical URL alone, so repeated intake of the
+# same link converges on the same brief and backlog item instead of duplicating work.
+# An inaccessible record prepares no scout because there is nothing to ingest.
+# Scout preparation happens after the record is published: when it fails, the record is
+# still stored and the command exits 3 so the failure is visible and repairable.
 # Bash 3.2 compatible.
 
 set -u
@@ -29,12 +42,16 @@ LINK_ROOT="$FM_HOME/data/link-intake"
 GENERATIONS_DIR="$LINK_ROOT/generations"
 CURRENT_LINK="$LINK_ROOT/current"
 LOCK_DIR="$LINK_ROOT/.update-lock"
+SCOUT_REPO_DEFAULT=firstmate
 LOCK_HELD=0
 LOCK_OWNER_DIR=
 STAGED_GENERATION=
 STAGED_LINK=
 CURRENT_GENERATION=
 QUIET_CURRENT_GENERATION=
+
+# shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 
 remove_generation() {
   local generation=$1
@@ -124,18 +141,28 @@ die() {
 usage() {
   cat <<'EOF'
 Usage:
-  bin/fm-link-intake.sh upsert --url URL --source-type TYPE --title TITLE --summary SUMMARY --terms TERMS --claim TEXT [--claim TEXT ...] [--canonical-url URL] [--retrieved-at YYYY-MM-DD] [--transcript-file PATH | --transcript-unavailable REASON] [--failure REASON]
+  bin/fm-link-intake.sh upsert --url URL --source-type TYPE --title TITLE --summary SUMMARY --terms TERMS --claim TEXT [--claim TEXT ...] [--canonical-url URL] [--retrieved-at YYYY-MM-DD] [--transcript-file PATH | --transcript-unavailable REASON] [--failure REASON] [--no-scout] [--scout-repo NAME]
+  bin/fm-link-intake.sh prepare-scout --url URL [--scout-repo NAME]
   bin/fm-link-intake.sh validate <URL>
   bin/fm-link-intake.sh validate --all
 
 Source types: article, web, video, audio, document, image, other.
 
 `upsert` preserves every supplied original URL, snapshots a replaced record under
-data/link-intake/current/history/, and prints the current record path.
+data/link-intake/current/history/, and prints the current record path as its first
+line; any scout-preparation line follows it.
 `--failure` creates a visible inaccessible record when title, summary, claims, and
 terms cannot be obtained.
 For video or audio, provide a legally accessible `--transcript-file` or explain why
 it is unavailable with `--transcript-unavailable`.
+
+A retrievable record also prepares one queued ingest scout: a brief at
+data/<task-id>/brief.md and a queued backlog item. Preparation never spawns or
+dispatches anything - firstmate decides what runs and when. `--no-scout` skips it
+for this invocation, `--scout-repo` names the repo the scout works in (default
+firstmate), and `prepare-scout` prepares or repairs one for a stored record.
+Preparation is idempotent per canonical URL and exits 3 when the record was stored
+but its scout could not be prepared.
 EOF
 }
 
@@ -588,9 +615,191 @@ publish_generation() {
   STAGED_GENERATION=
 }
 
+record_field() {
+  local field=$1 record=$2
+  sed -n "s/^$field: //p" "$record" | head -1
+}
+
+slugify() {
+  printf '%s' "$1" |
+    LC_ALL=C tr '[:upper:]' '[:lower:]' |
+    LC_ALL=C sed -e 's/[^a-z0-9]\{1,\}/-/g' -e 's/^-*//' -e 's/-*$//'
+}
+
+# The scout task id is derived from the canonical URL alone so that re-recording the
+# same link - including the scout's own transcript-retaining upsert - converges on the
+# one brief and backlog item instead of queueing a second scout under a changed title.
+scout_task_id_for() {
+  local canonical=$1 slug digest
+  slug=$(slugify "$(url_host "$canonical")" | cut -c1-24 | LC_ALL=C sed -e 's/-*$//')
+  [ -n "$slug" ] || slug='link'
+  digest=$(record_id_for "$canonical" | cut -c1-8)
+  printf 'ingest-%s-%s\n' "$slug" "$digest"
+}
+
+scout_error() {
+  printf 'error: %s\n' "$*" >&2
+  return 1
+}
+
+scout_task_text() {
+  local record=$1 canonical=$2 task_id=$3 data=$4
+  local title summary source terms
+  title=$(record_field Title "$record")
+  summary=$(record_field Summary "$record")
+  source=$(record_field 'Source type' "$record")
+  terms=$(record_field 'Search terms' "$record")
+  cat <<EOF
+Ingest scout for a link the captain sent: $title
+
+- Source: $canonical
+- Source type: $source
+- Recorded summary: $summary
+- Recorded search terms: $terms
+- Link-intake record: $(logical_record_path_for "$canonical")
+
+Do these three things, in order.
+
+1. Ingest the source with the existing tool suited to it: \`chrome-devtools-axi\` for
+   pages and documents, the existing media transcript tooling for video or audio.
+   Store the full ingested text as a durable artifact at \`$data/$task_id/source.txt\`.
+   That file survives cleanup alongside the report, so every claim in the report must be
+   traceable to it; never leave the only copy in a temporary directory.
+   For video or audio, also retain it in the searchable record:
+   \`bin/fm-link-intake.sh upsert --url $canonical --source-type $source --title '<title>' --summary '<summary>' --terms '<terms>' --claim '<claim>' --transcript-file $data/$task_id/source.txt --no-scout\`
+   Keep the existing title, summary, terms, and claims unless the ingest corrects them.
+   If the source cannot be retrieved, record the visible failure with
+   \`bin/fm-link-intake.sh upsert --url $canonical --source-type $source --failure '<reason>' --no-scout\`
+   and report what you tried; do not guess at the content.
+
+2. Write the report at \`$data/$task_id/report.md\`, citing the stored artifact for
+   every factual claim about the source. Cover these four sections:
+   - **What we can build from it** - concrete, buildable things, each mapped to a current
+     lane in \`$data/projects.md\` and the captain's working doctrine in \`$data/captain.md\`.
+   - **Out-of-the-box ideas** - angles the source does not state outright but that its
+     material genuinely supports.
+   - **Potential blindspots** - what the source omits, overstates, or gets wrong, and
+     where following it would cost us.
+   - **Other angles worth taking** - adjacent framings, and lanes this does not fit.
+   Keep what the source actually says separate from what you recommend, and leave out
+   anything the artifact does not support.
+
+3. File each promising idea as its own queued backlog item, one per idea:
+   \`tasks-axi add <slug-id> "<title>" --kind ship --queue --file $data/backlog.md --body "from $task_id: <one line>; see $data/$task_id/report.md"\`
+   Use \`--kind scout\` for an idea that still needs investigation before it can ship.
+   Queue them only. Never start, dispatch, promote, or spawn anything, and never edit a
+   project: firstmate decides what gets worked and when. List every item you filed in
+   the report so the queue and the report agree.
+EOF
+}
+
+fill_brief_task() {
+  local brief=$1 task=$2 directory tmp
+  directory=${brief%/*}
+  tmp=$(mktemp "$directory/.brief.XXXXXX") || return 1
+  if ! awk -v taskfile="$task" '
+    $0 == "{TASK}" {
+      while ((getline line < taskfile) > 0) print line
+      close(taskfile)
+      next
+    }
+    { print }
+  ' "$brief" > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv "$tmp" "$brief" || { rm -f "$tmp"; return 1; }
+}
+
+file_scout_backlog_item() {
+  local task_id=$1 title=$2 canonical=$3 brief=$4 data=$5
+  local backlog output
+  backlog="$data/backlog.md"
+  if ! fm_tasks_axi_backend_available "$FM_HOME/config"; then
+    printf 'manual backlog: add queued scout item %s "Ingest: %s" for %s to %s\n' \
+      "$task_id" "$title" "$canonical" "$backlog"
+    return 0
+  fi
+  if ! tasks-axi show "$task_id" --file "$backlog" >/dev/null 2>&1; then
+    output=$(tasks-axi add "$task_id" "Ingest: $title" --kind scout --queue --file "$backlog" \
+      --body "queued by link intake for $canonical; brief $brief; report $data/$task_id/report.md" 2>&1) \
+      || { scout_error "could not file the queued ingest scout backlog item: $output"; return 1; }
+  fi
+  printf 'scout backlog: %s queued in %s\n' "$task_id" "$backlog"
+}
+
+prepare_scout() {
+  local generation=$1 canonical=$2 repo=$3
+  local id record status title task_id data brief output task_tmp
+  id=$(record_id_for "$canonical")
+  record="$generation/records/$id.md"
+  if [ ! -f "$record" ]; then
+    scout_error "link record is absent: $canonical"
+    return 1
+  fi
+  status=$(record_field 'Retrieval status' "$record")
+  if [ "$status" != captured ]; then
+    scout_error "an inaccessible link record has nothing to ingest: $canonical"
+    return 1
+  fi
+  title=$(record_field Title "$record")
+  task_id=$(scout_task_id_for "$canonical")
+  data="$FM_HOME/data"
+  brief="$data/$task_id/brief.md"
+  if [ ! -f "$brief" ]; then
+    output=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-brief.sh" "$task_id" "$repo" --scout 2>&1) \
+      || { scout_error "could not scaffold the ingest scout brief: $output"; return 1; }
+  fi
+  if grep -F -x -q '{TASK}' "$brief"; then
+    task_tmp=$(mktemp "$data/$task_id/.task.XXXXXX") \
+      || { scout_error 'could not stage the ingest scout task text'; return 1; }
+    if ! scout_task_text "$record" "$canonical" "$task_id" "$data" > "$task_tmp"; then
+      rm -f "$task_tmp"
+      scout_error 'could not write the ingest scout task text'
+      return 1
+    fi
+    if ! fill_brief_task "$brief" "$task_tmp"; then
+      rm -f "$task_tmp"
+      scout_error 'could not fill the ingest scout brief'
+      return 1
+    fi
+    rm -f "$task_tmp"
+  fi
+  grep -F -x -q '{TASK}' "$brief" \
+    && { scout_error "the ingest scout brief still has an unfilled task: $brief"; return 1; }
+  grep -F -q "$canonical" "$brief" \
+    || { scout_error "the ingest scout brief does not name its source link: $brief"; return 1; }
+  file_scout_backlog_item "$task_id" "$title" "$canonical" "$brief" "$data" || return 1
+  printf 'scout: %s prepared, not dispatched\n' "$task_id"
+  printf 'scout brief: %s\n' "$brief"
+}
+
+command_prepare_scout() {
+  local canonical='' original='' repo=$SCOUT_REPO_DEFAULT
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --url) shift; original=${1:-} ;;
+      --scout-repo) shift; repo=${1:-} ;;
+      -h|--help|help) usage; return 0 ;;
+      *) die "unknown argument: $1" ;;
+    esac
+    [ "$#" -gt 0 ] || die 'missing value for option'
+    shift
+  done
+  require_one_line URL "$original"
+  require_one_line 'scout repo' "$repo"
+  canonical=$(canonicalize_url "$original") || return $?
+  acquire_lock
+  resolve_current || die 'link-intake current state is absent'
+  prune_abandoned_generations "$CURRENT_GENERATION"
+  validate_state "$CURRENT_GENERATION"
+  prepare_scout "$CURRENT_GENERATION" "$canonical" "$repo" || return 2
+}
+
 command_upsert() {
   local original='' canonical='' canonical_input='' source='' title='' summary='' terms='' retrieved='' transcript_file='' transcript_unavailable='' failure='' argument claim
   local claims='' id current='' record existing transcript note status host path record_tmp logical_record
+  local scout=1 scout_repo=$SCOUT_REPO_DEFAULT published
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --url) shift; original=${1:-} ;;
@@ -604,6 +813,8 @@ command_upsert() {
       --transcript-file) shift; transcript_file=${1:-} ;;
       --transcript-unavailable) shift; transcript_unavailable=${1:-} ;;
       --failure) shift; failure=${1:-} ;;
+      --no-scout) scout=0 ;;
+      --scout-repo) shift; scout_repo=${1:-} ;;
       -h|--help|help) usage; return 0 ;;
       *) die "unknown argument: $1" ;;
     esac
@@ -697,9 +908,18 @@ command_upsert() {
   mv "$record_tmp" "$record" || die 'could not install staged record update'
   prepare_index "$STAGED_GENERATION" "$canonical" "$id" "$retrieved" "$source" "$title" "$status" "$terms"
   validate_state "$STAGED_GENERATION"
+  published=$STAGED_GENERATION
   publish_generation
   logical_record=$(logical_record_path_for "$canonical")
   printf '%s\n' "$logical_record"
+  if [ "$scout" = 1 ] && [ "$status" = captured ]; then
+    require_one_line 'scout repo' "$scout_repo"
+    if ! prepare_scout "$published" "$canonical" "$scout_repo"; then
+      printf 'error: the link record is stored, but its ingest scout was not prepared; rerun: bin/fm-link-intake.sh prepare-scout --url %s\n' \
+        "$canonical" >&2
+      return 3
+    fi
+  fi
 }
 
 command_validate() {
@@ -722,6 +942,7 @@ command_validate() {
 main() {
   case "${1:-}" in
     upsert) shift; command_upsert "$@" ;;
+    prepare-scout) shift; command_prepare_scout "$@" ;;
     validate) shift; command_validate "$@" ;;
     -h|--help|help) usage ;;
     *) usage >&2; exit 2 ;;
