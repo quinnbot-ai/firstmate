@@ -389,10 +389,16 @@ pause_state_class() {  # <window> <task>
     printf 'paused'
     return
   fi
-  class=$(crew_absorb_class "$task")
+  crew_absorb_class "$task" >/dev/null
+  class=$CREW_ABSORB_CLASS
   if [ "$class" = working ]; then
     rm -f "$recheck_file"
     printf 'working'
+    return
+  fi
+  if [ "$CREW_ABSORB_PARKED_DECLARED_PAUSE" = 1 ]; then
+    date +%s > "$recheck_file"
+    printf 'paused'
     return
   fi
   if [ "$(window_kind "$win")" != secondmate ]; then
