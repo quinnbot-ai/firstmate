@@ -953,8 +953,18 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 # left untouched. A placeholder surviving the rewrite is fatal: a worker reading a
 # literal {FM_WORKTREE} has no isolation check at all.
 fill_isolation_facts() {  # <brief> <worktree-real> <primary-real>
-  local brief=$1 worktree=$2 primary=$3 tmp
-  if grep -q -e '^- your isolated task worktree: ' -e '^- the primary checkout: ' "$brief" 2>/dev/null; then
+  local brief=$1 worktree=$2 primary=$3 tmp worktree_fact=0 primary_fact=0
+  grep -q '^- your isolated task worktree: ' "$brief" 2>/dev/null && worktree_fact=1
+  grep -q '^- the primary checkout: ' "$brief" 2>/dev/null && primary_fact=1
+  if [ "$worktree_fact" = 1 ] && [ "$primary_fact" = 0 ]; then
+    echo "error: $brief is missing the '- the primary checkout:' isolation fact line; refusing to launch a worker whose isolation check is missing an operand" >&2
+    exit 1
+  fi
+  if [ "$worktree_fact" = 0 ] && [ "$primary_fact" = 1 ]; then
+    echo "error: $brief is missing the '- your isolated task worktree:' isolation fact line; refusing to launch a worker whose isolation check is missing an operand" >&2
+    exit 1
+  fi
+  if [ "$worktree_fact" = 1 ]; then
     tmp="$brief.fm-isolation-facts.$$"
     if ! { FM_FILL_WORKTREE="$worktree" FM_FILL_PRIMARY="$primary" awk '
       /^- your isolated task worktree: / { print "- your isolated task worktree: " ENVIRON["FM_FILL_WORKTREE"]; next }

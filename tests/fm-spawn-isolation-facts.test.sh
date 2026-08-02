@@ -188,9 +188,47 @@ EOF
   pass "fm-spawn.sh: a pre-contract brief launches unchanged"
 }
 
+test_missing_worktree_fact_refuses_to_launch() {
+  local id out status
+  id=isolation-facts-missing-worktree-z5
+  make_case missing-worktree "$id"
+  write_brief "$CASE_BRIEF" '{FM_WORKTREE}' '{FM_PRIMARY_CHECKOUT}'
+  grep -v '^- your isolated task worktree: ' "$CASE_BRIEF" > "$CASE_BRIEF.tmp"
+  mv "$CASE_BRIEF.tmp" "$CASE_BRIEF"
+
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn exited 0 with the worktree isolation fact missing"
+  assert_contains "$out" "missing the '- your isolated task worktree:' isolation fact line" \
+    "refusal did not name the missing worktree isolation fact"
+  assert_not_contains "$out" "spawned $id" "spawn reported success despite the missing worktree fact"
+  assert_absent "$CASE_HOME/state/$id.meta" "a malformed isolation block still recorded task metadata"
+  pass "fm-spawn.sh: a brief missing the worktree isolation fact refuses to launch"
+}
+
+test_missing_primary_fact_refuses_to_launch() {
+  local id out status
+  id=isolation-facts-missing-primary-z6
+  make_case missing-primary "$id"
+  write_brief "$CASE_BRIEF" '{FM_WORKTREE}' '{FM_PRIMARY_CHECKOUT}'
+  grep -v '^- the primary checkout: ' "$CASE_BRIEF" > "$CASE_BRIEF.tmp"
+  mv "$CASE_BRIEF.tmp" "$CASE_BRIEF"
+
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn exited 0 with the primary-checkout isolation fact missing"
+  assert_contains "$out" "missing the '- the primary checkout:' isolation fact line" \
+    "refusal did not name the missing primary-checkout isolation fact"
+  assert_not_contains "$out" "spawned $id" "spawn reported success despite the missing primary-checkout fact"
+  assert_absent "$CASE_HOME/state/$id.meta" "a malformed isolation block still recorded task metadata"
+  pass "fm-spawn.sh: a brief missing the primary-checkout isolation fact refuses to launch"
+}
+
 test_placeholders_are_filled_with_the_verified_paths
 test_stale_isolation_facts_are_rewritten
 test_unfillable_placeholder_refuses_to_launch
 test_pre_contract_brief_launches_unchanged
+test_missing_worktree_fact_refuses_to_launch
+test_missing_primary_fact_refuses_to_launch
 
 echo "# all fm-spawn-isolation-facts tests passed"
