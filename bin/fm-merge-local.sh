@@ -14,13 +14,13 @@
 # core.ignoreCase semantics; info/exclude and global excludes do not count.
 # An ignored directory is allowed only when the target head tracks nothing under
 # its prefix. Unresolved paths refuse before advancing; the first 50 receive
-# per-path diagnostics, followed by a +N summary for any remainder. Proven
-# ignored files are retained byte-for-byte; proven ignored symlinks retain their
-# readlink targets; proven ignored directories remain directories without
+# per-path diagnostics, followed by a +N summary for any remainder. An ignored
+# file or symlink that the merge moves aside must be restored with its exact blob
+# bytes or readlink target. Proven ignored directories remain directories without
 # walking or hashing their contents. A changed-but-still-present ignored entry
 # that the merge did not move aside is reported as live-runtime churn, because
-# the target tree cannot touch it. Other present entry types and entries that
-# cannot be inspected refuse. Every previously dirty path is then verified clean.
+# the target tree cannot touch it; a lost or unreadable entry still fails loudly.
+# Other present entry types refuse. Every previously dirty path is then verified clean.
 # A preservation or cleanliness failure after the fast-forward is reported
 # without attempting rollback. Diverged branches still refuse and require the
 # crewmate to rebase. See AGENTS.md prime directives, project management, and
