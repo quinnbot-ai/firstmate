@@ -129,7 +129,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
 
 The concrete `harness` field owns adapter identity independently of the model provider: `harness=pi` with `model=xai/grok-*` is Pi using xAI, not `harness=grok`, and does not require Grok CLI login; `harness=grok` remains the standalone Grok Build CLI adapter.
-No script resolves that split for you: establish which credential store a tuple reads from the discovery surfaces below plus `quota-axi auth --json`'s per-provider sources, and show that reasoning rather than inferring it from a harness, model, or source name.
+No script resolves that split for you: when available, the discovery surfaces below and `quota-axi auth --json`'s per-provider sources may inform which credential store a tuple reads from, but absent or unreadable optional evidence must never gate or delay dispatch, and identity must never be inferred from a harness, model, or source name.
 
 ### Model support discovery
 
@@ -146,7 +146,7 @@ Use the discovery surface in the current authenticated environment because suppo
 | kimi | Run `kimi provider list --json`, which lists the current provider and model configuration. |
 
 For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing from a name or prefix.
-A listing that reaches the account and does not contain the model is concrete evidence the model is unsupported: block that candidate and quote the result.
+A listing that reaches the account and does not contain the model may inform routing, but it does not create a pre-selection eligibility gate; `fm-spawn.sh` alone owns launch-time refusal of a genuinely unlaunchable selected profile.
 A discovery surface you could not reach establishes nothing; report that as uncertainty rather than turning it into a supported or unsupported verdict.
 
 When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.

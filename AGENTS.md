@@ -177,7 +177,7 @@ Capacity is advisory: read `quota-axi` when it is installed and let it separate 
 Preserve malformed profile configuration as an actionable error rather than selecting around it.
 Selection is followed by exactly one preflight: `fm-spawn.sh` validates the concrete selected profile at launch and refuses only a genuinely unlaunchable one.
 Never add a second pre-selection capacity, credential, or eligibility gate in front of that preflight, and never launch another harness's CLI to judge a candidate.
-Stop and ask the captain only when the selected capability actually fails at that preflight or in flight and every remaining fallback would cross an identity boundary such as another account, credential surface, or home.
+Stop and ask the captain only when the selected capability actually fails at that preflight or in flight, or when every remaining fallback would cross an identity boundary such as another account, credential surface, or home.
 The generic effort fallback and its precedence are owned by `harness-adapters`: explicit captain and standing configured effort win; otherwise use low for well-understood explicit work, xhigh for ambiguous investigation or design, intermediate levels proportionally, and never max without explicit captain preference.
 Do not add model-specific versions of that policy.
 
