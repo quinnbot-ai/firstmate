@@ -344,6 +344,10 @@ attach_and_wait() {
     fi
     if healthy_watcher; then
       if [ "$HEALTHY_CYCLE_ID" != "$attached_cycle_id" ]; then
+        if ! require_session_owner "not attaching to successor"; then
+          cycle_log_append unknown unknown session-owner-fenced none
+          return 1
+        fi
         followed_cycle_may_transition "$attached_cycle_id" || { cycle_log_append unknown unknown attached-cycle-ended wake-delivered; return 1; }
         cycle_log_append unknown unknown lock-replaced "attached:$HEALTHY_PID"
         attached_pid=$HEALTHY_PID
