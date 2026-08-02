@@ -5,7 +5,8 @@
 # non-focused workspace steals the focused workspace.
 # Part B proves the mitigation: the focus-safe emptying-close plan
 # (repositioning move plus pane-death removal) removes the doomed workspace
-# with no focus change and no corrective tab focus at all.
+# with no wrong-focus interval; on the defective release, any corrective tab
+# focus must find the exact prior tab still focused.
 # On a future release whose explicit close preserves focus, Part A records
 # that and Part B keeps outcome-only assertions, so no version is guessed.
 # Every CLI operation is routed through one guarded named non-default lab, and
@@ -87,6 +88,8 @@ focus_snapshot() {
 # workspace list is a multi-object snapshot that can be transiently
 # incoherent while Herdr is changing workspaces, whereas tab get returns the
 # exact response-derived tab identity and its focus state in one object.
+# Only missing, malformed, or identity-mismatched responses retry; a valid
+# unfocused sample returns immediately so the regression cannot mask it.
 focus_sample_exact_tab() {  # <workspace-id> <tab-id>
   local workspace=$1 tab=$2 attempt=0 info focused
   while [ "$attempt" -lt 8 ]; do
