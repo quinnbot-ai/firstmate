@@ -5,12 +5,17 @@
 # Usage: fm-meta-reconcile.sh [--apply] [task-id ...]
 #
 # Without --apply this is a read-only dry run.  It considers only legacy records
-# with exactly one landed_<date>= marker and exactly one window_detached_<date>=
-# endpoint record.  Every candidate must have a missing or dead endpoint and be
-# proven landed through its recorded merged PR or a task branch contained in the
-# project's local default branch.  It never weakens fm-teardown.sh's normal
-# cleanup guard.  A lease is returned only when its worktree still proves it is
-# the exact task branch; a reallocated slot is reported and left untouched.
+# with exactly one landed_<date>= marker, exactly one window_detached_<date>=
+# endpoint record, and no current window= record.  It checks that recorded endpoint
+# first and preserves the record unless the endpoint is missing or dead.  It then
+# proves landed work only through the forge API for the recorded merged PR or
+# containment of the task branch in the project's local default branch.  It never
+# weakens fm-teardown.sh's normal cleanup guard.  A lease is returned only when
+# its worktree still proves it is the exact clean task branch; a reallocated slot
+# is reported and left untouched.
+# With --apply, successful reconciliation archives the metadata under
+# state/meta-archive/<YYYY-MM-DD>/ and removes its stale status, turn-ended, and
+# check artifacts.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
