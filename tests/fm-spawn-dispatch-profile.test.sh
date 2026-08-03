@@ -138,7 +138,7 @@ test_no_profile_keeps_claude_profile_defaults() {
 
   launch_line=$(cat "$LAUNCH_LOG")
   launch=$(captured_launch_body "$launch_line")
-  assert_contains "$launch_line" "/usr/bin/env -u FM_TEST_BASELINE_SECRET GOTMPDIR='/tmp/fm-$id/gotmp' /bin/bash -c " \
+  assert_contains "$launch_line" "/usr/bin/env -u BASH_ENV -u FM_TEST_BASELINE_SECRET GOTMPDIR='/tmp/fm-$id/gotmp' /bin/bash -c " \
     "no-profile claude launch did not enter the scrubbed child shell"
   assert_contains "$launch" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions" \
     "no-profile claude launch did not use the canonical launch kind"
@@ -408,12 +408,14 @@ test_active_dispatch_profile_allows_raw_launch_command() {
 }
 
 test_raw_launch_scrubs_compound_commands_and_reapplies_gotmpdir() {
-  local rec id out status launch result raw expected_gotmp
+  local rec id out status launch result raw expected_gotmp bash_env_hook
   id=profile-raw-compound-z15b
   rec=$(make_spawn_case profile-raw-compound claude "$id")
   read_case_record "$rec"
   printf '%s\n' 'FM_TEST_BASELINE_SECRET=not-a-secret' 'GOTMPDIR=baseline-value' > "$OPERATOR_HOME/.secrets"
   result="$CASE_DIR/raw-result"
+  bash_env_hook="$CASE_DIR/bash-env-hook"
+  printf '%s\n' 'export FM_TEST_BASELINE_SECRET=reintroduced' > "$bash_env_hook"
   expected_gotmp="/tmp/fm-$id/gotmp"
   raw="printf '%s\\n' \"\${FM_TEST_BASELINE_SECRET-unset}:\$GOTMPDIR\" > '$result'; printf '%s\\n' \"\$(if [ -z \"\${FM_TEST_BASELINE_SECRET+x}\" ]; then printf scrubbed; else printf leaked; fi):\$GOTMPDIR\" >> '$result'"
 
@@ -423,7 +425,8 @@ test_raw_launch_scrubs_compound_commands_and_reapplies_gotmpdir() {
   expect_code 0 "$status" "compound raw launch should be accepted inside the scrubbed child shell"
   launch_line=$(cat "$LAUNCH_LOG")
   launch=$(captured_launch_body "$launch_line")
-  FM_TEST_BASELINE_SECRET=leaked GOTMPDIR=stale /bin/bash -c "$launch_line" \
+  BASH_ENV="$bash_env_hook" FM_TEST_BASELINE_SECRET=leaked GOTMPDIR=stale \
+    /bin/bash -c "$launch_line" \
     || fail "captured compound raw launch did not execute"
   [ "$(cat "$result")" = "unset:$expected_gotmp
 scrubbed:$expected_gotmp" ] \
@@ -750,7 +753,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex default default
   launch_line=$(cat "$LAUNCH_LOG")
   launch=$(captured_launch_body "$launch_line")
-  assert_contains "$launch_line" "/usr/bin/env -u FM_TEST_BASELINE_SECRET GOTMPDIR='/tmp/fm-$id/gotmp' /bin/bash -c " \
+  assert_contains "$launch_line" "/usr/bin/env -u BASH_ENV -u FM_TEST_BASELINE_SECRET GOTMPDIR='/tmp/fm-$id/gotmp' /bin/bash -c " \
     "secondmate launch did not enter the scrubbed child shell"
   assert_contains "$launch" "FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE=" \
     "secondmate launch did not reapply its required home overrides"
@@ -780,11 +783,11 @@ test_secret_scrub_prefix_parses_supported_baseline_and_executes() {
   expect_code 0 "$status" "a supported secret baseline should permit the spawn"
   launch_line=$(cat "$LAUNCH_LOG")
   launch=$(captured_launch_body "$launch_line")
-  assert_contains "$launch_line" "/usr/bin/env -u SCRUB_ALPHA -u SCRUB_BETA -u SCRUB_GAMMA GOTMPDIR='/tmp/fm-$id/gotmp' /bin/bash -c " \
+  assert_contains "$launch_line" "/usr/bin/env -u BASH_ENV -u SCRUB_ALPHA -u SCRUB_BETA -u RETIRED_SECRET -u SCRUB_GAMMA GOTMPDIR='/tmp/fm-$id/gotmp' /bin/bash -c " \
     "scrub prefix did not preserve first-seen order, deduplicate names, or read a final line without newline"
   prefix=${launch_line%% /bin/bash -c*}
-  SCRUB_ALPHA=present SCRUB_BETA=present SCRUB_GAMMA=present PRESERVED_SETTING=present \
-    bash -c "$prefix /bin/bash -c 'test -z \"\${SCRUB_ALPHA+x}\" && test -z \"\${SCRUB_BETA+x}\" && test -z \"\${SCRUB_GAMMA+x}\" && test \"\$PRESERVED_SETTING\" = present'" \
+  SCRUB_ALPHA=present SCRUB_BETA=present SCRUB_GAMMA=present RETIRED_SECRET=present PRESERVED_SETTING=present \
+    bash -c "$prefix /bin/bash -c 'test -z \"\${SCRUB_ALPHA+x}\" && test -z \"\${SCRUB_BETA+x}\" && test -z \"\${SCRUB_GAMMA+x}\" && test -z \"\${RETIRED_SECRET+x}\" && test \"\$PRESERVED_SETTING\" = present'" \
     || fail "constructed /usr/bin/env prefix did not remove only the declared fixture variables"
   pass "secret scrub prefix parses the supported baseline and removes each declared variable exactly once"
 }
@@ -873,7 +876,7 @@ test_secret_scrub_prefix_wraps_every_direct_launch_template() {
     launch_line=$(cat "$LAUNCH_LOG")
     launch=$(captured_launch_body "$launch_line")
     case "$launch_line" in
-      "/usr/bin/env -u FM_TEST_BASELINE_SECRET GOTMPDIR="*" /bin/bash -c "*) ;;
+      "/usr/bin/env -u BASH_ENV -u FM_TEST_BASELINE_SECRET GOTMPDIR="*" /bin/bash -c "*) ;;
       *) fail "$harness launch template was not wrapped by the scrub prefix: $launch_line" ;;
     esac
   done

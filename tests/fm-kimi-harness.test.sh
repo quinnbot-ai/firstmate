@@ -218,7 +218,7 @@ test_kimi_launch_then_send_is_verified() {
 
   launch_line=$(cat "$CASE_DIR/launch.log")
   launch=$(captured_launch_body "$launch_line")
-  assert_contains "$launch_line" "/usr/bin/env -u FM_TEST_BASELINE_SECRET GOTMPDIR='$task_tmp/gotmp' /bin/bash -c " \
+  assert_contains "$launch_line" "/usr/bin/env -u BASH_ENV -u FM_TEST_BASELINE_SECRET GOTMPDIR='$task_tmp/gotmp' /bin/bash -c " \
     "kimi launch did not enter the scrubbed child shell"
   assert_contains "$launch" "$FAKEBIN_DIR/kimi" "kimi launch did not use the absolute binary"
   assert_contains "$launch" "--model" "kimi launch omitted the requested model"
@@ -480,7 +480,7 @@ test_kimi_falls_back_to_expanded_home_binary() {
   expect_code 0 "$rc" "Kimi HOME fallback spawn should succeed"
   launch_line=$(cat "$CASE_DIR/launch.log")
   launch=$(captured_launch_body "$launch_line")
-  assert_contains "$launch_line" "/usr/bin/env -u FM_TEST_BASELINE_SECRET GOTMPDIR='/tmp/fm-$id/gotmp' /bin/bash -c " \
+  assert_contains "$launch_line" "/usr/bin/env -u BASH_ENV -u FM_TEST_BASELINE_SECRET GOTMPDIR='/tmp/fm-$id/gotmp' /bin/bash -c " \
     "Kimi fallback did not enter the scrubbed child shell"
   assert_contains "$launch" "$fallback" \
     "Kimi fallback did not expand HOME into an absolute executable"

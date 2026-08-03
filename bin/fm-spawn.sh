@@ -257,9 +257,10 @@ secret_env_assignment_tail_supported() {
 }
 
 secret_env_scrub_prefix() {
-  local secrets_file line name read_status assignment_tail
+  local secrets_file line name read_status assignment_tail word_index
   local assignment_re export_re blank_re unset_re
-  local seen=' ' prefix=/usr/bin/env count=0 line_no=0
+  local -a line_names unset_words
+  local seen=' BASH_ENV ' prefix='/usr/bin/env -u BASH_ENV' count=0 line_no=0
 
   if [ -z "${HOME:-}" ]; then
     echo "error: HOME is unset; cannot locate approved secret baseline for crewmate environment scrub" >&2
@@ -298,9 +299,10 @@ secret_env_scrub_prefix() {
     fi
     line_no=$((line_no + 1))
 
-    name=
+    line_names=()
     if [[ $line =~ $assignment_re ]]; then
       name=${BASH_REMATCH[2]}
+      line_names+=("$name")
       assignment_tail=${line#*=}
       if ! secret_env_assignment_tail_supported "$assignment_tail"; then
         exec 9<&-
@@ -309,7 +311,21 @@ secret_env_scrub_prefix() {
       fi
     elif [[ $line =~ $export_re ]]; then
       name=${BASH_REMATCH[1]}
-    elif [[ $line =~ $blank_re ]] || [[ $line =~ $unset_re ]]; then
+      line_names+=("$name")
+    elif [[ $line =~ $unset_re ]]; then
+      unset_words=()
+      IFS=$' \t' read -r -a unset_words <<< "$line"
+      word_index=1
+      while [ "$word_index" -lt "${#unset_words[@]}" ]; do
+        name=${unset_words[$word_index]}
+        case "$name" in
+          -f|-v|--) ;;
+          \#*) break ;;
+          *) line_names+=("$name") ;;
+        esac
+        word_index=$((word_index + 1))
+      done
+    elif [[ $line =~ $blank_re ]]; then
       :
     else
       exec 9<&-
@@ -317,16 +333,16 @@ secret_env_scrub_prefix() {
       return 1
     fi
 
-    if [ -n "$name" ]; then
+    for name in "${line_names[@]}"; do
+      count=$((count + 1))
       case "$seen" in
         *" $name "*) ;;
         *)
           prefix="$prefix -u $name"
           seen="$seen$name "
-          count=$((count + 1))
           ;;
       esac
-    fi
+    done
     [ "$read_status" -eq 0 ] || break
   done
   exec 9<&-
