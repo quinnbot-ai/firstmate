@@ -315,16 +315,18 @@ secret_env_scrub_prefix() {
     elif [[ $line =~ $unset_re ]]; then
       unset_words=()
       IFS=$' \t' read -r -a unset_words <<< "$line"
-      word_index=1
-      while [ "$word_index" -lt "${#unset_words[@]}" ]; do
-        name=${unset_words[$word_index]}
-        case "$name" in
-          -f|-v|--) ;;
-          \#*) break ;;
-          *) line_names+=("$name") ;;
-        esac
-        word_index=$((word_index + 1))
-      done
+      if [ "${unset_words[1]:-}" != -f ]; then
+        word_index=1
+        while [ "$word_index" -lt "${#unset_words[@]}" ]; do
+          name=${unset_words[$word_index]}
+          case "$name" in
+            -v|--) ;;
+            \#*) break ;;
+            *) line_names+=("$name") ;;
+          esac
+          word_index=$((word_index + 1))
+        done
+      fi
     elif [[ $line =~ $blank_re ]]; then
       :
     else

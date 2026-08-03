@@ -761,7 +761,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 }
 
 test_secret_scrub_prefix_parses_supported_baseline_and_executes() {
-  local rec id out status launch prefix secret_home
+  local rec id out status launch prefix secret_home required_home required_path
   id=profile-secret-scrub-z20
   rec=$(make_spawn_case profile-secret-scrub claude "$id")
   read_case_record "$rec"
@@ -773,6 +773,9 @@ test_secret_scrub_prefix_parses_supported_baseline_and_executes() {
     printf '%s\n' '  SCRUB_BETA=second'
     printf '%s\n' 'export SCRUB_ALPHA'
     printf '%s\n' 'unset RETIRED_SECRET'
+    printf '%s\n' 'unset -v RETIRED_V_SECRET'
+    printf '%s\n' 'unset -- RETIRED_DASH_SECRET'
+    printf '%s\n' 'unset -f HOME PATH'
     printf '%s' 'SCRUB_GAMMA=third'
   } > "$secret_home/.secrets"
 
@@ -783,11 +786,15 @@ test_secret_scrub_prefix_parses_supported_baseline_and_executes() {
   expect_code 0 "$status" "a supported secret baseline should permit the spawn"
   launch_line=$(cat "$LAUNCH_LOG")
   launch=$(captured_launch_body "$launch_line")
-  assert_contains "$launch_line" "/usr/bin/env -u BASH_ENV -u SCRUB_ALPHA -u SCRUB_BETA -u RETIRED_SECRET -u SCRUB_GAMMA GOTMPDIR='/tmp/fm-$id/gotmp' /bin/bash -c " \
+  assert_contains "$launch_line" "/usr/bin/env -u BASH_ENV -u SCRUB_ALPHA -u SCRUB_BETA -u RETIRED_SECRET -u RETIRED_V_SECRET -u RETIRED_DASH_SECRET -u SCRUB_GAMMA GOTMPDIR='/tmp/fm-$id/gotmp' /bin/bash -c " \
     "scrub prefix did not preserve first-seen order, deduplicate names, or read a final line without newline"
   prefix=${launch_line%% /bin/bash -c*}
-  SCRUB_ALPHA=present SCRUB_BETA=present SCRUB_GAMMA=present RETIRED_SECRET=present PRESERVED_SETTING=present \
-    bash -c "$prefix /bin/bash -c 'test -z \"\${SCRUB_ALPHA+x}\" && test -z \"\${SCRUB_BETA+x}\" && test -z \"\${SCRUB_GAMMA+x}\" && test -z \"\${RETIRED_SECRET+x}\" && test \"\$PRESERVED_SETTING\" = present'" \
+  required_home="$CASE_DIR/required-home"
+  required_path=/usr/bin:/bin
+  HOME="$required_home" PATH="$required_path" EXPECTED_HOME="$required_home" EXPECTED_PATH="$required_path" \
+    SCRUB_ALPHA=present SCRUB_BETA=present SCRUB_GAMMA=present RETIRED_SECRET=present \
+    RETIRED_V_SECRET=present RETIRED_DASH_SECRET=present PRESERVED_SETTING=present \
+    /bin/bash -c "$prefix /bin/bash -c 'test -z \"\${SCRUB_ALPHA+x}\" && test -z \"\${SCRUB_BETA+x}\" && test -z \"\${SCRUB_GAMMA+x}\" && test -z \"\${RETIRED_SECRET+x}\" && test -z \"\${RETIRED_V_SECRET+x}\" && test -z \"\${RETIRED_DASH_SECRET+x}\" && test \"\$HOME\" = \"\$EXPECTED_HOME\" && test \"\$PATH\" = \"\$EXPECTED_PATH\" && test \"\$PRESERVED_SETTING\" = present'" \
     || fail "constructed /usr/bin/env prefix did not remove only the declared fixture variables"
   pass "secret scrub prefix parses the supported baseline and removes each declared variable exactly once"
 }
