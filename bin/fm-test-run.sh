@@ -726,11 +726,6 @@ families_for_changed_path() {
       families_for_test_reference "$(basename "$path")" \
         || printf '%s\n' "__unmapped__:$path"
       ;;
-    tests/fixtures/fm-spawn-secret-baseline)
-      # This baseline affects every suite that drives fm-spawn through tests/lib.sh.
-      printf '%s\n' backend-dispatch
-      printf '%s\n' pure-contract-unit
-      ;;
     tests/fixtures/*/*)
       # A fixture belongs to whichever suite reads its directory, found by the
       # same reference scan used for shared helpers. Keyed on the directory

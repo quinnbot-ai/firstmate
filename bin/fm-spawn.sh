@@ -163,24 +163,109 @@ esac
 # one-definition-per-line format plus comments, blanks, export-only names, and
 # safe unset directives. Unknown shell syntax is a refusal: silently skipping a
 # line could leave a baseline secret inherited by the worker.
+secret_env_assignment_tail_supported() {
+  local value=$1 state=plain trailing=0 char next i=0 length
+  length=${#value}
+
+  while [ "$i" -lt "$length" ]; do
+    char=${value:$i:1}
+    case "$state" in
+      single)
+        [ "$char" != "'" ] || state=plain
+        ;;
+      double)
+        case "$char" in
+          '"') state=plain ;;
+          '\')
+            i=$((i + 1))
+            [ "$i" -lt "$length" ] || return 1
+            ;;
+          '$')
+            i=$((i + 1))
+            [ "$i" -lt "$length" ] || return 1
+            next=${value:$i:1}
+            if [ "$next" = '{' ]; then
+              i=$((i + 1))
+              [ "$i" -lt "$length" ] || return 1
+              next=${value:$i:1}
+              [[ $next =~ ^[A-Za-z_]$ ]] || return 1
+              while :; do
+                i=$((i + 1))
+                [ "$i" -lt "$length" ] || return 1
+                next=${value:$i:1}
+                [[ $next =~ ^[A-Za-z0-9_]$ ]] || break
+              done
+              [ "$next" = '}' ] || return 1
+            else
+              [[ $next =~ ^[A-Za-z_]$ ]] || return 1
+              while [ $((i + 1)) -lt "$length" ]; do
+                next=${value:$((i + 1)):1}
+                [[ $next =~ ^[A-Za-z0-9_]$ ]] || break
+                i=$((i + 1))
+              done
+            fi
+            ;;
+          '`') return 1 ;;
+        esac
+        ;;
+      plain)
+        if [ "$trailing" -eq 1 ]; then
+          case "$char" in
+            ' '|$'\t') ;;
+            '#') return 0 ;;
+            *) return 1 ;;
+          esac
+        else
+          case "$char" in
+            "'") state=single ;;
+            '"') state=double ;;
+            ' '|$'\t') trailing=1 ;;
+            '\'|'`'|';'|'&'|'|'|'<'|'>'|'('|')') return 1 ;;
+            '$')
+              i=$((i + 1))
+              [ "$i" -lt "$length" ] || return 1
+              next=${value:$i:1}
+              if [ "$next" = '{' ]; then
+                i=$((i + 1))
+                [ "$i" -lt "$length" ] || return 1
+                next=${value:$i:1}
+                [[ $next =~ ^[A-Za-z_]$ ]] || return 1
+                while :; do
+                  i=$((i + 1))
+                  [ "$i" -lt "$length" ] || return 1
+                  next=${value:$i:1}
+                  [[ $next =~ ^[A-Za-z0-9_]$ ]] || break
+                done
+                [ "$next" = '}' ] || return 1
+              else
+                [[ $next =~ ^[A-Za-z_]$ ]] || return 1
+                while [ $((i + 1)) -lt "$length" ]; do
+                  next=${value:$((i + 1)):1}
+                  [[ $next =~ ^[A-Za-z0-9_]$ ]] || break
+                  i=$((i + 1))
+                done
+              fi
+              ;;
+          esac
+        fi
+        ;;
+    esac
+    i=$((i + 1))
+  done
+
+  [ "$state" = plain ]
+}
+
 secret_env_scrub_prefix() {
   local secrets_file line name read_status assignment_tail
-  local assignment_re compound_assignment_re export_re blank_re unset_re
+  local assignment_re export_re blank_re unset_re
   local seen=' ' prefix=/usr/bin/env count=0 line_no=0
 
-  if [ -n "${FM_TEST_SECRET_ENV_BASELINE:-}" ]; then
-    if [ "${FM_GATE_REFUSE_BYPASS:-}" != 1 ]; then
-      echo "error: FM_TEST_SECRET_ENV_BASELINE is restricted to the test harness" >&2
-      return 1
-    fi
-    secrets_file=$FM_TEST_SECRET_ENV_BASELINE
-  else
-    if [ -z "${HOME:-}" ]; then
-      echo "error: HOME is unset; cannot locate approved secret baseline for crewmate environment scrub" >&2
-      return 1
-    fi
-    secrets_file=$HOME/.secrets
+  if [ -z "${HOME:-}" ]; then
+    echo "error: HOME is unset; cannot locate approved secret baseline for crewmate environment scrub" >&2
+    return 1
   fi
+  secrets_file=$HOME/.secrets
 
   if [ ! -f "$secrets_file" ] || [ ! -r "$secrets_file" ]; then
     echo "error: cannot read approved secret baseline for crewmate environment scrub" >&2
@@ -192,7 +277,6 @@ secret_env_scrub_prefix() {
   fi
 
   assignment_re='^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)='
-  compound_assignment_re='[[:space:];&|][[:space:]]*[A-Za-z_][A-Za-z0-9_]*='
   export_re='^[[:space:]]*export[[:space:]]+([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*(#.*)?$'
   blank_re='^[[:space:]]*(#.*)?$'
   unset_re='^[[:space:]]*unset[[:space:]]+(-[fv][[:space:]]+|--[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*([[:space:]]+[A-Za-z_][A-Za-z0-9_]*)*[[:space:]]*(#.*)?$'
@@ -218,7 +302,7 @@ secret_env_scrub_prefix() {
     if [[ $line =~ $assignment_re ]]; then
       name=${BASH_REMATCH[2]}
       assignment_tail=${line#*=}
-      if [[ $assignment_tail =~ $compound_assignment_re ]]; then
+      if ! secret_env_assignment_tail_supported "$assignment_tail"; then
         exec 9<&-
         echo "error: approved secret baseline has unsupported syntax at line $line_no; refusing incomplete crewmate environment scrub" >&2
         return 1
@@ -1941,7 +2025,7 @@ if [ "$KIND" = secondmate ]; then
   sq_primary_home=$(shell_quote "$FM_HOME")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home $LAUNCH"
 fi
-LAUNCH="$SECRET_ENV_SCRUB_PREFIX $LAUNCH"
+LAUNCH="$SECRET_ENV_SCRUB_PREFIX GOTMPDIR=$(shell_quote "$TASK_TMP/gotmp") /bin/bash -c $(shell_quote "$LAUNCH")"
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. The verified delivery routine
 # below then waits for that shell to round-trip a probe before staging the full
