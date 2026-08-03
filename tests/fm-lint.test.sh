@@ -18,7 +18,11 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 LINT="$ROOT/bin/fm-lint.sh"
+CI="$ROOT/.github/workflows/ci.yml"
+NM="$ROOT/.no-mistakes.yaml"
 INSTALLER="$ROOT/bin/fm-install-shellcheck.sh"
+# The authoritative file set the one owner must run.
+CANON='ROOTS=(bin/*.sh bin/backends/*.sh tests/*.sh)'
 # The pinned version, read from the single source (the one owner itself).
 REQUIRED=$("$LINT" --required-version)
 
@@ -36,7 +40,8 @@ test_list_files_reports_the_shell_inventory() {
   [ "$(printf '%s\n' "$listed" | LC_ALL=C sort)" = "$expected" ] \
     || fail "fm-lint.sh --list-files did not return the complete shell inventory"
   pass "fm-lint.sh --list-files reports the complete shell inventory"
-||||||| parent of 514f0ab (fix: restore stock macOS Bash 3.2 brief scaffolding (#1093))
+}
+
 test_owner_exists_and_executable() {
   assert_present "$LINT" "bin/fm-lint.sh is missing"
   [ -x "$LINT" ] || fail "bin/fm-lint.sh must be executable so CI/gate can run it directly"
