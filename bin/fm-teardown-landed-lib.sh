@@ -143,27 +143,64 @@ fm_teardown_local_main_contains_task_branch() {
   git -C "$PROJ" merge-base --is-ancestor "$branch_head" "$main_head" 2>/dev/null
 }
 
+fm_teardown_recorded_pr_head() {
+  local target=$1 view state merged head project_id
+  FM_TEARDOWN_RECORDED_PR_HEAD=
+  fm_pr_url_parse "$target" || return 1
+  case "$FM_PR_PROVIDER" in
+    github)
+      view=$(cd "$PROJ" && gh api "repos/$FM_PR_PATH/pulls/$FM_PR_NUMBER" \
+        --jq '[.state, .merged, .head.sha] | @tsv' 2>/dev/null) || return 1
+      state=${view%%$'\t'*}
+      view=${view#*$'\t'}
+      merged=${view%%$'\t'*}
+      head=${view#*$'\t'}
+      [ "$state" = closed ] && [ "$merged" = true ] || return 1
+      ;;
+    gitlab)
+      command -v jq >/dev/null 2>&1 || return 1
+      project_id=${FM_PR_PATH//\//%2F}
+      view=$(cd "$PROJ" && glab api --hostname "$FM_PR_HOST" \
+        "projects/$project_id/merge_requests/$FM_PR_NUMBER" 2>/dev/null \
+        | jq -er '[.state, .sha] | @tsv' 2>/dev/null) || return 1
+      state=${view%%$'\t'*}
+      head=${view#*$'\t'}
+      [ "$state" = merged ] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  fm_pr_head_valid "$head" || return 1
+  FM_TEARDOWN_RECORDED_PR_HEAD=$head
+}
+
+fm_teardown_forge_head_contains_commit() {
+  local branch_head=$1 head=$2 status project_id merge_base
+  [ "$branch_head" = "$head" ] && return 0
+  case "$FM_PR_PROVIDER" in
+    github)
+      status=$(cd "$PROJ" && gh api "repos/$FM_PR_PATH/compare/$branch_head...$head" \
+        --jq .status 2>/dev/null) || return 1
+      [ "$status" = ahead ]
+      ;;
+    gitlab)
+      command -v jq >/dev/null 2>&1 || return 1
+      project_id=${FM_PR_PATH//\//%2F}
+      merge_base=$(cd "$PROJ" && glab api --hostname "$FM_PR_HOST" \
+        "projects/$project_id/repository/merge_base?refs%5B%5D=$branch_head&refs%5B%5D=$head" \
+        2>/dev/null | jq -er '.id' 2>/dev/null) || return 1
+      [ "$merge_base" = "$branch_head" ]
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 # The detached legacy records no longer have their original worktree, so this
 # proof compares their durable task branch directly with the recorded PR head.
 fm_teardown_recorded_pr_contains_task_branch() {
-  local task_id=$1 target view state head branch_head n
+  local task_id=$1 head branch_head
   [ -n "$PR_URL" ] || return 1
-  target=$PR_URL
-  view=$(cd "$PROJ" && gh pr view "$target" --json state,headRefOid -q '.state + "\t" + .headRefOid' 2>/dev/null) || return 1
-  state=${view%%$'\t'*}
-  head=${view#*$'\t'}
-  [ "$state" != "$view" ] || return 1
-  case "$state" in
-    MERGED|merged) ;;
-    *) return 1 ;;
-  esac
-  [ -n "$head" ] || return 1
-  if ! git -C "$PROJ" cat-file -e "$head^{commit}" 2>/dev/null; then
-    n=$(fm_teardown_pr_number_from_target "$target") || return 1
-    git -C "$PROJ" remote get-url origin >/dev/null 2>&1 || return 1
-    git -C "$PROJ" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
-    git -C "$PROJ" cat-file -e "$head^{commit}" 2>/dev/null || return 1
-  fi
+  fm_teardown_recorded_pr_head "$PR_URL" || return 1
+  head=$FM_TEARDOWN_RECORDED_PR_HEAD
   branch_head=$(git -C "$PROJ" rev-parse --verify "refs/heads/fm/$task_id^{commit}" 2>/dev/null) || return 1
-  git -C "$PROJ" merge-base --is-ancestor "$branch_head" "$head" 2>/dev/null
+  fm_teardown_forge_head_contains_commit "$branch_head" "$head"
 }

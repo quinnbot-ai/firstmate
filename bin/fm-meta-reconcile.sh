@@ -21,16 +21,12 @@ APPLY=0
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
-# shellcheck source=bin/fm-tasks-axi-lib.sh
-. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
-# shellcheck source=bin/fm-wake-lib.sh
-. "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-teardown-landed-lib.sh
 . "$SCRIPT_DIR/fm-teardown-landed-lib.sh"
 
@@ -51,17 +47,23 @@ for ID in "$@"; do
 done
 fm_refuse_if_gate_agent
 
+if [ "$APPLY" -eq 1 ]; then
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+fi
+
 TMP_META=
 cleanup_tmp() {
   [ -z "$TMP_META" ] || rm -f -- "$TMP_META"
 }
 trap cleanup_tmp EXIT
 
-legacy_value() {  # <meta> <key-prefix>
-  local meta=$1 prefix=$2 lines line value
-  lines=$(grep -E "^${prefix}[A-Za-z0-9_]*=" "$meta" 2>/dev/null || true)
+legacy_detached_window() {  # <meta>
+  local meta=$1 lines line value
+  lines=$(grep '^window_detached_' "$meta" 2>/dev/null || true)
   [ "$(printf '%s\n' "$lines" | sed '/^$/d' | wc -l | tr -d '[:space:]')" = 1 ] || return 1
   line=$(printf '%s\n' "$lines" | sed -n '1p')
+  printf '%s\n' "$line" | grep -Eq '^window_detached_[0-9]{8}=' || return 1
   value=${line#*=}
   value=${value%%'  #' *}
   [ -n "$value" ] || return 1
@@ -71,7 +73,7 @@ legacy_value() {  # <meta> <key-prefix>
 legacy_endpoint_state() {  # <meta> <task-id>
   local meta=$1 id=$2 target tmp_line
   [ "$(grep -c '^window=' "$meta" 2>/dev/null || true)" -eq 0 ] || return 1
-  target=$(legacy_value "$meta" 'window_detached_') || return 1
+  target=$(legacy_detached_window "$meta") || return 1
   TMP_META=$(mktemp "${TMPDIR:-/tmp}/fm-meta-reconcile.XXXXXX") || return 1
   while IFS= read -r tmp_line || [ -n "$tmp_line" ]; do
     case "$tmp_line" in
@@ -123,17 +125,38 @@ remove_cleanup_artifacts() {  # <task-id>
   fi
 }
 
-lease_returnable() {  # <task-id> <worktree> <project>
-  local id=$1 worktree=$2 project=$3 top branch head ref_head
+registered_task_worktree() {  # <task-id> <project>
+  local id=$1 project=$2 listed line entry='' found=''
+  listed=$(git -C "$project" -c core.quotePath=false worktree list --porcelain 2>/dev/null) || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      worktree\ *) entry=${line#worktree } ;;
+      "branch refs/heads/fm/$id")
+        [ -z "$found" ] || return 1
+        found=$entry
+        ;;
+    esac
+  done <<EOF
+$listed
+EOF
+  printf '%s' "$found"
+}
+
+task_worktree_safe() {  # <task-id> <worktree> <project> <registered-worktree>
+  local id=$1 worktree=$2 project=$3 registered=$4 top branch head ref_head worktree_real registered_real
   [ -n "$worktree" ] && [ -d "$worktree" ] && [ ! -L "$worktree" ] || return 1
+  [ -n "$registered" ] && [ -d "$registered" ] && [ ! -L "$registered" ] || return 1
+  worktree_real=$(cd "$worktree" && pwd -P) || return 1
+  registered_real=$(cd "$registered" && pwd -P) || return 1
+  [ "$worktree_real" = "$registered_real" ] || return 1
   top=$(git -C "$worktree" rev-parse --show-toplevel 2>/dev/null) || return 1
-  [ "$(cd "$top" && pwd -P)" = "$(cd "$worktree" && pwd -P)" ] || return 1
+  [ "$(cd "$top" && pwd -P)" = "$worktree_real" ] || return 1
   branch=$(git -C "$worktree" rev-parse --abbrev-ref HEAD 2>/dev/null) || return 1
   [ "$branch" = "fm/$id" ] || return 1
   head=$(git -C "$worktree" rev-parse --verify HEAD 2>/dev/null) || return 1
   ref_head=$(git -C "$project" rev-parse --verify "refs/heads/fm/$id" 2>/dev/null) || return 1
   [ "$head" = "$ref_head" ] || return 1
-  [ -z "$(git -C "$worktree" status --porcelain 2>/dev/null)" ] || return 1
+  [ -z "$(GIT_OPTIONAL_LOCKS=0 git -C "$worktree" status --porcelain 2>/dev/null)" ] || return 1
 }
 
 archive_meta() {  # <meta> <task-id>
@@ -150,7 +173,7 @@ archive_meta() {  # <meta> <task-id>
 }
 
 reconcile_one() {  # <task-id>
-  local id=$1 meta=$STATE/$1.meta marker_count worktree project lease proof=
+  local id=$1 meta=$STATE/$1.meta marker_count worktree project registered lease proof=
   LEGACY_BACKEND=
   LEGACY_TARGET=
   LEGACY_ENDPOINT_STATE=
@@ -171,8 +194,21 @@ reconcile_one() {  # <task-id>
     printf '%s: preserved: project is not inspectable\n' "$id"
     return 0
   fi
+  registered=$(registered_task_worktree "$id" "$project") || {
+    printf '%s: preserved: task worktree ownership is ambiguous\n' "$id"
+    return 0
+  }
+  if [ -n "$registered" ]; then
+    if ! task_worktree_safe "$id" "$worktree" "$project" "$registered"; then
+      printf '%s: preserved: task worktree is dirty, unlanded, or not owned by this project\n' "$id"
+      return 0
+    fi
+  elif [ -e "$worktree" ] || [ -L "$worktree" ]; then
+    printf '%s: preserved: recorded worktree is not owned by this project\n' "$id"
+    return 0
+  fi
   if fm_teardown_recorded_pr_contains_task_branch "$id"; then
-    proof=merged-pr
+    proof='merged-pr'
   elif fm_teardown_local_main_contains_task_branch "$id"; then
     proof=local-main
   else
@@ -185,7 +221,7 @@ reconcile_one() {  # <task-id>
     printf '%s: preserved: invalid lease marker\n' "$id"
     return 0
   fi
-  if [ "$lease" = 1 ] && ! lease_returnable "$id" "$worktree" "$project"; then
+  if [ "$lease" = 1 ] && [ -z "$registered" ]; then
     printf '%s: preserved: held lease is not provably this task worktree\n' "$id"
     return 0
   fi
