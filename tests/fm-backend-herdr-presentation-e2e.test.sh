@@ -21,6 +21,7 @@ REAL_HERDR=$(command -v herdr)
 REAL_TREEHOUSE=$(command -v treehouse)
 HERDR_ORIGINAL_PATH=$PATH
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-presentation.XXXXXX")
+OPERATOR_HOME="$TMP_ROOT/operator-home"
 FAKEBIN="$TMP_ROOT/fakebin"
 HERDR_CALL_LOG="$TMP_ROOT/herdr-calls.log"
 TREEHOUSE_CALL_LOG="$TMP_ROOT/treehouse-calls.log"
@@ -31,7 +32,9 @@ MACOS_ACTIVATION_READY="$TMP_ROOT/macos-activation.ready"
 MACOS_ACTIVATION_WATCHER="$TMP_ROOT/macos-activation-watcher.swift"
 ACTIVE_SEEDED_CONTROL="$TMP_ROOT/active-seeded-control"
 POST_CREATE_ABORT_CONTROL="$TMP_ROOT/post-create-abort-control"
-mkdir -p "$FAKEBIN"
+mkdir -p "$FAKEBIN" "$OPERATOR_HOME"
+printf '%s\n' 'FM_TEST_BASELINE_SECRET=not-a-secret' > "$OPERATOR_HOME/.secrets"
+chmod 0600 "$OPERATOR_HOME/.secrets"
 : > "$HERDR_CALL_LOG"
 : > "$TREEHOUSE_CALL_LOG"
 : > "$MOVE_CALL_LOG"
@@ -494,13 +497,15 @@ make_project() {  # <dir>
 
 spawn_task() {  # <id> <home> <project>
   local id=$1 home=$2 project=$3
-  FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+  HOME="$OPERATOR_HOME" FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$project" "sh -c 'sleep 120'" --backend herdr
 }
 
 spawn_secondmate_task() {
   local id=$1 home=$2
-  FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
+  HOME="$OPERATOR_HOME" FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 \
+    FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$home" "sh -c 'sleep 120'" --secondmate --backend herdr
 }
 
