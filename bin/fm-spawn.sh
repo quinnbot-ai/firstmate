@@ -335,7 +335,7 @@ secret_env_scrub_prefix() {
       return 1
     fi
 
-    for name in "${line_names[@]}"; do
+    for name in "${line_names[@]+"${line_names[@]}"}"; do
       count=$((count + 1))
       case "$seen" in
         *" $name "*) ;;
