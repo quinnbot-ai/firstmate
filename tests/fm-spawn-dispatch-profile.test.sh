@@ -128,6 +128,29 @@ test_no_profile_keeps_claude_profile_defaults() {
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
 
+test_claude_keeps_selected_identity_without_cloning_invoker_config() {
+  local rec id out status launch expected
+  id=profile-claude-identity-z1a
+  rec=$(make_spawn_case profile-claude-identity claude "$id")
+  read_case_record "$rec"
+
+  out=$(CLAUDE_CONFIG_DIR="/opt/test/claude-work" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn with an invoker-specific config directory should succeed"
+  assert_contains "$out" "spawned $id harness=claude" \
+    "claude spawn did not preserve the selected harness identity"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
+
+  launch=$(cat "$LAUNCH_LOG")
+  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  [ "$launch" = "$expected" ] \
+    || fail "claude launch cloned invoker config or changed the canonical autonomous launch"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+  assert_not_contains "$launch" "CLAUDE_CONFIG_DIR=" \
+    "claude launch must not clone the invoker's credential/config store into the worker"
+  pass "claude preserves selected identity and autonomy without cloning invoker credentials or config"
+}
+
 test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
   local rec id out status launch home_real
   id=profile-relative-paths-z1b
@@ -619,6 +642,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 }
 
 test_no_profile_keeps_claude_profile_defaults
+test_claude_keeps_selected_identity_without_cloning_invoker_config
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths
 test_absolute_override_spelling_is_preserved_in_launch_paths
