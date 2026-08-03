@@ -39,6 +39,12 @@ export FM_GATE_REFUSE_BYPASS=1
 # shellcheck disable=SC2034
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Every behavior test that drives fm-spawn gets the same non-secret baseline,
+# independent of the developer or CI account's real ~/.secrets. fm-spawn honors
+# this path only alongside the test-only gate-refusal bypass above; dedicated
+# scrub tests replace it with per-case baseline fixtures.
+export FM_TEST_SECRET_ENV_BASELINE="$ROOT/tests/fixtures/fm-spawn-secret-baseline"
+
 # --- reporters --------------------------------------------------------------
 
 fail() {

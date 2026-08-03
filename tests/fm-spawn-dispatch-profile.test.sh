@@ -128,7 +128,7 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="/usr/bin/env -u FM_TEST_BASELINE_SECRET CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -384,7 +384,7 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  [ "$launch" = "/usr/bin/env -u FM_TEST_BASELINE_SECRET custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 
@@ -678,7 +678,7 @@ test_non_claude_harness_ignores_config_dir() {
 }
 
 test_active_dispatch_profile_does_not_block_secondmate_launch() {
-  local rec id sm out status
+  local rec id sm out status launch
   id=profile-secondmate-z16
   rec=$(make_spawn_case profile-secondmate codex "$id")
   read_case_record "$rec"
@@ -692,7 +692,119 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   assert_contains "$out" "spawned $id harness=codex kind=secondmate" "secondmate launch did not use secondmate harness resolution"
   assert_grep "kind=secondmate" "$HOME_DIR/state/$id.meta" "secondmate meta missing kind=secondmate"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex default default
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "/usr/bin/env -u FM_TEST_BASELINE_SECRET FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE=" \
+    "secondmate launch did not scrub before reapplying its required home overrides"
   pass "active crew-dispatch profile does not block secondmate launches"
+}
+
+test_secret_scrub_prefix_parses_supported_baseline_and_executes() {
+  local rec id out status launch prefix secret_home
+  id=profile-secret-scrub-z20
+  rec=$(make_spawn_case profile-secret-scrub claude "$id")
+  read_case_record "$rec"
+  secret_home="$CASE_DIR/host-home"
+  mkdir -p "$secret_home"
+  {
+    printf '%s\n' '# fixture baseline'
+    printf '%s\n' 'export SCRUB_ALPHA=first'
+    printf '%s\n' '  SCRUB_BETA=second'
+    printf '%s\n' 'export SCRUB_ALPHA'
+    printf '%s\n' 'unset RETIRED_SECRET'
+    printf '%s' 'SCRUB_GAMMA=third'
+  } > "$secret_home/.secrets"
+
+  out=$(FM_TEST_SECRET_ENV_BASELINE="$secret_home/.secrets" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "a supported secret baseline should permit the spawn"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "/usr/bin/env -u SCRUB_ALPHA -u SCRUB_BETA -u SCRUB_GAMMA CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
+    "scrub prefix did not preserve first-seen order, deduplicate names, or read a final line without newline"
+  prefix=${launch%% CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false*}
+  SCRUB_ALPHA=present SCRUB_BETA=present SCRUB_GAMMA=present PRESERVED_SETTING=present \
+    bash -c "$prefix sh -c 'test -z \"\${SCRUB_ALPHA+x}\" && test -z \"\${SCRUB_BETA+x}\" && test -z \"\${SCRUB_GAMMA+x}\" && test \"\$PRESERVED_SETTING\" = present'" \
+    || fail "constructed /usr/bin/env prefix did not remove only the declared fixture variables"
+  pass "secret scrub prefix parses the supported baseline and removes each declared variable exactly once"
+}
+
+assert_secret_baseline_refusal() {
+  local label=$1 secret_home=$2 expected=$3 forbidden=${4:-}
+  local rec id out status
+  id="profile-secret-refusal-${label}-z21"
+  rec=$(make_spawn_case "profile-secret-refusal-$label" claude "$id")
+  read_case_record "$rec"
+
+  out=$(FM_TEST_SECRET_ENV_BASELINE="$secret_home/.secrets" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "$label secret baseline should refuse the spawn"
+  assert_contains "$out" "$expected" "$label secret baseline refusal was not actionable"
+  if [ -n "$forbidden" ]; then
+    assert_not_contains "$out" "$forbidden" \
+      "$label secret baseline refusal printed secret-file content"
+  fi
+  assert_absent "$HOME_DIR/state/$id.meta" "$label secret baseline refusal wrote task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "$label secret baseline refusal typed a launch command"
+}
+
+test_secret_scrub_refuses_missing_unreadable_empty_and_unsupported_baselines() {
+  local secret_home
+
+  secret_home="$TMP_ROOT/secret-missing-home"
+  mkdir -p "$secret_home"
+  assert_secret_baseline_refusal missing "$secret_home" \
+    "cannot read approved secret baseline for crewmate environment scrub"
+
+  secret_home="$TMP_ROOT/secret-unreadable-home"
+  mkdir -p "$secret_home"
+  printf '%s\n' 'UNREADABLE_FIXTURE=fixture' > "$secret_home/.secrets"
+  chmod 000 "$secret_home/.secrets"
+  assert_secret_baseline_refusal unreadable "$secret_home" \
+    "cannot read approved secret baseline for crewmate environment scrub"
+  chmod 600 "$secret_home/.secrets"
+
+  secret_home="$TMP_ROOT/secret-empty-home"
+  mkdir -p "$secret_home"
+  : > "$secret_home/.secrets"
+  assert_secret_baseline_refusal empty "$secret_home" \
+    "approved secret baseline exposed no variable names for scrub"
+
+  secret_home="$TMP_ROOT/secret-unsupported-home"
+  mkdir -p "$secret_home"
+  printf '%s\n' 'SAFE_NAME=fixture' 'source /tmp/SECRET_BASELINE_CONTENT_MUST_NOT_PRINT' > "$secret_home/.secrets"
+  assert_secret_baseline_refusal unsupported "$secret_home" \
+    "approved secret baseline has unsupported syntax at line 2; refusing incomplete crewmate environment scrub" \
+    "SECRET_BASELINE_CONTENT_MUST_NOT_PRINT"
+
+  secret_home="$TMP_ROOT/secret-compound-home"
+  mkdir -p "$secret_home"
+  printf '%s\n' 'FIRST_FIXTURE=one SECOND_FIXTURE=two' > "$secret_home/.secrets"
+  assert_secret_baseline_refusal compound "$secret_home" \
+    "approved secret baseline has unsupported syntax at line 1; refusing incomplete crewmate environment scrub"
+
+  pass "missing, unreadable, empty, unsupported, and compound secret baselines refuse before metadata or launch"
+}
+
+test_secret_scrub_prefix_wraps_every_direct_launch_template() {
+  local harness rec id out status launch
+  for harness in claude codex opencode pi pi-signed grok; do
+    id="profile-secret-template-${harness}-z22"
+    rec=$(make_spawn_case "profile-secret-template-$harness" "$harness" "$id")
+    read_case_record "$rec"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 0 "$status" "$harness spawn should succeed under the scrub prefix"
+    launch=$(cat "$LAUNCH_LOG")
+    case "$launch" in
+      "/usr/bin/env -u FM_TEST_BASELINE_SECRET "*) ;;
+      *) fail "$harness launch template was not wrapped by the scrub prefix: $launch" ;;
+    esac
+  done
+  pass "claude, codex, opencode, pi, pi-signed, and grok launch templates share the scrub prefix"
 }
 
 test_no_profile_keeps_claude_profile_defaults
@@ -722,5 +834,8 @@ test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_secret_scrub_prefix_parses_supported_baseline_and_executes
+test_secret_scrub_refuses_missing_unreadable_empty_and_unsupported_baselines
+test_secret_scrub_prefix_wraps_every_direct_launch_template
 
 echo "# all fm-spawn-dispatch-profile tests passed"
