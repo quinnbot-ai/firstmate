@@ -146,7 +146,7 @@ test_no_profile_keeps_claude_profile_defaults() {
 }
 
 test_claude_keeps_selected_identity_without_cloning_invoker_config() {
-  local rec id out status launch expected
+  local rec id out status launch_line launch expected
   id=profile-claude-identity-z1a
   rec=$(make_spawn_case profile-claude-identity claude "$id")
   read_case_record "$rec"
@@ -159,11 +159,12 @@ test_claude_keeps_selected_identity_without_cloning_invoker_config() {
     "claude spawn did not preserve the selected harness identity"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
-  launch=$(cat "$LAUNCH_LOG")
+  launch_line=$(cat "$LAUNCH_LOG")
+  launch=$(captured_launch_body "$launch_line")
   expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] \
     || fail "claude launch cloned invoker config or changed the canonical autonomous launch"$'\n'"expected: $expected"$'\n'"actual:   $launch"
-  assert_not_contains "$launch" "CLAUDE_CONFIG_DIR=" \
+  assert_not_contains "$launch_line" "CLAUDE_CONFIG_DIR=" \
     "claude launch must not clone the invoker's credential/config store into the worker"
   pass "claude preserves selected identity and autonomy without cloning invoker credentials or config"
 }
@@ -419,7 +420,7 @@ test_raw_launch_scrubs_compound_commands_and_reapplies_gotmpdir() {
   expected_gotmp="/tmp/fm-$id/gotmp"
   raw="printf '%s\\n' \"\${FM_TEST_BASELINE_SECRET-unset}:\$GOTMPDIR\" > '$result'; printf '%s\\n' \"\$(if [ -z \"\${FM_TEST_BASELINE_SECRET+x}\" ]; then printf scrubbed; else printf leaked; fi):\$GOTMPDIR\" >> '$result'"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" "$raw")
   status=$?
   expect_code 0 "$status" "compound raw launch should be accepted inside the scrubbed child shell"
@@ -780,7 +781,7 @@ test_secret_scrub_prefix_parses_supported_baseline_and_executes() {
   } > "$secret_home/.secrets"
 
   OPERATOR_HOME=$secret_home
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "a supported secret baseline should permit the spawn"
@@ -807,7 +808,7 @@ assert_secret_baseline_refusal() {
   read_case_record "$rec"
 
   OPERATOR_HOME=$secret_home
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR")
   status=$?
   expect_code 1 "$status" "$label secret baseline should refuse the spawn"
@@ -876,7 +877,7 @@ test_secret_scrub_prefix_wraps_every_direct_launch_template() {
     id="profile-secret-template-${harness}-z22"
     rec=$(make_spawn_case "profile-secret-template-$harness" "$harness" "$id")
     read_case_record "$rec"
-    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
       "$id" "$PROJ_DIR")
     status=$?
     expect_code 0 "$status" "$harness spawn should succeed under the scrub prefix"
