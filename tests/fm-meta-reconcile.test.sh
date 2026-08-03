@@ -54,11 +54,11 @@ SH
 case "$*" in
   *"/merge_requests/"*)
     [ "${FM_TEST_MR_MERGED:-0}" = 1 ] || exit 1
-    printf '{"state":"merged","sha":"%s"}\n' "${FM_TEST_PR_HEAD:?}"
+    printf '{"author":{"state":"active"},"state":"merged","sha":"%s"}\n' "${FM_TEST_PR_HEAD:?}"
     ;;
   *"/repository/merge_base?"*)
     [ "${FM_TEST_PR_CONTAINS:-0}" = 1 ] || exit 1
-    printf '{"id":"%s"}\n' "${FM_TEST_BRANCH_HEAD:?}"
+    printf '{"commit":{"id":"wrong"},"id":"%s"}\n' "${FM_TEST_BRANCH_HEAD:?}"
     ;;
   *) exit 1 ;;
 esac
@@ -134,12 +134,15 @@ test_recorded_merged_pr_proof() {
 }
 
 test_recorded_gitlab_merged_mr_proof() {
-  local dir worktree id=merged-mr head out
+  local dir worktree id=merged-mr branch_head remote_head=ffffffffffffffffffffffffffffffffffffffff out
   dir=$(make_case merged-mr)
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 127' > "$dir/fakebin/jq"
+  chmod +x "$dir/fakebin/jq"
   worktree=$(make_task_branch "$dir" "$id")
-  head=$(git -C "$dir/project" rev-parse "refs/heads/fm/$id")
+  branch_head=$(git -C "$dir/project" rev-parse "refs/heads/fm/$id")
   write_legacy_meta "$dir" "$id" "$worktree" 'https://gitlab.example.com/group/repo/-/merge_requests/9'
-  out=$(FM_TEST_MR_MERGED=1 FM_TEST_PR_HEAD="$head" run_case "$dir" "$id")
+  out=$(FM_TEST_MR_MERGED=1 FM_TEST_PR_HEAD="$remote_head" FM_TEST_PR_CONTAINS=1 \
+    FM_TEST_BRANCH_HEAD="$branch_head" run_case "$dir" "$id")
   assert_contains "$out" "$id: would reconcile: endpoint=missing, proof=merged-pr" "recorded merged MR dry run"
   [ -f "$dir/home/state/$id.meta" ] || fail "merged MR dry run changed metadata"
   pass "meta reconcile: recorded GitLab MR proves detached task branch"
@@ -226,6 +229,28 @@ test_malformed_detached_marker_is_preserved() {
   pass "meta reconcile: malformed detached markers are preserved"
 }
 
+test_multi_record_dry_run_removes_endpoint_metadata_copies() {
+  local dir first_worktree second_worktree first=first-record second=second-record out
+  dir=$(make_case multi-record)
+  mkdir -p "$dir/tmp"
+  first_worktree=$(make_task_branch "$dir" "$first" "$dir/first-worktree")
+  land_branch_locally "$dir" "$first"
+  second_worktree=$(make_task_branch "$dir" "$second" "$dir/second-worktree")
+  land_branch_locally "$dir" "$second"
+  write_legacy_meta "$dir" "$first" "$first_worktree" 'https://github.com/private/first/pull/1'
+  write_legacy_meta "$dir" "$second" "$second_worktree" 'https://github.com/private/second/pull/2'
+  out=$(FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_TEST_ID="$first" \
+    FM_TEST_TREEHOUSE_LOG="$dir/treehouse.log" TMPDIR="$dir/tmp" PATH="$dir/fakebin:$PATH" \
+    "$RECONCILE")
+  assert_contains "$out" "$first: would reconcile: endpoint=missing, proof=local-main" \
+    "first multi-record dry run"
+  assert_contains "$out" "$second: would reconcile: endpoint=missing, proof=local-main" \
+    "second multi-record dry run"
+  [ -z "$(find "$dir/tmp" -maxdepth 1 -name 'fm-meta-reconcile.*' -print -quit)" ] \
+    || fail "multi-record dry run retained an endpoint metadata copy"
+  pass "meta reconcile: multi-record dry run removes endpoint metadata copies"
+}
+
 test_dry_run_does_not_create_state() {
   local dir id=no-state out
   dir="$TMP_ROOT/no-state"
@@ -245,4 +270,5 @@ test_live_endpoint_is_preserved
 test_held_lease_is_returned_before_cleanup
 test_existing_dirty_worktree_without_lease_is_preserved
 test_malformed_detached_marker_is_preserved
+test_multi_record_dry_run_removes_endpoint_metadata_copies
 test_dry_run_does_not_create_state

@@ -143,6 +143,78 @@ fm_teardown_local_main_contains_task_branch() {
   git -C "$PROJ" merge-base --is-ancestor "$branch_head" "$main_head" 2>/dev/null
 }
 
+fm_teardown_json_string_field() {
+  local field=$1
+  awk -v wanted="$field" '
+    {
+      line = $0 "\n"
+      for (i = 1; i <= length(line); i++) {
+        char = substr(line, i, 1)
+        if (in_string) {
+          if (escaped) {
+            token = token "\\" char
+            escaped = 0
+          } else if (char == "\\") {
+            escaped = 1
+          } else if (char == "\"") {
+            in_string = 0
+            if (mode == "key") {
+              key = token
+              key_ready = 1
+            } else if (mode == "value") {
+              matches++
+              result = token
+            }
+            mode = ""
+          } else {
+            token = token char
+          }
+          continue
+        }
+        if (char == "\"") {
+          in_string = 1
+          token = ""
+          if (depth == 1 && expect_key) {
+            mode = "key"
+            expect_key = 0
+          } else if (depth == 1 && want_value) {
+            mode = "value"
+            want_value = 0
+          } else {
+            mode = "other"
+          }
+        } else if (char == "{" || char == "[") {
+          depth++
+          if (depth == 1) {
+            expect_key = 1
+          }
+        } else if (char == "}" || char == "]") {
+          depth--
+          if (depth < 0) {
+            invalid = 1
+          }
+        } else if (depth == 1 && char == ":") {
+          if (key_ready) {
+            want_value = (key == wanted)
+            key_ready = 0
+          }
+        } else if (depth == 1 && char == ",") {
+          expect_key = 1
+          want_value = 0
+          key_ready = 0
+        }
+      }
+    }
+    END {
+      if (!invalid && !in_string && depth == 0 && matches == 1) {
+        print result
+      } else {
+        exit 1
+      }
+    }
+  '
+}
+
 fm_teardown_recorded_pr_head() {
   local target=$1 view state merged head project_id
   FM_TEARDOWN_RECORDED_PR_HEAD=
@@ -158,13 +230,11 @@ fm_teardown_recorded_pr_head() {
       [ "$state" = closed ] && [ "$merged" = true ] || return 1
       ;;
     gitlab)
-      command -v jq >/dev/null 2>&1 || return 1
       project_id=${FM_PR_PATH//\//%2F}
       view=$(cd "$PROJ" && glab api --hostname "$FM_PR_HOST" \
-        "projects/$project_id/merge_requests/$FM_PR_NUMBER" 2>/dev/null \
-        | jq -er '[.state, .sha] | @tsv' 2>/dev/null) || return 1
-      state=${view%%$'\t'*}
-      head=${view#*$'\t'}
+        "projects/$project_id/merge_requests/$FM_PR_NUMBER" 2>/dev/null) || return 1
+      state=$(printf '%s\n' "$view" | fm_teardown_json_string_field state) || return 1
+      head=$(printf '%s\n' "$view" | fm_teardown_json_string_field sha) || return 1
       [ "$state" = merged ] || return 1
       ;;
     *) return 1 ;;
@@ -183,11 +253,11 @@ fm_teardown_forge_head_contains_commit() {
       [ "$status" = ahead ]
       ;;
     gitlab)
-      command -v jq >/dev/null 2>&1 || return 1
       project_id=${FM_PR_PATH//\//%2F}
-      merge_base=$(cd "$PROJ" && glab api --hostname "$FM_PR_HOST" \
+      status=$(cd "$PROJ" && glab api --hostname "$FM_PR_HOST" \
         "projects/$project_id/repository/merge_base?refs%5B%5D=$branch_head&refs%5B%5D=$head" \
-        2>/dev/null | jq -er '.id' 2>/dev/null) || return 1
+        2>/dev/null) || return 1
+      merge_base=$(printf '%s\n' "$status" | fm_teardown_json_string_field id) || return 1
       [ "$merge_base" = "$branch_head" ]
       ;;
     *) return 1 ;;

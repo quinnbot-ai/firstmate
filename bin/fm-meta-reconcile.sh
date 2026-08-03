@@ -54,7 +54,9 @@ fi
 
 TMP_META=
 cleanup_tmp() {
-  [ -z "$TMP_META" ] || rm -f -- "$TMP_META"
+  [ -z "$TMP_META" ] && return 0
+  rm -f -- "$TMP_META" || return 1
+  TMP_META=
 }
 trap cleanup_tmp EXIT
 
@@ -74,6 +76,7 @@ legacy_endpoint_state() {  # <meta> <task-id>
   local meta=$1 id=$2 target tmp_line
   [ "$(grep -c '^window=' "$meta" 2>/dev/null || true)" -eq 0 ] || return 1
   target=$(legacy_detached_window "$meta") || return 1
+  cleanup_tmp || return 1
   TMP_META=$(mktemp "${TMPDIR:-/tmp}/fm-meta-reconcile.XXXXXX") || return 1
   while IFS= read -r tmp_line || [ -n "$tmp_line" ]; do
     case "$tmp_line" in
@@ -82,9 +85,13 @@ legacy_endpoint_state() {  # <meta> <task-id>
     esac
   done < "$meta"
   printf 'window=%s\n' "$target" >> "$TMP_META"
-  fm_backend_validate_task_endpoint "$TMP_META" "$id" >/dev/null 2>&1 || return 1
+  if ! fm_backend_validate_task_endpoint "$TMP_META" "$id" >/dev/null 2>&1; then
+    cleanup_tmp || true
+    return 1
+  fi
   LEGACY_BACKEND=$FM_BACKEND_VALIDATED_BACKEND
   LEGACY_TARGET=$FM_BACKEND_VALIDATED_TARGET
+  cleanup_tmp || return 1
   LEGACY_ENDPOINT_STATE=$(fm_backend_agent_state "$LEGACY_BACKEND" "$LEGACY_TARGET" 2>/dev/null || true)
   case "$LEGACY_ENDPOINT_STATE" in
     dead|missing) return 0 ;;
@@ -177,7 +184,6 @@ reconcile_one() {  # <task-id>
   LEGACY_BACKEND=
   LEGACY_TARGET=
   LEGACY_ENDPOINT_STATE=
-  TMP_META=
   [ -f "$meta" ] && [ ! -L "$meta" ] || { printf '%s: preserved: no safe metadata file\n' "$id"; return 0; }
   marker_count=$(grep -Ec '^landed_[0-9]{8}=' "$meta" 2>/dev/null || true)
   [ "$marker_count" -eq 1 ] || { printf '%s: preserved: not an explicit legacy landed record\n' "$id"; return 0; }
