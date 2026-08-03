@@ -176,7 +176,7 @@ secret_env_assignment_tail_supported() {
       double)
         case "$char" in
           '"') state=plain ;;
-          '\')
+          \\)
             i=$((i + 1))
             [ "$i" -lt "$length" ] || return 1
             ;;
@@ -220,7 +220,7 @@ secret_env_assignment_tail_supported() {
             "'") state=single ;;
             '"') state=double ;;
             ' '|$'\t') trailing=1 ;;
-            '\'|'`'|';'|'&'|'|'|'<'|'>'|'('|')') return 1 ;;
+            \\|'`'|';'|'&'|'|'|'<'|'>'|'('|')') return 1 ;;
             '$')
               i=$((i + 1))
               [ "$i" -lt "$length" ] || return 1

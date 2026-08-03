@@ -863,7 +863,7 @@ test_secret_scrub_refuses_missing_unreadable_empty_and_unsupported_baselines() {
 
   secret_home="$TMP_ROOT/secret-mutating-expansion-home"
   mkdir -p "$secret_home"
-  printf '%s\n' 'FIRST_FIXTURE=${SECOND_FIXTURE:=secret}' > "$secret_home/.secrets"
+  printf '%s\n' "FIRST_FIXTURE=\${SECOND_FIXTURE:=secret}" > "$secret_home/.secrets"
   assert_secret_baseline_refusal mutating-expansion "$secret_home" \
     "approved secret baseline has unsupported syntax at line 1; refusing incomplete crewmate environment scrub"
 
