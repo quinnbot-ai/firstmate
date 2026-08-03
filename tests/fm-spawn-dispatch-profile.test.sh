@@ -61,7 +61,7 @@ make_spawn_case() {
   touch "$home/state/.last-watcher-beat"
   for id in "$@"; do
     mkdir -p "$home/data/$id"
-    printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+    printf '# Task\nBrief for %s.\n' "$id" > "$home/data/$id/brief.md"
   done
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$launchlog"
 }
@@ -649,6 +649,36 @@ test_non_claude_harness_ignores_config_dir() {
   pass "non-claude harnesses do not receive the claude CLAUDE_CONFIG_DIR prefix"
 }
 
+test_unfilled_task_brief_refuses_before_spawn_state() {
+  local rec id out status brief
+  id=profile-unfilled-brief-z20
+  rec=$(make_spawn_case profile-unfilled-brief codex "$id")
+  read_case_record "$rec"
+  brief="$HOME_DIR/data/$id/brief.md"
+
+  printf '# Task\n{TASK}\n' > "$brief"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "an unfilled task brief must refuse"
+  assert_contains "$out" 'containing only the {TASK} placeholder' \
+    "unfilled task brief refusal was not actionable"
+  assert_absent "$HOME_DIR/state/$id.meta" "unfilled task brief created task metadata"
+
+  printf '# Task\n\n# Rules\nFollow the brief.\n' > "$brief"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "an empty task section must refuse"
+  assert_contains "$out" 'has an empty # Task section' \
+    "empty task section refusal was not actionable"
+  assert_absent "$HOME_DIR/state/$id.meta" "empty task brief created task metadata"
+
+  printf 'A handwritten legacy brief remains valid.\n' > "$brief"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "a non-scaffold legacy brief must remain valid"
+  pass "fm-spawn refuses unfilled ordinary task briefs before task-state creation"
+}
+
 test_active_dispatch_profile_does_not_block_secondmate_launch() {
   local rec id sm out status
   id=profile-secondmate-z16
@@ -692,6 +722,7 @@ test_batch_forwards_shared_profile_flags
 test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir
+test_unfilled_task_brief_refuses_before_spawn_state
 test_active_dispatch_profile_does_not_block_secondmate_launch
 
 echo "# all fm-spawn-dispatch-profile tests passed"
