@@ -170,6 +170,7 @@ test_empty_queue_check_runs_under_system_strict_shell() {
   dir=$(make_case empty-queue-strict-shell)
   owner_state holder alpha full prior "$PRIOR_START" terminal 0 > "$dir/home/state/validation-lane"
   chmod 0600 "$dir/home/state/validation-lane"
+  cp "$dir/home/state/validation-lane" "$dir/validation-lane.before"
   (
     PATH=/bin:/usr/bin
     run_lane "$dir" check
@@ -178,6 +179,7 @@ test_empty_queue_check_runs_under_system_strict_shell() {
   [ ! -s "$dir/check.out" ] || fail "empty queue strict-shell check reported an unexpected release"
   [ ! -s "$dir/check.err" ] || fail "empty queue strict-shell check wrote an error"
   assert_state "$dir" "$(owner_state holder alpha full prior "$PRIOR_START" terminal 0)" "empty queue strict-shell check changed ownership"
+  cmp -s "$dir/validation-lane.before" "$dir/home/state/validation-lane" || fail "empty queue strict-shell check changed state bytes"
   assert_not_contains "$(cat "$dir/home/state/validation-lane")" "queued=" "empty queue strict-shell check serialized a phantom queue record"
   pass "validation lane: an empty queue check succeeds under the system strict shell"
 }
