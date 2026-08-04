@@ -5,7 +5,7 @@
 # This is the one implementation of "advance a firstmate checkout to a base by a
 # clean fast-forward, never forcing, merging, or stashing" used by every sync
 # path:
-#   - /updatefirstmate (bin/fm-update.sh) pulls from the checkout's PUBLISH remote
+#   - /updatefirstmate (bin/fm-update.sh) pulls from the checkout's publish remote
 #     as resolved by bin/fm-remote-lib.sh: base_mode "publish".
 #   - the local-HEAD secondmate sync (bin/fm-spawn.sh on launch, bin/fm-bootstrap.sh
 #     on startup) follows the PRIMARY checkout's current default-branch commit:
@@ -196,7 +196,8 @@ validate_secondmate_home() {
 
 # A single fetch refreshes every worktree that shares an object store, so fetch
 # each distinct git-common-dir at most once per remote. Used ONLY by the publish
-# base mode; the local-HEAD sync never fetches.
+# base mode;
+# the local-HEAD sync never fetches.
 FETCHED=""
 fetch_once() {
   local dir=$1 remote=$2 common key
@@ -300,8 +301,6 @@ ff_target() {
   # Resolve the fast-forward base from base_mode (see header).
   if [ "$base_mode" = publish ]; then
     if ! remote=$(fm_publish_remote "$dir"); then
-      # Reached only when the checkout has neither a fork nor an origin remote;
-      # the wording matches fm-fleet-sync.sh's benign no-remote skip.
       echo "$label: skipped: no origin remote"
       return 0
     fi
@@ -423,6 +422,7 @@ sweep_live_secondmate_metas() {
   local state=$1 base_mode=$2 nudge_requires_instr=${3:-no} registry=${4:-$FM_HOME/data/secondmates.md} id home window meta
   [ -d "$state" ] || return 0
   while IFS='|' read -r id home window meta; do
+    if grep -q '^remote_host=.' "$meta" 2>/dev/null; then continue; fi
     process_secondmate "$id" "$home" "$window" "$base_mode" "$nudge_requires_instr"
   done < <(live_secondmate_meta_records "$state" "$registry")
 }

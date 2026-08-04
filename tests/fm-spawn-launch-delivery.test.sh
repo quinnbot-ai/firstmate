@@ -113,7 +113,7 @@ run_spawn() {
     FM_FAKE_EVALUATED="$case_dir/evaluated" FM_FAKE_SCREEN_HISTORY="$case_dir/screen-history" \
     FM_SPAWN_LAUNCH_POLL_INTERVAL=0 FM_SPAWN_LAUNCH_CHUNK_DELAY=0 \
     PATH="$fakebin:$PATH" \
-    "$SPAWN" "$id" "$proj" "$@" 2>&1
+    "$SPAWN" "$id" "$proj" --mode direct-PR --yolo on "$@" 2>&1
 }
 
 read_case() {

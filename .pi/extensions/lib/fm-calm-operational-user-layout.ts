@@ -1,14 +1,12 @@
-// Verified against Pi 0.81.1 and 0.82.0, which add the ordinary-user spacer and row
-// together via InteractiveMode.addMessageToChat. This adapter probes that exact method
-// and throws if it is missing; fm-calm.ts catches that and skips only this adapter with a
-// diagnostic instead of blocking Calm or Pi. It changes only that presentation and never
-// message delivery.
-import type { UserMessageComponent as PiUserMessageComponent } from "@earendil-works/pi-coding-agent";
+// Verified against Pi 0.81.1 and 0.82.0, which add each ordinary user row as a native
+// spacer-plus-user-component pair via InteractiveMode.addMessageToChat. This adapter
+// decorates that exact topology and throws if it is unavailable; fm-calm.ts catches that
+// and skips only this adapter with a diagnostic instead of blocking Calm or Pi. It changes
+// only presentation and never message delivery.
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import { calmPresentationHides } from "./fm-calm-visibility.ts";
 import { classifyFirstmateCurrentOperationalText } from "./fm-operational-input.ts";
 
-type UserMessageConstructorArgs = ConstructorParameters<typeof PiUserMessageComponent>;
 type UserMessageLike = {
   role: string;
   content: unknown;
@@ -19,14 +17,11 @@ type AddMessageOptions = {
 type InteractiveModePresentation = {
   chatContainer: {
     children: unknown[];
-    addChild(component: PiUserMessageComponent): void;
   };
   editor: {
     addToHistory?(text: string): void;
   };
-  getMarkdownThemeWithSettings(): UserMessageConstructorArgs[1];
   getUserMessageText(message: UserMessageLike): string;
-  outputPad: number;
 };
 type InteractiveModePrototype = {
   addMessageToChat(
@@ -92,30 +87,6 @@ export function installCalmOperationalUserLayout(): void {
     throw new Error("Firstmate Calm requires Pi InteractiveMode.addMessageToChat");
   }
 
-  const UserMessageComponent = PiCodingAgent.UserMessageComponent;
-  if (typeof UserMessageComponent !== "function") {
-    throw new Error("Firstmate Calm requires Pi UserMessageComponent");
-  }
-  class CalmOperationalUserMessageComponent extends UserMessageComponent {
-    private readonly hasLeadingSpacer: boolean;
-
-    constructor(
-      text: UserMessageConstructorArgs[0],
-      markdownTheme: UserMessageConstructorArgs[1],
-      outputPad: number,
-      hasLeadingSpacer: boolean,
-    ) {
-      super(text, markdownTheme, outputPad);
-      this.hasLeadingSpacer = hasLeadingSpacer;
-    }
-
-    override render(width: number): string[] {
-      if (patch.hidesOperationalInput()) return [];
-      const lines = super.render(width);
-      return this.hasLeadingSpacer ? ["", ...lines] : lines;
-    }
-  }
-
   prototype.addMessageToChat = function (
     message: UserMessageLike,
     options?: AddMessageOptions,
@@ -131,14 +102,42 @@ export function installCalmOperationalUserLayout(): void {
       return;
     }
 
-    const component = new CalmOperationalUserMessageComponent(
-      text,
-      this.getMarkdownThemeWithSettings(),
-      this.outputPad,
-      this.chatContainer.children.length > 0,
-    );
-    this.chatContainer.addChild(component);
-    if (options?.populateHistory) this.editor.addToHistory?.(text);
+    // Keep Pi's own spacer and user-row construction together so adjacent follow-ups
+    // retain the same transcript topology as ordinary native input.
+    const before = this.chatContainer.children.length;
+    const hasPrecedingRow = before > 0;
+    originalAddMessageToChat.call(this, message, options);
+    const added = this.chatContainer.children.length - before;
+    const expectedAdded = hasPrecedingRow ? 2 : 1;
+    if (added !== expectedAdded) {
+      throw new Error("Firstmate Calm requires Pi's spacer-plus-user operational row topology");
+    }
+    const spacer = hasPrecedingRow
+      ? (this.chatContainer.children[before] as {
+          render?: (width: number) => string[];
+        } | undefined)
+      : undefined;
+    const component = this.chatContainer.children[before + expectedAdded - 1] as {
+      render?: (width: number) => string[];
+    } | undefined;
+    if (
+      !component ||
+      typeof component.render !== "function" ||
+      (hasPrecedingRow && (!spacer || typeof spacer.render !== "function"))
+    ) {
+      throw new Error("Firstmate Calm could not locate Pi's operational spacer and user row");
+    }
+    const render = component.render.bind(component);
+    if (spacer) {
+      const renderSpacer = spacer.render!.bind(spacer);
+      spacer.render = (width: number): string[] => (
+        patch.hidesOperationalInput() ? [] : renderSpacer(width)
+      );
+    }
+    component.render = (width: number): string[] => {
+      if (patch.hidesOperationalInput()) return [];
+      return render(width);
+    };
   };
 
   registry[CALM_OPERATIONAL_USER_LAYOUT_PATCH] = patch;

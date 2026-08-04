@@ -255,13 +255,16 @@ select_ready_fixture() {
 }
 
 refill_to_configured_capacity() {
-  local candidate capacity count out
+  local candidate capacity count mode out yolo
   capacity=$(configured_capacity) || return
+  read -r mode yolo <<EOF
+$(fixture_cmd "$ROOT/bin/fm-project-mode.sh" "$(basename "$PROJECT")")
+EOF
   for candidate in "$@"; do
     count=$(ordinary_lane_count)
     [ "$count" -lt "$capacity" ] || break
     select_ready_fixture "$candidate" || return
-    out=$(fixture_cmd "$SPAWN" "$candidate" "$PROJECT" --harness opencode) \
+    out=$(fixture_cmd "$SPAWN" "$candidate" "$PROJECT" --mode "$mode" --yolo "$yolo" --harness opencode) \
       || return
     printf '%s\n' "$out"
   done

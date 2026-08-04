@@ -511,11 +511,18 @@ InteractiveMode.prototype.addMessageToChat.call(
   operationalMode,
   { role: "user", content: legacyAwayMessage },
 );
-const operationalComponent = operationalChat.children[1];
-const legacyOperationalComponent = operationalChat.children[2];
+// Real Pi adds its Spacer before each ordinary user row.
+// Preserve that topology in this fixture so the adapter is exercised against
+// the same component sequence as the live InteractiveMode.
+const operationalComponent = operationalChat.children[2];
+const legacyOperationalComponent = operationalChat.children[4];
 const stockOperationalComponent = new UserMessageComponent(watcherMessage, undefined, 1);
 const expectedCalmOffOperationalRows = ["", ...stockOperationalComponent.render(100)];
-if (JSON.stringify(operationalComponent.render(100)) !== JSON.stringify(expectedCalmOffOperationalRows)) {
+const nativeOperationalRows = [
+  ...operationalChat.children[1].render(100),
+  ...operationalComponent.render(100),
+];
+if (JSON.stringify(nativeOperationalRows) !== JSON.stringify(expectedCalmOffOperationalRows)) {
   throw new Error("Calm-off operational user rendering changed from Pi stock rows");
 }
 if (operationalHistory.length !== 1 || operationalHistory[0] !== watcherMessage) {
@@ -938,7 +945,7 @@ if (
 ) {
   throw new Error("turning Calm off did not restore a legacy synthetic presentation row");
 }
-if (JSON.stringify(operationalComponent.render(100)) !== JSON.stringify(expectedCalmOffOperationalRows)) {
+if (JSON.stringify(nativeOperationalRows) !== JSON.stringify(expectedCalmOffOperationalRows)) {
   throw new Error("turning Calm off did not restore byte-identical operational user rows and spacing");
 }
 if (!legacyOperationalComponent.render(100).join("\n").includes("legacy presentation compatibility")) {

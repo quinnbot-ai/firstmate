@@ -98,7 +98,7 @@ run_spawn() {
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$CASE_WT" \
     PATH="$CASE_FAKEBIN:$PATH" \
-    "$SPAWN" "$id" "$CASE_PROJ" 2>&1
+    "$SPAWN" "$id" "$CASE_PROJ" --mode no-mistakes --yolo off 2>&1
 }
 
 # The paths the worker will compare against must be the physically resolved ones,

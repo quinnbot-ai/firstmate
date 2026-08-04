@@ -142,7 +142,7 @@ fm_fake_pane_shell() {
   mkdir -p "$fakebin"
   cat > "$fakebin/pane-shell.sh" <<'SH'
 # Sourced by a suite's fake terminal. Owner: fm_fake_pane_shell in tests/lib.sh.
-FM_FAKE_PANE_STATE="${BASH_SOURCE[0]%/*}/pane-shell-state"
+FM_FAKE_PANE_STATE="${FM_FAKE_PANE_STATE:-${BASH_SOURCE[0]%/*}/pane-shell-state}"
 mkdir -p "$FM_FAKE_PANE_STATE"
 FM_FAKE_PANE_SCREEN="$FM_FAKE_PANE_STATE/screen"
 FM_FAKE_PANE_STAGED="$FM_FAKE_PANE_STATE/staged"
