@@ -165,6 +165,23 @@ test_empty_lane_retires_its_watcher_artifacts() {
   pass "validation lane: an empty lane retires its watcher artifacts"
 }
 
+test_empty_queue_check_runs_under_system_strict_shell() {
+  local dir lane_rc=0
+  dir=$(make_case empty-queue-strict-shell)
+  owner_state holder alpha full prior "$PRIOR_START" terminal 0 > "$dir/home/state/validation-lane"
+  chmod 0600 "$dir/home/state/validation-lane"
+  (
+    PATH=/bin:/usr/bin
+    run_lane "$dir" check
+  ) > "$dir/check.out" 2> "$dir/check.err" || lane_rc=$?
+  expect_code 0 "$lane_rc" "empty queue strict-shell check"
+  [ ! -s "$dir/check.out" ] || fail "empty queue strict-shell check reported an unexpected release"
+  [ ! -s "$dir/check.err" ] || fail "empty queue strict-shell check wrote an error"
+  assert_state "$dir" "$(owner_state holder alpha full prior "$PRIOR_START" terminal 0)" "empty queue strict-shell check changed ownership"
+  assert_not_contains "$(cat "$dir/home/state/validation-lane")" "queued=" "empty queue strict-shell check serialized a phantom queue record"
+  pass "validation lane: an empty queue check succeeds under the system strict shell"
+}
+
 test_failed_delivery_remains_pending_and_is_retried() {
   local dir out
   dir=$(make_case retry)
@@ -451,6 +468,7 @@ test_enqueue_reserves_and_delivers_first_task
 test_queue_is_fifo_and_terminal_check_releases_next
 test_status_log_terminal_does_not_free_a_slot
 test_empty_lane_retires_its_watcher_artifacts
+test_empty_queue_check_runs_under_system_strict_shell
 test_failed_delivery_remains_pending_and_is_retried
 test_generated_check_executes_scheduler_without_live_runtime
 test_terminal_status_event_releases_and_queues_a_wake

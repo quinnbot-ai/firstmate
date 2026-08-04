@@ -113,9 +113,11 @@ lane_id_seen() {  # <id>
   local id=$1 queued
   [ "$LANE_HOLDER" = "$id" ] && return 0
   [ "$LANE_RELEASE" = "$id" ] && return 0
-  for queued in "${LANE_QUEUE[@]}"; do
-    [ "$queued" = "$id" ] && return 0
-  done
+  if [ "${#LANE_QUEUE[@]}" -gt 0 ]; then
+    for queued in "${LANE_QUEUE[@]}"; do
+      [ "$queued" = "$id" ] && return 0
+    done
+  fi
   return 1
 }
 
@@ -255,9 +257,11 @@ write_lane() {
       printf 'reservation-state=%s\n' "$LANE_RESERVATION_STATE"
       printf 'reservation-started=%s\n' "$LANE_RESERVATION_STARTED"
     fi
-    for queued in "${LANE_QUEUE[@]}"; do
-      printf 'queued=%s\n' "$queued"
-    done
+    if [ "${#LANE_QUEUE[@]}" -gt 0 ]; then
+      for queued in "${LANE_QUEUE[@]}"; do
+        printf 'queued=%s\n' "$queued"
+      done
+    fi
   } > "$tmp" || return 1
   chmod 0600 "$tmp" || return 1
   fm_pr_private_file_valid "$tmp" 600 "$LANE_DEVICE" || return 1
