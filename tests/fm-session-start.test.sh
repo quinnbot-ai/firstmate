@@ -6,7 +6,7 @@
 # Coverage:
 #   - absent-file markers vs empty-but-present files in the context digest
 #   - the lock-refusal read-only path: banner leads, every mutating step is
-#     skipped (including bootstrap's six mutating sweeps, verified by their
+#     skipped (including bootstrap's five mutating sweeps, verified by their
 #     ABSENCE), the digest still completes
 #   - output section ordering: diagnostics/banners lead, bulk file dumps follow
 #   - context-aware next-step guidance for read-only, AFK, X mode, and normal
@@ -231,8 +231,6 @@ make_fake_tmux_secondmate_recovery() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
-# shellcheck source=/dev/null
-. "$(dirname "$0")/pane-shell.sh"
 mode=${FM_FAKE_TMUX_MODE:?}
 log=${FM_FAKE_TMUX_LOG:?}
 spawned=${FM_FAKE_TMUX_SPAWNED:?}
@@ -306,20 +304,11 @@ case "${1:-}" in
     printf '%%1\n'
     exit 0
     ;;
-  set-window-option) exit 0 ;;
-  capture-pane)
-    fm_fake_pane_capture
-    exit 0
-    ;;
-  send-keys)
-    fm_fake_pane_send "$@"
-    exit 0
-    ;;
+  set-window-option|send-keys) exit 0 ;;
 esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_pane_shell "$fakebin"
 }
 
 make_fake_herdr_secondmate_recovery() {
@@ -330,8 +319,6 @@ make_fake_herdr_secondmate_recovery() {
   cat > "$fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
-# shellcheck source=/dev/null
-. "$(dirname "$0")/pane-shell.sh"
 log=${FM_FAKE_HERDR_LOG:?}
 state=${FM_FAKE_HERDR_STATE:?}
 mate_id=${FM_FAKE_SECOND_MATE_ID:?}
@@ -392,15 +379,7 @@ case "${1:-} ${2:-}" in
   "pane close")
     [ "${3:-}" = p-old ] && : > "$killed"
     ;;
-  "pane read")
-    fm_fake_pane_capture
-    ;;
-  "pane run")
-    # herdr submits the whole line in one call, so feed the pane shell directly
-    # rather than through the tmux send-keys argv parser.
-    fm_fake_pane_line "${4:-}"
-    ;;
-  "pane send-text"|"pane send-keys"|"tab close")
+  "pane run"|"pane send-text"|"pane send-keys"|"tab close")
     ;;
   *)
     exit 1
@@ -409,7 +388,6 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/herdr"
-  fm_fake_pane_shell "$fakebin"
 }
 
 # make_fake_herdr <fakebin> <live-pane>: `herdr pane get <pane>` succeeds only

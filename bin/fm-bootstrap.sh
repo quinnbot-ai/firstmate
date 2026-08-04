@@ -118,18 +118,10 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-startup-memory-budget-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-x-lib.sh"
-# shellcheck source=bin/fm-pr-lib.sh disable=SC1091
-. "$SCRIPT_DIR/fm-pr-lib.sh"
-# shellcheck source=bin/fm-check-lib.sh disable=SC1091
-. "$SCRIPT_DIR/fm-check-lib.sh"
-# shellcheck source=bin/fm-ops-inbox-lib.sh disable=SC1091
-. "$SCRIPT_DIR/fm-ops-inbox-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
-
-# Reserved check id for the standing operational alert inbox watch.
-# It is a watch, never a work item, so it never appears in the backlog or fleet view.
-OPS_INBOX_CHECK_ID=ops-watch
+# shellcheck source=bin/fm-remote-readiness-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 
 fleet_sync_origin_backed_project_count() {
   local count proj
@@ -467,13 +459,14 @@ secondmate_sync() {
     fi
     nudge_needed=0
     converged=1
-    if sync_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh sync "$id" 2>&1); then
+    if sync_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh sync "$id" < /dev/null 2>&1); then
       case "$sync_out" in synced:*) nudge_needed=1 ;; esac
     else
       echo "SECONDMATE_SYNC: secondmate $id: skipped: remote tracked-file sync failed on $remote_host: $(first_line "$sync_out")"
       converged=0
     fi
-    if inherit_out=$("$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" 2>&1); then
+    if inherit_out=$(FM_CONFIG_INHERIT_LIVE=1 \
+      "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" 2>&1); then
       if printf '%s\n' "$inherit_out" | grep -Eq '^(pushed|removed):'; then nudge_needed=1; fi
     else
       echo "SECONDMATE_SYNC: secondmate $id: skipped: remote inheritance failed on $remote_host: $(first_line "$inherit_out")"
@@ -509,7 +502,7 @@ secondmate_liveness_sweep() {
   # primary-only no-op there. Mid-session liveness remains explicitly out of
   # scope and requires a separate periodic signal.
   [ -d "$STATE" ] || return 0
-  local meta id window harness backend target agent_state out cause remote_host remote_rc
+  local meta id window harness backend target agent_state out cause remote_host remote_rc readiness_reason route_out remote_backend
   SECONDMATE_RESPAWNED_IDS=""
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
@@ -520,7 +513,21 @@ secondmate_liveness_sweep() {
     harness=$(fm_meta_get "$meta" harness)
     remote_host=$(fm_meta_get "$meta" remote_host)
     if [ -n "$remote_host" ]; then
-      if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" 2>/dev/null); then
+      remote_rc=0
+      fm_remote_readiness_ensure "$SCRIPT_DIR" "$id" || remote_rc=$?
+      if [ "$remote_rc" -eq 255 ]; then
+        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote host unavailable or endpoint state unknown; route preserved on $remote_host"
+        continue
+      fi
+      if [ "$remote_rc" -ne 0 ]; then
+        readiness_reason=$(printf '%s\n' "$FM_REMOTE_READINESS_OUT" \
+          | awk '/^check [^=]+=(fixable|human):|^action:|^error:/ { print; exit }')
+        [ -n "$readiness_reason" ] || readiness_reason=$(first_line "$FM_REMOTE_READINESS_OUT")
+        [ -n "$readiness_reason" ] || readiness_reason="unknown readiness failure"
+        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote readiness failed on $remote_host: $readiness_reason"
+        continue
+      fi
+      if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null); then
         remote_rc=0
       else
         remote_rc=$?
@@ -536,6 +543,24 @@ secondmate_liveness_sweep() {
       agent_state=$(printf '%s\n' "$out" | tail -1)
       case "$agent_state" in
         alive)
+          if route_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh route "$id" < /dev/null 2>/dev/null); then
+            remote_rc=0
+          else
+            remote_rc=$?
+          fi
+          if [ "$remote_rc" -eq 255 ]; then
+            echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote host unavailable or endpoint route unknown; route preserved on $remote_host"
+            continue
+          fi
+          if [ "$remote_rc" -ne 0 ]; then
+            echo "SECONDMATE_LIVENESS: secondmate $id: skipped: alive remote endpoint route is unreadable on $remote_host; inspect and migrate or retire it explicitly"
+            continue
+          fi
+          remote_backend=$(printf '%s\n' "$route_out" | sed -n 's/^backend=//p' | tail -1)
+          if [ "$remote_backend" != herdr ]; then
+            echo "SECONDMATE_LIVENESS: secondmate $id: skipped: alive remote endpoint is recorded on backend '${remote_backend:-missing}'; migrate or retire it explicitly"
+            continue
+          fi
           [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] || echo "BOOTSTRAP_INFO: remote secondmate $id already live (host=$remote_host)"
           ;;
         dead|missing)
@@ -850,102 +875,6 @@ EOF
   echo "FMX: X mode on - relay poll armed via state/x-watch.check.sh; 30s watcher cadence in config/x-mode.env"
 }
 
-# Operational alert inbox watch: turn an unreviewed critical alert backlog into
-# an ordinary watcher wake when private configuration selects an alert inbox.
-# The reserved check id prevents a task from colliding with this standing watch.
-ops_inbox_setup() {
-  local check trust sidecar body home_abs
-  check="$STATE/$OPS_INBOX_CHECK_ID.check.sh"
-  trust="$STATE/$OPS_INBOX_CHECK_ID.check-trust"
-  sidecar="$STATE/.ops-inbox-wake"
-
-  ops_inbox_home_abs() {
-    case "$FM_HOME" in
-      /*) printf '%s\n' "$FM_HOME" ;;
-      *) CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P ;;
-    esac
-  }
-
-  ops_inbox_disarm() {  # <reason-when-removed>
-    local reason=$1 failed=0 disarm_home disarm_body
-    if ! x_mode_artifact_present "$check"; then
-      x_mode_artifact_present "$trust" || return 0
-      echo "OPS_INBOX: state/$OPS_INBOX_CHECK_ID.check-trust has no owned operational alert check; inspect and remove or rename it, then rerun bootstrap"
-      return 0
-    fi
-    disarm_home=$(ops_inbox_home_abs) || {
-      echo "OPS_INBOX: the operational alert watch cannot prove ownership of state/$OPS_INBOX_CHECK_ID.check.sh because the firstmate home path is unresolved; leave it in place and rerun bootstrap after repairing the home"
-      return 0
-    }
-    disarm_body=$(fm_ops_inbox_shim_content "$disarm_home" "$FM_ROOT")
-    if [ ! -f "$check" ] || [ -L "$check" ] \
-      || ! cmp -s "$check" <(printf '%s\n' "$disarm_body"); then
-      echo "OPS_INBOX: state/$OPS_INBOX_CHECK_ID.check.sh is not this operational alert watch; leave it in place and retire or rename its owner, then rerun bootstrap"
-      return 0
-    fi
-    x_mode_remove_artifact "$check" || failed=1
-    x_mode_remove_artifact "$trust" || failed=1
-    x_mode_remove_artifact "$sidecar" || failed=1
-    if [ "$failed" -eq 0 ]; then
-      [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
-        && echo "BOOTSTRAP_INFO: operational alert watch disarmed - $reason"
-      return 0
-    fi
-    echo "OPS_INBOX: operational alert watch could not be disarmed; remove state/$OPS_INBOX_CHECK_ID.check.sh and its trust record, then rerun bootstrap"
-  }
-
-  if x_mode_artifact_present "$STATE/$OPS_INBOX_CHECK_ID.meta"; then
-    echo "OPS_INBOX: task id $OPS_INBOX_CHECK_ID is in use by live work, so the operational alert watch cannot arm; retire that task, then rerun bootstrap"
-    return 0
-  fi
-
-  if ! fm_ops_inbox_config_load "$CONFIG"; then
-    if [ "$FM_OPS_INBOX_CONFIG_ERROR" = "jq is required to read config/ops-inbox.json" ]; then
-      echo "MISSING: jq (install: $(install_cmd jq))"
-    fi
-    echo "OPS_INBOX: $FM_OPS_INBOX_CONFIG_ERROR; fix config/ops-inbox.json, then rerun bootstrap"
-    return 0
-  fi
-
-  if ! fm_ops_inbox_watch_expected "$FM_HOME"; then
-    ops_inbox_disarm "no alert inbox at $FM_OPS_INBOX_SPOOL"
-    return 0
-  fi
-
-  if ! command -v jq >/dev/null 2>&1; then
-    echo "MISSING: jq (install: $(install_cmd jq))"
-    echo "OPS_INBOX: the operational alert watch cannot read the inbox until jq is installed; install jq, then rerun bootstrap"
-    ops_inbox_disarm "jq is required to read the alert inbox"
-    return 0
-  fi
-
-  mkdir -p "$STATE" 2>/dev/null || {
-    echo "OPS_INBOX: state directory is unavailable, so the operational alert watch cannot arm"
-    return 0
-  }
-  home_abs=$(ops_inbox_home_abs) || {
-    echo "OPS_INBOX: the firstmate home path could not be resolved, so the operational alert watch cannot arm"
-    return 0
-  }
-  body=$(fm_ops_inbox_shim_content "$home_abs" "$FM_ROOT")
-  if [ -f "$check" ] && [ ! -L "$check" ] \
-    && cmp -s "$check" <(printf '%s\n' "$body") \
-    && fm_custom_check_registered "$STATE" "$OPS_INBOX_CHECK_ID"; then
-    return 0
-  fi
-  if ! x_mode_write_if_changed "$check" "$body" 700 \
-    || ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-      "$SCRIPT_DIR/fm-check-register.sh" "$OPS_INBOX_CHECK_ID" >/dev/null 2>&1 \
-    || ! fm_custom_check_registered "$STATE" "$OPS_INBOX_CHECK_ID"; then
-    x_mode_remove_artifact "$check" || true
-    x_mode_remove_artifact "$trust" || true
-    echo "OPS_INBOX: operational alert watch could not be armed; inspect state/$OPS_INBOX_CHECK_ID.check.sh, then rerun bootstrap"
-    return 0
-  fi
-  [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
-    && echo "BOOTSTRAP_INFO: operational alert watch armed for $FM_OPS_INBOX_SPOOL"
-}
-
 crew_dispatch_validate() {
   local file err
   file="$CONFIG/crew-dispatch.json"
@@ -1134,7 +1063,6 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_sync
   secondmate_handoff_resume
   x_mode_setup
-  ops_inbox_setup
   fleet_sync
 fi
 secondmate_handoff_detect

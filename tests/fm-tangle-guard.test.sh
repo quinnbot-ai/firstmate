@@ -123,12 +123,6 @@ test_bootstrap_line() {
 
 # The generated ship brief must carry the isolation assertion AHEAD of the
 # `git checkout -b` step, so the crewmate verifies its worktree before branching.
-# The assertion compares the crewmate's resolved top level against two named
-# paths that bin/fm-spawn.sh fills in at launch, so both operands must be present
-# and the git-dir/common-dir output must stay explicitly non-decisive: those
-# commands point into the primary checkout's `.git` for every linked worktree,
-# and a brief that let a crewmate read that as membership refused a correctly
-# isolated worker in the live fleet.
 test_brief_assertion_precedes_branch() {
   local home brief iso br
   home="$TMP_ROOT/brief-home"
@@ -138,12 +132,8 @@ test_brief_assertion_precedes_branch() {
   assert_present "$brief" "brief was not scaffolded"
   assert_grep "blocked: launched in primary checkout, not an isolated worktree" "$brief" \
     "brief is missing the isolation blocked-status contract"
-  assert_grep "- your isolated task worktree:" "$brief" \
-    "brief must name the task worktree the path check compares against"
-  assert_grep "- the primary checkout:" "$brief" \
-    "brief must name the primary checkout the path check compares against"
-  assert_grep "is not evidence that you are in the primary checkout" "$brief" \
-    "brief must keep the path check authoritative over git-dir/common-dir output"
+  assert_grep "The path check is authoritative" "$brief" \
+    "brief must make the path check authoritative"
   assert_no_grep "A reliable test that you are in a linked worktree" "$brief" \
     "brief must not present git-dir/common-dir as decisive"
   assert_no_grep "they are identical in the primary checkout" "$brief" \
@@ -168,25 +158,17 @@ make_spawn_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
-# shellcheck source=/dev/null
-. "$(dirname "$0")/pane-shell.sh"
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window) exit 0 ;;
-  capture-pane) fm_fake_pane_capture; exit 0 ;;
-  send-keys)
-    fm_fake_pane_send "$@"
-    exit 0
-    ;;
+  has-session|new-session|new-window|send-keys) exit 0 ;;
 esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_pane_shell "$fakebin"
   fm_fake_exit0 "$fakebin" treehouse
   printf '%s\n' "$fakebin"
 }
@@ -253,8 +235,6 @@ make_spawn_record_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
-# shellcheck source=/dev/null
-. "$(dirname "$0")/pane-shell.sh"
 [ -n "${FM_TMUX_REC:-}" ] && printf 'tmux %s\n' "$*" >> "$FM_TMUX_REC"
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
@@ -263,17 +243,11 @@ case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   new-window) printf '%s\n' "@spawnwid"; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|set-window-option) exit 0 ;;
-  capture-pane) fm_fake_pane_capture; exit 0 ;;
-  send-keys)
-    fm_fake_pane_send "$@"
-    exit 0
-    ;;
+  has-session|new-session|send-keys|set-window-option) exit 0 ;;
 esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_pane_shell "$fakebin"
   fm_fake_exit0 "$fakebin" treehouse
   printf '%s\n' "$fakebin"
 }

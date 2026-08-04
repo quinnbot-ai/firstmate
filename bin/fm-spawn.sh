@@ -142,6 +142,13 @@
 # one W3C traceparent= carrier, the same value injected into the pane as
 # TRACEPARENT; the default-off path writes neither, leaving the generated meta
 # and launch environment unchanged.
+#   --traceparent <carrier> delivers a carrier that a REMOTE parent already
+#   resolved and will record, instead of resolving one from this home's frozen
+#   decision. It is accepted only for --secondmate spawns, only as a strictly
+#   validated W3C traceparent, and exists because a remote secondmate's task
+#   identity is owned by the parent home that holds its task metadata, while the
+#   pane export happens on the remote host (bin/fm-remote-secondmate-control.sh).
+#   Local spawns never pass it and resolve their own carrier exactly as before.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -156,204 +163,6 @@ usage() {
 case "${1:-}" in
   -h|--help) usage; exit 0 ;;
 esac
-
-# Print a shell-safe command prefix that removes every variable declared by the
-# approved baseline. The parser deliberately accepts only the baseline's
-# one-definition-per-line format plus comments, blanks, export-only names, and
-# safe unset directives. Unknown shell syntax is a refusal: silently skipping a
-# line could leave a baseline secret inherited by the worker.
-secret_env_assignment_tail_supported() {
-  local value=$1 state=plain trailing=0 char next i=0 length
-  length=${#value}
-
-  while [ "$i" -lt "$length" ]; do
-    char=${value:$i:1}
-    case "$state" in
-      single)
-        [ "$char" != "'" ] || state=plain
-        ;;
-      double)
-        case "$char" in
-          '"') state=plain ;;
-          \\)
-            i=$((i + 1))
-            [ "$i" -lt "$length" ] || return 1
-            ;;
-          '$')
-            i=$((i + 1))
-            [ "$i" -lt "$length" ] || return 1
-            next=${value:$i:1}
-            if [ "$next" = '{' ]; then
-              i=$((i + 1))
-              [ "$i" -lt "$length" ] || return 1
-              next=${value:$i:1}
-              [[ $next =~ ^[A-Za-z_]$ ]] || return 1
-              while :; do
-                i=$((i + 1))
-                [ "$i" -lt "$length" ] || return 1
-                next=${value:$i:1}
-                [[ $next =~ ^[A-Za-z0-9_]$ ]] || break
-              done
-              [ "$next" = '}' ] || return 1
-            else
-              [[ $next =~ ^[A-Za-z_]$ ]] || return 1
-              while [ $((i + 1)) -lt "$length" ]; do
-                next=${value:$((i + 1)):1}
-                [[ $next =~ ^[A-Za-z0-9_]$ ]] || break
-                i=$((i + 1))
-              done
-            fi
-            ;;
-          '`') return 1 ;;
-        esac
-        ;;
-      plain)
-        if [ "$trailing" -eq 1 ]; then
-          case "$char" in
-            ' '|$'\t') ;;
-            '#') return 0 ;;
-            *) return 1 ;;
-          esac
-        else
-          case "$char" in
-            "'") state=single ;;
-            '"') state=double ;;
-            ' '|$'\t') trailing=1 ;;
-            \\|'`'|';'|'&'|'|'|'<'|'>'|'('|')') return 1 ;;
-            '$')
-              i=$((i + 1))
-              [ "$i" -lt "$length" ] || return 1
-              next=${value:$i:1}
-              if [ "$next" = '{' ]; then
-                i=$((i + 1))
-                [ "$i" -lt "$length" ] || return 1
-                next=${value:$i:1}
-                [[ $next =~ ^[A-Za-z_]$ ]] || return 1
-                while :; do
-                  i=$((i + 1))
-                  [ "$i" -lt "$length" ] || return 1
-                  next=${value:$i:1}
-                  [[ $next =~ ^[A-Za-z0-9_]$ ]] || break
-                done
-                [ "$next" = '}' ] || return 1
-              else
-                [[ $next =~ ^[A-Za-z_]$ ]] || return 1
-                while [ $((i + 1)) -lt "$length" ]; do
-                  next=${value:$((i + 1)):1}
-                  [[ $next =~ ^[A-Za-z0-9_]$ ]] || break
-                  i=$((i + 1))
-                done
-              fi
-              ;;
-          esac
-        fi
-        ;;
-    esac
-    i=$((i + 1))
-  done
-
-  [ "$state" = plain ]
-}
-
-secret_env_scrub_prefix() {
-  local secrets_file line name read_status assignment_tail word_index
-  local assignment_re export_re blank_re unset_re
-  local -a line_names unset_words
-  local seen=' BASH_ENV ' prefix='/usr/bin/env -u BASH_ENV' count=0 line_no=0
-
-  if [ -z "${HOME:-}" ]; then
-    echo "error: HOME is unset; cannot locate approved secret baseline for crewmate environment scrub" >&2
-    return 1
-  fi
-  secrets_file=$HOME/.secrets
-
-  if [ ! -f "$secrets_file" ] || [ ! -r "$secrets_file" ]; then
-    echo "error: cannot read approved secret baseline for crewmate environment scrub" >&2
-    return 1
-  fi
-  if ! { exec 9< "$secrets_file"; } 2>/dev/null; then
-    echo "error: cannot read approved secret baseline for crewmate environment scrub" >&2
-    return 1
-  fi
-
-  assignment_re='^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)='
-  export_re='^[[:space:]]*export[[:space:]]+([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*(#.*)?$'
-  blank_re='^[[:space:]]*(#.*)?$'
-  unset_re='^[[:space:]]*unset[[:space:]]+(-[fv][[:space:]]+|--[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*([[:space:]]+[A-Za-z_][A-Za-z0-9_]*)*[[:space:]]*(#.*)?$'
-
-  while :; do
-    line=
-    if IFS= read -r line <&9; then
-      read_status=0
-    else
-      read_status=$?
-    fi
-    if [ "$read_status" -ne 0 ] && [ -z "$line" ]; then
-      if [ "$read_status" -ne 1 ]; then
-        exec 9<&-
-        echo "error: could not finish reading approved secret baseline for crewmate environment scrub" >&2
-        return 1
-      fi
-      break
-    fi
-    line_no=$((line_no + 1))
-
-    line_names=()
-    if [[ $line =~ $assignment_re ]]; then
-      name=${BASH_REMATCH[2]}
-      line_names+=("$name")
-      assignment_tail=${line#*=}
-      if ! secret_env_assignment_tail_supported "$assignment_tail"; then
-        exec 9<&-
-        echo "error: approved secret baseline has unsupported syntax at line $line_no; refusing incomplete crewmate environment scrub" >&2
-        return 1
-      fi
-    elif [[ $line =~ $export_re ]]; then
-      name=${BASH_REMATCH[1]}
-      line_names+=("$name")
-    elif [[ $line =~ $unset_re ]]; then
-      unset_words=()
-      IFS=$' \t' read -r -a unset_words <<< "$line"
-      if [ "${unset_words[1]:-}" != -f ]; then
-        word_index=1
-        while [ "$word_index" -lt "${#unset_words[@]}" ]; do
-          name=${unset_words[$word_index]}
-          case "$name" in
-            -v|--) ;;
-            \#*) break ;;
-            *) line_names+=("$name") ;;
-          esac
-          word_index=$((word_index + 1))
-        done
-      fi
-    elif [[ $line =~ $blank_re ]]; then
-      :
-    else
-      exec 9<&-
-      echo "error: approved secret baseline has unsupported syntax at line $line_no; refusing incomplete crewmate environment scrub" >&2
-      return 1
-    fi
-
-    for name in "${line_names[@]+"${line_names[@]}"}"; do
-      count=$((count + 1))
-      case "$seen" in
-        *" $name "*) ;;
-        *)
-          prefix="$prefix -u $name"
-          seen="$seen$name "
-          ;;
-      esac
-    done
-    [ "$read_status" -eq 0 ] || break
-  done
-  exec 9<&-
-
-  if [ "$count" -eq 0 ]; then
-    echo "error: approved secret baseline exposed no variable names for scrub" >&2
-    return 1
-  fi
-  printf '%s' "$prefix"
-}
 
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
@@ -400,12 +209,11 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
+# shellcheck source=bin/fm-remote-readiness-lib.sh
+. "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
-# Resolve the scrub before the guard or any fleet mutation, while preserving the
-# gate-agent refusal as the first authority check.
-SECRET_ENV_SCRUB_PREFIX=$(secret_env_scrub_prefix) || exit 1
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -416,12 +224,14 @@ EFFORT=
 BACKEND_ARG=
 MODE=
 YOLO=
+TRACEPARENT_ARG=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
+TRACEPARENT_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -436,6 +246,7 @@ for a in "$@"; do
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
+      traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -456,6 +267,8 @@ for a in "$@"; do
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     --yolo) want_value=yolo ;;
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
+    --traceparent) want_value=traceparent ;;
+    --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -466,6 +279,20 @@ done
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
+[ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
+# A parent-delivered carrier replaces this home's own resolution, so it is
+# refused unless it is a secondmate spawn carrying a strictly valid W3C value.
+# Nothing else may reach the pane's TRACEPARENT export.
+if [ "$TRACEPARENT_SET" -eq 1 ]; then
+  [ "$KIND" = secondmate ] || {
+    echo "error: --traceparent applies only to --secondmate spawns; every other spawn resolves its own carrier from this home's frozen trace-context decision" >&2
+    exit 1
+  }
+  fm_trace_context_valid "$TRACEPARENT_ARG" || {
+    echo "error: --traceparent is not a valid W3C traceparent" >&2
+    exit 1
+  }
+fi
 case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
@@ -508,7 +335,9 @@ fi
 
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
-  local remote_backend remote_target remote_harness registry_lock remote_lock remote_generation
+  local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
+  local remote_traceparent remote_recorded_traceparent
+  local -a launch_args
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || { echo "error: invalid task id" >&2; return 2; }
   mkdir -p "$STATE" || { echo "error: could not create parent state directory" >&2; return 1; }
@@ -567,7 +396,19 @@ spawn_remote_secondmate() {
       [ -n "$effort" ] || effort=-
     fi
   fi
-  backend=${BACKEND_ARG:--}
+  # A remote second mate always runs on Herdr: its server belongs to the host's
+  # own GUI login session, so the endpoint outlives every SSH connection that
+  # supervises it. bin/fm-remote-doctor.sh gates that host on the same
+  # requirement, and the remote home's config/backend never overrides it.
+  case "${BACKEND_ARG:--}" in
+    -|herdr) backend=herdr ;;
+    *)
+      fm_lock_release "$registry_lock" || true
+      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      echo "error: a remote secondmate runs only on the herdr backend, not '$BACKEND_ARG'" >&2
+      return 1
+      ;;
+  esac
   case "$effort" in
     -|low|medium|high|xhigh|max) ;;
     *)
@@ -589,6 +430,27 @@ spawn_remote_secondmate() {
       echo "error: existing metadata for $id does not identify this remote secondmate route" >&2
       return 1
     fi
+  fi
+  # Gate the host before anything is published or transferred, so a host that
+  # cannot hold a durable Herdr endpoint refuses here rather than half-way
+  # through a launch. This is also the readiness gate every liveness relaunch
+  # passes through, because recovery respawns through this same route.
+  rc=0
+  fm_remote_readiness_ensure "$SCRIPT_DIR" "$id" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    # Summary first, then the doctor's own text: a caller that reports only the
+    # first line, such as the startup liveness sweep, must still say something
+    # actionable.
+    if [ "$rc" -eq 255 ]; then
+      echo "error: remote secondmate $id readiness could not be confirmed; preserved route $host:$home" >&2
+    else
+      echo "error: remote secondmate $id host $host is not ready for a remote second mate; launch refused" >&2
+    fi
+    [ -z "$FM_REMOTE_READINESS_OUT" ] || printf '%s\n' "$FM_REMOTE_READINESS_OUT" >&2
+    [ "$rc" -ne 255 ] || return 255
+    return 1
   fi
   remote_lock=$(fm_remote_inherit_transaction_lock_path "$STATE" "$id")
   if ! fm_lock_acquire_wait "$remote_lock"; then
@@ -619,8 +481,21 @@ spawn_remote_secondmate() {
     fi
     return "$rc"
   fi
+  # This parent home owns the remote secondmate's task identity because it holds
+  # the task metadata an observer reads, exactly as for a local spawn: the
+  # carrier is resolved against THIS task's own meta (reused verbatim on
+  # relaunch, freshly rooted otherwise, never adopting this process's ambient
+  # TRACEPARENT) under this home's frozen decision, then handed to the remote
+  # host to export into the agent's pane. Disabled resolves to empty and the
+  # remote launch call stays byte-identical to the untraced one.
+  remote_traceparent=
+  if [ "$(fm_trace_context_session_effective "$STATE/.trace-context-effective")" = on ]; then
+    remote_traceparent=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CONFIG" "$meta" || true)
+  fi
+  launch_args=("$id" "$harness" "$model" "$effort" "$backend")
+  [ -z "$remote_traceparent" ] || launch_args+=("$remote_traceparent")
   if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh launch \
-    "$id" "$harness" "$model" "$effort" "$backend" 2>&1); then
+    "${launch_args[@]}" < /dev/null 2>&1); then
     rc=0
   else
     rc=$?
@@ -638,13 +513,36 @@ spawn_remote_secondmate() {
   remote_backend=$(printf '%s\n' "$out" | sed -n 's/^backend=//p' | tail -1)
   remote_target=$(printf '%s\n' "$out" | sed -n 's/^target=//p' | tail -1)
   remote_harness=$(printf '%s\n' "$out" | sed -n 's/^harness=//p' | tail -1)
-  [ -n "$remote_backend" ] && [ -n "$remote_target" ] && [ "$remote_harness" = "$harness" ] || {
+  remote_herdr_session=$(printf '%s\n' "$out" | sed -n 's/^herdr_session=//p' | tail -1)
+  if [ "$remote_backend" != herdr ]; then
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote launch returned backend '${remote_backend:-missing}', expected herdr; preserving the remote route for reconciliation" >&2
+    return 1
+  fi
+  [ -n "$remote_target" ] && [ "$remote_harness" = "$harness" ] || {
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     echo "error: remote launch returned malformed route metadata; preserving the remote route for reconciliation" >&2
     return 1
   }
+  if [ "$remote_herdr_session" != fm-remote ] || [ "${remote_target%%:*}" != "$remote_herdr_session" ]; then
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote launch returned Herdr session '${remote_herdr_session:-missing}', expected 'fm-remote'; preserving the remote route for reconciliation" >&2
+    return 1
+  fi
+  # Record what the remote endpoint ACTUALLY carries, read back from its own
+  # launch, rather than what this side hoped to deliver. That keeps the #995
+  # guarantee that the recorded carrier is the identity the child received even
+  # when the remote host already had a live agent and reused its endpoint. An
+  # off decision delivers no carrier, but an endpoint already holding one still
+  # reports it here so the parent does not deny the agent's actual identity.
+  remote_recorded_traceparent=$(printf '%s\n' "$out" | sed -n 's/^traceparent=//p' | tail -1)
+  fm_trace_context_valid "$remote_recorded_traceparent" || remote_recorded_traceparent=
   tmp="$meta.tmp.$$"
   {
     echo "window=remote:$id"
@@ -663,7 +561,9 @@ spawn_remote_secondmate() {
     echo "remote_host=$host"
     echo "remote_root=$root"
     echo "remote_backend=$remote_backend"
+    echo "remote_herdr_session=$remote_herdr_session"
     echo "remote_target=$remote_target"
+    [ -z "$remote_recorded_traceparent" ] || echo "traceparent=$remote_recorded_traceparent"
   } > "$tmp"
   mv -f -- "$tmp" "$meta"
   fm_lock_release "$remote_lock" || true
@@ -720,9 +620,6 @@ HERDR_PROJECTION_ABORT_TASK_PANE=
 HERDR_PROJECTION_ABORT_SEEDED_PANE=
 HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
-# Fresh best-effort projection gives a contended session lock five seconds
-# before falling back to the ordinary flat layout.
-HERDR_PRESENTATION_ORDER_LOCK_ATTEMPTS=50
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
@@ -809,18 +706,12 @@ trap spawn_abort_cleanup EXIT
 # <session> is required so secondmate and primary spawns serialize against the
 # same session without writing any other home's state directory.
 spawn_herdr_presentation_order_lock_acquire() {
-  local session=${1:-} policy=${2:-best-effort} attempt lock_path
+  local session=${1:-} attempt lock_path
   [ -n "$session" ] || session=$(fm_backend_herdr_session)
   lock_path=$(fm_backend_herdr_presentation_session_lock_path "$session") || return 1
   HERDR_PRESENTATION_ORDER_LOCK="$lock_path"
-  if [ "$policy" = exact-recovery ]; then
-    fm_lock_acquire_wait "$HERDR_PRESENTATION_ORDER_LOCK" || return 1
-    HERDR_PRESENTATION_ORDER_LOCK_HELD=1
-    return 0
-  fi
-  [ "$policy" = best-effort ] || return 1
   attempt=0
-  while [ "$attempt" -lt "$HERDR_PRESENTATION_ORDER_LOCK_ATTEMPTS" ]; do
+  while [ "$attempt" -lt 50 ]; do
     if fm_lock_try_acquire "$HERDR_PRESENTATION_ORDER_LOCK"; then
       HERDR_PRESENTATION_ORDER_LOCK_HELD=1
       return 0
@@ -1398,37 +1289,6 @@ validate_spawn_worktree() {  # <source> <inspect-target>
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
-  WT_REAL=$wt_real
-}
-
-fill_isolation_facts() {  # <brief> <worktree-real> <primary-real>
-  local brief=$1 worktree=$2 primary=$3 tmp worktree_fact=0 primary_fact=0
-  grep -q '^- your isolated task worktree: ' "$brief" 2>/dev/null && worktree_fact=1
-  grep -q '^- the primary checkout: ' "$brief" 2>/dev/null && primary_fact=1
-  if [ "$worktree_fact" = 1 ] && [ "$primary_fact" = 0 ]; then
-    echo "error: $brief is missing the '- the primary checkout:' isolation fact line; refusing to launch a worker whose isolation check is missing an operand" >&2
-    exit 1
-  fi
-  if [ "$worktree_fact" = 0 ] && [ "$primary_fact" = 1 ]; then
-    echo "error: $brief is missing the '- your isolated task worktree:' isolation fact line; refusing to launch a worker whose isolation check is missing an operand" >&2
-    exit 1
-  fi
-  if [ "$worktree_fact" = 1 ]; then
-    tmp="$brief.fm-isolation-facts.$$"
-    if ! { FM_FILL_WORKTREE="$worktree" FM_FILL_PRIMARY="$primary" awk '
-      /^- your isolated task worktree: / { print "- your isolated task worktree: " ENVIRON["FM_FILL_WORKTREE"]; next }
-      /^- the primary checkout: / { print "- the primary checkout: " ENVIRON["FM_FILL_PRIMARY"]; next }
-      { print }
-    ' "$brief" > "$tmp" && mv "$tmp" "$brief"; }; then
-      rm -f "$tmp"
-      echo "error: could not write the isolation facts into $brief; refusing to launch a brief whose isolation check has no paths to compare" >&2
-      exit 1
-    fi
-  fi
-  if grep -q -e '{FM_WORKTREE}' -e '{FM_PRIMARY_CHECKOUT}' "$brief" 2>/dev/null; then
-    echo "error: $brief still contains an unfilled isolation placeholder; refusing to launch a worker whose isolation check cannot be evaluated" >&2
-    exit 1
-  fi
 }
 
 herdr_projection_meta_field_exact() {  # <meta> <key>
@@ -1556,7 +1416,7 @@ case "$BACKEND" in
           echo "error: herdr presentation recovery could not ensure its exact named session" >&2
           exit 1
         }
-        spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" exact-recovery || {
+        spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
           echo "error: herdr presentation recovery could not acquire its session lock; refusing a concurrent resume" >&2
           exit 1
         }
@@ -1729,7 +1589,6 @@ EOF
       exit 1
     fi
     validate_spawn_worktree "orca worktree create" "$W"
-    fill_isolation_facts "$BRIEF" "$WT_REAL" "$PROJ_ABS_REAL"
     if [ -z "$ORCA_TERMINAL" ]; then
       ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
     fi
@@ -1781,91 +1640,6 @@ spawn_send_key() {  # <target> <key>
     orca) fm_backend_orca_send_key "$1" "$2" ;;
     cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
   esac
-}
-
-spawn_capture() {  # <target>
-  fm_backend_capture "$BACKEND" "$1" 160 "$W" 2>/dev/null || true
-}
-
-spawn_capture_has_line() {  # <capture> <exact-line>
-  # Herdr's pane read exposes terminal-row wrapping literally. A marker can
-  # therefore be split across adjacent rows even though the shell emitted one
-  # newline-terminated line. The full marker is deliberately absent from the
-  # submitted probe, so joining captured rows cannot mistake typed input for
-  # execution proof.
-  printf '%s\n' "$1" | grep -Fqx "$2" \
-    || printf '%s' "$1" | tr -d '\r\n' | grep -Fq "$2"
-}
-
-spawn_wait_for_marker() {  # <target> <marker>
-  local target=$1 marker=$2 pane i=0 max=${FM_SPAWN_LAUNCH_VERIFY_POLLS:-40}
-  case "$max" in ''|*[!0-9]*) max=40 ;; esac
-  [ "$max" -gt 0 ] || max=40
-  while [ "$i" -lt "$max" ]; do
-    pane=$(spawn_capture "$target")
-    spawn_capture_has_line "$pane" "$marker" && return 0
-    i=$((i + 1))
-    [ "$i" -ge "$max" ] || sleep "${FM_SPAWN_LAUNCH_POLL_INTERVAL:-0.05}"
-  done
-  return 1
-}
-
-spawn_wait_for_shell_ready() {  # <target> <token>
-  local target=$1 token=$2
-  local marker="__FM_SPAWN_READY_$token"
-  # The full marker is intentionally absent from the typed command, so seeing
-  # an exact marker line proves the shell executed the probe rather than merely
-  # echoing bytes that arrived before its line editor was ready.
-  spawn_send_text_line "$target" "printf '%s%s\\n' '__FM_SPAWN_READY_' '$token'" \
-    || return 1
-  spawn_wait_for_marker "$target" "$marker"
-}
-
-spawn_stage_launch() {  # <target> <launch> <token>
-  local target=$1 launch=$2 token=$3 chunk_size=${FM_SPAWN_LAUNCH_CHUNK_BYTES:-160}
-  local delay=${FM_SPAWN_LAUNCH_CHUNK_DELAY:-0.04} offset=0 chunk quoted expected marker check
-  case "$chunk_size" in ''|*[!0-9]*) chunk_size=160 ;; esac
-  [ "$chunk_size" -gt 0 ] || chunk_size=160
-  expected=$(printf '%s' "$launch" | cksum) || return 1
-  marker="__FM_SPAWN_LAUNCH_OK_$token"
-
-  # C-c clears an abandoned line from a prior failed attempt before short,
-  # independently submitted assignments rebuild the launch exactly in the
-  # target shell. This avoids macOS's pre-ZLE canonical-input ceiling while
-  # retaining the backend adapters' own literal/key submission contracts.
-  spawn_send_key "$target" C-c || true
-  spawn_send_text_line "$target" "FM_SPAWN_LAUNCH=''" || return 1
-  while [ "$offset" -lt "${#launch}" ]; do
-    chunk=${launch:offset:chunk_size}
-    quoted=$(shell_quote "$chunk")
-    spawn_send_text_line "$target" "FM_SPAWN_LAUNCH=\"\${FM_SPAWN_LAUNCH}\"$quoted" || return 1
-    offset=$((offset + chunk_size))
-    sleep "$delay"
-  done
-  check="if [ \"\$(printf %s \"\$FM_SPAWN_LAUNCH\" | cksum)\" = $(shell_quote "$expected") ]; then printf '%s%s\\n' '__FM_SPAWN_LAUNCH_OK_' '$token'; else printf '%s%s\\n' '__FM_SPAWN_LAUNCH_BAD_' '$token'; fi"
-  spawn_send_text_line "$target" "$check" || return 1
-  spawn_wait_for_marker "$target" "$marker"
-}
-
-spawn_deliver_launch() {  # <target> <launch>
-  local target=$1 launch=$2 retries=${FM_SPAWN_LAUNCH_DELIVERY_RETRIES:-3}
-  local token token_sum attempt=1
-  case "$retries" in ''|*[!0-9]*) retries=3 ;; esac
-  [ "$retries" -gt 0 ] || retries=3
-  while [ "$attempt" -le "$retries" ]; do
-    token_sum=$(printf '%s' "$RANDOM:$attempt" | cksum) || return 1
-    token_sum=${token_sum%% *}
-    printf -v token '%010u' "$token_sum"
-    if spawn_wait_for_shell_ready "$target" "$token" \
-      && spawn_stage_launch "$target" "$launch" "$token"; then
-      # shellcheck disable=SC2016 # Expand the staged launch in the target shell.
-      spawn_send_text_line "$target" 'eval "$FM_SPAWN_LAUNCH"' || return 1
-      return 0
-    fi
-    spawn_send_key "$target" C-c || true
-    attempt=$((attempt + 1))
-  done
-  return 1
 }
 
 kimi_capture() {
@@ -1967,7 +1741,6 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
-  fill_isolation_facts "$BRIEF" "$WT_REAL" "$PROJ_ABS_REAL"
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
@@ -2239,11 +2012,22 @@ fi
 #
 # The session-start path owns input resolution. Spawn consumes only the frozen
 # home-session state and reuses it for the carrier and Secondmate launch prefix.
-SPAWN_TRACE_EFFECTIVE=$(fm_trace_context_session_effective "$STATE/.trace-context-effective")
-if [ "$SPAWN_TRACE_EFFECTIVE" = on ]; then
-  SPAWN_TRACEPARENT=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CONFIG" "$STATE/$ID.meta" || true)
+#
+# A remote secondmate launch is the one case where this process is not the home
+# that owns the task's identity: the parent home resolved and will record the
+# carrier, and this host only delivers it. The validated --traceparent value
+# then IS the decision, so the enablement snapshot handed to the new Secondmate
+# agrees with the carrier it receives exactly as on the local path.
+if [ "$TRACEPARENT_SET" -eq 1 ]; then
+  SPAWN_TRACE_EFFECTIVE=on
+  SPAWN_TRACEPARENT=$TRACEPARENT_ARG
 else
-  SPAWN_TRACEPARENT=
+  SPAWN_TRACE_EFFECTIVE=$(fm_trace_context_session_effective "$STATE/.trace-context-effective")
+  if [ "$SPAWN_TRACE_EFFECTIVE" = on ]; then
+    SPAWN_TRACEPARENT=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CONFIG" "$STATE/$ID.meta" || true)
+  else
+    SPAWN_TRACEPARENT=
+  fi
 fi
 
 META_WINDOW=$T
@@ -2330,11 +2114,9 @@ if [ "$KIND" = secondmate ]; then
   # injected carrier and this on/off snapshot are guaranteed to agree.
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE $LAUNCH"
 fi
-LAUNCH="$SECRET_ENV_SCRUB_PREFIX GOTMPDIR=$(shell_quote "$TASK_TMP/gotmp") /bin/bash -c $(shell_quote "$LAUNCH")"
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
-# process (go build, go test, ...) inherit it. The verified delivery routine
-# below then waits for that shell to round-trip a probe before staging the full
-# launch in bounded, independently submitted assignments.
+# process (go build, go test, ...) inherit it. Sent before the launch command so
+# the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
@@ -2352,16 +2134,14 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
     fi
   fi
 fi
-if ! spawn_deliver_launch "$T" "$LAUNCH"; then
-  printf 'failed: launch command delivery could not be verified after %s attempts\n' \
-    "${FM_SPAWN_LAUNCH_DELIVERY_RETRIES:-3}" >> "$STATE/$ID.status"
-  echo "error: launch command delivery could not be verified after ${FM_SPAWN_LAUNCH_DELIVERY_RETRIES:-3} attempts; inspect window $T" >&2
-  exit 1
-fi
+sleep 0.3
+spawn_send_literal "$T" "$LAUNCH"
+sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
+spawn_send_key "$T" Enter
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"

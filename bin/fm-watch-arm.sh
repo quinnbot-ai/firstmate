@@ -63,8 +63,6 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
-# shellcheck source=bin/fm-session-lock-lib.sh
-. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"
@@ -86,18 +84,8 @@ CYCLE_LOG_LOCK="$STATE/.watch-cycle-exits.lock"
 CYCLE_LOG_MAX_BYTES=${FM_WATCH_CYCLE_LOG_MAX_BYTES:-262144}
 CYCLE_LOG_KEEP_LINES=${FM_WATCH_CYCLE_LOG_KEEP_LINES:-1000}
 ARM_PID=${BASHPID:-$$}
-SESSION_CLAIM_LOCK="$STATE/.lock.acquire"
-SESSION_CLAIM_LOCK_HELD=0
 case "$CYCLE_LOG_MAX_BYTES" in ''|*[!0-9]*|0) CYCLE_LOG_MAX_BYTES=262144 ;; esac
 case "$CYCLE_LOG_KEEP_LINES" in ''|*[!0-9]*|0) CYCLE_LOG_KEEP_LINES=1000 ;; esac
-
-release_session_claim_lock() {
-  if [ "$SESSION_CLAIM_LOCK_HELD" -eq 1 ]; then
-    fm_lock_release "$SESSION_CLAIM_LOCK"
-    SESSION_CLAIM_LOCK_HELD=0
-  fi
-}
-trap release_session_claim_lock EXIT
 
 # The lifecycle ledger is diagnostic evidence, not a supervision dependency.
 # Writes are bounded and best-effort so an observability failure cannot stall an
@@ -281,43 +269,6 @@ wait_for_healthy_successor() {
   done
 }
 
-require_session_owner() {  # <action-phrase>
-  fm_session_owner_fence "$STATE" && return 0
-  echo "watcher: FAILED - session-owner fence: home session lock is held by live harness pid $FM_SESSION_OWNER_FOREIGN_PID outside this process's session; $1"
-  return 1
-}
-
-# A successor may appear while a harness transition is still publishing its
-# state lock. Wait briefly for that identity to settle before adoption: a live
-# but not-self lock is never a successor this arm may follow.
-successor_owner_ready() {
-  local session_lock_pid attempt=0
-  while [ "$attempt" -lt 5 ]; do
-    session_lock_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
-    case "$session_lock_pid" in
-      ''|*[!0-9]*)
-        sleep 0.1
-        attempt=$((attempt + 1))
-        continue
-        ;;
-    esac
-    if ! fm_pid_alive "$session_lock_pid"; then
-      require_session_owner "not attaching to successor"
-      return
-    fi
-    if fm_session_lock_owned_by_self "$STATE"; then
-      require_session_owner "not attaching to successor"
-      return
-    fi
-    if ! require_session_owner "not attaching to successor"; then
-      return 1
-    fi
-    sleep 0.1
-    attempt=$((attempt + 1))
-  done
-  require_session_owner "not attaching to successor"
-}
-
 fail_unexplained_cycle() {
   echo "watcher: FAILED - cycle ended without an actionable reason"
   return 1
@@ -361,16 +312,8 @@ close_unobserved_cycle() {
 attach_and_wait() {
   local attached_pid=$1
   while :; do
-    if ! require_session_owner "not attaching to successor"; then
-      cycle_log_append unknown unknown session-owner-fenced none
-      return 1
-    fi
     if healthy_watcher; then
       if [ "$HEALTHY_PID" != "$attached_pid" ] || [ "$HEALTHY_IDENTITY" != "$cycle_watcher_identity" ]; then
-        if ! successor_owner_ready; then
-          cycle_log_append unknown unknown session-owner-fenced none
-          return 1
-        fi
         cycle_log_append unknown unknown lock-replaced "attached:$HEALTHY_PID"
         attached_pid=$HEALTHY_PID
         cycle_begin "$attached_pid" attached "$HEALTHY_IDENTITY"
@@ -379,15 +322,7 @@ attach_and_wait() {
       sleep "$ATTACH_POLL"
       continue
     fi
-    if ! require_session_owner "not attaching to successor"; then
-      cycle_log_append unknown unknown session-owner-fenced none
-      return 1
-    fi
     if wait_for_healthy_successor; then
-      if ! successor_owner_ready; then
-        cycle_log_append unknown unknown session-owner-fenced none
-        return 1
-      fi
       cycle_log_append unknown unknown attached-cycle-ended "attached:$HEALTHY_PID"
       attached_pid=$HEALTHY_PID
       cycle_begin "$attached_pid" attached "$HEALTHY_IDENTITY"
@@ -444,18 +379,7 @@ case "${1:-}" in
   *) echo "usage: $(basename "$0") [--restart]" >&2; exit 2 ;;
 esac
 
-require_session_owner "not arming" || exit 1
-
 if [ "$mode" = restart ]; then
-  if ! fm_lock_acquire_wait "$SESSION_CLAIM_LOCK"; then
-    echo "watcher: FAILED - session claim lock was unavailable"
-    exit 1
-  fi
-  SESSION_CLAIM_LOCK_HELD=1
-  if ! require_session_owner "not restarting"; then
-    release_session_claim_lock
-    exit 1
-  fi
   # Home-scoped stop: only the watcher pid recorded in THIS home's lock.
   lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
   if fm_pid_alive "$lock_pid"; then
@@ -473,7 +397,6 @@ if [ "$mode" = restart ]; then
       clear_stale_recorded_watcher_lock
     fi
   fi
-  release_session_claim_lock
 fi
 
 # If a genuinely live+fresh watcher already holds the lock, do not start a second
@@ -543,15 +466,7 @@ owned_child_finished() {
   fi
 
   if [ "$rc" -eq 0 ]; then
-    if ! require_session_owner "not attaching to successor"; then
-      cycle_log_append "$rc" "$signal" session-owner-fenced none
-      return 1
-    fi
     if wait_for_healthy_successor; then
-      if ! successor_owner_ready; then
-        cycle_log_append "$rc" "$signal" session-owner-fenced none
-        return 1
-      fi
       cycle_log_append "$rc" "$signal" unexpected-clean-exit "attached:$HEALTHY_PID"
       print_watch_output "$child_out"
       rm -f "$child_out" 2>/dev/null || true

@@ -129,7 +129,6 @@ repair_line() {
   if [ "$QUEUE_PENDING" -eq 1 ]; then
     prefix='After draining queued wakes, '
   fi
-
   if [ "$X_MODE" -eq 1 ]; then
     prefix="${prefix}source ${x_mode_env_sh} first, then "
   fi
@@ -179,32 +178,6 @@ ordinary_wake_line() {
   esac
 }
 
-direct_lifecycle_line() {
-  local capacity capacity_file="$CONFIG/supervision-capacity"
-  if [ "$READ_ONLY" -eq 1 ]; then
-    printf '%s\n' '- Direct lifecycle: unavailable in this read-only session; preserve every lane without merge, teardown, or refill.'
-    return 0
-  fi
-  if [ -e "$capacity_file" ] || [ -L "$capacity_file" ]; then
-    if [ ! -f "$capacity_file" ] || [ ! -r "$capacity_file" ] \
-      || ! capacity=$(<"$capacity_file"); then
-      printf '%s%s%s\n' '- Direct lifecycle: ' "$capacity_file" ' is invalid; complete guarded closeout before the next wait or turn boundary, but do not refill until the capacity source contains one integer from 1 through 64.'
-      return 0
-    fi
-    case "$capacity" in
-      [1-9]|[1-5][0-9]|6[0-4])
-        ;;
-      *)
-        printf '%s%s%s\n' '- Direct lifecycle: ' "$capacity_file" ' is invalid; complete guarded closeout before the next wait or turn boundary, but do not refill until the capacity source contains one integer from 1 through 64.'
-        return 0
-        ;;
-    esac
-    printf '%s%s%s\n' '- Direct lifecycle: before the next wait or turn boundary, complete the AGENTS.md section 8 transaction: reconcile terminal work, use the guarded landing owner for its task mode, teardown only after landed proof, and launch eligible ready work to configured capacity ' "$capacity" ' while preserving every gated or ambiguous lane.'
-    return 0
-  fi
-  printf '%s\n' '- Direct lifecycle: before the next wait or turn boundary, complete the AGENTS.md section 8 transaction: reconcile terminal work, use the guarded landing owner for its task mode, teardown only after landed proof, and launch eligible ready work to the applicable captain-recorded capacity while preserving every gated or ambiguous lane and imposing no arbitrary cap when none applies.'
-}
-
 if [ "$REPAIR_LINE" -eq 1 ]; then
   repair_line
   exit 0
@@ -231,7 +204,6 @@ else
   printf '%s\n' '- X mode: inactive; use the default watcher cadence.'
 fi
 ordinary_wake_line
-direct_lifecycle_line
 printf '\n'
 render_snippet
 printf '\n'

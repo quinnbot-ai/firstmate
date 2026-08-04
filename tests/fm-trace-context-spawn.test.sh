@@ -21,8 +21,6 @@ make_spawn_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
-# shellcheck source=/dev/null
-. "$(dirname "$0")/pane-shell.sh"
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
@@ -33,7 +31,6 @@ case "${1:-}" in
     exit 0
     ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
-  capture-pane) fm_fake_pane_capture; exit 0 ;;
   send-keys)
     if [ "${FM_FAKE_TRACEPARENT_SEND_FAIL:-0}" = 1 ]; then
       for a in "$@"; do
@@ -58,28 +55,29 @@ case "${1:-}" in
         esac
       done
     fi
-    # Keep the carrier exports observable while the shared pane shell owns the
-    # staged-launch acknowledgement protocol.
+    # Capture the text payload of both send forms: the literal launch
+    # (`send-keys -t <target> -l <text>`) and a text line
+    # (`send-keys -t <target> <text> Enter`). Skip the flags, the target, and
+    # the trailing key so only the payload is logged, one per line, in order.
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
+      shift
       skip_next=
-      for a in "${@:2}"; do
+      for a in "$@"; do
         if [ -n "$skip_next" ]; then skip_next=; continue; fi
         case "$a" in
           -t) skip_next=1; continue ;;
           -l) continue ;;
-          Enter|C-m|C-c) continue ;;
-          export\ GOTMPDIR=*|export\ TRACEPARENT=*) printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG" ;;
+          Enter|C-m) continue ;;
+          *) printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG" ;;
         esac
       done
     fi
-    fm_fake_pane_send "$@"
     exit 0
     ;;
 esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_pane_shell "$fakebin"
   fm_fake_exit0 "$fakebin" treehouse
   printf '%s\n' "$fakebin"
 }

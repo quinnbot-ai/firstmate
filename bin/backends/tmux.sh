@@ -104,15 +104,16 @@ fm_backend_tmux_current_path() {  # <target>
 }
 
 # fm_backend_tmux_send_text_line: send one line of TEXT then Enter, with no
-# composer verification. fm-spawn uses this primitive for setup and the launch
-# delivery protocol owned by bin/fm-spawn.sh's header.
-# Mirrors `tmux send-keys -t "$T" "<text>" Enter`.
+# composer verification - used for the fixed spawn-time commands
+# (`treehouse get`, the GOTMPDIR export) that already ran this exact sequence
+# inline in fm-spawn.sh. Mirrors `tmux send-keys -t "$T" "<text>" Enter`.
 fm_backend_tmux_send_text_line() {  # <target> <text>
   tmux send-keys -t "$1" "$2" Enter
 }
 
 # fm_backend_tmux_send_literal: send TEXT as literal bytes with no
-# submission - the caller sends Enter separately.
+# submission - the caller sends Enter separately (fm-spawn.sh's launch-command
+# send pauses between the literal send and Enter for the harness to settle).
 # Mirrors `tmux send-keys -t "$T" -l "<text>"`.
 fm_backend_tmux_send_literal() {  # <target> <text>
   tmux send-keys -t "$1" -l "$2"
@@ -225,7 +226,7 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
 
 # fm_backend_tmux_agent_state: recovery-grade harness-agent state for one
 # recorded target. See bin/fm-backend.sh's fm_backend_agent_state for the
-# shared state vocabulary and docs/tmux-backend.md "Current behavior and safety" for
+# shared state vocabulary and docs/tmux-backend.md "Agent liveness probe" for
 # the empirical basis. Tmux silently falls back to the active window when a
 # named target is absent, so the exact recorded window must appear in a
 # successful session inventory before its foreground command can be trusted.

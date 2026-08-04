@@ -136,10 +136,7 @@ printf '202 invalid\n' > "$SESSION_STATE"
 rm "$SESSION_STATE"
 [ "$(fm_trace_context_session_effective "$SESSION_STATE")" = off ] \
   || fail "missing session state must fail independent and default off"
-MISSING_SESSION_STATE="$WORK/missing-session/.trace-context-effective"
-[ "$(fm_trace_context_session_effective "$MISSING_SESSION_STATE" 2>&1)" = off ] \
-  || fail "a missing session directory must fail independent, stay quiet, and default off"
-pass "missing or invalid frozen session state defaults off without read-redirection diagnostics"
+pass "missing or invalid frozen session state defaults off"
 
 # --- resolve: default-off omits; enabled mints ------------------------------
 

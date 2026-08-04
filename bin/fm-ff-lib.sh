@@ -5,16 +5,15 @@
 # This is the one implementation of "advance a firstmate checkout to a base by a
 # clean fast-forward, never forcing, merging, or stashing" used by every sync
 # path:
-#   - /updatefirstmate (bin/fm-update.sh) pulls from the checkout's publish remote
-#     as resolved by bin/fm-remote-lib.sh: base_mode "publish".
+#   - /updatefirstmate (bin/fm-update.sh) pulls from origin: base_mode "origin".
 #   - the local-HEAD secondmate sync (bin/fm-spawn.sh on launch, bin/fm-bootstrap.sh
 #     on startup) follows the PRIMARY checkout's current default-branch commit:
-#     base_mode is that local commit, with NO fetch and no remote dependency.
+#     base_mode is that local commit, with NO fetch and no origin dependency.
 #
 # A linked-worktree secondmate home already holds the primary's commit in the
 # shared object store, so its local-HEAD sync is a purely local fast-forward that
 # never touches the network. A standalone clone moves through that path only when
-# it already has the target; otherwise it is skipped until the publish path updates it.
+# it already has the target; otherwise it is skipped until the origin path updates it.
 # A tracked-files fast-forward never touches the gitignored operational dirs
 # (data/, state/, config/, projects/, .no-mistakes/), so it cannot disturb a
 # secondmate's backlog, projects, or in-flight work.
@@ -28,9 +27,6 @@
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-secondmate-registry-lib.sh"
-
-# shellcheck source=bin/fm-remote-lib.sh disable=SC1091
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-remote-lib.sh"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -195,21 +191,19 @@ validate_secondmate_home() {
 }
 
 # A single fetch refreshes every worktree that shares an object store, so fetch
-# each distinct git-common-dir at most once per remote. Used ONLY by the publish
-# base mode;
+# each distinct git-common-dir at most once. Used ONLY by the origin base mode;
 # the local-HEAD sync never fetches.
 FETCHED=""
 fetch_once() {
-  local dir=$1 remote=$2 common key
+  local dir=$1 common
   common=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
   if [ -n "$common" ]; then
-    key="$remote:$common"
     case " $FETCHED " in
-      *" $key "*) return 0 ;;
+      *" $common "*) return 0 ;;
     esac
   fi
-  if git -C "$dir" fetch "$remote" --prune --quiet 2>/dev/null; then
-    [ -n "$common" ] && FETCHED="$FETCHED $key"
+  if git -C "$dir" fetch origin --prune --quiet 2>/dev/null; then
+    [ -n "$common" ] && FETCHED="$FETCHED $common"
     return 0
   fi
   return 1
@@ -265,11 +259,9 @@ live_secondmate_meta_records() {
 #   FF_INSTR  = comma list of changed instruction paths (only when updated)
 #
 # base_mode selects where the fast-forward base comes from:
-#   publish      - fetch the checkout's publish remote (resolved by
-#                  bin/fm-remote-lib.sh) and advance to <remote>/<default>
-#                  (the /updatefirstmate path); requires a resolved remote and
-#                  network reachability.
-#   <commit-ish> - advance to that LOCAL commit with NO fetch and no remote
+#   origin       - fetch origin and advance to origin/<default> (the /updatefirstmate
+#                  path); requires an origin remote and network reachability.
+#   <commit-ish> - advance to that LOCAL commit with NO fetch and no origin
 #                  dependency (the local-HEAD secondmate sync). The commit must
 #                  already exist in the target's object store, which it always does
 #                  for a worktree of this same repo; a standalone clone that lacks
@@ -292,23 +284,23 @@ ff_target() {
     return 0
   fi
 
-  local default base cur instr local_rev base_rev before after out remote
+  local default base cur instr local_rev base_rev before after out
   default=$(default_branch "$dir") || {
     echo "$label: skipped: cannot determine default branch"
     return 0
   }
 
   # Resolve the fast-forward base from base_mode (see header).
-  if [ "$base_mode" = publish ]; then
-    if ! remote=$(fm_publish_remote "$dir"); then
+  if [ "$base_mode" = origin ]; then
+    if ! git -C "$dir" remote get-url origin >/dev/null 2>&1; then
       echo "$label: skipped: no origin remote"
       return 0
     fi
-    if ! fetch_once "$dir" "$remote"; then
+    if ! fetch_once "$dir"; then
       echo "$label: skipped: fetch failed"
       return 0
     fi
-    base="$remote/$default"
+    base="origin/$default"
   else
     base="$base_mode"
   fi

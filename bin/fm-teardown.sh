@@ -106,8 +106,6 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
-# shellcheck source=bin/fm-remote-lib.sh
-. "$SCRIPT_DIR/fm-remote-lib.sh"
 # shellcheck source=bin/fm-public-followup-lib.sh
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
@@ -271,9 +269,9 @@ remote_secondmate_teardown() {
   }
   "$FM_ROOT/bin/fm-guard.sh" || true
   if [ "$FORCE" = --force ]; then
-    if out=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh retire "$ID" --force 2>&1); then rc=0; else rc=$?; fi
+    if out=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh retire "$ID" --force < /dev/null 2>&1); then rc=0; else rc=$?; fi
   else
-    if out=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh retire "$ID" 2>&1); then rc=0; else rc=$?; fi
+    if out=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh retire "$ID" < /dev/null 2>&1); then rc=0; else rc=$?; fi
   fi
   if [ "$rc" -ne 0 ]; then
     [ -z "$out" ] || printf '%s\n' "$out" >&2
@@ -677,13 +675,13 @@ pr_is_merged() {
   unpushed_patches_are_in_pr_head "$head"
 }
 
-# Is the branch's content already present in the up-to-date default branch?
-# Fetches first, then 3-way merges the default branch with HEAD: when HEAD
-# introduces nothing the default branch does not already contain, the merged tree
-# equals the default branch's tree. This isolates branch-only changes, so unrelated
-# commits the default branch gained past the merge-base do not count as "added".
-# Returns non-zero when inconclusive (no default ref, or a merge conflict), so the
-# caller refuses rather than guesses.
+# Is the branch's content already present in the up-to-date default branch? Fetches
+# first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
+# the default branch does not already contain (e.g. its change landed via squash) the
+# merged tree equals the default branch's tree. This isolates branch-only changes, so
+# unrelated commits the default branch gained past the merge-base do not count as
+# "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
+# so the caller refuses rather than guesses.
 content_in_default() {
   local name ref default_tree merged_tree
   name=$(default_branch) || return 1

@@ -149,10 +149,6 @@
       "audience": "agent-runtime"
     },
     {
-      "path": ".agents/skills/no-mistakes-reviewer-recovery/SKILL.md",
-      "audience": "agent-runtime"
-    },
-    {
       "path": ".agents/skills/fmx-respond/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -265,14 +261,6 @@
       "audience": "maintainer-verification"
     },
     {
-      "path": "docs/link-intake.md",
-      "audience": "operator-current"
-    },
-    {
-      "path": "docs/ops-inbox-wake.md",
-      "audience": "operator-current"
-    },
-    {
       "path": "docs/herdr-backend.md",
       "audience": "operator-current"
     },
@@ -338,10 +326,6 @@
     },
     {
       "path": "docs/verification/process-event-sources.md",
-      "audience": "maintainer-verification"
-    },
-    {
-      "path": "docs/verification/link-intake.md",
       "audience": "maintainer-verification"
     },
     {

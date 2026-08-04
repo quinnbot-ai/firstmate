@@ -82,8 +82,6 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
-# shellcheck source=bin/fm-session-lock-lib.sh
-. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -530,17 +528,12 @@ run_check() {
 FM_ACTIVE_CHECK_PID=
 FM_ACTIVE_CHECK_PGID=
 FM_CHECK_OUTPUT=
-FM_CHECK_ERROR_OUTPUT=
 FM_CHECK_RESULT=
-FM_CHECK_ERROR=
-FM_CHECK_STATUS=0
 FM_CHECK_SIGNAL_PENDING=
 
 fm_check_output_cleanup() {
   [ -z "$FM_CHECK_OUTPUT" ] || rm -f -- "$FM_CHECK_OUTPUT"
-  [ -z "$FM_CHECK_ERROR_OUTPUT" ] || rm -f -- "$FM_CHECK_ERROR_OUTPUT"
   FM_CHECK_OUTPUT=
-  FM_CHECK_ERROR_OUTPUT=
 }
 
 fm_active_check_stop() {
@@ -569,21 +562,15 @@ fm_active_check_stop() {
 }
 
 run_check_capture() {
-  local pgid check_status=0
+  local pgid
   fm_check_output_cleanup
   FM_CHECK_RESULT=
-  FM_CHECK_ERROR=
-  FM_CHECK_STATUS=0
   FM_CHECK_OUTPUT=$(mktemp "$STATE/.fm-check-output.XXXXXX") || return 1
-  FM_CHECK_ERROR_OUTPUT=$(mktemp "$STATE/.fm-check-error.XXXXXX") \
-    || { fm_check_output_cleanup; return 1; }
-  chmod 0600 "$FM_CHECK_OUTPUT" "$FM_CHECK_ERROR_OUTPUT" \
-    || { fm_check_output_cleanup; return 1; }
+  chmod 0600 "$FM_CHECK_OUTPUT" || { fm_check_output_cleanup; return 1; }
   FM_CHECK_SIGNAL_PENDING=
   trap 'FM_CHECK_SIGNAL_PENDING=1' HUP INT TERM
   set -m
-  ( FM_CHECK_OWNED_GROUP=1 run_check_process "$@" ) \
-    > "$FM_CHECK_OUTPUT" 2> "$FM_CHECK_ERROR_OUTPUT" &
+  ( FM_CHECK_OWNED_GROUP=1 run_check_process "$@" ) > "$FM_CHECK_OUTPUT" 2>/dev/null &
   FM_ACTIVE_CHECK_PID=$!
   FM_ACTIVE_CHECK_PGID=$FM_ACTIVE_CHECK_PID
   set +m
@@ -595,46 +582,11 @@ run_check_capture() {
     return 1
   fi
   [ -z "$FM_CHECK_SIGNAL_PENDING" ] || exit 1
-  wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || check_status=$?
+  wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || true
   FM_ACTIVE_CHECK_PID=
   fm_active_check_stop || return 1
-  FM_CHECK_STATUS=$check_status
   FM_CHECK_RESULT=$(cat "$FM_CHECK_OUTPUT" 2>/dev/null || true)
-  FM_CHECK_ERROR=$(head -c 512 "$FM_CHECK_ERROR_OUTPUT" 2>/dev/null \
-    | tr '\r\n\t' '   ' \
-    | sed 's/[[:space:]][[:space:]]*/ /g; s/^ //; s/ $//' || true)
   fm_check_output_cleanup
-}
-
-fm_check_failure_reason() {
-  local check=$1 status=$2 detail=$3
-  [ -n "$detail" ] || detail="no stderr"
-  printf 'check: %s failed (exit %s): %s' "$check" "$status" "$detail"
-}
-
-FM_VALIDATION_LANE_EVENT_RESULT=
-FM_VALIDATION_LANE_EVENT_ERROR=
-FM_VALIDATION_LANE_EVENT_STATUS=0
-run_validation_lane_event_check() {
-  local c="$STATE/validation-lane.check.sh" custom_snapshot
-  FM_VALIDATION_LANE_EVENT_RESULT=
-  FM_VALIDATION_LANE_EVENT_ERROR=
-  FM_VALIDATION_LANE_EVENT_STATUS=0
-  [ -e "$c" ] || return 0
-  if ! fm_custom_check_snapshot_prepare "$STATE" validation-lane; then
-    fm_custom_check_snapshot_cleanup
-    return 2
-  fi
-  custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
-  run_check_capture "$custom_snapshot" || {
-    fm_custom_check_snapshot_cleanup
-    return 1
-  }
-  FM_VALIDATION_LANE_EVENT_RESULT=$FM_CHECK_RESULT
-  FM_VALIDATION_LANE_EVENT_ERROR=$FM_CHECK_ERROR
-  FM_VALIDATION_LANE_EVENT_STATUS=$FM_CHECK_STATUS
-  fm_custom_check_snapshot_cleanup
-  [ "$FM_VALIDATION_LANE_EVENT_STATUS" -eq 0 ] || return 3
 }
 
 # Surfaced-marker bookkeeping for the heartbeat backstop is owned by
@@ -753,11 +705,6 @@ if [ "${BASH_SOURCE[0]}" != "$0" ]; then
   return 0
 fi
 
-if ! fm_session_owner_fence "$STATE"; then
-  echo "watcher: FAILED - session-owner fence: home session lock is held by live harness pid $FM_SESSION_OWNER_FOREIGN_PID outside this process's session; not starting"
-  exit 1
-fi
-
 # Before acquiring the watcher lock or enumerating any runnable check, replace
 # or quarantine checks created by older versions. The migration compares bytes
 # and reads data only; it never invokes legacy check files through Bash.
@@ -826,11 +773,6 @@ while :; do
     exit 0
   fi
 
-  if ! fm_session_owner_fence "$STATE"; then
-    echo "watcher: FAILED - session-owner fence: home session lock moved to live harness pid $FM_SESSION_OWNER_FOREIGN_PID outside this process's session; standing down"
-    exit 1
-  fi
-
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
@@ -864,7 +806,6 @@ while :; do
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
       is_pr_poll=0
-      id=
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
           && [ -f "$FM_ROOT/bin/fm-x-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-x-poll.sh" ]; then
@@ -897,12 +838,6 @@ while :; do
           continue
         fi
       fi
-      if [ "$id" = validation-lane ] && [ "$FM_CHECK_STATUS" -ne 0 ]; then
-        reason=$(fm_check_failure_reason "$c" "$FM_CHECK_STATUS" "$FM_CHECK_ERROR")
-        fm_wake_append check "$c" "$reason" || exit 1
-        touch "$STATE/.last-check"
-        wake "$reason"
-      fi
       if [ -n "$out" ]; then
         reason="check: $c: $out"
         fm_wake_append check "$c" "$reason" || exit 1
@@ -934,18 +869,12 @@ while :; do
   # signature for an already-pending file (last write wins below).
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
-    terminal_status_event=0
     sleep "$SIGNAL_GRACE"
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
     files=""
     while IFS=$(printf '\t') read -r sf sig f; do
       [ -n "$sf" ] || continue
       case " $files " in *" $f "*) ;; *) files="$files $f" ;; esac
-      case "$f" in
-        *.status)
-          status_is_terminal_verb "$(last_status_line "$f")" && terminal_status_event=1
-          ;;
-      esac
     done <<EOF
 $pending
 EOF
@@ -965,30 +894,6 @@ EOF
     # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
     if afk_present || signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
-      if [ "$terminal_status_event" -eq 1 ]; then
-        terminal_check_rc=0
-        run_validation_lane_event_check || terminal_check_rc=$?
-        check_path="$STATE/validation-lane.check.sh"
-        case "$terminal_check_rc" in
-          0) ;;
-          2)
-            reason="check: rejected unauthenticated state checks: $check_path"
-            fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
-            wake "$reason"
-            ;;
-          3)
-            reason=$(fm_check_failure_reason "$check_path" \
-              "$FM_VALIDATION_LANE_EVENT_STATUS" "$FM_VALIDATION_LANE_EVENT_ERROR")
-            fm_wake_append check "$check_path" "$reason" || exit 1
-            wake "$reason"
-            ;;
-          *)
-            reason="check: $check_path failed before execution completed"
-            fm_wake_append check "$check_path" "$reason" || exit 1
-            wake "$reason"
-            ;;
-        esac
-      fi
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
@@ -1002,12 +907,6 @@ EOF
       done <<EOF
 $pending
 EOF
-      if [ "$terminal_status_event" -eq 1 ] && [ -n "$FM_VALIDATION_LANE_EVENT_RESULT" ]; then
-        check_path="$STATE/validation-lane.check.sh"
-        reason="check: $check_path: $FM_VALIDATION_LANE_EVENT_RESULT"
-        fm_wake_append check "$check_path" "$reason" || exit 1
-        wake "$reason"
-      fi
       wake "$reason"
     else
       while IFS=$(printf '\t') read -r sf sig f; do
