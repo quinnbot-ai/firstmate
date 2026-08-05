@@ -298,7 +298,7 @@ JS
 }
 
 test_pi_stale_event_ctx_noop() {
-  local fixture out status
+  local fixture out out_file status
   if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
     echo "skip: node or npm not found for Pi calm stale-event-ctx test"
     return 0
@@ -324,10 +324,12 @@ test_pi_stale_event_ctx_noop() {
   ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/project/node_modules/typebox"
   printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
 
-  out=$(cd "$fixture/project" && \
+  out_file="$fixture/stale-event-ctx.out"
+  (
+    cd "$fixture/project" || exit 1
     EXT="$fixture/project/.pi/extensions/fm-calm.ts" \
-    FM_HOME="$fixture/home" \
-    node --input-type=module 2>&1 <<'JS'
+      FM_HOME="$fixture/home" \
+      node --input-type=module <<'JS'
 import { pathToFileURL } from "node:url";
 
 const extension = await import(`${pathToFileURL(process.env.EXT).href}?stale=${Date.now()}`);
@@ -402,8 +404,9 @@ if (!calls.includes("setWorkingVisible")) {
   );
 }
 JS
-)
+  ) >"$out_file" 2>&1
   status=$?
+  out=$(<"$out_file")
   [ "$status" -eq 0 ] || fail "Pi calm stale-event-ctx handling failed: $out"
   [ -z "$out" ] || fail "Pi calm stale-event-ctx test printed output: $out"
   pass "a lifecycle event delivered after session disposal is a Calm no-op instead of an extension error, while a live ctx still presents"
