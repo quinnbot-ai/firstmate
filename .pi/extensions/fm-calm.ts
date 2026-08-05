@@ -1,15 +1,16 @@
 // Firstmate's home-persistent Pi transcript presentation toggle.
 //
-// Verified against Pi 0.81.1 and 0.82.0, which expose built-in ToolDefinitions, per-slot
-// renderers, renderShell: "self", session_start replacement reasons, agent_start and
-// agent_settled, ExtensionUIContext.setToolsExpanded(), setWorkingVisible(), setWidget()
-// with a disposable component factory, and setHiddenThinkingLabel().
+// Pi exposes built-in ToolDefinitions, per-slot renderers, renderShell: "self",
+// session_start replacement reasons, agent_start and agent_settled,
+// ExtensionUIContext.setToolsExpanded(), setWorkingVisible(), setWidget() with a
+// disposable component factory, and setHiddenThinkingLabel().
 // ./lib/fm-calm-working-ship.ts owns the animated working presentation this file
 // installs. The focused tests pin those assumptions but never reject a
 // newer Pi solely for its version. The collapsed-thinking and operational-user
 // presentation adapters probe the exact API they patch and degrade independently with a
 // diagnostic (see installCalmPresentationAdapter below) if a future Pi removes it; Pi
 // still exposes no global renderer for arbitrary built-in or custom rows.
+// docs/calm-mode-feasibility.md owns version-scoped compatibility evidence.
 // docs/configuration.md owns the home-local Calm preference contract.
 import { randomUUID } from "node:crypto";
 import {
