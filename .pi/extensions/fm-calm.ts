@@ -322,9 +322,10 @@ export default function (pi: ExtensionAPI) {
         exportRendering = false;
         setCalmStockExportRendering(false);
         publishPresentationState();
-        const expanded = ui.getToolsExpanded();
-        ui.setToolsExpanded(!expanded);
-        ui.setToolsExpanded(expanded);
+        // Pi coalesces adjacent transcript statuses. Request the repaint through our
+        // footer status instead of toggling tool expansion, which would replace Pi's
+        // built-in "Session exported" confirmation before it becomes visible.
+        ui.setStatus("firstmate-calm", undefined);
       }, 0);
     });
   });
