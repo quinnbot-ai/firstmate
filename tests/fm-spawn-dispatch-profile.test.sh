@@ -397,7 +397,7 @@ test_raw_launch_scrubs_compound_commands_and_reapplies_gotmpdir() {
   expected_gotmp="/tmp/fm-$id/gotmp"
   raw="printf '%s\\n' \"\${FM_TEST_BASELINE_SECRET-unset}:\$GOTMPDIR\" > '$result'; printf '%s\\n' \"\$(if [ -z \"\${FM_TEST_BASELINE_SECRET+x}\" ]; then printf scrubbed; else printf leaked; fi):\$GOTMPDIR\" >> '$result'"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" "$raw")
   status=$?
   expect_code 0 "$status" "compound raw launch should be accepted inside the scrubbed child shell"
@@ -758,7 +758,7 @@ test_secret_scrub_prefix_parses_supported_baseline_and_executes() {
   } > "$secret_home/.secrets"
 
   OPERATOR_HOME=$secret_home
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "a supported secret baseline should permit the spawn"
@@ -854,7 +854,7 @@ test_secret_scrub_prefix_wraps_every_direct_launch_template() {
     id="profile-secret-template-${harness}-z22"
     rec=$(make_spawn_case "profile-secret-template-$harness" "$harness" "$id")
     read_case_record "$rec"
-    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
       "$id" "$PROJ_DIR")
     status=$?
     expect_code 0 "$status" "$harness spawn should succeed under the scrub prefix"
