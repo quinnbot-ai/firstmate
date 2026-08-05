@@ -315,6 +315,16 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
+      // Extension input listeners run before Pi dispatches the slash command.
+      // Rebuild Calm's hidden tool rows now, while their normal renderers are
+      // active, so the later export can keep Pi's completion status as the
+      // final transcript status. Refreshing after the command would coalesce
+      // over that completion status in Pi 0.83.
+      if (calmPresentationIsActive()) {
+        const expanded = ui.getToolsExpanded();
+        ui.setToolsExpanded(!expanded);
+        ui.setToolsExpanded(expanded);
+      }
       exportRendering = true;
       setCalmStockExportRendering(true);
       publishPresentationState();
@@ -322,10 +332,6 @@ export default function (pi: ExtensionAPI) {
         exportRendering = false;
         setCalmStockExportRendering(false);
         publishPresentationState();
-        // Pi coalesces adjacent transcript statuses. Request the repaint through our
-        // footer status instead of toggling tool expansion, which would replace Pi's
-        // built-in "Session exported" confirmation before it becomes visible.
-        ui.setStatus("firstmate-calm", undefined);
       }, 0);
     });
   });
