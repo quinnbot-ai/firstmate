@@ -297,6 +297,118 @@ JS
   pass "a missing collapsed-thinking presentation API degrades only that Calm adapter with a clear skip reason, while the rest of Calm still registers"
 }
 
+test_pi_stale_event_ctx_noop() {
+  local fixture out status
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    echo "skip: node or npm not found for Pi calm stale-event-ctx test"
+    return 0
+  fi
+  if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
+    echo "skip: installed @earendil-works/pi-coding-agent package not found"
+    return 0
+  fi
+
+  fixture="$TMP_ROOT/stale-event-ctx"
+  mkdir -p \
+    "$fixture/project/.pi/extensions/lib" \
+    "$fixture/project/node_modules/@earendil-works" \
+    "$fixture/home"
+  cp "$EXT" "$fixture/project/.pi/extensions/fm-calm.ts"
+  cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+  cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
+  cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
+  ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
+  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/project/node_modules/typebox"
+  printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
+
+  out=$(cd "$fixture/project" && \
+    EXT="$fixture/project/.pi/extensions/fm-calm.ts" \
+    FM_HOME="$fixture/home" \
+    node --input-type=module 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+
+const extension = await import(`${pathToFileURL(process.env.EXT).href}?stale=${Date.now()}`);
+
+const handlers = new Map();
+const pi = {
+  events: { emit() {}, on() {} },
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerEntryRenderer() {},
+  registerTool() {},
+};
+extension.default(pi);
+
+for (const event of ["session_start", "agent_start", "agent_settled", "session_shutdown"]) {
+  if (!handlers.has(event)) {
+    throw new Error(`Calm did not register a ${event} handler`);
+  }
+}
+
+// Pi's AgentSession.dispose() invalidates the extension runner before disconnecting
+// from the agent, so a queued lifecycle event can reach a handler with a ctx whose
+// guarded `ui` getter already throws. Mirror that ctx shape exactly: every property
+// access fails, and the handler must treat the event as a no-op rather than throw.
+const staleCtx = {
+  get ui() {
+    throw new Error(
+      "This extension ctx is stale after session replacement or reload.",
+    );
+  },
+};
+await handlers.get("session_start")({ type: "session_start", reason: "startup" }, staleCtx);
+await handlers.get("agent_start")({ type: "agent_start" }, staleCtx);
+await handlers.get("agent_settled")({ type: "agent_settled" }, staleCtx);
+await handlers.get("session_shutdown")({ type: "session_shutdown", reason: "quit" }, staleCtx);
+
+// Drive the verdict apart: the same handler on a live ctx must still present, so the
+// guard cannot pass by silencing every lifecycle event.
+const calls = [];
+const liveCtx = {
+  ui: {
+    getEditorText() {
+      return "";
+    },
+    getToolsExpanded() {
+      return false;
+    },
+    onTerminalInput() {
+      return () => {};
+    },
+    setHiddenThinkingLabel() {
+      calls.push("setHiddenThinkingLabel");
+    },
+    setStatus() {
+      calls.push("setStatus");
+    },
+    setToolsExpanded() {},
+    setWidget() {
+      calls.push("setWidget");
+    },
+    setWorkingVisible() {
+      calls.push("setWorkingVisible");
+    },
+  },
+};
+await handlers.get("session_start")({ type: "session_start", reason: "startup" }, liveCtx);
+if (!calls.includes("setWorkingVisible")) {
+  throw new Error(
+    `the stale-ctx guard also silenced live session_start presentation; saw ${JSON.stringify(calls)}`,
+  );
+}
+JS
+)
+  status=$?
+  [ "$status" -eq 0 ] || fail "Pi calm stale-event-ctx handling failed: $out"
+  [ -z "$out" ] || fail "Pi calm stale-event-ctx test printed output: $out"
+  pass "a lifecycle event delivered after session disposal is a Calm no-op instead of an extension error, while a live ctx still presents"
+}
+
 test_pi_compat_missing_adapter_exports() {
   local fixture out status
   if ! command -v node >/dev/null 2>&1; then
@@ -3276,6 +3388,7 @@ JS
 test_home_resolution
 test_pi_compat_no_upper_bound
 test_pi_compat_degraded_adapter
+test_pi_stale_event_ctx_noop
 test_pi_compat_missing_adapter_exports
 test_rendering_and_session_lifecycle
 test_operational_followup_turn_e2e
