@@ -18,8 +18,10 @@
 #      config/startup-memory-budget, and config/trace-context -
 #      down into each secondmate home's config/, so the secondmate's OWN crewmates,
 #      dispatch profiles, backlog backend, runtime-backend default, Herdr
-#      presentation opt-in, startup-memory budget, and trace context inherit the
-#      primary's settings.
+#      presentation choice, startup-memory budget, and trace context inherit the
+#      primary's settings. config/herdr-presentation-spaces is default-ON, so an
+#      absent primary file and an absent destination file both mean on and the
+#      generic absence mirror already converges that item correctly.
 #      It is primary-authoritative
 #      (re-pushed at secondmate spawn, on the bootstrap secondmate sweep, and by
 #      config push).
@@ -683,7 +685,7 @@ test_spawn_bare_harness_no_model_effort_flag() {
   meta="$w/home/state/sm.meta"
   [ "$(meta_field "$meta" model)" = default ] || fail "bare-tokens: meta model not default (got '$(meta_field "$meta" model)')"
   [ "$(meta_field "$meta" effort)" = default ] || fail "bare-tokens: meta effort not default (got '$(meta_field "$meta" effort)')"
-  launch=$(cat "$launchlog")
+  launch=$(fm_test_normalize_nested_shell_quotes < "$launchlog")
   assert_not_contains "$launch" "--model" "bare-tokens: launch must not carry a --model flag"
   assert_not_contains "$launch" "--effort" "bare-tokens: launch must not carry an --effort flag"
   pass "C2 spawn: a bare harness-only secondmate-harness file launches with no model/effort flag (backward-compat)"
@@ -706,7 +708,7 @@ test_spawn_secondmate_harness_model_token() {
   [ "$(meta_field "$meta" harness)" = claude ] || fail "model-token: meta harness not claude"
   [ "$(meta_field "$meta" model)" = opus ] || fail "model-token: meta model not opus (got '$(meta_field "$meta" model)')"
   [ "$(meta_field "$meta" effort)" = default ] || fail "model-token: meta effort not default (got '$(meta_field "$meta" effort)')"
-  launch=$(cat "$launchlog")
+  launch=$(fm_test_normalize_nested_shell_quotes < "$launchlog")
   assert_contains "$launch" "claude --dangerously-skip-permissions --model 'opus'" \
     "model-token: launch did not carry --model opus"
   assert_not_contains "$launch" "--effort" "model-token: launch must not carry an --effort flag"
@@ -728,7 +730,7 @@ test_spawn_secondmate_harness_model_and_effort_tokens() {
   meta="$w/home/state/sm.meta"
   [ "$(meta_field "$meta" model)" = opus ] || fail "model-effort-tokens: meta model not opus"
   [ "$(meta_field "$meta" effort)" = high ] || fail "model-effort-tokens: meta effort not high (got '$(meta_field "$meta" effort)')"
-  launch=$(cat "$launchlog")
+  launch=$(fm_test_normalize_nested_shell_quotes < "$launchlog")
   assert_contains "$launch" "claude --dangerously-skip-permissions --model 'opus' --effort 'high'" \
     "model-effort-tokens: launch did not carry both --model opus and --effort high"
   pass "C4 spawn: config/secondmate-harness's model+effort tokens thread into the launch and meta"
@@ -750,7 +752,7 @@ test_spawn_explicit_model_overrides_secondmate_harness_token() {
   [ "$(meta_field "$meta" model)" = sonnet ] \
     || fail "explicit-model: meta model not sonnet (got '$(meta_field "$meta" model)'), explicit flag did not win over file token"
   [ "$(meta_field "$meta" effort)" = high ] || fail "explicit-model: file's effort token should still apply"
-  launch=$(cat "$launchlog")
+  launch=$(fm_test_normalize_nested_shell_quotes < "$launchlog")
   assert_contains "$launch" "--model 'sonnet'" "explicit-model: launch did not use the explicit --model"
   assert_not_contains "$launch" "--model 'opus'" "explicit-model: launch leaked the file's model token"
   pass "C5 spawn: an explicit --model overrides config/secondmate-harness's model token; the file's effort token still applies"
@@ -772,7 +774,7 @@ test_spawn_explicit_effort_overrides_secondmate_harness_token() {
   [ "$(meta_field "$meta" model)" = opus ] || fail "explicit-effort: file's model token should still apply"
   [ "$(meta_field "$meta" effort)" = low ] \
     || fail "explicit-effort: meta effort not low (got '$(meta_field "$meta" effort)'), explicit flag did not win over file token"
-  launch=$(cat "$launchlog")
+  launch=$(fm_test_normalize_nested_shell_quotes < "$launchlog")
   assert_contains "$launch" "--effort 'low'" "explicit-effort: launch did not use the explicit --effort"
   assert_not_contains "$launch" "--effort 'high'" "explicit-effort: launch leaked the file's effort token"
   pass "C6 spawn: an explicit --effort overrides config/secondmate-harness's effort token; the file's model token still applies"
@@ -793,7 +795,7 @@ test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens() {
   [ "$(meta_field "$meta" harness)" = codex ] || fail "explicit-harness-no-tokens: meta harness not codex"
   [ "$(meta_field "$meta" model)" = default ] || fail "explicit-harness-no-tokens: meta model should stay default"
   [ "$(meta_field "$meta" effort)" = default ] || fail "explicit-harness-no-tokens: meta effort should stay default"
-  launch=$(cat "$launchlog")
+  launch=$(fm_test_normalize_nested_shell_quotes < "$launchlog")
   assert_contains "$launch" "codex --dangerously-bypass-approvals-and-sandbox" \
     "explicit-harness-no-tokens: launch did not use codex"
   assert_not_contains "$launch" "--model" "explicit-harness-no-tokens: launch must not carry a --model flag"
@@ -817,7 +819,7 @@ test_spawn_explicit_harness_uses_explicit_profile_axes() {
   [ "$(meta_field "$meta" harness)" = codex ] || fail "explicit-harness-explicit-axes: meta harness not codex"
   [ "$(meta_field "$meta" model)" = gpt-5.5 ] || fail "explicit-harness-explicit-axes: meta model did not use explicit value"
   [ "$(meta_field "$meta" effort)" = xhigh ] || fail "explicit-harness-explicit-axes: meta effort did not use explicit value"
-  launch=$(cat "$launchlog")
+  launch=$(fm_test_normalize_nested_shell_quotes < "$launchlog")
   assert_contains "$launch" "--model 'gpt-5.5'" \
     "explicit-harness-explicit-axes: launch did not use the explicit --model"
   assert_contains "$launch" "-c 'model_reasoning_effort=\"xhigh\"'" \
@@ -827,6 +829,41 @@ test_spawn_explicit_harness_uses_explicit_profile_axes() {
   assert_not_contains "$launch" "model_reasoning_effort=\"high\"" \
     "explicit-harness-explicit-axes: launch leaked the file's effort token"
   pass "C8 spawn: an explicit --harness still honors explicit model/effort flags"
+}
+
+test_spawned_secondmate_uses_its_harness_supervision_model() {
+  local harness expected w sm launchlog launch fakebin out
+  for harness in codex claude; do
+    w="$TMP_ROOT/spawn-supervision-model-$harness"
+    sm="$w/sm"
+    launchlog="$w/launch.log"
+    mkdir -p "$w/home/config"
+    printf '%s\n' "$harness" > "$w/home/config/secondmate-harness"
+    make_seeded_home "$sm" sm
+    spawn_secondmate_capture "$w" sm "$sm" "$launchlog" >/dev/null 2>&1
+    fm_write_meta "$sm/state/task.meta" "window=firstmate:fm-task" "kind=ship"
+    touch "$sm/state/.last-watcher-beat"
+    fakebin="$w/tmux-sm/fakebin"
+    cat > "$fakebin/$harness" <<SH
+#!/usr/bin/env bash
+"$ROOT/bin/fm-guard.sh"
+SH
+    chmod +x "$fakebin/$harness"
+    launch=$(cat "$launchlog")
+    out=$(PATH="$fakebin:$BASE_PATH" CLAUDECODE=1 bash -c "$launch" 2>&1)
+    case "$harness" in
+      codex)
+        expected='WATCHER DOWN - SUPERVISION IS OFF'
+        assert_contains "$out" "$expected" \
+          "Codex secondmate inherited Claude auto-arm despite its persistent watcher model"
+        ;;
+      claude)
+        [ -z "$out" ] \
+          || fail "Claude secondmate with a fresh beacon should use auto-arm supervision, got: $out"
+        ;;
+    esac
+  done
+  pass "C9 spawn: secondmate launch pins supervision to its own harness"
 }
 
 # The harness fallback chain (secondmate-harness -> crew-harness -> own) still
@@ -873,7 +910,7 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
   [ "$(meta_field "$meta" harness)" = codex ] || fail "crew-unaffected: crew harness resolution changed"
   [ "$(meta_field "$meta" model)" = default ] || fail "crew-unaffected: crew task must not invent a model"
   [ "$(meta_field "$meta" effort)" = default ] || fail "crew-unaffected: crew task must not invent an effort"
-  launch=$(cat "$launchlog")
+  launch=$(fm_test_normalize_nested_shell_quotes < "$launchlog")
   assert_not_contains "$launch" "--model" "crew-unaffected: crew launch must not carry a --model flag"
   assert_not_contains "$launch" "--effort" "crew-unaffected: crew launch must not carry an --effort flag"
   pass "C9 spawn: the harness fallback chain still resolves with no tokens; crew/scout launches are unaffected by this feature"
@@ -938,7 +975,16 @@ make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin="$dir/fakebin"
   mkdir -p "$fakebin"
-  fm_fake_exit0 "$fakebin" node gh-axi chrome-devtools-axi lavish-axi
+  fm_fake_exit0 "$fakebin" node chrome-devtools-axi lavish-axi
+  cat > "$fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' '0.1.29'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/gh-axi"
   # tmux fake supports fm-send's composer-verified submit path and optional
   # FM_FAKE_TMUX_LOG / FM_FAKE_TMUX_FAIL_LITERAL for reread-nudge assertions.
   cat > "$fakebin/tmux" <<'SH'
@@ -985,6 +1031,25 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/no-mistakes"
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "--version ") printf '%s\n' '0.2.2' ;;
+  "update --help") printf '%s\n' 'usage: tasks-axi update <id> [flags]' '  --archive-body' ;;
+  "mv --help") printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>' ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tasks-axi"
+  cat > "$fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' '0.1.16'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/quota-axi"
   printf '%s\n' "$fakebin"
 }
 
@@ -1269,6 +1334,55 @@ test_backend_inheritance_present_and_absent() {
   assert_contains "$(cat "$instruction")" $'-----BEGIN config/backend-----\nABSENT\n-----END config/backend-----' \
     "backend absence reread must use ABSENT token"
   pass "B12b backend inheritance: present values and primary absence converge exactly"
+}
+
+# config/herdr-presentation-spaces is default-ON, so this item's convergence is
+# asserted through the verdict the spawn gate actually reads in the destination
+# home, not through file presence alone: mirroring the primary's absence must
+# converge a secondmate to the same default rather than turning its projection off.
+sm_presentation_verdict() {  # <config-dir> -> on|off
+  bash -c '
+    . "$0/bin/backends/herdr.sh"
+    if fm_backend_herdr_presentation_enabled "$1"; then printf "on\n"; else printf "off\n"; fi
+  ' "$ROOT" "$1" 2>/dev/null
+}
+
+test_presentation_inheritance_default_on_and_opt_out() {
+  local w head out err status verdict
+  w=$(new_world presentation-inherit)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  err="$w/presentation-inherit.err"
+
+  out=$(run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "presentation default push should succeed"
+  [ -e "$w/sm/config/herdr-presentation-spaces" ] \
+    && fail "primary default must not write an opt-out downstream"
+  verdict=$(sm_presentation_verdict "$w/sm/config")
+  [ "$verdict" = on ] || fail "primary default left the secondmate projection $verdict"
+
+  mkdir -p "$w/sm/config"
+  printf 'off\n' > "$w/sm/config/herdr-presentation-spaces"
+  out=$(run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "presentation reconverge push should succeed"
+  assert_contains "$out" "herdr-presentation-spaces: pushed - mirrored primary absence" \
+    "a local secondmate opt-out should reconverge on the primary default"
+  verdict=$(sm_presentation_verdict "$w/sm/config")
+  [ "$verdict" = on ] || fail "primary default did not reconverge a locally opted-out secondmate ($verdict)"
+
+  printf 'off\n' > "$w/home/config/herdr-presentation-spaces"
+  out=$(run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "presentation opt-out push should succeed"
+  assert_contains "$out" "herdr-presentation-spaces: pushed" "explicit opt-out should report pushed"
+  verdict=$(sm_presentation_verdict "$w/sm/config")
+  [ "$verdict" = off ] || fail "explicit primary opt-out left the secondmate projection $verdict"
+
+  : > "$w/home/config/herdr-presentation-spaces"
+  out=$(run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "presentation legacy opt-in push should succeed"
+  verdict=$(sm_presentation_verdict "$w/sm/config")
+  [ "$verdict" = on ] || fail "a legacy primary opt-in file left the secondmate projection $verdict"
+  pass "B12c presentation inheritance: the primary default converges on, and only an explicit opt-out propagates off"
 }
 
 test_bootstrap_sweep_surfaces_config_propagation_failure() {
@@ -2206,7 +2320,7 @@ test_config_reread_bootstrap_path_and_spawn_flexibility() {
   spawn_secondmate_capture "$w" sm-flex "$sm" "$launchlog" --harness pi >/dev/null 2>&1
   assert_no_reread_pending "$sm"
   assert_no_reread_instructions "$sm"
-  launch=$(cat "$launchlog")
+  launch=$(fm_test_normalize_nested_shell_quotes < "$launchlog")
   assert_contains "$launch" "pi" \
     "explicit --harness pi must still win over configured codex defaults"
   pass "B18 bootstrap config reread path works; spawn flexibility remains defaults-only"
@@ -2356,12 +2470,14 @@ test_spawn_explicit_model_overrides_secondmate_harness_token
 test_spawn_explicit_effort_overrides_secondmate_harness_token
 test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens
 test_spawn_explicit_harness_uses_explicit_profile_axes
+test_spawned_secondmate_uses_its_harness_supervision_model
 test_spawn_fallback_chain_and_crew_scout_unaffected
 test_bootstrap_sweep_propagates_and_reconverges
 test_bootstrap_sweep_propagates_when_tracked_current
 test_bootstrap_sweep_defers_dispatch_on_stale_unignored_home
 test_bootstrap_sweep_materializes_and_inherits_memory_default
 test_backend_inheritance_present_and_absent
+test_presentation_inheritance_default_on_and_opt_out
 test_bootstrap_sweep_surfaces_config_propagation_failure
 test_bootstrap_rereads_after_partial_propagation
 test_config_push_propagates_reports_without_ff_or_nudge
