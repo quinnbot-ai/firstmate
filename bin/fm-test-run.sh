@@ -1507,6 +1507,7 @@ SERIAL_CHILD_PID=
 SERIAL_TEE_PID=
 : >"$RECORDS"
 
+# shellcheck disable=SC2329 # Invoked indirectly by the cleanup and worker signal traps.
 terminate_and_reap_process_tree() {
   local root=$1 idx=0 parent children child seen pid
   local -a process_tree_pids=()
@@ -1547,6 +1548,7 @@ terminate_and_reap_process_tree() {
   done
 }
 
+# shellcheck disable=SC2329 # Registered by the EXIT and signal traps below.
 cleanup_run() {
   local rc=$? pid serial_child_owned=0 cleanup_pids="$RUN_TMP/cleanup-pids"
   trap - EXIT INT TERM HUP
@@ -1824,6 +1826,7 @@ else
     (
       set +e
       child_pid=
+      # shellcheck disable=SC2329 # Registered by the worker signal traps below.
       worker_signal_exit() {
         local signal_rc=$1 pid signal_pids="$work/signal-pids"
         trap - INT TERM HUP
