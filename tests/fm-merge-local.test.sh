@@ -6,6 +6,7 @@
 # coverage proves exact tracked adoption while leaving untracked collision and
 # preservation decisions to Git. Untracked files, symlinks, and directories are
 # deliberately included because the helper does not enumerate or mutate them.
+# The ambient cases exercise the script's bounded known-effect hardening.
 set -u
 
 # shellcheck disable=SC1091
@@ -319,7 +320,37 @@ test_ambient_git_overrides_cannot_redirect_verification() {
     || fail "ambient overrides: refusal changed the candidate"
   [ "$(tr -d '\n' <"$case_dir/project/payload.txt")" = candidate ] \
     || fail "ambient overrides: refusal changed target bytes"
-  pass "fm-merge-local neutralizes ambient Git repository overrides"
+  pass "fm-merge-local resists the covered ambient Git repository overrides"
+}
+
+test_lazy_fetch_is_denied_across_the_safe_git_boundary() {
+  local case_dir fakebin marker real_git
+  case_dir=$(make_case no-lazy-fetch)
+  commit_candidate "$case_dir"
+  fakebin=$case_dir/fakebin
+  marker=$case_dir/lazy-fetch-enabled
+  real_git=$(command -v git)
+  mkdir "$fakebin"
+  cat >"$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *' --no-replace-objects '*)
+    if [ "${GIT_NO_LAZY_FETCH:-}" != 1 ]; then
+      : >"$FM_TEST_LAZY_FETCH_MARKER"
+      exit 91
+    fi
+    ;;
+esac
+exec "$REAL_GIT" "$@"
+SH
+  chmod +x "$fakebin/git"
+  GIT_NO_LAZY_FETCH=0 PATH="$fakebin:$PATH" REAL_GIT="$real_git" \
+    FM_TEST_LAZY_FETCH_MARKER="$marker" \
+    run_merge "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr" \
+    || fail "no lazy fetch: merge failed"
+  [ ! -e "$marker" ] || fail "no lazy fetch: a guarded Git call allowed lazy fetching"
+  assert_ref_advanced "$case_dir" "no lazy fetch: main did not advance"
+  pass "fm-merge-local denies lazy fetches throughout guarded Git execution"
 }
 
 test_missing_duplicate_and_subdirectory_worktree_metadata_refuse() {
@@ -353,10 +384,47 @@ test_candidate_equivalent_target_index_and_worktree_fast_forward() {
   printf 'resolved\n' >"$case_dir/project/payload.txt"
   chmod +x "$case_dir/project/payload.txt"
   git -C "$case_dir/project" add payload.txt
+  git -C "$case_dir/project" config merge.autoStash true
+  git -C "$case_dir/project" cat-file --batch-all-objects --batch-check='%(objectname)' \
+    | LC_ALL=C sort >"$case_dir/objects-before"
   run_merge "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr" || fail "candidate-equivalent target: merge failed"
+  git -C "$case_dir/project" cat-file --batch-all-objects --batch-check='%(objectname)' \
+    | LC_ALL=C sort >"$case_dir/objects-after"
   assert_ref_advanced "$case_dir" "candidate-equivalent target: main did not advance"
   [ -z "$(git -C "$case_dir/project" status --porcelain=v1 --untracked-files=all)" ] || fail "candidate-equivalent target: tracked dirt remained"
-  pass "fm-merge-local adopts target index and worktree already equal to the candidate"
+  cmp -s "$case_dir/objects-before" "$case_dir/objects-after" \
+    || fail "candidate-equivalent target: configured autostash wrote Git objects"
+  pass "fm-merge-local adopts candidate-equivalent target state without autostashing"
+}
+
+test_configured_post_merge_hook_cannot_mutate_target_content() {
+  local case_dir hooks marker
+  case_dir=$(make_case post-merge-hook)
+  commit_candidate "$case_dir"
+  hooks=$case_dir/configured-hooks
+  marker=$case_dir/hook-ran
+  mkdir "$hooks"
+  cat >"$hooks/post-merge" <<'SH'
+#!/bin/sh
+printf 'hook ran\n' >"$FM_TEST_HOOK_MARKER"
+printf 'hook mutation\n' >"$FM_TEST_HOOK_TARGET"
+printf 'hook mutation\n' >"$FM_TEST_HOOK_UNTRACKED"
+SH
+  chmod +x "$hooks/post-merge"
+  git -C "$case_dir/project" config core.hooksPath "$hooks"
+  printf 'preserved runtime\n' >"$case_dir/project/runtime.log"
+  FM_TEST_HOOK_MARKER="$marker" \
+    FM_TEST_HOOK_TARGET="$case_dir/project/payload.txt" \
+    FM_TEST_HOOK_UNTRACKED="$case_dir/project/runtime.log" \
+    run_merge "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr" \
+    || fail "post-merge hook: merge failed"
+  assert_ref_advanced "$case_dir" "post-merge hook: main did not advance"
+  [ ! -e "$marker" ] || fail "post-merge hook: configured hook ran"
+  [ "$(tr -d '\n' <"$case_dir/project/payload.txt")" = candidate ] \
+    || fail "post-merge hook: tracked target content changed"
+  [ "$(tr -d '\n' <"$case_dir/project/runtime.log")" = 'preserved runtime' ] \
+    || fail "post-merge hook: untracked target content changed"
+  pass "fm-merge-local disables configured hooks for the final merge"
 }
 
 test_target_difference_refuses_and_many_paths_have_bounded_diagnostic() {
@@ -480,7 +548,7 @@ test_signal_at_final_merge_boundary_refuses() {
     cat >"$fakebin/git" <<'SH'
 #!/usr/bin/env bash
 case " $* " in
-  *' merge --ff-only '*)
+  *' merge '*' --ff-only '*)
     kill -s "$FM_TEST_SIGNAL" "$PPID"
     exit 99
     ;;
@@ -522,7 +590,7 @@ test_untracked_content_is_preserved_or_git_refuses_collision() {
   cat >"$fakebin/git" <<'SH'
 #!/usr/bin/env bash
 case " $* " in
-  *' merge --ff-only '*)
+  *' merge '*' --ff-only '*)
     "$REAL_GIT" "$@"
     rc=$?
     if [ "$rc" -eq 0 ]; then printf 'runtime churn\n' >"$FM_TEST_CHURN_PATH"; fi
@@ -574,8 +642,10 @@ test_hidden_worker_dirt_refuses_without_mutation
 test_clean_filter_cannot_hide_worker_or_target_bytes
 test_replacement_refs_cannot_hide_worker_bytes
 test_ambient_git_overrides_cannot_redirect_verification
+test_lazy_fetch_is_denied_across_the_safe_git_boundary
 test_missing_duplicate_and_subdirectory_worktree_metadata_refuse
 test_candidate_equivalent_target_index_and_worktree_fast_forward
+test_configured_post_merge_hook_cannot_mutate_target_content
 test_target_difference_refuses_and_many_paths_have_bounded_diagnostic
 test_hidden_target_bytes_and_modes_refuse
 test_target_state_changed_after_preflight_refuses

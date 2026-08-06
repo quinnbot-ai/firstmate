@@ -11,8 +11,10 @@
 # recorded task worktree is the clean, checked-out fm/<id> candidate branch.
 # A dirty target checkout is accepted only when its tracked index and working
 # tree already exactly equal that candidate. Git remains the final collision
-# check for untracked content. See AGENTS.md prime directives,
-# project management, and task lifecycle.
+# check for untracked content. Git execution is hardened against the known
+# ambient effects covered by the regression suite, not treated as a complete
+# hermetic boundary. See AGENTS.md prime directives, project management, and
+# task lifecycle.
 # Usage: fm-merge-local.sh <task-id>
 set -eu
 
@@ -67,6 +69,7 @@ safe_git() {
     -u GIT_CONFIG_COUNT \
     -u GIT_EXEC_PATH \
     GIT_NO_REPLACE_OBJECTS=1 \
+    GIT_NO_LAZY_FETCH=1 \
     git --no-replace-objects "$@"
 }
 
@@ -286,6 +289,6 @@ fi
 validate_task_custody || exit 1
 before=$(safe_git -C "$PROJECT_ROOT" rev-parse --short "$DEFAULT")
 validate_target_state || exit 1
-safe_git -C "$PROJECT_ROOT" merge --ff-only "$CANDIDATE" >/dev/null
+safe_git -c core.hooksPath=/dev/null -C "$PROJECT_ROOT" merge --no-autostash --ff-only "$CANDIDATE" >/dev/null
 after=$(safe_git -C "$PROJECT_ROOT" rev-parse --short "$DEFAULT")
 echo "merged $BRANCH into local $DEFAULT ($before -> $after) in $PROJECT_ROOT"
