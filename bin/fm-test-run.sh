@@ -1626,6 +1626,7 @@ terminate_and_reap_process_group() {
   done
 }
 
+# shellcheck disable=SC2329 # Invoked indirectly by the EXIT and signal traps through cleanup_run.
 terminate_and_reap_background_job() {
   local pid=$1 group
   group=$(ps -o pgid= -p "$pid" 2>/dev/null | awk 'NR == 1 { gsub(/[[:space:]]/, "", $1); print $1 }' || true)
