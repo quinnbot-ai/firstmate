@@ -1789,7 +1789,7 @@ record_script_result() {
 
 run_one_serial() {
   local script=$1
-  local base family runtime requirement out fifo begin_iso begin_ms end_ms end_iso duration rc child_pid tee_pid monitor_mode=
+  local base family runtime requirement out fifo begin_iso begin_ms end_ms end_iso duration rc child_pid monitor_mode=
   base=$(basename "$script")
   family=$(family_for_basename "$base")
   runtime=$(runtime_gate_for_basename "$base")
