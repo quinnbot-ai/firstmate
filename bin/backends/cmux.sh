@@ -188,8 +188,11 @@ fm_backend_cmux_cli() {  # <cmux-subcommand-and-args...>
 # separate from reachability/auth (fm_backend_cmux_ping_state below).
 fm_backend_cmux_version_check() {
   fm_backend_cmux_tool_check || return 1
-  local raw ver major rest minor
-  raw=$(fm_backend_cmux_cli version 2>/dev/null) || { echo "error: 'cmux version' failed; is cmux installed correctly?" >&2; return 1; }
+  local bin raw ver major rest minor
+  bin=$(fm_backend_cmux_bin) || return 1
+  # Version probing never needs the control socket, so keep this dependency
+  # gate independent from both configured and ambient socket credentials.
+  raw=$( ( unset CMUX_SOCKET_PASSWORD; CMUX_QUIET=1 "$bin" version ) 2>/dev/null) || { echo "error: 'cmux version' failed; is cmux installed correctly?" >&2; return 1; }
   ver=$(printf '%s' "$raw" | awk '{print $2}')
   case "$ver" in
     ''|*[!0-9.]*)
@@ -219,9 +222,8 @@ fm_backend_cmux_version_check() {
 # (password mode, wrong password presented) all classify as unauth - each is a
 # password-configuration problem on one side or the other, never fixable by
 # relaunching the app.
-fm_backend_cmux_ping_state() {
-  local out
-  out=$(fm_backend_cmux_cli ping 2>&1)
+fm_backend_cmux_ping_state_from_output() {  # <cmux-ping-output>
+  local out=$1
   if [ "$out" = "PONG" ]; then
     printf 'ok'
     return 0
@@ -232,6 +234,24 @@ fm_backend_cmux_ping_state() {
     *'Socket not found'*) printf 'down' ;;
     *) printf 'error' ;;
   esac
+}
+
+fm_backend_cmux_ping_state() {
+  local out
+  out=$(fm_backend_cmux_cli ping 2>&1)
+  fm_backend_cmux_ping_state_from_output "$out"
+}
+
+# fm_backend_cmux_ping_state_without_credentials: classify the control socket
+# without reading config/cmux-socket-password or forwarding an ambient socket
+# password.  Read-only diagnostics use this to prove only password-free access;
+# an unauth result stays intentionally incomplete rather than consulting a
+# secret.  Spawn paths continue to use fm_backend_cmux_ping_state above.
+fm_backend_cmux_ping_state_without_credentials() {
+  local bin out
+  bin=$(fm_backend_cmux_bin) || return 1
+  out=$( ( unset CMUX_SOCKET_PASSWORD; CMUX_QUIET=1 "$bin" ping ) 2>&1)
+  fm_backend_cmux_ping_state_from_output "$out"
 }
 
 # fm_backend_cmux_refuse_denied / fm_backend_cmux_refuse_unauth: the two

@@ -227,38 +227,55 @@ fm_backend_detect_cmux_app_is_ancestor() {
   return 1
 }
 
-# fm_backend_name: resolve the ACTIVE backend for a NEW spawn, absent an
-# explicit per-task override. Precedence: FM_BACKEND env, then config/backend
-# (a single word on its first non-empty line, mirroring config/crew-harness),
-# then runtime auto-detection (fm_backend_detect), then default tmux. A
-# per-task `--backend` flag is parsed by the caller (fm-spawn.sh) and takes
-# precedence over this resolution entirely; it is not read here. Auto-detect
-# fires only when nothing was explicitly configured, so an explicit setting
-# always wins. Selecting herdr or cmux via auto-detect prints one loud stderr
-# notice (both are experimental); auto-detecting tmux stays silent - it is
-# today's default-path behavior and callers must see zero change. The cmux
-# notice names the winning signal, so a fallback-detected cmux (bundle id or
-# ancestry, after the claude wrapper stripped CMUX_WORKSPACE_ID) is visibly
-# distinct from the primary-marker case.
-fm_backend_name() {
-  local line v detected marker
+# fm_backend_selection: resolve the active backend and its authoritative
+# selection source for a new spawn.  On success, sets
+# FM_BACKEND_SELECTION_SOURCE to env|config|auto|default and
+# FM_BACKEND_SELECTION_VALUE to the selected literal value.  It never emits
+# notices, so read-only callers can inspect the same selection without
+# pretending to launch a task.  fm_backend_name owns caller-facing notices.
+fm_backend_selection() {
+  local line v detected
+  FM_BACKEND_SELECTION_SOURCE=""
+  FM_BACKEND_SELECTION_VALUE=""
   if [ -n "${FM_BACKEND:-}" ]; then
-    printf '%s' "$FM_BACKEND"
+    FM_BACKEND_SELECTION_SOURCE="env"
+    FM_BACKEND_SELECTION_VALUE=$FM_BACKEND
     return 0
   fi
   if [ -f "$FM_BACKEND_CONFIG_DIR/backend" ]; then
     while IFS= read -r line || [ -n "$line" ]; do
       v=$(printf '%s' "$line" | tr -d '[:space:]')
       if [ -n "$v" ]; then
-        printf '%s' "$v"
+        FM_BACKEND_SELECTION_SOURCE="config"
+        FM_BACKEND_SELECTION_VALUE=$v
         return 0
       fi
     done < "$FM_BACKEND_CONFIG_DIR/backend"
   fi
   # Called directly (not in a command substitution) so the detect signal
-  # globals survive into the notice below.
+  # globals survive for fm_backend_name's notice below.
   if fm_backend_detect >/dev/null; then
     detected=$FM_BACKEND_DETECTED
+    FM_BACKEND_SELECTION_SOURCE="auto"
+    FM_BACKEND_SELECTION_VALUE=$detected
+    return 0
+  fi
+  FM_BACKEND_SELECTION_SOURCE="default"
+  FM_BACKEND_SELECTION_VALUE=tmux
+  return 0
+}
+
+# fm_backend_name: print the active backend for a new spawn.  Selection
+# precedence and source are owned by fm_backend_selection above.  Selecting
+# herdr or cmux via auto-detection prints one loud stderr notice (both are
+# experimental); auto-detecting tmux stays silent to preserve default-path
+# behavior.  The cmux notice names the winning signal, so a fallback-detected
+# cmux is visibly distinct from the primary-marker case.
+fm_backend_name() {
+  local detected marker
+  fm_backend_selection || return 1
+  if [ "$FM_BACKEND_SELECTION_SOURCE" = auto ]; then
+    detected=$FM_BACKEND_SELECTION_VALUE
     if [ "$detected" = herdr ]; then
       echo "NOTICE: auto-detected herdr runtime (HERDR_ENV=1) - spawning into the EXPERIMENTAL herdr backend. Set config/backend or pass --backend tmux to opt out." >&2
     fi
@@ -273,7 +290,7 @@ fm_backend_name() {
     printf '%s' "$detected"
     return 0
   fi
-  printf 'tmux'
+  printf '%s' "$FM_BACKEND_SELECTION_VALUE"
 }
 
 # fm_backend_validate: refuse an unknown backend LOUDLY. Silent on success.
@@ -330,6 +347,14 @@ fm_backend_required_tool_available() {  # <backend> <tool>
       ;;
     *) command -v "$tool" >/dev/null 2>&1 ;;
   esac
+}
+
+# fm_backend_treehouse_lease_capable: the spawn-time capability required from
+# treehouse when a session-provider backend delegates task worktrees to it.
+# Bootstrap and read-only readiness diagnostics share this probe so an installed
+# but pre-lease treehouse build is never reported as spawn-capable.
+fm_backend_treehouse_lease_capable() {
+  treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
 }
 
 # fm_meta_get: the LAST value of `key=` in <meta-file>, or empty (never
