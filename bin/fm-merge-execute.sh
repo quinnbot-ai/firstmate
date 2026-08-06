@@ -173,6 +173,8 @@ def configured_hooks_path():
 
 
 def install_hooks(directory):
+    # Local landing assumes a quiescent checkout; concurrent uncooperative writers are outside the supported boundary.
+    # Best-effort dirty-state checks keep observed drift from proceeding silently.
     original_directory = configured_hooks_path()
     original_reference = original_directory / "reference-transaction"
     if original_directory.is_dir():
@@ -189,12 +191,25 @@ def install_hooks(directory):
         "cat > \"$payload\"\n"
         f"{original_command} \"$1\" < \"$payload\"\n"
         "[ \"$1\" = prepared ] || exit 0\n"
-        "count=$(awk -v ref=\"$FM_MERGE_EXPECTED_REF\" '$3 == ref { count++ } END { print count + 0 }' \"$payload\")\n"
-        "[ \"$count\" -ne 0 ] || exit 0\n"
-        "[ \"$count\" -eq 1 ] || exit 1\n"
-        "grep -qxF \"$FM_MERGE_EXPECTED_BASE $FM_MERGE_EXPECTED_CANDIDATE $FM_MERGE_EXPECTED_REF\" \"$payload\" || exit 1\n"
-        "git -C \"$FM_MERGE_PROJECT\" diff --quiet \"$FM_MERGE_EXPECTED_CANDIDATE\" -- || exit 1\n"
-        "[ -z \"$(git -C \"$FM_MERGE_PROJECT\" ls-files --others --exclude-standard)\" ] || exit 1\n"
+        "awk -v ref=\"$FM_MERGE_EXPECTED_REF\" -v base=\"$FM_MERGE_EXPECTED_BASE\" -v candidate=\"$FM_MERGE_EXPECTED_CANDIDATE\" -v zero=0000000000000000000000000000000000000000 '\n"
+        "  NF != 3 { invalid = 1; next }\n"
+        "  $3 == ref { if ($1 != base || $2 != candidate) invalid = 1; expected++; next }\n"
+        "  $3 == \"ORIG_HEAD\" { if ($2 != base) invalid = 1; original++; next }\n"
+        "  $3 == \"AUTO_MERGE\" { if ($2 != zero) invalid = 1; automatic++; next }\n"
+        "  { invalid = 1 }\n"
+        "  END {\n"
+        "    if (invalid) exit 1\n"
+        "    if (expected == 1 && original <= 1 && automatic <= 1) exit 0\n"
+        "    if (expected == 0 && NR == 1 && original + automatic == 1) exit 0\n"
+        "    exit 1\n"
+        "  }\n"
+        "' \"$payload\" || exit 1\n"
+        "if grep -qF \" $FM_MERGE_EXPECTED_REF\" \"$payload\"; then\n"
+        "  [ \"$(git -C \"$FM_MERGE_PROJECT\" symbolic-ref --quiet HEAD)\" = \"$FM_MERGE_EXPECTED_REF\" ] || exit 1\n"
+        "  grep -qxF \"$FM_MERGE_EXPECTED_BASE $FM_MERGE_EXPECTED_CANDIDATE $FM_MERGE_EXPECTED_REF\" \"$payload\" || exit 1\n"
+        "  git -C \"$FM_MERGE_PROJECT\" diff --quiet \"$FM_MERGE_EXPECTED_CANDIDATE\" -- || exit 1\n"
+        "  [ -z \"$(git -C \"$FM_MERGE_PROJECT\" ls-files --others --exclude-standard)\" ] || exit 1\n"
+        "fi\n"
     )
     hook.chmod(0o700)
 
