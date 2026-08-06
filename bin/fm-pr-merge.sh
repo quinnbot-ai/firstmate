@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Record a task's canonical GitHub PR metadata, then delegate its merge to the
 # one shared exact-candidate execution boundary.
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <merge-options>]
+# Merge options are --squash, --merge, --rebase,
+# --method <squash|merge|rebase>, --method=<squash|merge|rebase>, and
+# --delete-branch; the default method is squash.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -12,6 +12,7 @@ The boundary verifies clean exact candidate and base commits, then verifies the 
 The local path lets Git own the checkout and ref transition while its prepared reference transaction verifies the expected default ref, base, and candidate on a quiescent project checkout.
 Concurrent uncooperative writers to that project checkout during landing are outside the supported boundary; best-effort dirty-state checks refuse detected drift but do not provide cross-writer atomicity.
 The GitHub path submits an immediate REST merge conditioned on the verified head SHA.
+GitHub execution requires strict, administrator-enforced base-branch protection so the conditional merge cannot bypass required status checks.
 
 ## Literal-source inventory
 
@@ -37,8 +38,11 @@ It does not import the project, run pytest, execute plugins, or claim to observe
 The receipt binds the declaration digest, baseline version, declaration count, test-file count, and a SHA-256 digest of sorted literal declaration identifiers.
 Dynamic parametrization, generated tests, custom collection hooks, and other runtime behavior are intentionally outside this receipt's guarantee.
 In particular, a candidate-controlled `conftest.py` that could forge a runtime observer is outside the threat model because this contract never executes it.
+[`tests/fm-test-inventory.test.sh`](../tests/fm-test-inventory.test.sh) is the focused regression for that no-execution boundary.
 
-An intentional decrease advances `baseline.version` and records `baseline_reduction_review` with the prior version and counts, reviewer, date, and reason.
+A changed baseline policy advances `baseline.version`.
+`maximum_unreviewed_deletion` lowers both the declaration-count and test-file-count floors by the stated allowance; decreasing either baseline count or increasing that allowance also records `baseline_reduction_review` with the prior version and counts, reviewer, date, and reason.
+Changing between `test-bearing` and `testless` is refused at this boundary and requires a separately reviewed migration.
 Testless projects declare only `schema_version` and `status` and keep no receipt.
 
 ## Rollout

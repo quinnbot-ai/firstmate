@@ -2,7 +2,10 @@
 # Execute a task merge through one shared exact-candidate boundary.
 #
 # Usage: fm-merge-execute.sh local <task-id>
-#        fm-merge-execute.sh github <task-id> <pr-url> [-- <merge-args>]
+#        fm-merge-execute.sh github <task-id> <pr-url> [-- <merge-options>]
+# GitHub merge options are --squash, --merge, --rebase,
+# --method <squash|merge|rebase>, --method=<squash|merge|rebase>, and
+# --delete-branch.
 #
 # Both sanctioned merge entry points delegate here.
 # The boundary validates task metadata, repository identity, clean exact
