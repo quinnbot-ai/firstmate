@@ -1599,13 +1599,50 @@ terminate_and_reap_process_tree() {
   done
 }
 
+process_group_has_running_members() {
+  ps -eo pgid=,stat= 2>/dev/null \
+    | awk -v group="$1" '$1 == group && $2 !~ /^Z/ { found=1; exit } END { exit !found }'
+}
+
+terminate_and_reap_process_group() {
+  local group=$1 grace=0
+  if ! kill -STOP -- "-$group" 2>/dev/null; then
+    wait "$group" 2>/dev/null || true
+    return
+  fi
+  kill -TERM -- "-$group" 2>/dev/null || true
+  kill -CONT -- "-$group" 2>/dev/null || true
+  while [ "$grace" -lt 100 ] && process_group_has_running_members "$group"; do
+    sleep 0.01
+    grace=$((grace + 1))
+  done
+  kill -STOP -- "-$group" 2>/dev/null || true
+  kill -KILL -- "-$group" 2>/dev/null || true
+  wait "$group" 2>/dev/null || true
+  grace=0
+  while [ "$grace" -lt 100 ] && process_group_has_running_members "$group"; do
+    sleep 0.01
+    grace=$((grace + 1))
+  done
+}
+
+terminate_and_reap_background_job() {
+  local pid=$1 group
+  group=$(ps -o pgid= -p "$pid" 2>/dev/null | awk 'NR == 1 { gsub(/[[:space:]]/, "", $1); print $1 }' || true)
+  if [ "$group" = "$pid" ]; then
+    terminate_and_reap_process_group "$group"
+  else
+    terminate_and_reap_process_tree "$pid"
+  fi
+}
+
 # shellcheck disable=SC2329 # Registered by the EXIT and signal traps below.
 cleanup_run() {
   local rc=$? pid serial_child_owned=0 cleanup_pids="$RUN_TMP/cleanup-pids"
   trap - EXIT INT TERM HUP
   jobs -p >"$cleanup_pids" 2>/dev/null || true
   if [ -n "$SERIAL_CHILD_PID" ]; then
-    terminate_and_reap_process_tree "$SERIAL_CHILD_PID"
+    terminate_and_reap_process_group "$SERIAL_CHILD_PID"
     serial_child_owned=1
   fi
   while IFS= read -r pid; do
@@ -1613,7 +1650,7 @@ cleanup_run() {
     if [ "$pid" = "$SERIAL_CHILD_PID" ] || [ "$pid" = "$SERIAL_TEE_PID" ]; then
       continue
     fi
-    terminate_and_reap_process_tree "$pid"
+    terminate_and_reap_background_job "$pid"
     if [ -n "$SERIAL_TEE_PID" ]; then
       serial_child_owned=1
     fi
@@ -1751,7 +1788,7 @@ record_script_result() {
 
 run_one_serial() {
   local script=$1
-  local base family runtime requirement out fifo begin_iso begin_ms end_ms end_iso duration rc child_pid tee_pid
+  local base family runtime requirement out fifo begin_iso begin_ms end_ms end_iso duration rc child_pid tee_pid monitor_mode=
   base=$(basename "$script")
   family=$(family_for_basename "$base")
   runtime=$(runtime_gate_for_basename "$base")
@@ -1768,8 +1805,11 @@ run_one_serial() {
   mkfifo "$fifo"
   tee "$out" <"$fifo" &
   SERIAL_TEE_PID=$!
+  case $- in *m*) monitor_mode=1 ;; esac
+  set -m
   bash "$script" >"$fifo" 2>&1 &
   SERIAL_CHILD_PID=$!
+  [ -n "$monitor_mode" ] || set +m
   wait "$SERIAL_CHILD_PID"
   rc=$?
   wait "$SERIAL_TEE_PID" 2>/dev/null || true
@@ -1874,7 +1914,11 @@ else
     requirement=$(runtime_gate_requirement "$runtime")
     printf 'FM_TEST_BEGIN %s %s family=%s runtime_gate=%s gate_requirement=%s\n' \
       "$(now_iso)" "$script" "$family" "$runtime" "$requirement"
+    monitor_mode=
+    case $- in *m*) monitor_mode=1 ;; esac
+    set -m
     (
+      set +m
       set +e
       child_pid=
       # shellcheck disable=SC2329 # Registered by the worker signal traps below.
@@ -1916,6 +1960,7 @@ else
       exit 0
     ) &
     WORKER_PIDS[worker_n]=$!
+    [ -n "$monitor_mode" ] || set +m
     WORKER_IDX[worker_n]=$worker_n
     WORKER_SCRIPTS[worker_n]=$script
     active_workers=$((active_workers + 1))
