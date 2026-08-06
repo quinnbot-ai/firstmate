@@ -3,7 +3,10 @@ run-name: "PR #${{ github.event.pull_request.number }} body compliance - ${{ git
 
 on:
   pull_request:
-    types: [opened, edited, synchronize, reopened]
+    # A new PR can be observed before its creation pipeline has written the
+    # deterministic body signature. Body edits and later head/reopen events can
+    # satisfy the contract, so they remain enforced.
+    types: [edited, synchronize, reopened]
     branches:
       - main
 
@@ -11,11 +14,11 @@ permissions:
   contents: read
 
 # GitHub concurrency groups retain at most one pending run, replacing older
-# pending runs even when cancel-in-progress is false. Give body-bearing events
-# an immutable per-event group so first-time-fork approvals can never collapse
-# opened/edited checks. Keep synchronize/reopened coalescing as before.
+# pending runs even when cancel-in-progress is false. Give body-edit checks an
+# immutable per-event group so first-time-fork approvals can never collapse
+# their signature verification. Keep synchronize/reopened coalescing as before.
 concurrency:
-  group: no-mistakes-required-${{ github.event.pull_request.number }}-${{ (github.event.action == 'opened' || github.event.action == 'edited') && github.run_id || 'head-change' }}
+  group: no-mistakes-required-${{ github.event.pull_request.number }}-${{ github.event.action == 'edited' && github.run_id || 'head-change' }}
   cancel-in-progress: true
 
 jobs:
