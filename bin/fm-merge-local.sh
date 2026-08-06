@@ -172,7 +172,7 @@ tracked_state_matches() {
         ;;
       160000)
         [ -d "$full_path" ] || return 1
-        [ "$(safe_git -C "$full_path" rev-parse --verify HEAD^{commit} 2>/dev/null)" = "$object_id" ] \
+        [ "$(safe_git -C "$full_path" rev-parse --verify 'HEAD^{commit}' 2>/dev/null)" = "$object_id" ] \
           || return 1
         tracked_state_matches "$full_path" "$object_id" \
           || return 1
