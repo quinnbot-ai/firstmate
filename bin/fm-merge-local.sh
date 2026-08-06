@@ -279,7 +279,7 @@ validate_target_state() {
 # custody-verified candidate (firstmate never reconciles it manually).
 validate_target_state || exit 1
 
-# Clean fast-forward only: DEFAULT must be an ancestor of BRANCH.
+# Fast-forward only: DEFAULT must be an ancestor of the custody-verified candidate.
 if ! safe_git -C "$PROJECT_ROOT" merge-base --is-ancestor "$DEFAULT" "$CANDIDATE"; then
   echo "REFUSED: $BRANCH is not a fast-forward of $DEFAULT (it has diverged)." >&2
   echo "Have the crewmate rebase $BRANCH onto $DEFAULT, then retry." >&2
