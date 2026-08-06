@@ -86,7 +86,7 @@ test_claude_adapter_registration() {
   done
   grep -Fq 'disable-model-invocation: true' "$ROOT/.claude/commands/calm.md" \
     || fail "Claude Calm command must remain user invoked"
-  grep -Fq '"${CLAUDE_PROJECT_DIR}/bin/fm-calm.sh" toggle' "$ROOT/.claude/commands/calm.md" \
+  grep -Fq "\"\${CLAUDE_PROJECT_DIR}/bin/fm-calm.sh\" toggle" "$ROOT/.claude/commands/calm.md" \
     || fail "Claude Calm command does not invoke the public toggle"
   grep -Fq 'name: Firstmate Calm' "$ROOT/.claude/output-styles/firstmate-calm.md" \
     || fail "Claude Calm output style is not registered"
