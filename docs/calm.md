@@ -1,7 +1,7 @@
 # Calm mode
 
 Calm is a home-local conversation presentation toggle for Pi and Claude Code.
-It is off by default, and the last `/calm` choice persists for the effective Firstmate home across Pi and Claude session starts and resumes.
+It is off by default, and the last `/calm` choice persists for the effective Firstmate home across Pi and Claude session lifecycle transitions.
 
 ## Pi
 
@@ -52,6 +52,7 @@ FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 
 Claude Code exposes no supported project transcript renderer, so Calm changes Claude's response presentation rather than terminal rows.
 When Calm is active, its tracked SessionStart hook asks Claude to keep captain-facing updates outcome-first, concise, and free of incidental progress narration while preserving all operational instructions, safety boundaries, and material technical facts.
+That hook reloads the persisted preference on Claude startup, resume, clear, compact, and fork transitions.
 The project-native `/calm` command atomically toggles the effective home preference and applies the matching presentation for the rest of the current session.
 The tracked `Firstmate Calm` output style is available through Claude's `/config` output-style picker and preserves Claude Code's coding instructions.
 Output-style selection takes effect at the next Claude session start, but the SessionStart hook honors the persisted `config/calm` preference even when that style is not selected.

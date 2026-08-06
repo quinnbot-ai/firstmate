@@ -261,7 +261,7 @@ Quoted current markers, ASCII-only labels, ordinary text before a marker, unrela
 `tests/fm-pi-primary-live-e2e.test.sh` also proves the working ship replaces the built-in `Working...` row while Calm is active on the credentialed provider path, and that it clears when the run settles, before continuing its ordinary watcher lifecycle.
 The native export case asserts Pi's built-in completion feedback remains visible and that stock tool rows are present in exported HTML while Calm is active.
 `tests/fm-pi-primary-types.test.sh` performs strict no-emit TypeScript checking against the installed Pi declarations, currently package version 0.83.0.
-`tests/fm-calm-claude-adapter.test.sh` exercises the public preference and Claude SessionStart-nudge executables across absent, malformed, on, off, gate, and primary-scope cases.
+`tests/fm-calm-claude-adapter.test.sh` exercises the public preference and Claude SessionStart-nudge executables across absent, malformed, on, off, gate, and primary-scope cases, and proves Calm reload routing covers startup, resume, clear, compact, and fork without widening the operational digest lifecycle.
 `tests/fm-calm-claude-adapter-live-e2e.test.sh` is an opt-in isolated real-Claude guard for the project `/calm` command.
 
 The relevant commands are:
@@ -438,7 +438,7 @@ Escape aborted the run leaving `Operation aborted`, no boat, and no stale sprite
 
 Claude Code 2.1.223 was verified in an isolated disposable project fixture with a private `FM_HOME` whose persisted Calm preference began on.
 The project-native `/calm` command changed that preference to off through Claude's supported dynamic command preprocessing.
-The executable unit regression separately covers the preference's exact on/off file format, primary scope, gate silence, SessionStart registration, command registration, and output-style preservation contract.
+The executable unit regression separately covers the preference's exact on/off file format, primary scope, gate silence, distinct SessionStart lifecycle routing, command registration, and output-style preservation contract.
 
 ```text
 $ claude --version
@@ -447,7 +447,8 @@ $ claude --version
 $ tests/fm-calm-claude-adapter.test.sh
 ok - fm-calm: public commands default safely, persist exact values, and reject invalid input
 ok - Claude Calm nudge follows the persisted preference only in a genuine primary home
-ok - Claude Calm registers its SessionStart nudge, native command, and safe output style
+ok - Claude Calm reloads on startup, resume, clear, compact, and fork without widening the operational digest
+ok - Claude Calm registers its native command and safe output style
 
 $ FM_CLAUDE_CALM_LIVE_E2E=1 tests/fm-calm-claude-adapter-live-e2e.test.sh
 ok - Claude 2.1.223 (Claude Code) runs the project /calm command in an isolated fixture

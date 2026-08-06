@@ -29,7 +29,7 @@ The Pi Calm extension and Claude Calm adapter store the captain's home-local pre
 The only values it writes are `on` and `off`, each followed by one newline; an absent, unreadable, or unrecognized value defaults to off.
 The `/calm` command replaces the file atomically before changing live presentation, so a failed write leaves the current choice unchanged rather than claiming persistence.
 Pi reloads this preference on every `session_start`, including startup, new, resume, fork, and reload reasons.
-Claude reads it through its SessionStart hook and its project `/calm` command, so a home keeps the same choice across Claude session starts and resumes.
+Claude reloads it through its SessionStart hook on startup, resume, clear, compact, and fork transitions, while its project `/calm` command applies a changed choice immediately within the current session.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)

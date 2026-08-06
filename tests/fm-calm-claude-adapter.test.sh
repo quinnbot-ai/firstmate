@@ -31,6 +31,23 @@ run_nudge() {
   FM_ROOT_OVERRIDE="$root" FM_HOME="$root" FM_CONFIG_OVERRIDE="$root/config" "$NUDGE"
 }
 
+sessionstart_commands() {
+  local source=$1
+  node - "$ROOT/.claude/settings.json" "$source" <<'JS'
+const fs = require("fs");
+
+const settings = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const source = process.argv[3];
+for (const group of settings.hooks?.SessionStart ?? []) {
+  if (group.matcher && !new RegExp(group.matcher).test(source)) continue;
+  for (const hook of group.hooks ?? []) {
+    const executable = hook.command?.match(/\/bin\/([^\s"]+)/)?.[1];
+    if (executable) process.stdout.write(`${executable}\n`);
+  }
+}
+JS
+}
+
 test_preference_commands() {
   local config="$TMP_ROOT/preference/config" home="$TMP_ROOT/preference/home" out status=0
   out=$(run_calm "$config" status) || status=$?
@@ -56,8 +73,17 @@ test_preference_commands() {
 }
 
 test_claude_adapter_registration() {
-  grep -Fq 'fm-claude-calm-nudge.sh' "$ROOT/.claude/settings.json" \
-    || fail "Claude SessionStart settings do not register the Calm nudge"
+  local source commands
+  for source in startup resume clear; do
+    commands=$(sessionstart_commands "$source")
+    [ "$commands" = $'fm-sessionstart-nudge.sh\nfm-claude-calm-nudge.sh' ] \
+      || fail "Claude $source SessionStart routing changed unexpectedly: $commands"
+  done
+  for source in compact fork; do
+    commands=$(sessionstart_commands "$source")
+    [ "$commands" = 'fm-claude-calm-nudge.sh' ] \
+      || fail "Claude $source must reload Calm without running the operational digest: $commands"
+  done
   grep -Fq 'disable-model-invocation: true' "$ROOT/.claude/commands/calm.md" \
     || fail "Claude Calm command must remain user invoked"
   grep -Fq '"${CLAUDE_PROJECT_DIR}/bin/fm-calm.sh" toggle' "$ROOT/.claude/commands/calm.md" \
@@ -66,7 +92,8 @@ test_claude_adapter_registration() {
     || fail "Claude Calm output style is not registered"
   grep -Fq 'keep-coding-instructions: true' "$ROOT/.claude/output-styles/firstmate-calm.md" \
     || fail "Claude Calm output style must preserve coding instructions"
-  pass "Claude Calm registers its SessionStart nudge, native command, and safe output style"
+  pass "Claude Calm reloads on startup, resume, clear, compact, and fork without widening the operational digest"
+  pass "Claude Calm registers its native command and safe output style"
 }
 
 test_claude_nudge_scope_and_preference() {
