@@ -1503,6 +1503,8 @@ fi
 RUN_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run.XXXXXX")
 RECORDS="$RUN_TMP/records.tsv"
 FAMILIES_TSV="$RUN_TMP/families.tsv"
+SERIAL_CHILD_PID=
+SERIAL_TEE_PID=
 : >"$RECORDS"
 
 terminate_and_reap_process_tree() {
@@ -1546,13 +1548,30 @@ terminate_and_reap_process_tree() {
 }
 
 cleanup_run() {
-  local rc=$? pid cleanup_pids="$RUN_TMP/cleanup-pids"
+  local rc=$? pid serial_child_owned=0 cleanup_pids="$RUN_TMP/cleanup-pids"
   trap - EXIT INT TERM HUP
   jobs -p >"$cleanup_pids" 2>/dev/null || true
+  if [ -n "$SERIAL_CHILD_PID" ]; then
+    terminate_and_reap_process_tree "$SERIAL_CHILD_PID"
+    serial_child_owned=1
+  fi
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
+    if [ "$pid" = "$SERIAL_CHILD_PID" ] || [ "$pid" = "$SERIAL_TEE_PID" ]; then
+      continue
+    fi
     terminate_and_reap_process_tree "$pid"
+    if [ -n "$SERIAL_TEE_PID" ]; then
+      serial_child_owned=1
+    fi
   done <"$cleanup_pids"
+  if [ -n "$SERIAL_TEE_PID" ]; then
+    if [ "$serial_child_owned" -eq 1 ]; then
+      wait "$SERIAL_TEE_PID" 2>/dev/null || true
+    else
+      terminate_and_reap_process_tree "$SERIAL_TEE_PID"
+    fi
+  fi
   rm -rf "$RUN_TMP"
   exit "$rc"
 }
@@ -1695,12 +1714,14 @@ run_one_serial() {
   fifo="$RUN_TMP/serial.$TOTAL.fifo"
   mkfifo "$fifo"
   tee "$out" <"$fifo" &
-  tee_pid=$!
+  SERIAL_TEE_PID=$!
   bash "$script" >"$fifo" 2>&1 &
-  child_pid=$!
-  wait "$child_pid"
+  SERIAL_CHILD_PID=$!
+  wait "$SERIAL_CHILD_PID"
   rc=$?
-  wait "$tee_pid" 2>/dev/null || true
+  wait "$SERIAL_TEE_PID" 2>/dev/null || true
+  SERIAL_CHILD_PID=
+  SERIAL_TEE_PID=
   rm -f "$fifo"
   set -e
   : "${rc:=1}"

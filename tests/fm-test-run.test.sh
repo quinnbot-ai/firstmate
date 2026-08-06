@@ -311,12 +311,22 @@ SH
   pass "parallel workers own signals before launching test children"
 }
 
-test_interrupt_cleans_serial_child() {
+test_interrupt_drains_serial_cleanup() {
   local tmp fixture child_pid runner_pid rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-serial-signal.XXXXXX")
   fixture="$tmp/serial.test.sh"
   cat >"$fixture" <<'SH'
 #!/usr/bin/env bash
+set -e
+cleanup_done=
+cleanup() {
+  [ -z "$cleanup_done" ] || return
+  printf 'serial cleanup diagnostic\n'
+  printf 'released\n' >"$SCHED_EVIDENCE/resource.released"
+  cleanup_done=1
+}
+trap 'cleanup; exit 0' TERM
+trap cleanup EXIT
 printf '%s\n' "$$" >"$SCHED_EVIDENCE/child.pid"
 while :; do
   sleep 1
@@ -340,12 +350,16 @@ SH
   rc=$?
   set -e
   [ "$rc" -eq 143 ] || { rm -rf "$tmp"; fail "serial runner TERM exit should be 143, got $rc"; }
+  grep -Fq 'serial cleanup diagnostic' "$tmp/out" \
+    || { rm -rf "$tmp"; fail "serial cleanup diagnostic was not drained"; }
+  [ "$(cat "$tmp/resource.released" 2>/dev/null || true)" = "released" ] \
+    || { rm -rf "$tmp"; fail "serial cleanup did not release its resource"; }
   if kill -0 "$child_pid" 2>/dev/null; then
     rm -rf "$tmp"
     fail "runner TERM left its serial child alive"
   fi
   rm -rf "$tmp"
-  pass "signals terminate and reap serial test children"
+  pass "serial cleanup drains diagnostics before releasing tee"
 }
 
 test_interrupt_cleans_parallel_process_tree() {
@@ -1044,7 +1058,7 @@ test_empty_selection_emits_summary
 test_timing_markers_and_json
 test_quoting_and_platform_temp_paths
 test_parallel_child_can_signal_immediately
-test_interrupt_cleans_serial_child
+test_interrupt_drains_serial_cleanup
 test_interrupt_cleans_parallel_process_tree
 test_interrupt_waits_for_parallel_cleanup
 test_aggregate_exit_behavior
