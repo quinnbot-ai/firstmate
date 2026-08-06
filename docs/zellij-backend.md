@@ -76,8 +76,12 @@ There is a narrow visible race between those calls that no current Zellij flag c
 
 Literal send uses bracketed paste followed by a separate explicit Enter.
 The adapter supports `Enter`, `Esc`, and the one-argument key expression `Ctrl c` through the shared key vocabulary.
-Zellij exposes no cursor-row, ANSI composer style, or native agent-state signal, so submit acknowledgement remains content-delta based.
-This can distinguish no change from a changed screen but is less precise than tmux's structural box reader or Herdr's native state plus structural classifier.
+Zellij exposes no cursor-row, ANSI composer style, or native agent-state signal.
+`fm_backend_zellij_composer_state` in [`bin/backends/zellij.sh`](../bin/backends/zellij.sh) is therefore the sole owner of its fail-closed plain-screen contract for spawn readiness, send acknowledgement, and recovery.
+It emits `idle`, `composing`, `submitted`, `exited`, `ambiguous`, or `unreachable`.
+Only a known empty composer is idle, only a known typed composer is composing, and submitted requires a composing baseline followed by a changed known idle layout.
+Spawn wraps each Zellij harness command with a task-bound exit marker, so only that marker proves exited for recovery.
+Unknown layouts, raw shell prompts, absent sessions, and unreadable panes never become delivery or recovery proof.
 
 Viewport capture has no line-bound option.
 Routine reads use `dump-screen` and larger peeks use `dump-screen --full`, followed by local trimming.
@@ -93,7 +97,8 @@ Real test cleanup uses only an isolated non-`firstmate` session and the guard in
 - All homes share one session and tab bar; scoped titles prevent cross-home identity collisions but do not create per-home visual containers.
 - There is no native busy or push-event signal, so supervision uses capture/hash polling for screen changes and each harness adapter's semantic lifecycle for worker state.
   Grok alone retains its isolated rendered-tail fallback.
-- There is no verified agent-process liveness signal, so a dead Zellij secondmate is reported inconclusive rather than auto-respawned.
+- There is no native agent-process liveness signal.
+  Recovery accepts only the task-bound exit marker emitted by the spawn wrapper, and leaves every other Zellij screen inconclusive.
 - New-tab focus restoration has a narrow visible race.
 - CLI exit status is not meaningful; a target can still disappear after structural readiness checks.
 - Worktree cwd discovery requires the spawn-time marker probe.
