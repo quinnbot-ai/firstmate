@@ -123,8 +123,9 @@ Backend applicability was reviewed across every spawn adapter.
 Tmux needs the exact `pi-launcher`, `pi-signed`, `pi`, and `Pi` process identities for recovery-grade liveness.
 Herdr uses native registered-agent state and needs no process-name branch.
 Zellij has no verified recovery-grade agent process probe.
-Its spawn wrapper emits a task-bound exit marker, which `fm_backend_zellij_composer_state` accepts only as a controlled lifecycle signal and never as an operating-system liveness probe.
-`tests/fm-backend-zellij.test.sh` pins the marker and fail-closed composer-layout contract.
+Its spawn wrapper publishes an exit receipt bound to a private per-launch nonce, which `fm_backend_zellij_composer_state` accepts independently of later shell-prompt rendering.
+The visible task-bound marker remains diagnostic output and carries no lifecycle authority.
+`tests/fm-backend-zellij.test.sh` pins the nonce-bound receipt and full-capture composer-layout contract.
 Orca and cmux do not support secondmate spawns, so they retain their existing generic ordinary-launch semantics without a new liveness matcher.
 
 The structural multi-row composer reader, Kimi pointer-delivery path, and OpenCode 1.18.4 busy-queue behavior are pinned by:

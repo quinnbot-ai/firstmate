@@ -2045,6 +2045,13 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+ZELLIJ_LIFECYCLE_NONCE=
+if [ "$BACKEND" = zellij ]; then
+  ZELLIJ_LIFECYCLE_NONCE=$(fm_backend_zellij_lifecycle_arm "$W") || {
+    echo "error: could not arm the Zellij lifecycle state for $W" >&2
+    exit 1
+  }
+fi
 {
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
@@ -2148,8 +2155,8 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
   fi
 fi
 if [ "$BACKEND" = zellij ]; then
-  LAUNCH=$(fm_backend_zellij_wrap_launch "$W" "$LAUNCH") || {
-    echo "error: could not bind the Zellij lifecycle marker for $W" >&2
+  LAUNCH=$(fm_backend_zellij_wrap_launch "$W" "$LAUNCH" "$ZELLIJ_LIFECYCLE_NONCE") || {
+    echo "error: could not bind the Zellij lifecycle state for $W" >&2
     exit 1
   }
 fi

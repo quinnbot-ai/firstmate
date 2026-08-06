@@ -593,28 +593,38 @@ test_capture_fails_when_session_absent() {
 
 test_composer_layout_classifies_known_fixtures() {
   local fixture expected out exited
-  for fixture in idle composing exited ambiguous; do
+  for fixture in idle composing ambiguous; do
     case "$fixture" in
       idle) expected=idle ;;
       composing) expected=composing ;;
-      exited) expected=exited ;;
       ambiguous) expected=ambiguous ;;
     esac
     out=$(fm_backend_zellij_composer_layout_state "$(cat "$ROOT/tests/fixtures/zellij-composer-state/$fixture.txt")" fm-fixture)
     [ "$out" = "$expected" ] || fail "fixture $fixture should classify as $expected, got $out"
   done
   exited=$(cat "$ROOT/tests/fixtures/zellij-composer-state/exited.txt")
-  out=$(fm_backend_zellij_composer_layout_state "$exited" fm-other-task)
-  [ "$out" = ambiguous ] || fail "a different task's exit marker must fail closed, got $out"
+  out=$(fm_backend_zellij_composer_layout_state "$exited" fm-fixture)
+  [ "$out" = ambiguous ] || fail "pane output must not prove lifecycle exit, got $out"
   pass "fm_backend_zellij_composer_layout_state: recognizes only the fixture-proven layouts"
 }
 
-test_composer_layout_rejects_nonterminal_exit_marker() {
+test_composer_layout_finds_supported_row_above_border_and_footer() {
   local capture out
-  capture=$'__FM_ZELLIJ_AGENT_EXITED__:fixture:0\n│ > │'
+  capture=$'agent output\n╭────────────╮\n│ > captain │\n╰────────────╯\n│ context: 4.2% │'
   out=$(fm_backend_zellij_composer_layout_state "$capture" fm-fixture)
-  [ "$out" = idle ] || fail "a nonterminal exit marker must not prove exit, got $out"
-  pass "fm_backend_zellij_composer_layout_state: accepts an exit marker only as the final screen line"
+  [ "$out" = composing ] || fail "a bordered composer above its border and footer should be composing, got $out"
+  capture=$'agent output\n╭────────────╮\n│ >          │\n╰────────────╯\n│ context: 4.2% │'
+  out=$(fm_backend_zellij_composer_layout_state "$capture" fm-fixture)
+  [ "$out" = idle ] || fail "an empty composer above its border and footer should be idle, got $out"
+  pass "fm_backend_zellij_composer_layout_state: scans the full capture for the supported composer row"
+}
+
+test_composer_layout_never_accepts_exit_marker_output() {
+  local capture out
+  capture=$'__FM_ZELLIJ_AGENT_EXITED__:fixture:0\nzsh %'
+  out=$(fm_backend_zellij_composer_layout_state "$capture" fm-fixture)
+  [ "$out" = ambiguous ] || fail "a final diagnostic marker must not prove exit, got $out"
+  pass "fm_backend_zellij_composer_layout_state: pane text cannot forge lifecycle exit"
 }
 
 test_composer_state_requires_known_transition_for_submission() {
@@ -652,13 +662,46 @@ test_composer_state_reports_unreachable_target() {
   pass "fm_backend_zellij_composer_state: an unavailable endpoint is unreachable"
 }
 
-test_lifecycle_wrapper_emits_task_bound_exit_marker() {
-  local command out
-  command=$(fm_backend_zellij_wrap_launch fm-fixture 'printf launch')
-  out=$(bash -c "$command")
-  [ "$out" = $'launch\n__FM_ZELLIJ_AGENT_EXITED__:fixture:0' ] \
-    || fail "the spawn wrapper should preserve launch output and emit its task-bound exit marker, got '$out'"
-  pass "fm_backend_zellij_wrap_launch: emits the task-bound exit marker after the harness returns"
+test_lifecycle_wrapper_publishes_nonce_bound_exit() {
+  local dir nonce command out state
+  dir="$TMP_ROOT/lifecycle-wrapper"; mkdir -p "$dir/state"
+  nonce=$(FM_STATE_OVERRIDE="$dir/state" fm_backend_zellij_lifecycle_arm fm-fixture) \
+    || fail "the lifecycle state could not be armed"
+  command=$(FM_STATE_OVERRIDE="$dir/state" fm_backend_zellij_wrap_launch fm-fixture 'printf launch' "$nonce") \
+    || fail "the lifecycle wrapper could not be built"
+  out=$(bash -c "$command; printf 'shell prompt\n'")
+  [ "$out" = $'launch\n__FM_ZELLIJ_AGENT_EXITED__:fixture:0\nshell prompt' ] \
+    || fail "the wrapper should preserve launch output and return to its shell, got '$out'"
+  state=$(FM_STATE_OVERRIDE="$dir/state" fm_backend_zellij_lifecycle_state fm-fixture)
+  [ "$state" = exited ] || fail "the wrapper did not publish an authenticated exit receipt, got $state"
+  pass "fm_backend_zellij_wrap_launch: publishes nonce-bound exit before the shell resumes"
+}
+
+test_lifecycle_state_rejects_stale_and_malformed_receipts() {
+  local dir nonce state
+  dir="$TMP_ROOT/lifecycle-auth"; mkdir -p "$dir/state"
+  nonce=$(FM_STATE_OVERRIDE="$dir/state" fm_backend_zellij_lifecycle_arm fm-fixture) \
+    || fail "the lifecycle state could not be armed"
+  printf '%032d 0\n' 0 > "$dir/state/fixture.zellij-exited"
+  state=$(FM_STATE_OVERRIDE="$dir/state" fm_backend_zellij_lifecycle_state fm-fixture)
+  [ "$state" = unknown ] || fail "a receipt from another launch should be unknown, got $state"
+  printf '%s not-a-status\n' "$nonce" > "$dir/state/fixture.zellij-exited"
+  state=$(FM_STATE_OVERRIDE="$dir/state" fm_backend_zellij_lifecycle_state fm-fixture)
+  [ "$state" = unknown ] || fail "a malformed receipt should be unknown, got $state"
+  pass "fm_backend_zellij_lifecycle_state: rejects stale and malformed exit receipts"
+}
+
+test_composer_state_prefers_trusted_exit_over_shell_prompt() {
+  local dir nonce command out
+  dir="$TMP_ROOT/composer-exited"; mkdir -p "$dir/state"
+  nonce=$(FM_STATE_OVERRIDE="$dir/state" fm_backend_zellij_lifecycle_arm fm-fixture) \
+    || fail "the lifecycle state could not be armed"
+  command=$(FM_STATE_OVERRIDE="$dir/state" fm_backend_zellij_wrap_launch fm-fixture ':' "$nonce") \
+    || fail "the lifecycle wrapper could not be built"
+  bash -c "$command" >/dev/null
+  out=$(FM_STATE_OVERRIDE="$dir/state" fm_backend_zellij_composer_state firstmate:7 '' fm-fixture)
+  [ "$out" = exited ] || fail "trusted exit state should survive a later shell prompt, got $out"
+  pass "fm_backend_zellij_composer_state: trusted lifecycle state proves exit independently of pane layout"
 }
 
 test_agent_state_maps_only_marker_proven_exit_to_dead() {
@@ -1190,10 +1233,13 @@ test_capture_large_reads_use_full_scrollback_and_trim
 test_capture_fails_when_pane_absent
 test_capture_fails_when_session_absent
 test_composer_layout_classifies_known_fixtures
-test_composer_layout_rejects_nonterminal_exit_marker
+test_composer_layout_finds_supported_row_above_border_and_footer
+test_composer_layout_never_accepts_exit_marker_output
 test_composer_state_requires_known_transition_for_submission
 test_composer_state_reports_unreachable_target
-test_lifecycle_wrapper_emits_task_bound_exit_marker
+test_lifecycle_wrapper_publishes_nonce_bound_exit
+test_lifecycle_state_rejects_stale_and_malformed_receipts
+test_composer_state_prefers_trusted_exit_over_shell_prompt
 test_agent_state_maps_only_marker_proven_exit_to_dead
 test_send_key_normalizes_and_targets_pane
 test_send_literal_uses_paste_separator_for_option_shaped_text

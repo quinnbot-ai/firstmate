@@ -80,8 +80,10 @@ Zellij exposes no cursor-row, ANSI composer style, or native agent-state signal.
 `fm_backend_zellij_composer_state` in [`bin/backends/zellij.sh`](../bin/backends/zellij.sh) is therefore the sole owner of its fail-closed plain-screen contract for spawn readiness, send acknowledgement, and recovery.
 It emits `idle`, `composing`, `submitted`, `exited`, `ambiguous`, or `unreachable`.
 Only a known empty composer is idle, only a known typed composer is composing, and submitted requires a composing baseline followed by a changed known idle layout.
-Spawn wraps each Zellij harness command with a task-bound exit marker, so only that marker proves exited for recovery.
-Unknown layouts, raw shell prompts, absent sessions, and unreadable panes never become delivery or recovery proof.
+Spawn arms a per-launch random nonce in private lifecycle state and wraps each Zellij harness command so its return publishes a matching exit receipt.
+Only a receipt matching the current launch nonce proves exited for recovery; the visible task-bound marker is diagnostic and never lifecycle authority.
+The presentation parser scans the full capture for the bottom-most supported composer row, so a lower box border or footer does not hide a known idle or composing layout.
+Unknown layouts, raw shell prompts, absent sessions, unreadable panes, and visible exit-marker text never become delivery or recovery proof.
 
 Viewport capture has no line-bound option.
 Routine reads use `dump-screen` and larger peeks use `dump-screen --full`, followed by local trimming.
@@ -98,7 +100,7 @@ Real test cleanup uses only an isolated non-`firstmate` session and the guard in
 - There is no native busy or push-event signal, so supervision uses capture/hash polling for screen changes and each harness adapter's semantic lifecycle for worker state.
   Grok alone retains its isolated rendered-tail fallback.
 - There is no native agent-process liveness signal.
-  Recovery accepts only the task-bound exit marker emitted by the spawn wrapper, and leaves every other Zellij screen inconclusive.
+  Recovery accepts only the nonce-bound private exit receipt emitted by the spawn wrapper, and leaves every other Zellij state inconclusive.
 - New-tab focus restoration has a narrow visible race.
 - CLI exit status is not meaningful; a target can still disappear after structural readiness checks.
 - Worktree cwd discovery requires the spawn-time marker probe.

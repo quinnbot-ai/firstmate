@@ -487,11 +487,8 @@ fm_backend_zellij_capture() {  # <target> <lines> [expected-label]
   printf '%s' "$out" | tail -n "$lines"
 }
 
-# fm_backend_zellij_lifecycle_marker: the task-bound marker the spawn wrapper
-# prints only after the launched harness returns to its shell. Zellij exposes
-# neither a process identity nor structured composer data, so this controlled
-# marker is the only recovery-grade proof of an exited harness. A marker is
-# never accepted without the same expected task label that target_ready uses.
+# fm_backend_zellij_lifecycle_marker: the task-bound diagnostic marker the
+# spawn wrapper prints after the launched harness returns to its shell.
 fm_backend_zellij_lifecycle_marker() {  # <expected-label>
   local label=$1 id
   case "$label" in
@@ -501,50 +498,125 @@ fm_backend_zellij_lifecycle_marker() {  # <expected-label>
   printf '__FM_ZELLIJ_AGENT_EXITED__:%s:' "$id"
 }
 
-# fm_backend_zellij_wrap_launch: preserve the launch command's status while
-# emitting the task-bound exited marker once it returns. Only fm-spawn uses
-# this wrapper. It deliberately keeps the terminal shell alive for subsequent
-# inspection and safe teardown rather than replacing it with exec.
-fm_backend_zellij_wrap_launch() {  # <expected-label> <launch-command>
-  local marker
+# fm_backend_zellij_lifecycle_paths: resolve the nonce authority and exit
+# receipt owned by one task label.
+fm_backend_zellij_lifecycle_paths() {  # <expected-label>
+  local label=$1 id state
+  case "$label" in
+    fm-?*) id=${label#fm-} ;;
+    *) return 1 ;;
+  esac
+  case "$id" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+  state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
+  printf '%s\n%s\n' "$state/$id.zellij-lifecycle" "$state/$id.zellij-exited"
+}
+
+fm_backend_zellij_lifecycle_nonce() {
+  local nonce
+  nonce=$(LC_ALL=C od -An -v -tx1 -N 16 /dev/urandom 2>/dev/null | tr -d ' \n') || return 1
+  case "$nonce" in ''|*[!0-9a-f]*) return 1 ;; esac
+  [ "${#nonce}" -eq 32 ] || return 1
+  printf '%s' "$nonce"
+}
+
+fm_backend_zellij_lifecycle_arm() {  # <expected-label>
+  local paths authority receipt nonce tmp
+  paths=$(fm_backend_zellij_lifecycle_paths "$1") || return 1
+  authority=${paths%%$'\n'*}
+  receipt=${paths#*$'\n'}
+  nonce=$(fm_backend_zellij_lifecycle_nonce) || return 1
+  tmp=$(umask 077; mktemp "$authority.tmp.XXXXXX") || return 1
+  if ! printf '%s\n' "$nonce" > "$tmp" || ! mv -f -- "$tmp" "$authority"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  rm -f -- "$receipt"
+  printf '%s' "$nonce"
+}
+
+fm_backend_zellij_lifecycle_state() {  # <expected-label>
+  local paths authority receipt expected nonce status extra
+  paths=$(fm_backend_zellij_lifecycle_paths "$1" 2>/dev/null) || { printf 'absent'; return 0; }
+  authority=${paths%%$'\n'*}
+  receipt=${paths#*$'\n'}
+  [ -f "$authority" ] || { printf 'absent'; return 0; }
+  IFS= read -r expected < "$authority" 2>/dev/null || { printf 'unknown'; return 0; }
+  if ! printf '%s' "$expected" | grep -Eq '^[0-9a-f]{32}$'; then
+    printf 'unknown'
+    return 0
+  fi
+  [ -f "$receipt" ] || { printf 'running'; return 0; }
+  nonce= status= extra=
+  IFS=' ' read -r nonce status extra < "$receipt" 2>/dev/null || { printf 'unknown'; return 0; }
+  if [ -n "$extra" ] || [ "$nonce" != "$expected" ]; then
+    printf 'unknown'
+    return 0
+  fi
+  case "$status" in ''|*[!0-9]*) printf 'unknown' ;; *) printf 'exited' ;; esac
+}
+
+fm_backend_zellij_shell_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
+# fm_backend_zellij_wrap_launch: preserve the launch command's status, publish
+# a nonce-bound exit receipt, and emit the task-bound diagnostic marker.
+fm_backend_zellij_wrap_launch() {  # <expected-label> <launch-command> <nonce>
+  local marker paths authority receipt nonce=$3 authority_q receipt_q nonce_q marker_q
   marker=$(fm_backend_zellij_lifecycle_marker "$1") || return 1
+  paths=$(fm_backend_zellij_lifecycle_paths "$1") || return 1
+  authority=${paths%%$'\n'*}
+  receipt=${paths#*$'\n'}
+  [ "$(cat "$authority" 2>/dev/null)" = "$nonce" ] || return 1
+  authority_q=$(fm_backend_zellij_shell_quote "$authority")
+  receipt_q=$(fm_backend_zellij_shell_quote "$receipt")
+  nonce_q=$(fm_backend_zellij_shell_quote "$nonce")
+  marker_q=$(fm_backend_zellij_shell_quote "$marker")
   # shellcheck disable=SC2016 # Preserve the downstream shell's status expansion.
-  printf '( %s ); fm_zellij_exit=$?; printf "\\n%s%%s\\n" "$fm_zellij_exit"' "$2" "$marker"
+  printf '( %s ); fm_zellij_exit=$?; if [ "$(cat %s 2>/dev/null)" = %s ]; then fm_zellij_tmp=$(mktemp %s.tmp.XXXXXX 2>/dev/null) && (umask 077; printf "%%s %%s\\n" %s "$fm_zellij_exit" > "$fm_zellij_tmp") && mv -f -- "$fm_zellij_tmp" %s || { [ -z "${fm_zellij_tmp:-}" ] || rm -f -- "$fm_zellij_tmp"; }; fi; printf "\\n%%s%%s\\n" %s "$fm_zellij_exit"' \
+    "$2" "$authority_q" "$nonce_q" "$receipt_q" "$nonce_q" "$receipt_q" "$marker_q"
 }
 
 # fm_backend_zellij_composer_layout_state: classify one plain Zellij screen
-# capture as idle|composing|exited|ambiguous. This is deliberately the only
-# owner of Zellij's presentation parsing. The narrow accepted layouts are the
-# known one-line bordered composer and the verified bare Claude/Codex prompt;
-# every other screen is ambiguous. A shell prompt is not enough to prove exit.
+# capture as idle|composing|ambiguous. This is deliberately the only owner of
+# Zellij's presentation parsing. It selects the bottom-most supported bordered
+# or bare Claude/Codex composer row from the full capture.
 fm_backend_zellij_composer_layout_state() {  # <capture> [expected-label]
-  local capture=$1 expected_label=${2:-} marker line suffix content verdict
-  line=$(printf '%s\n' "$capture" | awk 'NF { last=$0 } END { print last }')
-  [ -n "$line" ] || { printf 'ambiguous'; return 0; }
-  if [ -n "$expected_label" ]; then
-    marker=$(fm_backend_zellij_lifecycle_marker "$expected_label" 2>/dev/null) || marker=
-    if [ -n "$marker" ]; then
-      case "$line" in
-        "$marker"[0-9]*)
-          suffix=${line#"$marker"}
-          case "$suffix" in
-            *[!0-9]*|'') ;;
-            *) printf 'exited'; return 0 ;;
-          esac
-          ;;
-      esac
-    fi
+  local capture=$1 line trimmed candidate='' bordered=0 content verdict
+  while IFS= read -r line; do
+    trimmed="${line#"${line%%[![:space:]]*}"}"
+    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+    [ -n "$trimmed" ] || continue
+    case "$trimmed" in
+      '│'*'│'|'┃'*'┃'|'|'*'|')
+        content=$trimmed
+        case "$content" in
+          '│'*'│') content=${content#│}; content=${content%│} ;;
+          '┃'*'┃') content=${content#┃}; content=${content%┃} ;;
+          '|'*'|') content=${content#|}; content=${content%|} ;;
+        esac
+        content="${content#"${content%%[![:space:]]*}"}"
+        case "$content" in
+          '>'|'>'\ *|'❯'|'❯ '*|'›'|'› '*) candidate=$trimmed; bordered=1 ;;
+        esac
+        ;;
+      '❯'|'❯ '*|'›'|'› '*) candidate=$trimmed; bordered=0 ;;
+    esac
+  done < <(printf '%s\n' "$capture")
+  [ -n "$candidate" ] || { printf 'ambiguous'; return 0; }
+  content=$candidate
+  if [ "$bordered" -eq 1 ]; then
+    case "$content" in
+      '│'*'│') content=${content#│}; content=${content%│} ;;
+      '┃'*'┃') content=${content#┃}; content=${content%┃} ;;
+      '|'*'|') content=${content#|}; content=${content%|} ;;
+    esac
   fi
-  if printf '%s\n' "$line" | grep -Eq '^[[:space:]]*(│|┃|\|).*([│┃|])[[:space:]]*$'; then
-    content=$(printf '%s\n' "$line" | sed 's/^[[:space:]]*[│┃|][[:space:]]*//; s/[[:space:]]*[│┃|][[:space:]]*$//')
-    verdict=$(fm_composer_classify_content 1 "$content")
-  elif printf '%s\n' "$line" | grep -Eq '^[[:space:]]*[❯›]([[:space:]].*)?$'; then
-    content=$(printf '%s\n' "$line" | sed 's/^[[:space:]]*[❯›][[:space:]]*//')
-    verdict=$(fm_composer_classify_content 0 "$content")
-  else
-    printf 'ambiguous'
-    return 0
-  fi
+  content="${content#"${content%%[![:space:]]*}"}"
+  content="${content%"${content##*[![:space:]]}"}"
+  verdict=$(fm_composer_classify_content "$bordered" "$content")
   case "$verdict" in
     empty) printf 'idle' ;;
     pending) printf 'composing' ;;
@@ -561,7 +633,14 @@ fm_backend_zellij_composer_layout_state() {  # <capture> [expected-label]
 # layout. A changed but unrecognized screen stays ambiguous, never submitted.
 # No caller may parse dump-screen presentation text independently.
 fm_backend_zellij_composer_state() {  # <target> [typed-baseline] [expected-label]
-  local target=$1 baseline=${2:-} expected_label=${3:-} capture before after
+  local target=$1 baseline=${2:-} expected_label=${3:-} capture before after lifecycle
+  if [ -n "$expected_label" ]; then
+    lifecycle=$(fm_backend_zellij_lifecycle_state "$expected_label")
+    case "$lifecycle" in
+      exited) printf 'exited'; return 0 ;;
+      unknown) printf 'ambiguous'; return 0 ;;
+    esac
+  fi
   fm_backend_zellij_target_ready "$target" "$expected_label" || { printf 'unreachable'; return 0; }
   capture=$(fm_backend_zellij_capture "$target" 40 "$expected_label") || { printf 'unreachable'; return 0; }
   after=$(fm_backend_zellij_composer_layout_state "$capture" "$expected_label")
