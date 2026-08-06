@@ -888,9 +888,9 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 # Only `dead` and `missing` license recovery. The tmux adapter requires a
 # successful session inventory and returns `missing` only when it omits the
 # exact window; the Herdr adapter reuses its husk classifier. Zellij accepts
-# only its task-bound spawn exit marker as dead proof; a missing screen or an
-# unknown layout remains unreadable. Orca and cmux do not support secondmate
-# spawns.
+# only its authenticated nonce-bound exit receipt as dead proof; a missing
+# screen or an unknown layout remains unreadable. Orca and cmux do not support
+# secondmate spawns.
 fm_backend_agent_state() {  # <backend> <target> [expected-label]
   local backend=$1 target=$2 expected_label=${3:-}
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }

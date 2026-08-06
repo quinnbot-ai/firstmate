@@ -590,9 +590,8 @@ test_capture_fails_when_session_absent() {
 }
 
 # --- shared composer/lifecycle classifier -----------------------------------
-# Live Zellij 0.44+ screen-rendering evidence is DEFERRED and unverified until
-# this contract is exercised on a host with Zellij 0.44+ and a supported harness.
-# Run tests/fm-backend-zellij-smoke.test.sh before enabling Zellij for real use.
+# Live screen-rendering verification status is owned by
+# docs/verification/runtime-backends.md#zellij.
 
 test_composer_layout_classifies_known_fixtures() {
   local fixture expected out exited

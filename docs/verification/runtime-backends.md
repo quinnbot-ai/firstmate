@@ -440,8 +440,10 @@ The dedicated Herdr daemon workspace topology is covered by `tests/fm-afk-launch
 
 ## Zellij
 
-The current compatibility floor and latest verification are Zellij 0.44.0 with `jq` on macOS aarch64.
+The current compatibility floor and latest live CLI verification are Zellij 0.44.0 with `jq` on macOS aarch64.
 All real tests use a uniquely named session and `tests/zellij-test-safety.sh`; they never touch a session named `firstmate` or call all-session deletion.
+The current full-capture composer-layout classifier is fixture-verified only.
+Live Zellij 0.44 or newer screen rendering against a supported harness has not been rerun for that classifier, so live layout compatibility remains unverified until a harness-specific live check is added and run.
 
 | Guarantee | Command shape | Result |
 | --- | --- | --- |
@@ -464,7 +466,8 @@ tests/fm-backend-zellij.test.sh
 tests/fm-backend-zellij-smoke.test.sh
 ```
 
-The real lifecycle smoke proved spawn, metadata, nested-subshell worktree discovery, send, capture, unlanded-work refusal, approved local landing, exact tab cleanup, and session cleanup without retaining task-specific ids or branch names here.
+The earlier real lifecycle smoke proved spawn, metadata, nested-subshell worktree discovery, send, capture, unlanded-work refusal, approved local landing, exact tab cleanup, and session cleanup without retaining task-specific ids or branch names here.
+It predates the current full-capture composer-layout classifier and does not verify that classifier's live rendered rows.
 
 ## Orca
 

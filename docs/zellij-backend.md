@@ -82,7 +82,7 @@ It emits `idle`, `composing`, `submitted`, `exited`, `ambiguous`, or `unreachabl
 Only a known empty composer is idle, only a known typed composer is composing, and submitted requires a composing baseline followed by a changed known idle layout.
 Spawn arms a per-launch random nonce in private lifecycle state and wraps each Zellij harness command so its return publishes a matching exit receipt.
 Only a receipt matching the current launch nonce proves exited for recovery; the visible task-bound marker is diagnostic and never lifecycle authority.
-The presentation parser scans the full capture for the bottom-most supported composer row, so a lower box border or footer does not hide a known idle or composing layout.
+The presentation parser scans the full capture for the bottom-most supported composer row, so a lower box border or footer does not hide a known idle or composing layout, while a later raw shell prompt invalidates the candidate.
 Unknown layouts, raw shell prompts, absent sessions, unreadable panes, and visible exit-marker text never become delivery or recovery proof.
 
 Viewport capture has no line-bound option.
@@ -114,4 +114,4 @@ tests/fm-backend-zellij-smoke.test.sh
 ```
 
 The real smoke test uses a unique session and guarded deletion.
-[`verification/runtime-backends.md`](verification/runtime-backends.md#zellij) records the active CLI matrix and lifecycle evidence.
+[`verification/runtime-backends.md`](verification/runtime-backends.md#zellij) records the active CLI matrix, lifecycle evidence, and deferred live-rendering status.

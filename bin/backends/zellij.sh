@@ -40,9 +40,9 @@
 # (acceptable - recorded worktree paths do not survive a move either).
 #
 # Empirical verification (real zellij 0.44.0, macOS aarch64, 2026-07-02;
-# docs/zellij-backend.md has the full evidence log) resolved every "gaps to
-# verify" item in the design report, plus additional real findings not
-# anticipated by the report:
+# docs/verification/runtime-backends.md has the full evidence log) resolved
+# every "gaps to verify" item in the design report, plus additional real
+# findings not anticipated by the report:
 #
 #   1. dump-screen on a background session with NO attached client: WORKS.
 #   2. Key names: Enter -> "Enter", Escape -> "Esc" (NOT "Escape"), Ctrl-C ->
@@ -123,7 +123,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
 # Verified minimum: report.md recommends "likely Zellij 0.44 or newer" for
 # returned pane/tab IDs and dump-screen --pane-id; empirically verified
-# against the installed 0.44.0 (docs/zellij-backend.md).
+# against the installed 0.44.0 (docs/verification/runtime-backends.md).
 FM_BACKEND_ZELLIJ_MIN_MAJOR=0
 FM_BACKEND_ZELLIJ_MIN_MINOR=44
 
@@ -663,8 +663,8 @@ fm_backend_zellij_composer_state() {  # <target> [typed-baseline] [expected-labe
 
 # fm_backend_zellij_agent_state: map the shared Zellij composer/lifecycle
 # vocabulary into fm_backend_agent_state's recovery vocabulary. Only an
-# explicit spawn-owned exited marker licenses recovery; unreachable and unknown
-# layouts remain non-actionable.
+# authenticated nonce-bound exit receipt licenses recovery; unreachable and
+# unknown layouts remain non-actionable.
 fm_backend_zellij_agent_state() {  # <target> [expected-label]
   case "$(fm_backend_zellij_composer_state "$1" '' "${2:-}")" in
     idle|composing|submitted) printf 'alive' ;;
