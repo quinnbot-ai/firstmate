@@ -99,13 +99,14 @@ Portable shards, each portable serial shard, and the Herdr lane upload runner-ge
 
 ## Stock macOS Bash compatibility
 
-The CI job `macos-stock-bash` runs the focused `tests/fm-test-run.test.sh` contract under `/bin/bash` from the macOS image, covering parallel scheduling, result aggregation, quoting, private temporary paths, signal cleanup, and the GNU/BSD `stat` difference.
-The same job performs the repository-wide Bash parse sweep before the focused contract run.
+The CI job `macos-stock-bash` runs `tests/fm-fleet-snapshot-view.test.sh`, `tests/fm-bearings-snapshot.test.sh`, and the focused `tests/fm-test-run.test.sh` contract under `/bin/bash` from the macOS image.
+The snapshot suites preserve stock-Bash runtime coverage for fleet snapshot/view and Bearings rendering, while the focused runner contract covers parallel scheduling, result aggregation, quoting, private temporary paths, signal cleanup, and the GNU/BSD `stat` difference.
+The same job performs the repository-wide Bash parse sweep before the runtime test suites.
 The compatibility wrapper pins `PATH` so nested runner invocations also resolve `bash` to `/bin/bash`, and the focused contract verifies that interpreter identity.
-The compatibility boundary is stock macOS Bash 3.2.57 plus the commands explicitly required by the focused fixtures, including `awk`, `kill`, `mkfifo`, `mktemp`, `ps`, `sleep`, `stat`, `tee`, and `python3` for JSON assertions.
-The local reproduction command is `bin/fm-test-run-stock-bash.sh`.
-When Bash 3.2 is unavailable locally, the compatibility check may emit `skip: stock Bash 3.2 unavailable (evidence: <version or missing /bin/bash>)` and exit successfully; CI remains required on `macos-latest` and does not accept that skip.
-`.github/workflows/ci.yml` owns the exact artifact names and aggregation wiring.
+The focused runner compatibility boundary is stock macOS Bash 3.2.57 plus the commands explicitly required by its fixtures, including `awk`, `kill`, `mkfifo`, `mktemp`, `ps`, `sleep`, `stat`, `tee`, and `python3` for JSON assertions.
+The focused runner contract's local reproduction command is `bin/fm-test-run-stock-bash.sh`.
+When Bash 3.2 is unavailable locally, that wrapper may emit `skip: stock Bash 3.2 unavailable (evidence: <version or missing /bin/bash>)` and exit successfully; CI remains required on `macos-latest` and does not accept that skip.
+`.github/workflows/ci.yml` owns the exact CI command sequence, expected test counts, artifact names, and aggregation wiring.
 
 ## Local entry points
 
