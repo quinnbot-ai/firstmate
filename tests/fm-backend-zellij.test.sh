@@ -590,6 +590,9 @@ test_capture_fails_when_session_absent() {
 }
 
 # --- shared composer/lifecycle classifier -----------------------------------
+# Live Zellij 0.44+ screen-rendering evidence is DEFERRED and unverified until
+# this contract is exercised on a host with Zellij 0.44+ and a supported harness.
+# Run tests/fm-backend-zellij-smoke.test.sh before enabling Zellij for real use.
 
 test_composer_layout_classifies_known_fixtures() {
   local fixture expected out exited
@@ -617,6 +620,14 @@ test_composer_layout_finds_supported_row_above_border_and_footer() {
   out=$(fm_backend_zellij_composer_layout_state "$capture" fm-fixture)
   [ "$out" = idle ] || fail "an empty composer above its border and footer should be idle, got $out"
   pass "fm_backend_zellij_composer_layout_state: scans the full capture for the supported composer row"
+}
+
+test_composer_layout_rejects_stale_row_above_shell_prompt() {
+  local capture out
+  capture=$'agent output\n│ > │\nzsh %\nlast login banner'
+  out=$(fm_backend_zellij_composer_layout_state "$capture" fm-fixture)
+  [ "$out" = ambiguous ] || fail "a raw shell prompt below stale composer history must fail closed, got $out"
+  pass "fm_backend_zellij_composer_layout_state: a later shell prompt invalidates stale composer history"
 }
 
 test_composer_layout_never_accepts_exit_marker_output() {
@@ -981,6 +992,8 @@ test_teardown_passes_recorded_tab_id_to_zellij_kill() {
     "kind=scout" \
     "decisions_reviewed=1" \
     "decision_keys="
+  printf '%032d\n' 1 > "$state/zghost.zellij-lifecycle"
+  printf '%032d 0\n' 1 > "$state/zghost.zellij-exited"
   printf '[]\n' > "$dir/responses/1.out"
   printf '[{"tab_id":3,"name":"fm-zghost"}]\n' > "$dir/responses/2.out"
   fb=$(make_zellij_fakebin "$dir")
@@ -995,7 +1008,11 @@ test_teardown_passes_recorded_tab_id_to_zellij_kill() {
     "fm-teardown did not pass a verified recorded zellij_tab_id through to kill"
   assert_not_contains "$(cat "$dir/log")" $'\x1f''close-pane' \
     "fm-teardown should close the recorded tab id instead of falling back to close-pane"
-  pass "fm-teardown.sh: passes recorded zellij_tab_id with the expected task label"
+  assert_absent "$state/zghost.zellij-lifecycle" \
+    "fm-teardown should remove the task's Zellij lifecycle authority"
+  assert_absent "$state/zghost.zellij-exited" \
+    "fm-teardown should remove the task's Zellij exit receipt"
+  pass "fm-teardown.sh: passes the recorded tab id and retires Zellij lifecycle state"
 }
 
 test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag() {
@@ -1234,6 +1251,7 @@ test_capture_fails_when_pane_absent
 test_capture_fails_when_session_absent
 test_composer_layout_classifies_known_fixtures
 test_composer_layout_finds_supported_row_above_border_and_footer
+test_composer_layout_rejects_stale_row_above_shell_prompt
 test_composer_layout_never_accepts_exit_marker_output
 test_composer_state_requires_known_transition_for_submission
 test_composer_state_reports_unreachable_target

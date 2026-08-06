@@ -582,9 +582,10 @@ fm_backend_zellij_wrap_launch() {  # <expected-label> <launch-command> <nonce>
 # fm_backend_zellij_composer_layout_state: classify one plain Zellij screen
 # capture as idle|composing|ambiguous. This is deliberately the only owner of
 # Zellij's presentation parsing. It selects the bottom-most supported bordered
-# or bare Claude/Codex composer row from the full capture.
+# or bare Claude/Codex composer row from the full capture, but a later raw shell
+# prompt invalidates that stale composer candidate.
 fm_backend_zellij_composer_layout_state() {  # <capture> [expected-label]
-  local capture=$1 line trimmed candidate='' bordered=0 content verdict
+  local capture=$1 line trimmed candidate='' bordered=0 content verdict unsafe_after_candidate=0
   while IFS= read -r line; do
     trimmed="${line#"${line%%[![:space:]]*}"}"
     trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
@@ -599,13 +600,19 @@ fm_backend_zellij_composer_layout_state() {  # <capture> [expected-label]
         esac
         content="${content#"${content%%[![:space:]]*}"}"
         case "$content" in
-          '>'|'>'\ *|'❯'|'❯ '*|'›'|'› '*) candidate=$trimmed; bordered=1 ;;
+          '>'|'>'\ *|'❯'|'❯ '*|'›'|'› '*) candidate=$trimmed; bordered=1; unsafe_after_candidate=0 ;;
         esac
         ;;
-      '❯'|'❯ '*|'›'|'› '*) candidate=$trimmed; bordered=0 ;;
+      '❯'|'❯ '*|'›'|'› '*) candidate=$trimmed; bordered=0; unsafe_after_candidate=0 ;;
+    esac
+    case "$trimmed" in
+      '$'|'%'|'#'|'>'|*' $'|*' %'|*' #'|*' >')
+        [ -z "$candidate" ] || unsafe_after_candidate=1
+        ;;
     esac
   done < <(printf '%s\n' "$capture")
   [ -n "$candidate" ] || { printf 'ambiguous'; return 0; }
+  [ "$unsafe_after_candidate" -eq 0 ] || { printf 'ambiguous'; return 0; }
   content=$candidate
   if [ "$bordered" -eq 1 ]; then
     case "$content" in
