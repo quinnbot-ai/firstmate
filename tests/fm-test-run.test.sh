@@ -278,8 +278,78 @@ SH
   pass "quoting, temporary paths, and platform stat fallback stay portable"
 }
 
-test_interrupt_cleans_parallel_worker() {
-  local tmp repo runner fixture evidence child_pid runner_pid rc
+test_parallel_child_can_signal_immediately() {
+  local tmp repo runner fixture evidence child_pid rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-pretrap.XXXXXX")
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  fixture=tests/fm-brief.test.sh
+  evidence="$tmp/evidence"
+  mkdir -p "$repo/bin" "$repo/tests" "$evidence"
+  cp "$RUNNER" "$runner"
+  cat >"$repo/$fixture" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" >"$SCHED_EVIDENCE/child.pid"
+kill -TERM "$PPID"
+while :; do
+  sleep 1
+done
+SH
+  chmod +x "$runner" "$repo/$fixture"
+  set +e
+  SCHED_EVIDENCE="$evidence" "$runner" --jobs 2 "$fixture" >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || { rm -rf "$tmp"; fail "signaled parallel fixture should aggregate as failure, got $rc"; }
+  child_pid=$(cat "$evidence/child.pid" 2>/dev/null || true)
+  [ -n "$child_pid" ] || { rm -rf "$tmp"; fail "immediate-signal fixture never started"; }
+  if kill -0 "$child_pid" 2>/dev/null; then
+    rm -rf "$tmp"
+    fail "immediate child signal escaped worker cleanup"
+  fi
+  rm -rf "$tmp"
+  pass "parallel workers own signals before launching test children"
+}
+
+test_interrupt_cleans_serial_child() {
+  local tmp fixture child_pid runner_pid rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-serial-signal.XXXXXX")
+  fixture="$tmp/serial.test.sh"
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" >"$SCHED_EVIDENCE/child.pid"
+while :; do
+  sleep 1
+done
+SH
+  chmod +x "$fixture"
+  SCHED_EVIDENCE="$tmp" "$RUNNER" "$fixture" >"$tmp/out" 2>"$tmp/err" &
+  runner_pid=$!
+  child_pid=
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if [ -s "$tmp/child.pid" ]; then
+      child_pid=$(cat "$tmp/child.pid")
+      break
+    fi
+    sleep 0.1
+  done
+  [ -n "$child_pid" ] || { kill "$runner_pid" 2>/dev/null || true; wait "$runner_pid" 2>/dev/null || true; rm -rf "$tmp"; fail "serial signal fixture never started"; }
+  kill -TERM "$runner_pid"
+  set +e
+  wait "$runner_pid"
+  rc=$?
+  set -e
+  [ "$rc" -eq 143 ] || { rm -rf "$tmp"; fail "serial runner TERM exit should be 143, got $rc"; }
+  if kill -0 "$child_pid" 2>/dev/null; then
+    rm -rf "$tmp"
+    fail "runner TERM left its serial child alive"
+  fi
+  rm -rf "$tmp"
+  pass "signals terminate and reap serial test children"
+}
+
+test_interrupt_cleans_parallel_process_tree() {
+  local tmp repo runner fixture evidence child_pid descendant_pid runner_pid rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-signal.XXXXXX")
   repo="$tmp/repo"
   runner="$repo/bin/fm-test-run.sh"
@@ -290,6 +360,12 @@ test_interrupt_cleans_parallel_worker() {
   cat >"$repo/$fixture" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$$" >"$SCHED_EVIDENCE/child.pid"
+(
+  while :; do
+    sleep 1
+  done
+) &
+printf '%s\n' "$!" >"$SCHED_EVIDENCE/descendant.pid"
 while :; do
   sleep 1
 done
@@ -306,6 +382,8 @@ SH
     sleep 0.1
   done
   [ -n "$child_pid" ] || { kill "$runner_pid" 2>/dev/null || true; wait "$runner_pid" 2>/dev/null || true; rm -rf "$tmp"; fail "signal fixture never started"; }
+  descendant_pid=$(cat "$evidence/descendant.pid" 2>/dev/null || true)
+  [ -n "$descendant_pid" ] || { kill "$runner_pid" 2>/dev/null || true; wait "$runner_pid" 2>/dev/null || true; rm -rf "$tmp"; fail "descendant fixture never started"; }
   kill -TERM "$runner_pid"
   set +e
   wait "$runner_pid"
@@ -316,8 +394,61 @@ SH
     rm -rf "$tmp"
     fail "runner TERM left its worker child alive"
   fi
+  if kill -0 "$descendant_pid" 2>/dev/null; then
+    rm -rf "$tmp"
+    fail "runner TERM left its worker descendant alive"
+  fi
   rm -rf "$tmp"
-  pass "signals terminate parallel workers and clean private temporary state"
+  pass "signals terminate complete parallel worker process trees"
+}
+
+test_interrupt_waits_for_parallel_cleanup() {
+  local tmp repo runner fixture evidence child_pid runner_pid rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-synchronous.XXXXXX")
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  fixture=tests/fm-brief.test.sh
+  evidence="$tmp/evidence"
+  mkdir -p "$repo/bin" "$repo/tests" "$evidence"
+  cp "$RUNNER" "$runner"
+  cat >"$repo/$fixture" <<'SH'
+#!/usr/bin/env bash
+finish_cleanup() {
+  sleep 0.2
+  printf 'done\n' >"$SCHED_EVIDENCE/cleanup.done"
+  exit 0
+}
+trap finish_cleanup TERM
+printf '%s\n' "$$" >"$SCHED_EVIDENCE/child.pid"
+while :; do
+  sleep 1
+done
+SH
+  chmod +x "$runner" "$repo/$fixture"
+  SCHED_EVIDENCE="$evidence" "$runner" --jobs 2 "$fixture" >"$tmp/out" 2>"$tmp/err" &
+  runner_pid=$!
+  child_pid=
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if [ -s "$evidence/child.pid" ]; then
+      child_pid=$(cat "$evidence/child.pid")
+      break
+    fi
+    sleep 0.1
+  done
+  [ -n "$child_pid" ] || { kill "$runner_pid" 2>/dev/null || true; wait "$runner_pid" 2>/dev/null || true; rm -rf "$tmp"; fail "synchronous cleanup fixture never started"; }
+  kill -TERM "$runner_pid"
+  set +e
+  wait "$runner_pid"
+  rc=$?
+  set -e
+  [ "$rc" -eq 143 ] || { rm -rf "$tmp"; fail "synchronous cleanup TERM exit should be 143, got $rc"; }
+  [ -f "$evidence/cleanup.done" ] || { rm -rf "$tmp"; fail "runner returned before child cleanup completed"; }
+  if kill -0 "$child_pid" 2>/dev/null; then
+    rm -rf "$tmp"
+    fail "runner returned before the cleanup child exited"
+  fi
+  rm -rf "$tmp"
+  pass "signal handling completes child cleanup before returning"
 }
 
 test_aggregate_exit_behavior() {
@@ -912,7 +1043,10 @@ test_changed_dependency_selection_and_unmapped_failure
 test_empty_selection_emits_summary
 test_timing_markers_and_json
 test_quoting_and_platform_temp_paths
-test_interrupt_cleans_parallel_worker
+test_parallel_child_can_signal_immediately
+test_interrupt_cleans_serial_child
+test_interrupt_cleans_parallel_process_tree
+test_interrupt_waits_for_parallel_cleanup
 test_aggregate_exit_behavior
 test_gate_skip_accounting
 test_runtime_gate_required_and_optional_outcomes

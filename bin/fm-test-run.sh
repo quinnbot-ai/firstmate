@@ -1505,12 +1505,54 @@ RECORDS="$RUN_TMP/records.tsv"
 FAMILIES_TSV="$RUN_TMP/families.tsv"
 : >"$RECORDS"
 
-cleanup_run() {
-  local rc=$? pid
-  trap - EXIT INT TERM HUP
-  for pid in $(jobs -p 2>/dev/null); do
-    kill "$pid" 2>/dev/null || true
+terminate_and_reap_process_tree() {
+  local root=$1 idx=0 parent children child seen pid
+  local -a process_tree_pids=()
+  if ! kill -STOP "$root" 2>/dev/null; then
+    wait "$root" 2>/dev/null || true
+    return
+  fi
+  process_tree_pids[0]=$root
+  while [ "$idx" -lt "${#process_tree_pids[@]}" ]; do
+    parent=${process_tree_pids[$idx]}
+    children=$(ps -eo pid=,ppid= 2>/dev/null | awk -v parent="$parent" '$2 == parent { print $1 }' || true)
+    while IFS= read -r child; do
+      [ -n "$child" ] || continue
+      seen=0
+      for pid in "${process_tree_pids[@]}"; do
+        if [ "$pid" = "$child" ]; then
+          seen=1
+          break
+        fi
+      done
+      if [ "$seen" -eq 0 ] && kill -STOP "$child" 2>/dev/null; then
+        process_tree_pids[${#process_tree_pids[@]}]=$child
+      fi
+    done <<<"$children"
+    idx=$((idx + 1))
   done
+  for pid in "${process_tree_pids[@]}"; do
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  for pid in "${process_tree_pids[@]}"; do
+    kill -CONT "$pid" 2>/dev/null || true
+  done
+  wait "$root" 2>/dev/null || true
+  for pid in "${process_tree_pids[@]}"; do
+    while kill -0 "$pid" 2>/dev/null; do
+      sleep 0.01
+    done
+  done
+}
+
+cleanup_run() {
+  local rc=$? pid cleanup_pids="$RUN_TMP/cleanup-pids"
+  trap - EXIT INT TERM HUP
+  jobs -p >"$cleanup_pids" 2>/dev/null || true
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    terminate_and_reap_process_tree "$pid"
+  done <"$cleanup_pids"
   rm -rf "$RUN_TMP"
   exit "$rc"
 }
@@ -1637,7 +1679,7 @@ record_script_result() {
 
 run_one_serial() {
   local script=$1
-  local base family runtime requirement out begin_iso begin_ms end_ms end_iso duration rc
+  local base family runtime requirement out fifo begin_iso begin_ms end_ms end_iso duration rc child_pid tee_pid
   base=$(basename "$script")
   family=$(family_for_basename "$base")
   runtime=$(runtime_gate_for_basename "$base")
@@ -1650,10 +1692,16 @@ run_one_serial() {
     "$begin_iso" "$script" "$family" "$runtime" "$requirement"
 
   set +e
-  # Stream live output while retaining a copy for gate-skip detection.
-  # PIPESTATUS[0] is the test script; tee's exit is ignored for aggregate.
-  bash "$script" 2>&1 | tee "$out"
-  rc=${PIPESTATUS[0]}
+  fifo="$RUN_TMP/serial.$TOTAL.fifo"
+  mkfifo "$fifo"
+  tee "$out" <"$fifo" &
+  tee_pid=$!
+  bash "$script" >"$fifo" 2>&1 &
+  child_pid=$!
+  wait "$child_pid"
+  rc=$?
+  wait "$tee_pid" 2>/dev/null || true
+  rm -f "$fifo"
   set -e
   : "${rc:=1}"
 
@@ -1754,6 +1802,24 @@ else
       "$(now_iso)" "$script" "$family" "$runtime" "$requirement"
     (
       set +e
+      child_pid=
+      worker_signal_exit() {
+        local signal_rc=$1 pid signal_pids="$work/signal-pids"
+        trap - INT TERM HUP
+        if [ -n "$child_pid" ]; then
+          terminate_and_reap_process_tree "$child_pid"
+        else
+          jobs -p >"$signal_pids" 2>/dev/null || true
+          while IFS= read -r pid; do
+            [ -n "$pid" ] || continue
+            terminate_and_reap_process_tree "$pid"
+          done <"$signal_pids"
+        fi
+        exit "$signal_rc"
+      }
+      trap 'worker_signal_exit 130' INT
+      trap 'worker_signal_exit 143' TERM
+      trap 'worker_signal_exit 129' HUP
       export TMPDIR="$work/tmp"
       export TMP="$work/tmp"
       unset FM_HOME FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_ROOT_OVERRIDE \
@@ -1762,7 +1828,6 @@ else
       begin_ms=$(now_ms)
       bash "$script" >"$work/output" 2>&1 &
       child_pid=$!
-      trap 'kill "$child_pid" 2>/dev/null || true; wait "$child_pid" 2>/dev/null || true; exit 143' INT TERM HUP
       wait "$child_pid"
       rc=$?
       trap - INT TERM HUP
