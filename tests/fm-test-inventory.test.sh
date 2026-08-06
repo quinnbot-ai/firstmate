@@ -31,17 +31,27 @@ EOF
   printf '%s\n' "$project"
 }
 
-test_collect_and_check_never_execute_candidate_code() {
-  local project
+test_inventory_paths_never_execute_candidate_code() {
+  local project base candidate
   project=$(make_project literal-only)
+  "$INVENTORY" collect "$project" >/dev/null
+  git -C "$project" init -q
+  git -C "$project" add .firstmate tests
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm baseline
+  base=$(git -C "$project" rev-parse HEAD)
   cat > "$project/conftest.py" <<'EOF'
 raise RuntimeError("candidate conftest must never run")
 EOF
   "$INVENTORY" collect "$project" >/dev/null || fail "literal-source collection should not execute conftest.py"
   "$INVENTORY" check "$project" >/dev/null || fail "literal-source check should not execute conftest.py"
+  git -C "$project" add .firstmate/test-inventory-receipt.json conftest.py
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm candidate
+  candidate=$(git -C "$project" rev-parse HEAD)
+  "$INVENTORY" merge-check "$project" "$candidate" "$base" >/dev/null \
+    || fail "literal-source merge verification should not execute conftest.py"
   grep -q 'literal_declarations_sha256' "$project/.firstmate/test-inventory-receipt.json" \
     || fail "receipt did not bind literal declarations"
-  pass "inventory counts literal declarations without importing candidate conftest.py"
+  pass "inventory and merge verification ignore candidate conftest.py runtime behavior"
 }
 
 test_dynamic_runtime_tests_do_not_satisfy_literal_inventory() {
@@ -86,6 +96,6 @@ test_merge_check_rejects_symlinked_test_source() {
   pass "merge-check refuses test source outside the exact candidate tree"
 }
 
-test_collect_and_check_never_execute_candidate_code
+test_inventory_paths_never_execute_candidate_code
 test_dynamic_runtime_tests_do_not_satisfy_literal_inventory
 test_merge_check_rejects_symlinked_test_source
