@@ -54,6 +54,7 @@ add_github_mocks() {
   mkdir -p "$case_dir/fakebin"
   cat > "$case_dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
+[ "${FM_TEST_GH_UNAVAILABLE:-0}" -eq 0 ] || exit 1
 printf '%s\n' "$FM_TEST_GH_HEAD"
 SH
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
@@ -119,7 +120,7 @@ test_raced_local_edit_is_preserved() {
   mkdir -p "$fakebin"
   cat > "$fakebin/git" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-}" = -C ] && [ "${2:-}" = "$FM_TEST_RACE_PROJECT" ] && [ "${3:-}" = read-tree ]; then
+if [ "${1:-}" = -C ] && [ "${2:-}" = "$FM_TEST_RACE_PROJECT" ] && [[ " $* " = *" merge --ff-only "* ]]; then
   printf 'raced local edit\n' > "$FM_TEST_RACE_PROJECT/change.txt"
 fi
 exec "$FM_TEST_REAL_GIT" "$@"
@@ -150,7 +151,7 @@ test_intervening_base_movement_is_refused() {
   mkdir -p "$fakebin"
   cat > "$fakebin/git" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-}" = -C ] && [ "${2:-}" = "$FM_TEST_RACE_PROJECT" ] && [ "${3:-}" = update-ref ]; then
+if [ "${1:-}" = -C ] && [ "${2:-}" = "$FM_TEST_RACE_PROJECT" ] && [[ " $* " = *" merge --ff-only "* ]]; then
   "$FM_TEST_REAL_GIT" -C "$FM_TEST_RACE_PROJECT" update-ref refs/heads/main "$FM_TEST_INTERVENING" "$FM_TEST_BASE"
 fi
 exec "$FM_TEST_REAL_GIT" "$@"
@@ -178,7 +179,7 @@ test_unchanged_path_drift_is_preserved() {
   mkdir -p "$fakebin"
   cat > "$fakebin/git" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-}" = -C ] && [ "${2:-}" = "$FM_TEST_RACE_PROJECT" ] && [ "${3:-}" = read-tree ]; then
+if [ "${1:-}" = -C ] && [ "${2:-}" = "$FM_TEST_RACE_PROJECT" ] && [[ " $* " = *" merge --ff-only "* ]]; then
   printf 'raced unchanged path\n' > "$FM_TEST_RACE_PROJECT/README.md"
 fi
 exec "$FM_TEST_REAL_GIT" "$@"
@@ -193,6 +194,34 @@ SH
   [ "$(cat "$case_dir/project/README.md")" = 'raced unchanged path' ] || fail "unchanged-path drift was discarded"
   [ ! -e "$case_dir/project/change.txt" ] || fail "refused unchanged-path drift retained candidate checkout changes"
   pass "local merge preserves unchanged-path drift and refuses landing"
+}
+
+test_prepared_transaction_drift_is_preserved() {
+  local values case_dir base hooks rc
+  values=$(make_case prepared-drift)
+  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+  base=$(printf '%s\n' "$values" | sed -n '2p')
+  hooks=$(git -C "$case_dir/project" rev-parse --path-format=absolute --git-path hooks)
+  cat > "$hooks/reference-transaction" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = prepared ]; then
+  while read -r _old _new ref; do
+    if [ "$ref" = refs/heads/main ]; then
+      printf 'raced after checkout observation\n' > "$FM_TEST_LATE_PROJECT/change.txt"
+    fi
+  done
+fi
+SH
+  chmod +x "$hooks/reference-transaction"
+  set +e
+  FM_TEST_LATE_PROJECT="$case_dir/project" run_local_merge "$case_dir" >"$case_dir/out" 2>"$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "prepared-transaction drift must refuse local landing"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$base" ] || fail "prepared drift advanced the default ref"
+  [ "$(cat "$case_dir/project/change.txt")" = 'raced after checkout observation' ] || fail "prepared drift was discarded"
+  [ "$(git -C "$case_dir/project" status --short)" = '?? change.txt' ] || fail "prepared drift did not leave the base checkout coherent"
+  pass "prepared transaction drift is preserved before the ref commits"
 }
 
 test_github_merge_uses_verified_exact_sha() {
@@ -227,10 +256,49 @@ test_github_merge_refuses_changed_remote_head() {
   pass "GitHub merge refuses a remote head changed after metadata recording"
 }
 
+test_github_merge_accepts_live_head_without_recorded_head() {
+  local values case_dir base candidate
+  values=$(make_case github-live-head)
+  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+  base=$(printf '%s\n' "$values" | sed -n '2p')
+  candidate=$(printf '%s\n' "$values" | sed -n '3p')
+  fm_write_meta "$case_dir/state/task-x1.meta" "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" "kind=ship" "mode=no-mistakes"
+  add_github_mocks "$case_dir"
+  FM_TEST_GH_UNAVAILABLE=1 run_github_merge "$case_dir" "$candidate" "$candidate" "$base" >/dev/null \
+    || fail "GitHub boundary refused a live exact head without recorded head metadata"
+  ! grep -q '^pr_head=' "$case_dir/state/task-x1.meta" || fail "unavailable gh unexpectedly recorded PR head metadata"
+  grep -qxF "api PUT /repos/example/repo/pulls/9/merge --field sha=$candidate --field merge_method=merge" "$case_dir/gh-axi.log" \
+    || fail "live GraphQL head was not used for a wrapper-authenticated merge"
+  pass "GitHub merge binds an absent recorded head to live and local heads"
+}
+
+test_invalid_merge_args_are_side_effect_free() {
+  local values case_dir before rc
+  values=$(make_case invalid-args)
+  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+  fm_write_meta "$case_dir/state/task-x1.meta" "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" "kind=ship" "mode=no-mistakes"
+  add_github_mocks "$case_dir"
+  before=$(cat "$case_dir/state/task-x1.meta")
+  set +e
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" PATH="$case_dir/fakebin:$PATH" \
+    "$PR_MERGE" task-x1 https://github.com/example/repo/pull/9 -- --admin >"$case_dir/out" 2>"$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "unsupported merge arguments must fail as invalid input"
+  [ "$(cat "$case_dir/state/task-x1.meta")" = "$before" ] || fail "invalid merge arguments rewrote task metadata"
+  [ ! -e "$case_dir/state/task-x1.check.sh" ] || fail "invalid merge arguments published a watcher"
+  [ ! -s "$case_dir/gh-axi.log" ] || fail "invalid merge arguments reached the credential wrapper"
+  pass "invalid merge arguments fail before metadata and watcher side effects"
+}
+
 test_exact_literal_receipt_lands_candidate
 test_uncommitted_receipt_source_refuses_before_merge
 test_raced_local_edit_is_preserved
 test_intervening_base_movement_is_refused
 test_unchanged_path_drift_is_preserved
+test_prepared_transaction_drift_is_preserved
 test_github_merge_uses_verified_exact_sha
 test_github_merge_refuses_changed_remote_head
+test_github_merge_accepts_live_head_without_recorded_head
+test_invalid_merge_args_are_side_effect_free

@@ -29,6 +29,15 @@ meta_value() {
   printf '%s\n' "$values"
 }
 
+meta_optional_value() {
+  local key=$1 values count
+  values=$(sed -n "s/^${key}=//p" "$META")
+  count=$(grep -c "^${key}=" "$META" || true)
+  [ "$count" -le 1 ] || die "task metadata must contain at most one ${key}= value"
+  [ "$count" -eq 0 ] || [ -n "$values" ] || die "task metadata contains an empty ${key}= value"
+  printf '%s\n' "$values"
+}
+
 git_top() { git -C "$1" rev-parse --show-toplevel 2>/dev/null || return 1; }
 
 git_common() {
@@ -125,38 +134,16 @@ print(urllib.parse.quote(sys.argv[1], safe=""))
 PY
 }
 
-parse_merge_args() {
-  local arg
-  MERGE_METHOD=squash
-  DELETE_BRANCH=0
-  METHOD_SEEN=0
-  while [ "$#" -gt 0 ]; do
-    arg=$1
-    shift
-    case "$arg" in
-      --squash) arg=squash ;;
-      --merge) arg=merge ;;
-      --rebase) arg=rebase ;;
-      --method) [ "$#" -gt 0 ] || die "--method requires squash, merge, or rebase"; arg=$1; shift ;;
-      --method=*) arg=${arg#--method=} ;;
-      --delete-branch) DELETE_BRANCH=1; continue ;;
-      --auto|--disable-auto|--admin) die "$arg is a non-immediate or protection-bypassing merge mode" ;;
-      --repo|--repo=*|-R|-R?*) die "extra merge arguments must not override the repository" ;;
-      *) die "unsupported merge argument at the atomic merge boundary: $arg" ;;
-    esac
-    case "$arg" in squash|merge|rebase) ;; *) die "merge method must be squash, merge, or rebase" ;; esac
-    if [ "$METHOD_SEEN" -eq 1 ] && [ "$MERGE_METHOD" != "$arg" ]; then die "conflicting merge methods are not allowed"; fi
-    MERGE_METHOD=$arg
-    METHOD_SEEN=1
-  done
-}
-
 land_local_exact() {
-  python3 - "$PROJECT" "$DEFAULT" "$1" "$2" "$ID" <<'PY'
+  python3 - "$PROJECT" "$DEFAULT" "$1" "$2" <<'PY'
+import os
+import pathlib
+import shlex
 import subprocess
 import sys
+import tempfile
 
-project, default, base, candidate, task_id = sys.argv[1:]
+project, default, base, candidate = sys.argv[1:]
 ref = f"refs/heads/{default}"
 
 
@@ -164,112 +151,101 @@ class LandingError(Exception):
     pass
 
 
-def git(*args, check=True):
-    result = subprocess.run(["git", "-C", project, *args], text=True, capture_output=True)
+def git(*args, check=True, input_data=None):
+    result = subprocess.run(
+        ["git", "-C", project, *args],
+        text=True,
+        input=input_data,
+        capture_output=True,
+    )
     if check and result.returncode:
         detail = (result.stderr or result.stdout).strip()
         raise LandingError(detail or f"git {' '.join(args)} failed")
     return result
 
 
-def checkout_matches(revision):
-    index_tree = git("write-tree").stdout.strip()
-    expected_tree = git("rev-parse", f"{revision}^{{tree}}").stdout.strip()
-    tracked_clean = git("diff-files", "--quiet", check=False).returncode == 0
-    untracked = git("ls-files", "--others", "--exclude-standard", "-z").stdout
-    return index_tree == expected_tree and tracked_clean and not untracked
+def configured_hooks_path():
+    configured = git("config", "--path", "core.hooksPath", check=False)
+    if configured.returncode == 0 and configured.stdout.strip():
+        path = pathlib.Path(configured.stdout.strip())
+        return path if path.is_absolute() else pathlib.Path(project, path).resolve()
+    return pathlib.Path(git("rev-parse", "--path-format=absolute", "--git-path", "hooks").stdout.strip())
 
 
-class RefTransaction:
-    def __init__(self, new, old):
-        self.process = subprocess.Popen(
-            ["git", "-C", project, "update-ref", "-m", f"firstmate: merge {task_id}", "--stdin"],
-            text=True,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+def install_hooks(directory):
+    original_directory = configured_hooks_path()
+    original_reference = original_directory / "reference-transaction"
+    if original_directory.is_dir():
+        for source in original_directory.iterdir():
+            if source.name != "reference-transaction" and os.access(source, os.X_OK):
+                (directory / source.name).symlink_to(source.resolve())
+    original_command = shlex.quote(str(original_reference)) if os.access(original_reference, os.X_OK) else ":"
+    hook = directory / "reference-transaction"
+    hook.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -eu\n"
+        "payload=$(mktemp \"${TMPDIR:-/tmp}/fm-merge-ref.XXXXXX\")\n"
+        "trap 'rm -f \"$payload\"' EXIT HUP INT TERM\n"
+        "cat > \"$payload\"\n"
+        f"{original_command} \"$1\" < \"$payload\"\n"
+        "[ \"$1\" = prepared ] || exit 0\n"
+        "count=$(awk -v ref=\"$FM_MERGE_EXPECTED_REF\" '$3 == ref { count++ } END { print count + 0 }' \"$payload\")\n"
+        "[ \"$count\" -ne 0 ] || exit 0\n"
+        "[ \"$count\" -eq 1 ] || exit 1\n"
+        "grep -qxF \"$FM_MERGE_EXPECTED_BASE $FM_MERGE_EXPECTED_CANDIDATE $FM_MERGE_EXPECTED_REF\" \"$payload\" || exit 1\n"
+        "git -C \"$FM_MERGE_PROJECT\" diff --quiet \"$FM_MERGE_EXPECTED_CANDIDATE\" -- || exit 1\n"
+        "[ -z \"$(git -C \"$FM_MERGE_PROJECT\" ls-files --others --exclude-standard)\" ] || exit 1\n"
+    )
+    hook.chmod(0o700)
+
+
+def rollback_checkout():
+    changed = git("diff-tree", "--no-commit-id", "--name-only", "-r", "-z", base, candidate).stdout
+    dirty = git("diff", "--name-only", "-z", candidate, "--").stdout
+    dirty_paths = set(dirty.split("\0"))
+    restore = [path for path in changed.split("\0") if path and path not in dirty_paths]
+    if restore:
+        git(
+            "restore",
+            f"--source={base}",
+            "--worktree",
+            "--pathspec-from-file=-",
+            "--pathspec-file-nul",
+            input_data="\0".join(restore) + "\0",
         )
-        self.send("start")
-        self.expect("start: ok")
-        self.send(f"update {ref} {new} {old}")
-        self.send("prepare")
-        self.expect("prepare: ok")
-
-    def send(self, command):
-        if self.process.stdin is None:
-            raise LandingError("reference transaction input is unavailable")
-        self.process.stdin.write(command + "\n")
-        self.process.stdin.flush()
-
-    def expect(self, expected):
-        if self.process.stdout is None:
-            raise LandingError("reference transaction output is unavailable")
-        response = self.process.stdout.readline().strip()
-        if response != expected:
-            self.process.wait()
-            detail = self.process.stderr.read().strip() if self.process.stderr else ""
-            raise LandingError(detail or f"reference transaction returned {response!r}, expected {expected!r}")
-
-    def finish(self, command):
-        self.send(command)
-        self.expect(f"{command}: ok")
-        if self.process.stdin is not None:
-            self.process.stdin.close()
-        if self.process.wait():
-            detail = self.process.stderr.read().strip() if self.process.stderr else ""
-            raise LandingError(detail or f"reference transaction {command} failed")
-
-    def abort(self):
-        if self.process.poll() is None:
-            self.finish("abort")
-
-    def commit(self):
-        self.finish("commit")
+    git("read-tree", base)
 
 
-def restore_base():
-    git("read-tree", "-u", "-m", candidate, base)
+with tempfile.TemporaryDirectory(prefix="fm-merge-hooks-") as temporary:
+    hooks = pathlib.Path(temporary)
+    install_hooks(hooks)
+    environment = os.environ.copy()
+    environment.update(
+        FM_MERGE_PROJECT=project,
+        FM_MERGE_EXPECTED_REF=ref,
+        FM_MERGE_EXPECTED_BASE=base,
+        FM_MERGE_EXPECTED_CANDIDATE=candidate,
+    )
+    result = subprocess.run(
+        ["git", "-C", project, "-c", f"core.hooksPath={hooks}", "merge", "--ff-only", candidate],
+        text=True,
+        capture_output=True,
+        env=environment,
+    )
 
-
-transaction = None
-transitioned = False
-try:
-    transaction = RefTransaction(candidate, base)
-    git("read-tree", "-u", "-m", base, candidate)
-    transitioned = True
-    if not checkout_matches(candidate):
-        raise LandingError("project checkout changed during exact local landing")
-    transaction.commit()
-except LandingError as error:
-    restore_error = None
-    if transitioned:
-        try:
-            restore_base()
-        except LandingError as caught:
-            restore_error = caught
-    if transaction is not None:
-        try:
-            transaction.abort()
-        except LandingError as caught:
-            restore_error = restore_error or caught
-    if restore_error is not None:
-        print(f"error: {error}; checkout rollback also failed: {restore_error}", file=sys.stderr)
-    else:
-        print(f"error: {error}", file=sys.stderr)
-    raise SystemExit(1)
-
-if git("rev-parse", ref).stdout.strip() == candidate and checkout_matches(candidate):
+if result.returncode == 0:
+    if git("rev-parse", ref).stdout.strip() != candidate:
+        print("error: local merge did not land the exact candidate", file=sys.stderr)
+        raise SystemExit(1)
     raise SystemExit(0)
 
+error = (result.stderr or result.stdout).strip()
 try:
-    rollback = RefTransaction(base, candidate)
-    restore_base()
-    rollback.commit()
-except LandingError as error:
-    print(f"error: exact local landing changed after commit and rollback failed: {error}", file=sys.stderr)
+    rollback_checkout()
+except LandingError as rollback_error:
+    print(f"error: {error or 'local merge failed'}; checkout rollback also failed: {rollback_error}", file=sys.stderr)
     raise SystemExit(1)
-
-print("error: project checkout changed during exact local landing", file=sys.stderr)
+print(f"error: {error or 'local merge transaction was refused'}", file=sys.stderr)
 raise SystemExit(1)
 PY
 }
@@ -307,9 +283,11 @@ execute_github() {
   [ "$MODE" = no-mistakes ] || [ "$MODE" = direct-PR ] || die "task $ID is mode=$MODE, not a PR merge mode"
   [ "$KIND" = ship ] || die "task $ID is kind=$KIND, not ship"
   require_repository_state
-  parse_merge_args "$@"
+  fm_pr_merge_args_parse "$@" || exit $?
+  MERGE_METHOD=$FM_PR_MERGE_METHOD
+  DELETE_BRANCH=$FM_PR_MERGE_DELETE_BRANCH
   recorded_pr=$(meta_value pr)
-  recorded_head=$(meta_value pr_head)
+  recorded_head=$(meta_optional_value pr_head)
   [ "$recorded_pr" = "$URL" ] || die "task PR metadata does not match the requested PR"
   query="{repository(owner:\"$PR_OWNER\",name:\"$PR_REPO\"){pullRequest(number:$PR_NUMBER){headRefOid baseRefOid baseRefName headRefName state isDraft merged headRepository{nameWithOwner} baseRef{branchProtectionRule{requiresStrictStatusChecks isAdminEnforced}}}}}"
   payload=$(gh-axi api POST /graphql --field "query=$query") || die "cannot read the exact GitHub merge candidate"
@@ -317,7 +295,8 @@ execute_github() {
   head_ref=$(api_value headRefName "$payload"); head_repo=$(api_value nameWithOwner "$payload"); state=$(api_value state "$payload")
   draft=$(api_value isDraft "$payload"); merged=$(api_value merged "$payload"); strict=$(api_value requiresStrictStatusChecks "$payload"); admin_enforced=$(api_value isAdminEnforced "$payload")
   [ "$state" = OPEN ] && [ "$draft" = false ] && [ "$merged" = false ] || die "GitHub pull request is not an open, mergeable candidate"
-  [ "$recorded_head" = "$head" ] || die "task PR head metadata does not match the current GitHub head"
+  [ -z "$recorded_head" ] || fm_pr_head_valid "$recorded_head" || die "task PR head metadata is invalid"
+  [ -z "$recorded_head" ] || [ "$recorded_head" = "$head" ] || die "task PR head metadata does not match the current GitHub head"
   [ "$(git -C "$WORKTREE" rev-parse HEAD)" = "$head" ] || die "task worktree HEAD does not match the current GitHub PR head"
   git -C "$WORKTREE" cat-file -e "$base^{commit}" 2>/dev/null || git -C "$WORKTREE" fetch --quiet "https://github.com/$PR_OWNER/$PR_REPO.git" "$base"
   git -C "$WORKTREE" merge-base --is-ancestor "$base" "$head" || die "GitHub PR head does not contain the current base; update the branch and retry"
