@@ -29,6 +29,7 @@ fi
 URL=$FM_PR_URL
 shift 2
 [ "${1:-}" = "--" ] && shift
+fm_pr_merge_args_parse "$@" || exit $?
 
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
