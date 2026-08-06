@@ -91,6 +91,7 @@ A short viewport may expose fewer lines than requested.
 
 Closing a pane leaves an empty tab.
 Cleanup resolves and verifies the owning tab, then uses `close-tab-by-id` so both the task pane and tab disappear.
+During session-start secondmate recovery, a nonce-proven exit reuses the recorded tab id plus expected task label to close an empty ghost tab before respawning, while every inconclusive state remains untouched.
 Real test cleanup uses only an isolated non-`firstmate` session and the guard in `tests/zellij-test-safety.sh`; it never calls all-session deletion commands.
 
 ## Active limits
@@ -111,6 +112,7 @@ Real test cleanup uses only an isolated non-`firstmate` session and the guard in
 ```sh
 tests/fm-backend-zellij.test.sh
 tests/fm-backend-zellij-smoke.test.sh
+tests/fm-secondmate-liveness.test.sh
 ```
 
 The real smoke test uses a unique session and guarded deletion.
