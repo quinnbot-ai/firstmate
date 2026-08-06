@@ -119,7 +119,7 @@ test_raced_local_edit_is_preserved() {
   mkdir -p "$fakebin"
   cat > "$fakebin/git" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-}" = -C ] && [ "${2:-}" = "$FM_TEST_RACE_PROJECT" ] && [ "${3:-}" = merge ]; then
+if [ "${1:-}" = -C ] && [ "${2:-}" = "$FM_TEST_RACE_PROJECT" ] && [ "${3:-}" = read-tree ]; then
   printf 'raced local edit\n' > "$FM_TEST_RACE_PROJECT/change.txt"
 fi
 exec "$FM_TEST_REAL_GIT" "$@"
@@ -133,6 +133,66 @@ SH
   [ "$(git -C "$case_dir/project" rev-parse main)" = "$base" ] || fail "raced edit advanced the default ref"
   [ "$(cat "$case_dir/project/change.txt")" = 'raced local edit' ] || fail "raced edit was discarded"
   pass "local merge preserves an edit raced into the checkout"
+}
+
+test_intervening_base_movement_is_refused() {
+  local values case_dir base intervening candidate fakebin real_git rc
+  values=$(make_case raced-base)
+  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+  base=$(printf '%s\n' "$values" | sed -n '2p')
+  intervening=$(printf '%s\n' "$values" | sed -n '3p')
+  printf 'final candidate\n' > "$case_dir/wt/final.txt"
+  git -C "$case_dir/wt" add final.txt
+  git -C "$case_dir/wt" commit -qm final-candidate
+  candidate=$(git -C "$case_dir/wt" rev-parse HEAD)
+  fakebin="$case_dir/fakebin"
+  real_git=$(command -v git)
+  mkdir -p "$fakebin"
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -C ] && [ "${2:-}" = "$FM_TEST_RACE_PROJECT" ] && [ "${3:-}" = update-ref ]; then
+  "$FM_TEST_REAL_GIT" -C "$FM_TEST_RACE_PROJECT" update-ref refs/heads/main "$FM_TEST_INTERVENING" "$FM_TEST_BASE"
+fi
+exec "$FM_TEST_REAL_GIT" "$@"
+SH
+  chmod +x "$fakebin/git"
+  set +e
+  FM_TEST_BASE="$base" FM_TEST_INTERVENING="$intervening" \
+    run_local_merge_with_path "$case_dir" "$fakebin" "$real_git" >"$case_dir/out" 2>"$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "intervening base movement must refuse local landing"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$intervening" ] || fail "boundary overwrote intervening base movement"
+  [ "$(git -C "$case_dir/wt" rev-parse HEAD)" = "$candidate" ] || fail "fixture lost the final candidate"
+  [ ! -e "$case_dir/project/final.txt" ] || fail "refused base race changed the project checkout"
+  pass "local merge refuses an intervening base before checkout transition"
+}
+
+test_unchanged_path_drift_is_preserved() {
+  local values case_dir base fakebin real_git rc
+  values=$(make_case unchanged-path-drift)
+  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+  base=$(printf '%s\n' "$values" | sed -n '2p')
+  fakebin="$case_dir/fakebin"
+  real_git=$(command -v git)
+  mkdir -p "$fakebin"
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -C ] && [ "${2:-}" = "$FM_TEST_RACE_PROJECT" ] && [ "${3:-}" = read-tree ]; then
+  printf 'raced unchanged path\n' > "$FM_TEST_RACE_PROJECT/README.md"
+fi
+exec "$FM_TEST_REAL_GIT" "$@"
+SH
+  chmod +x "$fakebin/git"
+  set +e
+  run_local_merge_with_path "$case_dir" "$fakebin" "$real_git" >"$case_dir/out" 2>"$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "unchanged-path drift must refuse local landing"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$base" ] || fail "unchanged-path drift advanced the default ref"
+  [ "$(cat "$case_dir/project/README.md")" = 'raced unchanged path' ] || fail "unchanged-path drift was discarded"
+  [ ! -e "$case_dir/project/change.txt" ] || fail "refused unchanged-path drift retained candidate checkout changes"
+  pass "local merge preserves unchanged-path drift and refuses landing"
 }
 
 test_github_merge_uses_verified_exact_sha() {
@@ -170,5 +230,7 @@ test_github_merge_refuses_changed_remote_head() {
 test_exact_literal_receipt_lands_candidate
 test_uncommitted_receipt_source_refuses_before_merge
 test_raced_local_edit_is_preserved
+test_intervening_base_movement_is_refused
+test_unchanged_path_drift_is_preserved
 test_github_merge_uses_verified_exact_sha
 test_github_merge_refuses_changed_remote_head

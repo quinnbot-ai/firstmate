@@ -151,6 +151,129 @@ parse_merge_args() {
   done
 }
 
+land_local_exact() {
+  python3 - "$PROJECT" "$DEFAULT" "$1" "$2" "$ID" <<'PY'
+import subprocess
+import sys
+
+project, default, base, candidate, task_id = sys.argv[1:]
+ref = f"refs/heads/{default}"
+
+
+class LandingError(Exception):
+    pass
+
+
+def git(*args, check=True):
+    result = subprocess.run(["git", "-C", project, *args], text=True, capture_output=True)
+    if check and result.returncode:
+        detail = (result.stderr or result.stdout).strip()
+        raise LandingError(detail or f"git {' '.join(args)} failed")
+    return result
+
+
+def checkout_matches(revision):
+    index_tree = git("write-tree").stdout.strip()
+    expected_tree = git("rev-parse", f"{revision}^{{tree}}").stdout.strip()
+    tracked_clean = git("diff-files", "--quiet", check=False).returncode == 0
+    untracked = git("ls-files", "--others", "--exclude-standard", "-z").stdout
+    return index_tree == expected_tree and tracked_clean and not untracked
+
+
+class RefTransaction:
+    def __init__(self, new, old):
+        self.process = subprocess.Popen(
+            ["git", "-C", project, "update-ref", "-m", f"firstmate: merge {task_id}", "--stdin"],
+            text=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.send("start")
+        self.expect("start: ok")
+        self.send(f"update {ref} {new} {old}")
+        self.send("prepare")
+        self.expect("prepare: ok")
+
+    def send(self, command):
+        if self.process.stdin is None:
+            raise LandingError("reference transaction input is unavailable")
+        self.process.stdin.write(command + "\n")
+        self.process.stdin.flush()
+
+    def expect(self, expected):
+        if self.process.stdout is None:
+            raise LandingError("reference transaction output is unavailable")
+        response = self.process.stdout.readline().strip()
+        if response != expected:
+            self.process.wait()
+            detail = self.process.stderr.read().strip() if self.process.stderr else ""
+            raise LandingError(detail or f"reference transaction returned {response!r}, expected {expected!r}")
+
+    def finish(self, command):
+        self.send(command)
+        self.expect(f"{command}: ok")
+        if self.process.stdin is not None:
+            self.process.stdin.close()
+        if self.process.wait():
+            detail = self.process.stderr.read().strip() if self.process.stderr else ""
+            raise LandingError(detail or f"reference transaction {command} failed")
+
+    def abort(self):
+        if self.process.poll() is None:
+            self.finish("abort")
+
+    def commit(self):
+        self.finish("commit")
+
+
+def restore_base():
+    git("read-tree", "-u", "-m", candidate, base)
+
+
+transaction = None
+transitioned = False
+try:
+    transaction = RefTransaction(candidate, base)
+    git("read-tree", "-u", "-m", base, candidate)
+    transitioned = True
+    if not checkout_matches(candidate):
+        raise LandingError("project checkout changed during exact local landing")
+    transaction.commit()
+except LandingError as error:
+    restore_error = None
+    if transitioned:
+        try:
+            restore_base()
+        except LandingError as caught:
+            restore_error = caught
+    if transaction is not None:
+        try:
+            transaction.abort()
+        except LandingError as caught:
+            restore_error = restore_error or caught
+    if restore_error is not None:
+        print(f"error: {error}; checkout rollback also failed: {restore_error}", file=sys.stderr)
+    else:
+        print(f"error: {error}", file=sys.stderr)
+    raise SystemExit(1)
+
+if git("rev-parse", ref).stdout.strip() == candidate and checkout_matches(candidate):
+    raise SystemExit(0)
+
+try:
+    rollback = RefTransaction(base, candidate)
+    restore_base()
+    rollback.commit()
+except LandingError as error:
+    print(f"error: exact local landing changed after commit and rollback failed: {error}", file=sys.stderr)
+    raise SystemExit(1)
+
+print("error: project checkout changed during exact local landing", file=sys.stderr)
+raise SystemExit(1)
+PY
+}
+
 execute_local() {
   local branch current candidate base before after
   [ "$MODE" = local-only ] || die "task $ID is mode=$MODE, not local-only"
@@ -173,7 +296,7 @@ execute_local() {
   [ "$(git -C "$WORKTREE" rev-parse HEAD)" = "$candidate" ] || die "task worktree HEAD changed during merge verification"
   [ "$(git -C "$PROJECT" rev-parse "refs/heads/$DEFAULT")" = "$base" ] || die "local merge base changed during merge verification"
   before=${base:0:12}
-  git -C "$PROJECT" merge --ff-only "$candidate" >/dev/null || die "local checkout changed before the exact candidate could land"
+  land_local_exact "$base" "$candidate" || die "local checkout or base changed before the exact candidate could land"
   after=$(git -C "$PROJECT" rev-parse "refs/heads/$DEFAULT")
   [ "$after" = "$candidate" ] || die "local merge did not land the verified candidate SHA"
   echo "merged $branch into local $DEFAULT ($before -> ${after:0:12}) in $PROJECT"
