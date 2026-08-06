@@ -503,6 +503,44 @@ SH
   pass "signal handling completes child cleanup before returning"
 }
 
+test_completed_parallel_worker_drains_process_group() {
+  local tmp repo runner fixture evidence descendant_pid state rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-completed-worker.XXXXXX")
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  fixture=tests/fm-brief.test.sh
+  evidence="$tmp/evidence"
+  mkdir -p "$repo/bin" "$repo/tests" "$evidence"
+  cp "$RUNNER" "$runner"
+  cat >"$repo/$fixture" <<'SH'
+#!/usr/bin/env bash
+bash -c 'trap "" HUP TERM; while :; do sleep 1; done' &
+descendant_pid=$!
+printf '%s\n' "$descendant_pid" >"$SCHED_EVIDENCE/descendant.pid"
+printf 'ok - fixture completed while descendant remained active\n'
+SH
+  chmod +x "$runner" "$repo/$fixture"
+  set +e
+  SCHED_EVIDENCE="$evidence" "$runner" --jobs 2 "$fixture" >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || { cat "$tmp/out" "$tmp/err"; rm -rf "$tmp"; fail "completed parallel fixture should pass, got $rc"; }
+  assert_contains "$(cat "$tmp/out")" "FM_TEST_SUMMARY total=1 failed=0" "completed parallel fixture summary"
+  descendant_pid=$(cat "$evidence/descendant.pid" 2>/dev/null || true)
+  [ -n "$descendant_pid" ] || { rm -rf "$tmp"; fail "completed parallel fixture did not record its descendant"; }
+  state=$(ps -o stat= -p "$descendant_pid" 2>/dev/null | awk 'NR == 1 { print $1 }' || true)
+  case "$state" in
+    ""|Z*) ;;
+    *)
+      kill -KILL "$descendant_pid" 2>/dev/null || true
+      rm -rf "$tmp"
+      fail "completed parallel worker left a live descendant behind (pid=$descendant_pid state=$state)"
+      ;;
+  esac
+  rm -rf "$tmp"
+  pass "completed parallel workers drain their remaining process groups"
+}
+
 test_aggregate_exit_behavior() {
   local tmp pass_f fail_f rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-agg.XXXXXX")
@@ -1100,6 +1138,7 @@ test_parallel_child_can_signal_immediately
 test_interrupt_drains_serial_cleanup
 test_interrupt_cleans_parallel_process_tree
 test_interrupt_waits_for_parallel_cleanup
+test_completed_parallel_worker_drains_process_group
 test_aggregate_exit_behavior
 test_gate_skip_accounting
 test_runtime_gate_required_and_optional_outcomes
