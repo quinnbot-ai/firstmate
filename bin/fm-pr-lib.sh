@@ -222,6 +222,8 @@ fm_pr_merge_args_parse() {
   while [ "$#" -gt 0 ]; do
     arg=$1
     shift
+    # FM_PR_MERGE_DELETE_BRANCH is consumed by scripts that source this library.
+    # shellcheck disable=SC2034
     case "$arg" in
       --squash) arg=squash ;;
       --merge) arg=merge ;;
