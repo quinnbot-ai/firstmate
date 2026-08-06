@@ -14,6 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+MERGE_EXECUTE_ARGS=("$@")
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -58,6 +59,45 @@ require_repository_state() {
   [ "$worktree_common" = "$project_common" ] || die "task worktree and project metadata name different repositories"
   require_clean "$WORKTREE" "task worktree"
   require_clean "$PROJECT" "project checkout"
+}
+
+ensure_repository_lock() {
+  local common lock_path
+  common=$(git_common "$PROJECT") || die "cannot resolve repository lock path"
+  lock_path="$common/firstmate-merge.lock"
+  if [ -n "${FM_MERGE_LOCK_FD:-}" ]; then
+    python3 - "$FM_MERGE_LOCK_FD" "$lock_path" <<'PY' || die "repository merge lock is invalid"
+import fcntl
+import os
+import pathlib
+import sys
+
+fd = int(sys.argv[1])
+path = pathlib.Path(sys.argv[2])
+held = os.fstat(fd)
+current = path.stat()
+if (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino):
+    raise SystemExit(1)
+fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+PY
+    return
+  fi
+  python3 - "$lock_path" "$SCRIPT_DIR/fm-merge-execute.sh" "${MERGE_EXECUTE_ARGS[@]}" <<'PY'
+import fcntl
+import os
+import subprocess
+import sys
+
+lock_path, script, *args = sys.argv[1:]
+fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+os.set_inheritable(fd, True)
+environment = os.environ.copy()
+environment["FM_MERGE_LOCK_FD"] = str(fd)
+result = subprocess.run([script, *args], env=environment, pass_fds=(fd,))
+raise SystemExit(result.returncode)
+PY
+  exit $?
 }
 
 default_branch() {
@@ -133,8 +173,7 @@ execute_local() {
   [ "$(git -C "$WORKTREE" rev-parse HEAD)" = "$candidate" ] || die "task worktree HEAD changed during merge verification"
   [ "$(git -C "$PROJECT" rev-parse "refs/heads/$DEFAULT")" = "$base" ] || die "local merge base changed during merge verification"
   before=${base:0:12}
-  git -C "$PROJECT" update-ref -m "firstmate: merge $ID" "refs/heads/$DEFAULT" "$candidate" "$base" || die "local merge base changed before the exact candidate could land"
-  git -C "$PROJECT" reset --hard "$candidate" >/dev/null || die "local default ref landed, but its checkout could not be synchronized"
+  git -C "$PROJECT" merge --ff-only "$candidate" >/dev/null || die "local checkout changed before the exact candidate could land"
   after=$(git -C "$PROJECT" rev-parse "refs/heads/$DEFAULT")
   [ "$after" = "$candidate" ] || die "local merge did not land the verified candidate SHA"
   echo "merged $branch into local $DEFAULT ($before -> ${after:0:12}) in $PROJECT"
@@ -191,4 +230,5 @@ esac
 META="$STATE/$ID.meta"
 [ -f "$META" ] && [ ! -L "$META" ] || die "task metadata is unavailable"
 WORKTREE=$(meta_value worktree); PROJECT=$(meta_value project); KIND=$(meta_value kind); MODE=$(meta_value mode)
+ensure_repository_lock
 case "$ENTRY" in local) execute_local ;; github) execute_github "${GITHUB_ARGS[@]+"${GITHUB_ARGS[@]}"}" ;; esac

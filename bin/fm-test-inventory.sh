@@ -59,6 +59,14 @@ def git(*args, check=True):
     return run(["git", *args], check=check)
 
 
+def git_bytes(*args, check=True):
+    result = subprocess.run(["git", *args], cwd=root, capture_output=True)
+    if check and result.returncode:
+        message = (result.stderr or result.stdout).decode("utf-8", errors="replace").strip()
+        fail(f"git {' '.join(args)} failed: {message}")
+    return result
+
+
 def load_json_bytes(raw, label):
     try:
         return json.loads(raw.decode("utf-8"))
@@ -167,23 +175,51 @@ def validate_transition(base_declaration, candidate_declaration):
     return candidate
 
 
-def source_files():
-    paths = []
+def is_test_source(relative):
+    if any(part in {".git", ".venv", "venv", "site-packages", "__pycache__"} for part in relative.parts):
+        return False
+    return relative.name.startswith("test_") or relative.name.endswith("_test.py")
+
+
+def worktree_sources():
+    sources = []
     for path in root.rglob("*.py"):
         relative = path.relative_to(root)
-        if any(part in {".git", ".venv", "venv", "site-packages", "__pycache__"} for part in relative.parts):
+        if not is_test_source(relative):
             continue
-        name = relative.name
-        if name.startswith("test_") or name.endswith("_test.py"):
-            paths.append(path)
-    return sorted(paths)
+        if path.is_symlink():
+            fail(f"literal Python test source must not be a symlink: {relative.as_posix()}")
+        try:
+            sources.append((relative.as_posix(), path.read_bytes()))
+        except OSError as error:
+            fail(f"cannot read literal Python test source {relative.as_posix()}: {error}")
+    return sorted(sources)
 
 
-def declaration_nodes(path):
-    relative = path.relative_to(root).as_posix()
+def tree_sources(revision):
+    sources = []
+    listing = git_bytes("ls-tree", "-rz", "--full-tree", revision).stdout
+    for entry in listing.split(b"\0"):
+        if not entry:
+            continue
+        try:
+            header, raw_path = entry.split(b"\t", 1)
+            file_mode, object_type, object_id = header.decode("ascii").split()
+            relative = pathlib.PurePosixPath(raw_path.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as error:
+            fail(f"cannot inspect candidate tree entry: {error}")
+        if relative.suffix != ".py" or not is_test_source(relative):
+            continue
+        if object_type != "blob" or file_mode not in {"100644", "100755"}:
+            fail(f"literal Python test source must be a regular file at {revision}: {relative.as_posix()}")
+        sources.append((relative.as_posix(), git_bytes("cat-file", "blob", object_id).stdout))
+    return sorted(sources)
+
+
+def declaration_nodes(relative, raw):
     try:
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=relative)
-    except (OSError, SyntaxError, UnicodeDecodeError) as error:
+        tree = ast.parse(raw.decode("utf-8"), filename=relative)
+    except (SyntaxError, UnicodeDecodeError) as error:
         fail(f"cannot parse literal Python test source {relative}: {error}")
     nodes = []
     for item in tree.body:
@@ -196,10 +232,11 @@ def declaration_nodes(path):
     return nodes
 
 
-def observed_inventory():
+def observed_inventory(revision=None):
     nodes = []
-    for path in source_files():
-        nodes.extend(declaration_nodes(path))
+    sources = tree_sources(revision) if revision else worktree_sources()
+    for relative, raw in sources:
+        nodes.extend(declaration_nodes(relative, raw))
     if not nodes:
         fail("declared test-bearing project has no literal Python test declarations")
     if len(nodes) != len(set(nodes)):
@@ -226,7 +263,7 @@ def require_clean_exact_checkout():
         fail("task worktree is dirty; refusing test-inventory merge verification")
 
 
-def verify_receipt(declaration, policy, receipt):
+def verify_receipt(declaration, policy, receipt, revision=None):
     if not isinstance(receipt, dict) or receipt.get("schema_version") != 1:
         fail("test-inventory receipt must have schema_version=1")
     if receipt.get("declaration_sha256") != canonical_hash(declaration):
@@ -238,7 +275,7 @@ def verify_receipt(declaration, policy, receipt):
     for key in ("declarations", "test_files"):
         if not positive_integer(receipt.get(key)):
             fail(f"test-inventory receipt {key} must be positive")
-    observed = observed_inventory()
+    observed = observed_inventory(revision)
     for key in ("declarations", "test_files", "literal_declarations_sha256"):
         if receipt.get(key) != observed[key]:
             fail(f"current literal Python {key} does not match the committed receipt; regenerate it before merging")
@@ -275,6 +312,6 @@ if mode == "collect":
 receipt = load_json(receipt_path, "test-inventory receipt")
 if mode == "merge-check" and receipt != load_json_at(candidate_sha, receipt_rel, "candidate test-inventory receipt"):
     fail("worktree test-inventory receipt does not match the exact candidate commit")
-verified = verify_receipt(declaration, policy, receipt)
+verified = verify_receipt(declaration, policy, receipt, candidate_sha if mode == "merge-check" else None)
 print(f"test inventory: declarations={verified['declarations']} test_files={verified['test_files']} accepted")
 PY
