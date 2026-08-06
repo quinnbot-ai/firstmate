@@ -61,14 +61,15 @@ require_equal(macos_events.keys.sort, %w[pull_request schedule], "macOS workflow
 macos_pr = macos_events.fetch("pull_request")
 require_equal(macos_pr.fetch("branches"), ["main"], "macOS PR target")
 paths = macos_pr.fetch("paths")
-%w[
+macos_paths = %w[
   .github/workflows/macos-stock-bash.yml
   bin/**
   tests/lib.sh
   tests/fm-fleet-snapshot-view.test.sh
   tests/fm-bearings-snapshot.test.sh
   tests/fm-test-run.test.sh
-].each { |path| require_present(paths.include?(path), "macOS PR path #{path}") }
+]
+require_equal(paths, macos_paths, "macOS PR paths")
 require_equal(macos_events.fetch("schedule"), [{"cron" => "17 5 * * *"}], "macOS daily schedule")
 macos_jobs = macos.fetch("jobs")
 require_equal(macos_jobs.keys, ["macos-stock-bash"], "macOS job inventory")
