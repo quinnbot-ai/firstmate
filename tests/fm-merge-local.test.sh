@@ -41,6 +41,21 @@ commit_candidate() {
   git -C "$case_dir/worker" commit -qm candidate
 }
 
+enable_normalizing_filter() {
+  local case_dir=$1 filter=$1/normalize-filter
+  cat >"$filter" <<'SH'
+#!/bin/sh
+printf 'candidate\n'
+SH
+  chmod +x "$filter"
+  git -C "$case_dir/project" config filter.normalize.clean "$filter"
+  git -C "$case_dir/project" config filter.normalize.smudge cat
+  printf 'payload.txt filter=normalize\n' >"$case_dir/project/.gitattributes"
+  git -C "$case_dir/project" add .gitattributes
+  git -C "$case_dir/project" commit -qm "configure payload normalization"
+  git -C "$case_dir/worker" merge -q --ff-only main
+}
+
 assert_ref_unchanged() {
   local case_dir=$1 before_main=$2 before_worker=$3 message=$4
   [ "$(git -C "$case_dir/project" rev-parse main)" = "$before_main" ] || fail "$message: main advanced"
@@ -203,6 +218,49 @@ test_hidden_worker_dirt_refuses_without_mutation() {
   pass "fm-merge-local detects worker dirt hidden by index flags"
 }
 
+test_clean_filter_cannot_hide_worker_or_target_bytes() {
+  local before_main before_worker case_dir candidate_blob raw_object rc
+  case_dir=$(make_case filter-hidden-worker)
+  enable_normalizing_filter "$case_dir"
+  commit_candidate "$case_dir"
+  printf 'worker bytes hidden by clean filter\n' >"$case_dir/worker/payload.txt"
+  git -C "$case_dir/worker" diff --quiet -- \
+    || fail "clean-filter worker: fixture did not mask raw dirt from Git diff"
+  refusal_preserves "$case_dir" "not clean"
+  [ "$(tr -d '\n' <"$case_dir/worker/payload.txt")" = 'worker bytes hidden by clean filter' ] \
+    || fail "clean-filter worker: refusal changed worker bytes"
+
+  case_dir=$(make_case filter-hidden-target)
+  enable_normalizing_filter "$case_dir"
+  commit_candidate "$case_dir"
+  candidate_blob=$(git -C "$case_dir/project" rev-parse fm/task-x1:payload.txt)
+  git -C "$case_dir/project" update-index --cacheinfo 100644 "$candidate_blob" payload.txt
+  printf 'target raw object %s\n' "$case_dir" >"$case_dir/project/payload.txt"
+  git -C "$case_dir/project" diff --quiet -- \
+    || fail "clean-filter target: fixture did not mask raw worktree dirt"
+  git -C "$case_dir/project" diff --cached --quiet fm/task-x1 -- \
+    || fail "clean-filter target: fixture index did not match the candidate"
+  raw_object=$(git -C "$case_dir/project" hash-object --no-filters -- payload.txt)
+  if git -C "$case_dir/project" cat-file -e "$raw_object" 2>/dev/null; then
+    fail "clean-filter target: raw object unexpectedly existed before verification"
+  fi
+  before_main=$(git -C "$case_dir/project" rev-parse main)
+  before_worker=$(git -C "$case_dir/project" rev-parse fm/task-x1)
+  set +e
+  run_merge "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "clean-filter target: command should refuse"
+  assert_grep 'does not exactly match fm/task-x1' "$case_dir/stderr" "clean-filter target: raw dirt bypassed verification"
+  assert_ref_unchanged "$case_dir" "$before_main" "$before_worker" "clean-filter target"
+  if git -C "$case_dir/project" cat-file -e "$raw_object" 2>/dev/null; then
+    fail "clean-filter target: verification wrote the raw object"
+  fi
+  [ "$(tr -d '\n' <"$case_dir/project/payload.txt")" = "target raw object $case_dir" ] \
+    || fail "clean-filter target: refusal changed target bytes"
+  pass "fm-merge-local compares raw bytes without filters or object writes"
+}
+
 test_missing_duplicate_and_subdirectory_worktree_metadata_refuse() {
   local case_dir
   case_dir=$(make_case missing-worktree)
@@ -308,6 +366,47 @@ SH
   pass "fm-merge-local rechecks target state at the final pre-mutation boundary"
 }
 
+test_signal_at_final_merge_boundary_refuses() {
+  local before_main before_worker case_dir expected fakebin rc real_git signal suffix
+  for signal in HUP INT TERM; do
+    case "$signal" in
+      HUP) expected=129; suffix=hup ;;
+      INT) expected=130; suffix=int ;;
+      TERM) expected=143; suffix=term ;;
+    esac
+    case_dir=$(make_case "signal-$suffix")
+    commit_candidate "$case_dir" candidate
+    fakebin=$case_dir/fakebin
+    real_git=$(command -v git)
+    mkdir "$fakebin"
+    cat >"$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *' merge --ff-only '*)
+    kill -s "$FM_TEST_SIGNAL" "$PPID"
+    exit 99
+    ;;
+esac
+exec "$REAL_GIT" "$@"
+SH
+    chmod +x "$fakebin/git"
+    before_main=$(git -C "$case_dir/project" rev-parse main)
+    before_worker=$(git -C "$case_dir/project" rev-parse fm/task-x1)
+    set +e
+    PATH="$fakebin:$PATH" REAL_GIT="$real_git" FM_TEST_SIGNAL="$signal" \
+      run_merge "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code "$expected" "$rc" "signal $signal at final boundary: command should terminate"
+    assert_ref_unchanged "$case_dir" "$before_main" "$before_worker" "signal $signal at final boundary"
+    [ "$(tr -d '\n' <"$case_dir/project/payload.txt")" = base ] \
+      || fail "signal $signal at final boundary: target content changed"
+    [ "$(tr -d '\n' <"$case_dir/worker/payload.txt")" = candidate ] \
+      || fail "signal $signal at final boundary: worker content changed"
+  done
+  pass "fm-merge-local terminates safely on final-boundary signals"
+}
+
 test_untracked_content_is_preserved_or_git_refuses_collision() {
   local case_dir before_main before_worker fakebin rc real_git
   case_dir=$(make_case untracked-noncollision)
@@ -374,10 +473,12 @@ test_worker_branch_ref_changed_after_preflight_refuses
 test_detached_and_different_repository_workers_refuse
 test_unlanded_worker_states_refuse_without_mutation
 test_hidden_worker_dirt_refuses_without_mutation
+test_clean_filter_cannot_hide_worker_or_target_bytes
 test_missing_duplicate_and_subdirectory_worktree_metadata_refuse
 test_candidate_equivalent_target_index_and_worktree_fast_forward
 test_target_difference_refuses_and_many_paths_have_bounded_diagnostic
 test_hidden_target_bytes_and_modes_refuse
 test_target_state_changed_after_preflight_refuses
+test_signal_at_final_merge_boundary_refuses
 test_untracked_content_is_preserved_or_git_refuses_collision
 test_clean_target_ordinary_path

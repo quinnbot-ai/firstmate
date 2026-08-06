@@ -82,34 +82,100 @@ BRANCH="fm/$ID"
 CANDIDATE=
 VERIFY_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-merge-local.XXXXXX") \
   || { echo "error: cannot create verification workspace for task $ID" >&2; exit 1; }
-trap 'rm -rf -- "$VERIFY_DIR"' EXIT HUP INT TERM
+trap 'rm -rf -- "$VERIFY_DIR"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 VERIFY_SEQUENCE=0
 
 tracked_state_matches() {
-  local checkout=$1 expected=$2 actual_entries expected_entries snapshot_index snapshot_entries
+  local checkout=$1 expected=$2 actual_entries actual_link entry expected_blob expected_entries
+  local full_path metadata mode object_id permissions stage tracked_path
   VERIFY_SEQUENCE=$((VERIFY_SEQUENCE + 1))
-  snapshot_index=$VERIFY_DIR/index-$VERIFY_SEQUENCE
   expected_entries=$VERIFY_DIR/expected-$VERIFY_SEQUENCE
   actual_entries=$VERIFY_DIR/actual-$VERIFY_SEQUENCE
-  snapshot_entries=$VERIFY_DIR/snapshot-$VERIFY_SEQUENCE
+  expected_blob=$VERIFY_DIR/blob-$VERIFY_SEQUENCE
+  actual_link=$VERIFY_DIR/link-$VERIFY_SEQUENCE
 
-  GIT_INDEX_FILE=$snapshot_index git -C "$checkout" read-tree "$expected" \
+  git -C "$checkout" ls-tree -r -z --full-tree \
+    --format='%(objectmode) %(objectname) 0%x09%(path)' "$expected" >"$expected_entries" \
     || return 1
-  GIT_INDEX_FILE=$snapshot_index git -C "$checkout" ls-files --stage -z >"$expected_entries" \
-    || return 1
-  git -C "$checkout" ls-files --stage -z >"$actual_entries" \
+  git -C "$checkout" ls-files -z \
+    --format='%(objectmode) %(objectname) %(stage)%x09%(path)' >"$actual_entries" \
     || return 1
   cmp -s "$expected_entries" "$actual_entries" \
     || return 1
-  GIT_INDEX_FILE=$snapshot_index git -c core.fileMode=true -c core.symlinks=true \
-    -C "$checkout" add -u -- \
-    || return 1
-  GIT_INDEX_FILE=$snapshot_index git -C "$checkout" ls-files --stage -z >"$snapshot_entries" \
-    || return 1
-  cmp -s "$expected_entries" "$snapshot_entries" \
-    || return 1
-  GIT_INDEX_FILE=$snapshot_index git -c core.fileMode=true -c core.symlinks=true \
-    -C "$checkout" diff-files --quiet --ignore-submodules=none --
+
+  while IFS= read -r -d '' entry; do
+    metadata=${entry%%$'\t'*}
+    tracked_path=${entry#*$'\t'}
+    mode=${metadata%% *}
+    metadata=${metadata#* }
+    object_id=${metadata%% *}
+    stage=${metadata##* }
+    [ "$stage" = 0 ] || return 1
+    full_path=$checkout/$tracked_path
+    case "$mode" in
+      100644 | 100755)
+        [ -f "$full_path" ] && [ ! -L "$full_path" ] || return 1
+        if permissions=$(stat -c %a "$full_path" 2>/dev/null); then
+          :
+        elif permissions=$(stat -f %Lp "$full_path" 2>/dev/null); then
+          :
+        else
+          return 1
+        fi
+        case "$mode:$permissions" in
+          100755:*[1357][0-7][0-7] | 100644:*[0246][0-7][0-7]) ;;
+          *) return 1 ;;
+        esac
+        git -C "$checkout" cat-file blob "$object_id" >"$expected_blob" \
+          || return 1
+        cmp -s "$expected_blob" "$full_path" \
+          || return 1
+        ;;
+      120000)
+        [ -L "$full_path" ] || return 1
+        git -C "$checkout" cat-file blob "$object_id" >"$expected_blob" \
+          || return 1
+        readlink -n "$full_path" >"$actual_link" \
+          || return 1
+        cmp -s "$expected_blob" "$actual_link" \
+          || return 1
+        ;;
+      160000)
+        [ -d "$full_path" ] || return 1
+        [ "$(git -C "$full_path" rev-parse --verify HEAD^{commit} 2>/dev/null)" = "$object_id" ] \
+          || return 1
+        tracked_state_matches "$full_path" "$object_id" \
+          || return 1
+        ;;
+      *) return 1 ;;
+    esac
+  done <"$actual_entries"
+}
+
+checkout_has_untracked() {
+  local checkout=$1 entries entry full_path metadata mode tracked_path untracked
+  VERIFY_SEQUENCE=$((VERIFY_SEQUENCE + 1))
+  entries=$VERIFY_DIR/untracked-entries-$VERIFY_SEQUENCE
+  untracked=$VERIFY_DIR/untracked-$VERIFY_SEQUENCE
+  git -C "$checkout" ls-files --others --exclude-standard -z >"$untracked" \
+    || return 0
+  [ ! -s "$untracked" ] || return 0
+  git -C "$checkout" ls-files -z \
+    --format='%(objectmode) %(objectname) %(stage)%x09%(path)' >"$entries" \
+    || return 0
+  while IFS= read -r -d '' entry; do
+    metadata=${entry%%$'\t'*}
+    tracked_path=${entry#*$'\t'}
+    mode=${metadata%% *}
+    [ "$mode" = 160000 ] || continue
+    full_path=$checkout/$tracked_path
+    [ -d "$full_path" ] || continue
+    checkout_has_untracked "$full_path" && return 0
+  done <"$entries"
+  return 1
 }
 
 checkout_has_in_progress_operation() {
@@ -123,7 +189,7 @@ checkout_has_in_progress_operation() {
 }
 
 validate_task_custody() {
-  local worker_root worker_common worker_branch worker_head candidate_now untracked
+  local worker_root worker_common worker_branch worker_head candidate_now
   worker_root=$(git -C "$TASK_WORKTREE" rev-parse --show-toplevel 2>/dev/null) \
     || { echo "error: recorded worktree for task $ID is not a Git checkout" >&2; return 1; }
   worker_root=$(canonical_dir "$worker_root") \
@@ -157,10 +223,7 @@ validate_task_custody() {
   fi
   tracked_state_matches "$TASK_WORKTREE" "$CANDIDATE" \
     || { echo "error: recorded worktree for task $ID is not clean; refusing to land unlanded work" >&2; return 1; }
-  untracked=$VERIFY_DIR/untracked-$VERIFY_SEQUENCE
-  git -C "$TASK_WORKTREE" ls-files --others --exclude-standard -z >"$untracked" \
-    || { echo "error: cannot inspect untracked recorded-worktree state for task $ID" >&2; return 1; }
-  [ ! -s "$untracked" ] \
+  ! checkout_has_untracked "$TASK_WORKTREE" \
     || { echo "error: recorded worktree for task $ID is not clean; refusing to land unlanded work" >&2; return 1; }
 }
 
