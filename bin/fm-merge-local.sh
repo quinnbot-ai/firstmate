@@ -46,16 +46,40 @@ canonical_dir() {
   (cd -P -- "$1" && pwd -P)
 }
 
+safe_git() {
+  env \
+    -u GIT_DIR \
+    -u GIT_COMMON_DIR \
+    -u GIT_WORK_TREE \
+    -u GIT_IMPLICIT_WORK_TREE \
+    -u GIT_INDEX_FILE \
+    -u GIT_NAMESPACE \
+    -u GIT_OBJECT_DIRECTORY \
+    -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
+    -u GIT_QUARANTINE_PATH \
+    -u GIT_SHALLOW_FILE \
+    -u GIT_REPLACE_REF_BASE \
+    -u GIT_CONFIG \
+    -u GIT_CONFIG_GLOBAL \
+    -u GIT_CONFIG_SYSTEM \
+    -u GIT_CONFIG_NOSYSTEM \
+    -u GIT_CONFIG_PARAMETERS \
+    -u GIT_CONFIG_COUNT \
+    -u GIT_EXEC_PATH \
+    GIT_NO_REPLACE_OBJECTS=1 \
+    git --no-replace-objects "$@"
+}
+
 PROJ=$(meta_single_value project) || exit 1
 MODE=$(meta_single_value mode) || exit 1
 [ "$MODE" = local-only ] || { echo "error: task $ID is mode=$MODE, not local-only; merge PR tasks with bin/fm-pr-merge.sh <id> <PR url> after approval" >&2; exit 1; }
 RECORDED_WORKTREE=$(meta_single_value worktree) || exit 1
 
-PROJECT_ROOT=$(git -C "$PROJ" rev-parse --show-toplevel 2>/dev/null) \
+PROJECT_ROOT=$(safe_git -C "$PROJ" rev-parse --show-toplevel 2>/dev/null) \
   || { echo "error: task $ID project is not a Git checkout: $PROJ" >&2; exit 1; }
 PROJECT_ROOT=$(canonical_dir "$PROJECT_ROOT") \
   || { echo "error: cannot canonicalize project checkout for task $ID" >&2; exit 1; }
-PROJECT_COMMON=$(git -C "$PROJECT_ROOT" rev-parse --path-format=absolute --git-common-dir) \
+PROJECT_COMMON=$(safe_git -C "$PROJECT_ROOT" rev-parse --path-format=absolute --git-common-dir) \
   || { echo "error: cannot identify project repository for task $ID" >&2; exit 1; }
 PROJECT_COMMON=$(canonical_dir "$PROJECT_COMMON") \
   || { echo "error: cannot canonicalize project repository for task $ID" >&2; exit 1; }
@@ -64,13 +88,13 @@ TASK_WORKTREE=$(canonical_dir "$RECORDED_WORKTREE") \
 
 default_branch() {
   local ref branch
-  ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+  ref=$(safe_git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
   if [ -n "$ref" ]; then
     echo "${ref#origin/}"
     return 0
   fi
   for branch in main master; do
-    if git -C "$PROJ" show-ref --verify --quiet "refs/heads/$branch"; then
+    if safe_git -C "$PROJ" show-ref --verify --quiet "refs/heads/$branch"; then
       echo "$branch"
       return 0
     fi
@@ -97,10 +121,10 @@ tracked_state_matches() {
   expected_blob=$VERIFY_DIR/blob-$VERIFY_SEQUENCE
   actual_link=$VERIFY_DIR/link-$VERIFY_SEQUENCE
 
-  git -C "$checkout" ls-tree -r -z --full-tree \
+  safe_git -C "$checkout" ls-tree -r -z --full-tree \
     --format='%(objectmode) %(objectname) 0%x09%(path)' "$expected" >"$expected_entries" \
     || return 1
-  git -C "$checkout" ls-files -z \
+  safe_git -C "$checkout" ls-files -z \
     --format='%(objectmode) %(objectname) %(stage)%x09%(path)' >"$actual_entries" \
     || return 1
   cmp -s "$expected_entries" "$actual_entries" \
@@ -129,14 +153,14 @@ tracked_state_matches() {
           100755:*[1357][0-7][0-7] | 100644:*[0246][0-7][0-7]) ;;
           *) return 1 ;;
         esac
-        git -C "$checkout" cat-file blob "$object_id" >"$expected_blob" \
+        safe_git -C "$checkout" cat-file blob "$object_id" >"$expected_blob" \
           || return 1
         cmp -s "$expected_blob" "$full_path" \
           || return 1
         ;;
       120000)
         [ -L "$full_path" ] || return 1
-        git -C "$checkout" cat-file blob "$object_id" >"$expected_blob" \
+        safe_git -C "$checkout" cat-file blob "$object_id" >"$expected_blob" \
           || return 1
         readlink -n "$full_path" >"$actual_link" \
           || return 1
@@ -145,7 +169,7 @@ tracked_state_matches() {
         ;;
       160000)
         [ -d "$full_path" ] || return 1
-        [ "$(git -C "$full_path" rev-parse --verify HEAD^{commit} 2>/dev/null)" = "$object_id" ] \
+        [ "$(safe_git -C "$full_path" rev-parse --verify HEAD^{commit} 2>/dev/null)" = "$object_id" ] \
           || return 1
         tracked_state_matches "$full_path" "$object_id" \
           || return 1
@@ -160,10 +184,10 @@ checkout_has_untracked() {
   VERIFY_SEQUENCE=$((VERIFY_SEQUENCE + 1))
   entries=$VERIFY_DIR/untracked-entries-$VERIFY_SEQUENCE
   untracked=$VERIFY_DIR/untracked-$VERIFY_SEQUENCE
-  git -C "$checkout" ls-files --others --exclude-standard -z >"$untracked" \
+  safe_git -C "$checkout" ls-files --others --exclude-standard -z >"$untracked" \
     || return 0
   [ ! -s "$untracked" ] || return 0
-  git -C "$checkout" ls-files -z \
+  safe_git -C "$checkout" ls-files -z \
     --format='%(objectmode) %(objectname) %(stage)%x09%(path)' >"$entries" \
     || return 0
   while IFS= read -r -d '' entry; do
@@ -181,31 +205,31 @@ checkout_has_untracked() {
 checkout_has_in_progress_operation() {
   local checkout=$1 marker marker_path
   for marker in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD rebase-apply rebase-merge sequencer; do
-    marker_path=$(git -C "$checkout" rev-parse --path-format=absolute --git-path "$marker") || return 0
+    marker_path=$(safe_git -C "$checkout" rev-parse --path-format=absolute --git-path "$marker") || return 0
     [ ! -e "$marker_path" ] || return 0
   done
-  git -C "$checkout" ls-files -u | grep -q . && return 0
+  safe_git -C "$checkout" ls-files -u | grep -q . && return 0
   return 1
 }
 
 validate_task_custody() {
   local worker_root worker_common worker_branch worker_head candidate_now
-  worker_root=$(git -C "$TASK_WORKTREE" rev-parse --show-toplevel 2>/dev/null) \
+  worker_root=$(safe_git -C "$TASK_WORKTREE" rev-parse --show-toplevel 2>/dev/null) \
     || { echo "error: recorded worktree for task $ID is not a Git checkout" >&2; return 1; }
   worker_root=$(canonical_dir "$worker_root") \
     || { echo "error: cannot canonicalize recorded worktree for task $ID" >&2; return 1; }
   [ "$worker_root" = "$TASK_WORKTREE" ] \
     || { echo "error: recorded worktree for task $ID must name its checkout root" >&2; return 1; }
-  worker_common=$(git -C "$TASK_WORKTREE" rev-parse --path-format=absolute --git-common-dir) \
+  worker_common=$(safe_git -C "$TASK_WORKTREE" rev-parse --path-format=absolute --git-common-dir) \
     || { echo "error: cannot identify recorded worktree repository for task $ID" >&2; return 1; }
   worker_common=$(canonical_dir "$worker_common") \
     || { echo "error: cannot canonicalize recorded worktree repository for task $ID" >&2; return 1; }
   [ "$worker_common" = "$PROJECT_COMMON" ] \
     || { echo "error: recorded worktree for task $ID belongs to a different repository" >&2; return 1; }
-  worker_branch=$(git -C "$TASK_WORKTREE" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  worker_branch=$(safe_git -C "$TASK_WORKTREE" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
   [ "$worker_branch" = "$BRANCH" ] \
     || { echo "error: recorded worktree for task $ID is on '${worker_branch:-detached}', expected $BRANCH" >&2; return 1; }
-  candidate_now=$(git -C "$PROJECT_ROOT" rev-parse --verify --quiet "refs/heads/$BRANCH^{commit}") \
+  candidate_now=$(safe_git -C "$PROJECT_ROOT" rev-parse --verify --quiet "refs/heads/$BRANCH^{commit}") \
     || { echo "error: branch $BRANCH does not exist in $PROJECT_ROOT" >&2; return 1; }
   if [ -z "$CANDIDATE" ]; then
     CANDIDATE=$candidate_now
@@ -213,7 +237,7 @@ validate_task_custody() {
     echo "error: branch $BRANCH moved after custody verification; refusing to merge" >&2
     return 1
   fi
-  worker_head=$(git -C "$TASK_WORKTREE" rev-parse HEAD) \
+  worker_head=$(safe_git -C "$TASK_WORKTREE" rev-parse HEAD) \
     || { echo "error: cannot read recorded worktree HEAD for task $ID" >&2; return 1; }
   [ "$worker_head" = "$CANDIDATE" ] \
     || { echo "error: recorded worktree HEAD for task $ID is stale versus $BRANCH" >&2; return 1; }
@@ -233,7 +257,7 @@ DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for 
 
 validate_target_state() {
   local cur
-  cur=$(git -C "$PROJECT_ROOT" symbolic-ref --short HEAD 2>/dev/null || echo "")
+  cur=$(safe_git -C "$PROJECT_ROOT" symbolic-ref --short HEAD 2>/dev/null || echo "")
   [ "$cur" = "$DEFAULT" ] \
     || { echo "error: $PROJECT_ROOT is on '$cur', expected default branch '$DEFAULT'; cannot merge safely" >&2; return 1; }
   if checkout_has_in_progress_operation "$PROJECT_ROOT"; then
@@ -253,15 +277,15 @@ validate_target_state() {
 validate_target_state || exit 1
 
 # Clean fast-forward only: DEFAULT must be an ancestor of BRANCH.
-if ! git -C "$PROJECT_ROOT" merge-base --is-ancestor "$DEFAULT" "$CANDIDATE"; then
+if ! safe_git -C "$PROJECT_ROOT" merge-base --is-ancestor "$DEFAULT" "$CANDIDATE"; then
   echo "REFUSED: $BRANCH is not a fast-forward of $DEFAULT (it has diverged)." >&2
   echo "Have the crewmate rebase $BRANCH onto $DEFAULT, then retry." >&2
   exit 1
 fi
 
 validate_task_custody || exit 1
+before=$(safe_git -C "$PROJECT_ROOT" rev-parse --short "$DEFAULT")
 validate_target_state || exit 1
-before=$(git -C "$PROJECT_ROOT" rev-parse --short "$DEFAULT")
-git -C "$PROJECT_ROOT" merge --ff-only "$CANDIDATE" >/dev/null
-after=$(git -C "$PROJECT_ROOT" rev-parse --short "$DEFAULT")
+safe_git -C "$PROJECT_ROOT" merge --ff-only "$CANDIDATE" >/dev/null
+after=$(safe_git -C "$PROJECT_ROOT" rev-parse --short "$DEFAULT")
 echo "merged $BRANCH into local $DEFAULT ($before -> $after) in $PROJECT_ROOT"

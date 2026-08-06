@@ -261,6 +261,67 @@ test_clean_filter_cannot_hide_worker_or_target_bytes() {
   pass "fm-merge-local compares raw bytes without filters or object writes"
 }
 
+test_replacement_refs_cannot_hide_worker_bytes() {
+  local case_dir original_blob replacement_blob
+  case_dir=$(make_case replacement-hidden-worker)
+  commit_candidate "$case_dir"
+  original_blob=$(git -C "$case_dir/project" rev-parse fm/task-x1:payload.txt)
+  replacement_blob=$(printf 'replacement-hidden worker bytes\n' | git -C "$case_dir/project" hash-object -w --stdin)
+  git -C "$case_dir/project" replace "$original_blob" "$replacement_blob"
+  printf 'replacement-hidden worker bytes\n' >"$case_dir/worker/payload.txt"
+  [ "$(git -C "$case_dir/project" cat-file blob "$original_blob")" = 'replacement-hidden worker bytes' ] \
+    || fail "replacement ref: fixture did not substitute candidate bytes"
+  refusal_preserves "$case_dir" "not clean"
+  [ "$(tr -d '\n' <"$case_dir/worker/payload.txt")" = 'replacement-hidden worker bytes' ] \
+    || fail "replacement ref: refusal changed worker bytes"
+  [ "$(git -C "$case_dir/project" replace -l)" = "$original_blob" ] \
+    || fail "replacement ref: refusal changed replacement refs"
+  pass "fm-merge-local disables replacement refs during custody verification"
+}
+
+test_ambient_git_overrides_cannot_redirect_verification() {
+  local alternate_index before_main before_worker candidate_blob case_dir foreign local_blob rc
+  case_dir=$(make_case ambient-overrides)
+  commit_candidate "$case_dir"
+  candidate_blob=$(git -C "$case_dir/project" rev-parse fm/task-x1:payload.txt)
+  printf 'staged target dirt\n' >"$case_dir/project/payload.txt"
+  git -C "$case_dir/project" add payload.txt
+  local_blob=$(git -C "$case_dir/project" rev-parse :payload.txt)
+  printf 'candidate\n' >"$case_dir/project/payload.txt"
+  alternate_index=$case_dir/alternate-index
+  GIT_INDEX_FILE="$alternate_index" git -C "$case_dir/project" read-tree fm/task-x1
+  foreign=$case_dir/foreign
+  mkdir "$foreign"
+  git -C "$foreign" init -q -b main
+  before_main=$(git -C "$case_dir/project" rev-parse main)
+  before_worker=$(git -C "$case_dir/project" rev-parse fm/task-x1)
+  set +e
+  GIT_DIR="$foreign/.git" \
+    GIT_COMMON_DIR="$foreign/.git" \
+    GIT_WORK_TREE="$foreign" \
+    GIT_INDEX_FILE="$alternate_index" \
+    GIT_NAMESPACE=redirected \
+    GIT_OBJECT_DIRECTORY="$foreign/.git/objects" \
+    GIT_ALTERNATE_OBJECT_DIRECTORIES="$foreign/.git/objects" \
+    GIT_QUARANTINE_PATH="$foreign/.git/objects" \
+    GIT_SHALLOW_FILE="$foreign/.git/shallow" \
+    GIT_REPLACE_REF_BASE=refs/redirected/replace \
+    GIT_EXEC_PATH="$foreign" \
+    run_merge "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "ambient overrides: command should refuse the real target index"
+  assert_grep 'does not exactly match fm/task-x1' "$case_dir/stderr" "ambient overrides: verification was redirected"
+  assert_ref_unchanged "$case_dir" "$before_main" "$before_worker" "ambient overrides"
+  [ "$(git -C "$case_dir/project" rev-parse :payload.txt)" = "$local_blob" ] \
+    || fail "ambient overrides: refusal changed the real index"
+  [ "$(git -C "$case_dir/project" rev-parse fm/task-x1:payload.txt)" = "$candidate_blob" ] \
+    || fail "ambient overrides: refusal changed the candidate"
+  [ "$(tr -d '\n' <"$case_dir/project/payload.txt")" = candidate ] \
+    || fail "ambient overrides: refusal changed target bytes"
+  pass "fm-merge-local neutralizes ambient Git repository overrides"
+}
+
 test_missing_duplicate_and_subdirectory_worktree_metadata_refuse() {
   local case_dir
   case_dir=$(make_case missing-worktree)
@@ -364,6 +425,43 @@ SH
   assert_ref_unchanged "$case_dir" "$before_main" "$before_worker" "target changed after preflight"
   [ "$(tr -d '\n' <"$case_dir/project/payload.txt")" = 'late target churn' ] || fail "target changed after preflight: target content changed"
   pass "fm-merge-local rechecks target state at the final pre-mutation boundary"
+}
+
+test_target_churn_during_final_diagnostic_refuses() {
+  local before_main before_worker case_dir fakebin rc real_git
+  case_dir=$(make_case final-diagnostic-churn)
+  printf 'candidate addition\n' >"$case_dir/worker/candidate.txt"
+  git -C "$case_dir/worker" add candidate.txt
+  git -C "$case_dir/worker" commit -qm "add candidate path"
+  fakebin=$case_dir/fakebin
+  real_git=$(command -v git)
+  mkdir "$fakebin"
+  cat >"$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *' rev-parse --short main '*)
+    if [ ! -e "$FM_TEST_MUTATION_MARKER" ]; then
+      : >"$FM_TEST_MUTATION_MARKER"
+      printf 'final diagnostic churn\n' >"$FM_TEST_TARGET/payload.txt"
+    fi
+    ;;
+esac
+exec "$REAL_GIT" "$@"
+SH
+  chmod +x "$fakebin/git"
+  before_main=$(git -C "$case_dir/project" rev-parse main)
+  before_worker=$(git -C "$case_dir/project" rev-parse fm/task-x1)
+  set +e
+  PATH="$fakebin:$PATH" REAL_GIT="$real_git" FM_TEST_TARGET="$case_dir/project" \
+    FM_TEST_MUTATION_MARKER="$case_dir/mutated" run_merge "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "final diagnostic churn: command should refuse"
+  assert_grep 'does not exactly match fm/task-x1' "$case_dir/stderr" "final diagnostic churn: final validation did not refuse"
+  assert_ref_unchanged "$case_dir" "$before_main" "$before_worker" "final diagnostic churn"
+  [ "$(tr -d '\n' <"$case_dir/project/payload.txt")" = 'final diagnostic churn' ] \
+    || fail "final diagnostic churn: target content changed"
+  pass "fm-merge-local validates target state after final diagnostics"
 }
 
 test_signal_at_final_merge_boundary_refuses() {
@@ -474,11 +572,14 @@ test_detached_and_different_repository_workers_refuse
 test_unlanded_worker_states_refuse_without_mutation
 test_hidden_worker_dirt_refuses_without_mutation
 test_clean_filter_cannot_hide_worker_or_target_bytes
+test_replacement_refs_cannot_hide_worker_bytes
+test_ambient_git_overrides_cannot_redirect_verification
 test_missing_duplicate_and_subdirectory_worktree_metadata_refuse
 test_candidate_equivalent_target_index_and_worktree_fast_forward
 test_target_difference_refuses_and_many_paths_have_bounded_diagnostic
 test_hidden_target_bytes_and_modes_refuse
 test_target_state_changed_after_preflight_refuses
+test_target_churn_during_final_diagnostic_refuses
 test_signal_at_final_merge_boundary_refuses
 test_untracked_content_is_preserved_or_git_refuses_collision
 test_clean_target_ordinary_path
