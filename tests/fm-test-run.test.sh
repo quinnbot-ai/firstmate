@@ -627,6 +627,119 @@ SH
   pass "jobs scheduler runs proven scripts; failure propagates; non-proven refused"
 }
 
+test_jobs_worker_deadline_reaps_descendants_and_aggregates_failures() {
+  local tmp repo runner hang pass fail_a fail_b descendant test_pid rc waited alive started finished elapsed
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-worker-deadline.XXXXXX")
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  hang=tests/fm-brief.test.sh
+  pass=tests/fm-composer-lib.test.sh
+  fail_a=tests/fm-lint.test.sh
+  fail_b=tests/fm-supervision-instructions.test.sh
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$runner"
+  cat >"$repo/$hang" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" >"$HANG_TEST_PID_FILE"
+(
+  trap '' TERM
+  while :; do sleep 1; done
+) &
+printf '%s\n' "$!" >"$HANG_DESCENDANT_PID_FILE"
+while :; do sleep 1; done
+SH
+  cat >"$repo/$pass" <<'SH'
+#!/usr/bin/env bash
+echo "ok - parallel pass"
+SH
+  cat >"$repo/$fail_a" <<'SH'
+#!/usr/bin/env bash
+echo "not ok - first deliberate parallel failure"
+exit 1
+SH
+  cat >"$repo/$fail_b" <<'SH'
+#!/usr/bin/env bash
+echo "not ok - second deliberate parallel failure"
+exit 1
+SH
+  chmod +x "$runner" "$repo/$hang" "$repo/$pass" "$repo/$fail_a" "$repo/$fail_b"
+
+  set +e
+  # The wrapper bounds this regression test before the production worker
+  # deadline exists. It returns 125 only when the runner itself failed to
+  # finish, leaving the fixture PIDs available for explicit cleanup below.
+  started=$(date +%s)
+  perl -e '
+    my $limit = shift @ARGV;
+    defined(my $pid = fork) or exit 125;
+    if (!$pid) { exec @ARGV; exit 125 }
+    local $SIG{ALRM} = sub {
+      kill "TERM", $pid;
+      select undef, undef, undef, 0.1;
+      kill "KILL", $pid;
+      waitpid $pid, 0;
+      exit 125;
+    };
+    alarm $limit;
+    waitpid $pid, 0;
+    alarm 0;
+    exit($? >> 8);
+  ' 4 env HANG_TEST_PID_FILE="$tmp/test.pid" HANG_DESCENDANT_PID_FILE="$tmp/descendant.pid" \
+    FM_TEST_WORKER_TIMEOUT_SECONDS=1 "$runner" --jobs 2 "$hang" "$pass" "$fail_a" "$fail_b" \
+    >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  finished=$(date +%s)
+  set -e
+  if [ "$rc" -eq 125 ]; then
+    test_pid=$(cat "$tmp/test.pid" 2>/dev/null || true)
+    descendant=$(cat "$tmp/descendant.pid" 2>/dev/null || true)
+    [ -z "$test_pid" ] || kill -KILL "$test_pid" 2>/dev/null || true
+    [ -z "$descendant" ] || kill -KILL "$descendant" 2>/dev/null || true
+    rm -rf "$tmp"
+    fail "parallel worker deadline did not bound the hung test"
+  fi
+  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "worker timeout must make the aggregate fail"; }
+  elapsed=$((finished - started))
+  [ "$elapsed" -le 3 ] \
+    || { rm -rf "$tmp"; fail "one-second worker deadline exceeded deterministic closeout bound (${elapsed}s)"; }
+  grep -Fq "FM_TEST_TIMEOUT script=$hang deadline_s=1" "$tmp/err" \
+    || { rm -rf "$tmp"; fail "timeout diagnostic must name the hung test and deadline: $(cat "$tmp/err")"; }
+  grep -q 'FM_TEST_SUMMARY total=4 failed=3' "$tmp/out" \
+    || { rm -rf "$tmp"; fail "parallel timeout and failures must aggregate deterministically: $(grep FM_TEST_SUMMARY "$tmp/out")"; }
+  grep -q "FM_TEST_END .* $pass exit=0" "$tmp/out" \
+    || { rm -rf "$tmp"; fail "parallel success must remain successful"; }
+  grep -q "FM_TEST_END .* $fail_a exit=1" "$tmp/out" \
+    || { rm -rf "$tmp"; fail "first ordinary parallel failure was not preserved"; }
+  grep -q "FM_TEST_END .* $fail_b exit=1" "$tmp/out" \
+    || { rm -rf "$tmp"; fail "second ordinary parallel failure was not preserved"; }
+  grep -q "FM_TEST_END .* $hang exit=124" "$tmp/out" \
+    || { rm -rf "$tmp"; fail "timed out worker must have stable exit 124"; }
+
+  descendant=$(cat "$tmp/descendant.pid")
+  test_pid=$(cat "$tmp/test.pid")
+  waited=0
+  alive=1
+  while [ "$waited" -lt 100 ]; do
+    if ! kill -0 "$descendant" 2>/dev/null && ! kill -0 "$test_pid" 2>/dev/null; then
+      alive=0
+      break
+    fi
+    sleep 0.01
+    waited=$((waited + 1))
+  done
+  [ "$alive" -eq 0 ] || { rm -rf "$tmp"; fail "deadline must terminate and reap every worker descendant"; }
+
+  # Serial execution remains unbounded by the parallel worker deadline and
+  # keeps its existing success semantics.
+  FM_TEST_WORKER_TIMEOUT_SECONDS=1 "$runner" "$pass" >"$tmp/serial-out" 2>"$tmp/serial-err" \
+    || { rm -rf "$tmp"; fail "serial successful fixture changed under worker deadline configuration"; }
+  grep -q 'FM_TEST_SUMMARY total=1 failed=0' "$tmp/serial-out" \
+    || { rm -rf "$tmp"; fail "serial success summary changed"; }
+
+  rm -rf "$tmp"
+  pass "parallel worker deadlines reap descendants and preserve deterministic aggregation"
+}
+
 test_aggregate_json() {
   local tmp a b
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-aggjson.XXXXXX")
@@ -685,4 +798,5 @@ test_portable_serial_shards_partition_the_serial_lane
 test_portable_serial_shard_lane_refusals
 test_jobs_requires_proven_isolated
 test_jobs_parallel_scheduler_and_failure_propagation
+test_jobs_worker_deadline_reaps_descendants_and_aggregates_failures
 test_aggregate_json

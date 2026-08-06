@@ -42,6 +42,12 @@
 #                   selected script is in the proven-isolated set
 #                   (bin/fm-test-isolation-proof.sh --list). Cap is 8. Stateful
 #                   families never schedule under --jobs.
+#   --worker-timeout N
+#                   per-script deadline in seconds for --jobs workers. The
+#                   default is 600 seconds and can also be set with
+#                   FM_TEST_WORKER_TIMEOUT_SECONDS. Serial execution is
+#                   unchanged. Timed-out worker process groups are terminated
+#                   and reaped before their aggregate failure is recorded.
 #   -h, --help      print this header
 #
 # Per-script machine-parseable markers (stdout):
@@ -52,6 +58,9 @@
 #   FM_TEST_SUMMARY total=<n> failed=<n> skipped_gate=<n> duration_ms=<n>
 #   FM_TEST_SUMMARY_FAMILY family=<name> count=<n> duration_ms=<n> failed=<n>
 #   FM_TEST_SLOWEST rank=<k> script=<path> duration_ms=<n>
+#
+# Worker deadline diagnostic (stderr):
+#   FM_TEST_TIMEOUT script=<path> deadline_s=<n>
 #
 # Exit status is non-zero if any selected script exits non-zero or a configured
 # --fail-on-gate-skip token appears. Other gate skips (first meaningful line
@@ -88,6 +97,9 @@ EXCLUDE_FAMILIES=()
 FAIL_ON_GATE_SKIP=
 JOBS=1
 JOBS_MAX=8
+WORKER_TIMEOUT_SECONDS=${FM_TEST_WORKER_TIMEOUT_SECONDS:-600}
+WORKER_TERM_GRACE_TICKS=20
+WORKER_REAP_TICKS=100
 
 # How many separate-runner shards the portable serial remainder splits into.
 # One owner: CI lane names carry this count and are refused when they disagree.
@@ -1226,6 +1238,15 @@ while [ "$#" -gt 0 ]; do
       JOBS=${1#--jobs=}
       shift
       ;;
+    --worker-timeout)
+      [ "$#" -gt 1 ] || die "--worker-timeout requires a positive integer in seconds"
+      WORKER_TIMEOUT_SECONDS=$2
+      shift 2
+      ;;
+    --worker-timeout=*)
+      WORKER_TIMEOUT_SECONDS=${1#--worker-timeout=}
+      shift
+      ;;
     --list)
       LIST_ONLY=1
       shift
@@ -1326,6 +1347,10 @@ case "$JOBS" in
 esac
 [ "$JOBS" -ge 1 ] || die "--jobs must be >= 1"
 [ "$JOBS" -le "$JOBS_MAX" ] || die "--jobs is capped at $JOBS_MAX (got $JOBS)"
+case "$WORKER_TIMEOUT_SECONDS" in
+  ''|*[!0-9]*) die "--worker-timeout must be a positive integer in seconds" ;;
+esac
+[ "$WORKER_TIMEOUT_SECONDS" -ge 1 ] || die "--worker-timeout must be >= 1"
 
 case "${MODE:-}" in
   all)
@@ -1370,7 +1395,7 @@ if [ -n "$FAIL_ON_GATE_SKIP" ]; then
   SELECTION_DESC="${SELECTION_DESC};fail-on-gate-skip=$FAIL_ON_GATE_SKIP"
 fi
 if [ "$JOBS" -gt 1 ]; then
-  SELECTION_DESC="${SELECTION_DESC};jobs=$JOBS"
+  SELECTION_DESC="${SELECTION_DESC};jobs=$JOBS;worker-timeout=${WORKER_TIMEOUT_SECONDS}s"
 fi
 
 if [ "$LIST_ONLY" -eq 1 ]; then
@@ -1404,6 +1429,7 @@ done
 
 # --jobs N>1 only for the proven-isolated set. Stateful families stay serial.
 if [ "$JOBS" -gt 1 ]; then
+  command -v perl >/dev/null 2>&1 || die "--jobs requires perl for isolated worker process groups"
   for s in "${SCRIPTS[@]}"; do
     if ! is_proven_isolated_script "$s"; then
       die "--jobs $JOBS refused: $s is not in the proven-isolated set (see bin/fm-test-isolation-proof.sh --list). Stateful families stay serial."
@@ -1531,24 +1557,77 @@ else
   declare -a WORKER_PIDS=()
   declare -a WORKER_IDX=()
   declare -a WORKER_SCRIPTS=()
+  declare -a WORKER_STARTED_MS=()
+  declare -a WORKER_TIMED_OUT=()
   worker_n=0
   active_workers=0
 
+  worker_group_is_alive() {
+    local pgid=$1
+    kill -0 -- "-$pgid" 2>/dev/null
+  }
+
+  worker_stop_and_reap() {
+    local slot=$1 pid script ticks
+    pid=${WORKER_PIDS[$slot]}
+    script=${WORKER_SCRIPTS[$slot]}
+    WORKER_TIMED_OUT[slot]=1
+    printf 'FM_TEST_TIMEOUT script=%s deadline_s=%s\n' \
+      "$script" "$WORKER_TIMEOUT_SECONDS" >&2
+
+    # The Perl launcher made this backgrounded worker its own process-group
+    # leader. Signal the group rather than only the shell so a test's own
+    # background children cannot outlive its deadline.
+    kill -TERM -- "-$pid" 2>/dev/null || true
+    ticks=0
+    while worker_group_is_alive "$pid" && [ "$ticks" -lt "$WORKER_TERM_GRACE_TICKS" ]; do
+      sleep 0.01
+      ticks=$((ticks + 1))
+    done
+    if worker_group_is_alive "$pid"; then
+      kill -KILL -- "-$pid" 2>/dev/null || true
+    fi
+    set +e
+    wait "$pid"
+    set -e
+    ticks=0
+    while worker_group_is_alive "$pid" && [ "$ticks" -lt "$WORKER_REAP_TICKS" ]; do
+      sleep 0.01
+      ticks=$((ticks + 1))
+    done
+    if worker_group_is_alive "$pid"; then
+      log "worker process group did not reap after deadline: $script"
+    fi
+  }
+
   wait_one_job_worker() {
-    local slot=$1 pid idx work script rc duration mode out end_iso
+    local slot=$1 pid idx work script rc duration mode out end_iso end_ms started_ms timed_out
     pid=${WORKER_PIDS[$slot]}
     idx=${WORKER_IDX[$slot]}
     script=${WORKER_SCRIPTS[$slot]}
     unset 'WORKER_PIDS[slot]'
     unset 'WORKER_IDX[slot]'
     unset 'WORKER_SCRIPTS[slot]'
+    started_ms=${WORKER_STARTED_MS[$slot]}
+    timed_out=${WORKER_TIMED_OUT[$slot]:-0}
+    unset 'WORKER_STARTED_MS[slot]'
+    unset 'WORKER_TIMED_OUT[slot]'
     active_workers=$((active_workers - 1))
     set +e
     wait "$pid"
     set -e
     work="$RUN_TMP/w$idx"
-    rc=$(cat "$work/exit" 2>/dev/null || echo 1)
-    duration=$(cat "$work/duration_ms" 2>/dev/null || echo 0)
+    if [ "$timed_out" -eq 1 ]; then
+      rc=124
+      end_ms=$(now_ms)
+      duration=$((end_ms - started_ms))
+      [ "$duration" -ge 0 ] || duration=0
+    else
+      rc=$(cat "$work/exit" 2>/dev/null || echo 1)
+      end_ms=$(now_ms)
+      duration=$((end_ms - started_ms))
+      [ "$duration" -ge 0 ] || duration=0
+    fi
     out="$work/output"
     end_iso=$(now_iso)
     # Replay captured output after the worker finishes so markers stay ordered.
@@ -1579,10 +1658,18 @@ else
   }
 
   wait_one_completed_job_worker() {
-    local slot work
+    local slot work now_ms_value elapsed_ms deadline_ms
+    deadline_ms=$((WORKER_TIMEOUT_SECONDS * 1000))
     while :; do
       for slot in "${!WORKER_PIDS[@]}"; do
         work="$RUN_TMP/w${WORKER_IDX[$slot]}"
+        now_ms_value=$(now_ms)
+        elapsed_ms=$((now_ms_value - WORKER_STARTED_MS[slot]))
+        if [ "$elapsed_ms" -ge "$deadline_ms" ]; then
+          worker_stop_and_reap "$slot"
+          wait_one_job_worker "$slot"
+          return
+        fi
         if [ -f "$work/exit" ] || ! worker_pid_is_running "${WORKER_PIDS[$slot]}"; then
           wait_one_job_worker "$slot"
           return
@@ -1605,28 +1692,68 @@ else
     expected=$(expected_gate_skip_for_family "$family")
     printf 'FM_TEST_BEGIN %s %s family=%s expected_gate_skip=%s\n' \
       "$(now_iso)" "$script" "$family" "$expected"
+    cat >"$work/worker.sh" <<'SH'
+#!/usr/bin/env bash
+set +e
+script=$1
+root=$2
+out=$3
+exit_file=$4
+group_file=$5
+armed_file=$6
+worker_tmp=$7
+printf '%s\n' "$$" >"$group_file" || exit 125
+while [ ! -f "$armed_file" ]; do
+  sleep 0.01
+done
+export TMPDIR="$worker_tmp"
+export TMP="$worker_tmp"
+unset FM_HOME FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_ROOT_OVERRIDE \
+  FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_BACKEND 2>/dev/null || true
+cd "$root" || exit 1
+bash "$script" >"$out" 2>&1
+rc=$?
+printf '%s\n' "$rc" >"$exit_file"
+exit 0
+SH
+    chmod 0700 "$work/worker.sh" || die "could not secure worker launcher $work/worker.sh"
     (
-      set +e
-      export TMPDIR="$work/tmp"
-      export TMP="$work/tmp"
-      unset FM_HOME FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_ROOT_OVERRIDE \
-        FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_BACKEND 2>/dev/null || true
-      cd "$ROOT" || exit 1
-      begin_ms=$(now_ms)
-      bash "$script" >"$work/output" 2>&1
-      rc=$?
-      end_ms=$(now_ms)
-      duration=$((end_ms - begin_ms))
-      if [ "$duration" -lt 0 ]; then
-        duration=0
-      fi
-      printf '%s\n' "$duration" >"$work/duration_ms"
-      printf '%s\n' "$rc" >"$work/exit"
-      exit 0
+      # Perl's setpgrp is available on stock macOS and makes this exact worker
+      # PID its process-group leader without relying on Bash monitor mode.
+      exec perl -e 'setpgrp(0, 0) or exit 125; exec @ARGV; exit 125' \
+        bash "$work/worker.sh" "$script" "$ROOT" "$work/output" "$work/exit" \
+        "$work/group" "$work/armed" "$work/tmp"
     ) &
     WORKER_PIDS[worker_n]=$!
+    worker_ready=0
+    worker_attempt=0
+    while [ "$worker_attempt" -lt 100 ]; do
+      if [ -s "$work/group" ]; then
+        worker_ready=1
+        break
+      fi
+      sleep 0.01
+      worker_attempt=$((worker_attempt + 1))
+    done
+    worker_pgid=$(cat "$work/group" 2>/dev/null || true)
+    observed_pgid=$(ps -o pgid= -p "${WORKER_PIDS[$worker_n]}" 2>/dev/null | tr -d '[:space:]')
+    if [ "$worker_ready" -ne 1 ] || [ "$worker_pgid" != "${WORKER_PIDS[$worker_n]}" ] || \
+       [ "$observed_pgid" != "${WORKER_PIDS[$worker_n]}" ]; then
+      kill -TERM "${WORKER_PIDS[$worker_n]}" 2>/dev/null || true
+      kill -KILL "${WORKER_PIDS[$worker_n]}" 2>/dev/null || true
+      wait "${WORKER_PIDS[$worker_n]}" 2>/dev/null || true
+      die "could not isolate worker process group for $script"
+    fi
     WORKER_IDX[worker_n]=$worker_n
     WORKER_SCRIPTS[worker_n]=$script
+    WORKER_STARTED_MS[worker_n]=$(now_ms)
+    WORKER_TIMED_OUT[worker_n]=0
+    if ! : >"$work/armed"; then
+      kill -TERM -- "-${WORKER_PIDS[$worker_n]}" 2>/dev/null || true
+      kill -KILL -- "-${WORKER_PIDS[$worker_n]}" 2>/dev/null || true
+      wait "${WORKER_PIDS[$worker_n]}" 2>/dev/null || true
+      die "could not arm isolated worker for $script"
+    fi
     active_workers=$((active_workers + 1))
   done
   while [ "$active_workers" -gt 0 ]; do
