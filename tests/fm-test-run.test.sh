@@ -278,6 +278,28 @@ SH
   pass "quoting, temporary paths, and platform stat fallback stay portable"
 }
 
+test_stock_bash_wrapper_pins_nested_runner() {
+  local tmp fixture out
+  [ -n "${FM_STOCK_BASH_VERSION:-}" ] || return 0
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-stock-bash.XXXXXX")
+  fixture="$tmp/interpreter.test.sh"
+  out="$tmp/out"
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+if [ "$BASH_VERSION" != "$FM_STOCK_BASH_VERSION" ]; then
+  printf 'not ok - expected nested runner Bash %s, got %s\n' "$FM_STOCK_BASH_VERSION" "$BASH_VERSION"
+  exit 1
+fi
+printf 'ok - nested runner used stock Bash %s\n' "$BASH_VERSION"
+SH
+  chmod +x "$fixture"
+  "$RUNNER" "$fixture" >"$out" 2>&1 \
+    || { cat "$out"; rm -rf "$tmp"; fail "stock Bash wrapper did not pin the runner interpreter"; }
+  assert_contains "$(cat "$out")" "FM_TEST_SUMMARY total=1 failed=0" "stock Bash nested runner summary"
+  rm -rf "$tmp"
+  pass "stock Bash wrapper pins nested runner invocations to the verified interpreter"
+}
+
 test_parallel_child_can_signal_immediately() {
   local tmp repo runner fixture evidence child_pid rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-pretrap.XXXXXX")
@@ -1057,6 +1079,7 @@ test_changed_dependency_selection_and_unmapped_failure
 test_empty_selection_emits_summary
 test_timing_markers_and_json
 test_quoting_and_platform_temp_paths
+test_stock_bash_wrapper_pins_nested_runner
 test_parallel_child_can_signal_immediately
 test_interrupt_drains_serial_cleanup
 test_interrupt_cleans_parallel_process_tree

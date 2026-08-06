@@ -19,4 +19,7 @@ case "$version" in
     ;;
 esac
 
+export FM_STOCK_BASH_VERSION="$version"
+PATH=/bin:/usr/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin
+export PATH
 exec /bin/bash "$ROOT/tests/fm-test-run.test.sh" "$@"
