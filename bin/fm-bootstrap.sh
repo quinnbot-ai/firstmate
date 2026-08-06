@@ -597,7 +597,7 @@ secondmate_liveness_sweep() {
       dead|missing)
         if [ "$agent_state" = dead ]; then
           cause="confirmed agent absence on existing endpoint"
-          fm_backend_kill "$backend" "$target" 2>/dev/null || true
+          fm_backend_kill "$backend" "$target" "$(fm_meta_get "$meta" zellij_tab_id)" "fm-$id" 2>/dev/null || true
         else
           cause="recorded endpoint confidently missing"
         fi
