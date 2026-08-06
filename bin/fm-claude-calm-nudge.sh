@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# fm-claude-calm-nudge.sh - print Claude's Calm presentation instruction only
-# for a genuine Firstmate primary whose effective Calm preference is on.
+# fm-claude-calm-nudge.sh - print Claude's effective Calm presentation state
+# for a genuine Firstmate primary.
 # Every silence and error path exits 0 because Claude SessionStart exit 2 blocks
 # session initialization.
 set -u
@@ -17,6 +17,9 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 fm_is_gate_agent "$FM_ROOT" && exit 0
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
-[ "$("$SCRIPT_DIR/fm-calm.sh" status)" = on ] || exit 0
 
-printf '%s\n' 'Firstmate Calm presentation is active for this home. Keep captain-facing updates outcome-first, concise, and free of incidental progress narration while preserving every operational instruction, safety boundary, and technical fact that matters.'
+if [ "$("$SCRIPT_DIR/fm-calm.sh" status)" = on ]; then
+  printf '%s\n' 'Firstmate Calm presentation is active for this home. Keep captain-facing updates outcome-first, concise, and free of incidental progress narration while preserving every operational instruction, safety boundary, and technical fact that matters.'
+else
+  printf '%s\n' 'Firstmate Calm presentation is inactive for this home. This supersedes any earlier Calm-active instruction in the transcript; use ordinary captain-facing presentation.'
+fi

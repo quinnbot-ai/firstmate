@@ -102,13 +102,20 @@ test_claude_nudge_scope_and_preference() {
 
   out=$(run_nudge "$root") || status=$?
   expect_code 0 "$status" "Calm-off nudge"
-  [ -z "$out" ] || fail "Calm-off Claude nudge must stay silent: $out"
+  [ "$out" = 'Firstmate Calm presentation is inactive for this home. This supersedes any earlier Calm-active instruction in the transcript; use ordinary captain-facing presentation.' ] \
+    || fail "Calm-off Claude nudge changed unexpectedly: $out"
 
   run_calm "$root/config" on >/dev/null
   out=$(run_nudge "$root") || status=$?
   expect_code 0 "$status" "Calm-on nudge"
   [ "$out" = 'Firstmate Calm presentation is active for this home. Keep captain-facing updates outcome-first, concise, and free of incidental progress narration while preserving every operational instruction, safety boundary, and technical fact that matters.' ] \
     || fail "Calm-on Claude nudge changed unexpectedly: $out"
+
+  run_calm "$root/config" off >/dev/null
+  out=$(run_nudge "$root") || status=$?
+  expect_code 0 "$status" "Calm on-to-off nudge"
+  [ "$out" = 'Firstmate Calm presentation is inactive for this home. This supersedes any earlier Calm-active instruction in the transcript; use ordinary captain-facing presentation.' ] \
+    || fail "Calm on-to-off Claude nudge did not supersede stale active context: $out"
 
   out=$(FM_GATE_REFUSE_BYPASS=0 NO_MISTAKES_GATE=1 run_nudge "$root") || status=$?
   expect_code 0 "$status" "gate nudge"
