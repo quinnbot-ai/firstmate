@@ -1509,7 +1509,7 @@ SERIAL_TEE_PID=
 
 # shellcheck disable=SC2329 # Invoked indirectly by the cleanup and worker signal traps.
 terminate_and_reap_process_tree() {
-  local root=$1 idx=0 parent children child seen pid
+  local root=$1 idx=0 parent children child seen pid grace=0 running state
   local -a process_tree_pids=()
   if ! kill -STOP "$root" 2>/dev/null; then
     wait "$root" 2>/dev/null || true
@@ -1539,6 +1539,26 @@ terminate_and_reap_process_tree() {
   done
   for pid in "${process_tree_pids[@]}"; do
     kill -CONT "$pid" 2>/dev/null || true
+  done
+  while [ "$grace" -lt 100 ]; do
+    running=0
+    for pid in "${process_tree_pids[@]}"; do
+      state=$(ps -o stat= -p "$pid" 2>/dev/null | awk 'NR == 1 { print $1 }' || true)
+      case "$state" in
+        ""|Z*) ;;
+        *) running=1; break ;;
+      esac
+    done
+    [ "$running" -eq 1 ] || break
+    sleep 0.01
+    grace=$((grace + 1))
+  done
+  for pid in "${process_tree_pids[@]}"; do
+    state=$(ps -o stat= -p "$pid" 2>/dev/null | awk 'NR == 1 { print $1 }' || true)
+    case "$state" in
+      ""|Z*) ;;
+      *) kill -KILL "$pid" 2>/dev/null || true ;;
+    esac
   done
   wait "$root" 2>/dev/null || true
   for pid in "${process_tree_pids[@]}"; do

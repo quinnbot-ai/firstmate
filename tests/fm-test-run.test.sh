@@ -385,23 +385,28 @@ SH
 }
 
 test_interrupt_cleans_parallel_process_tree() {
-  local tmp repo runner fixture evidence child_pid descendant_pid runner_pid rc
+  local tmp repo runner fixture evidence child_pid descendant_pid runner_pid waited rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-signal.XXXXXX")
   repo="$tmp/repo"
   runner="$repo/bin/fm-test-run.sh"
   fixture=tests/fm-brief.test.sh
   evidence="$tmp/evidence"
   mkdir -p "$repo/bin" "$repo/tests" "$evidence"
+  mkfifo "$evidence/term-ignored"
   cp "$RUNNER" "$runner"
   cat >"$repo/$fixture" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "$$" >"$SCHED_EVIDENCE/child.pid"
 (
-  while :; do
-    sleep 1
-  done
+  trap '' TERM
+  : >"$SCHED_EVIDENCE/descendant.ready"
+  IFS= read -r _ <"$SCHED_EVIDENCE/term-ignored"
 ) &
-printf '%s\n' "$!" >"$SCHED_EVIDENCE/descendant.pid"
+descendant_pid=$!
+while [ ! -e "$SCHED_EVIDENCE/descendant.ready" ]; do
+  sleep 0.01
+done
+printf '%s\n' "$$" >"$SCHED_EVIDENCE/child.pid"
+printf '%s\n' "$descendant_pid" >"$SCHED_EVIDENCE/descendant.pid"
 while :; do
   sleep 1
 done
@@ -421,6 +426,17 @@ SH
   descendant_pid=$(cat "$evidence/descendant.pid" 2>/dev/null || true)
   [ -n "$descendant_pid" ] || { kill "$runner_pid" 2>/dev/null || true; wait "$runner_pid" 2>/dev/null || true; rm -rf "$tmp"; fail "descendant fixture never started"; }
   kill -TERM "$runner_pid"
+  waited=0
+  while kill -0 "$runner_pid" 2>/dev/null && [ "$waited" -lt 50 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if kill -0 "$runner_pid" 2>/dev/null; then
+    kill -KILL "$runner_pid" "$child_pid" "$descendant_pid" 2>/dev/null || true
+    wait "$runner_pid" 2>/dev/null || true
+    rm -rf "$tmp"
+    fail "runner TERM hung on a TERM-ignoring descendant"
+  fi
   set +e
   wait "$runner_pid"
   rc=$?
@@ -435,7 +451,7 @@ SH
     fail "runner TERM left its worker descendant alive"
   fi
   rm -rf "$tmp"
-  pass "signals terminate complete parallel worker process trees"
+  pass "signals escalate and terminate complete parallel worker process trees"
 }
 
 test_interrupt_waits_for_parallel_cleanup() {
