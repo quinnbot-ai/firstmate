@@ -119,6 +119,40 @@ SH
   pass "fm-merge-local rechecks worker custody after mutable target validation"
 }
 
+test_worker_branch_ref_changed_after_preflight_refuses() {
+  local before_main case_dir fakebin rc real_git
+  case_dir=$(make_case moved-worker-ref)
+  commit_candidate "$case_dir" worker
+  fakebin=$case_dir/fakebin
+  real_git=$(command -v git)
+  mkdir "$fakebin"
+  cat >"$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *' merge-base --is-ancestor '*)
+    if [ ! -e "$FM_TEST_MUTATION_MARKER" ]; then
+      : >"$FM_TEST_MUTATION_MARKER"
+      "$REAL_GIT" -C "$FM_TEST_TARGET" update-ref refs/heads/fm/task-x1 refs/heads/main
+    fi
+    ;;
+esac
+exec "$REAL_GIT" "$@"
+SH
+  chmod +x "$fakebin/git"
+  before_main=$(git -C "$case_dir/project" rev-parse main)
+  set +e
+  PATH="$fakebin:$PATH" REAL_GIT="$real_git" FM_TEST_TARGET="$case_dir/project" \
+    FM_TEST_MUTATION_MARKER="$case_dir/mutated" run_merge "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "worker ref changed after preflight: command should refuse"
+  assert_grep 'branch fm/task-x1 moved after custody verification' "$case_dir/stderr" "worker ref changed after preflight: pinned candidate was not enforced"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$before_main" ] || fail "worker ref changed after preflight: main advanced"
+  [ "$(git -C "$case_dir/project" rev-parse fm/task-x1)" = "$before_main" ] || fail "worker ref changed after preflight: command altered the churned worker ref"
+  [ "$(tr -d '\n' <"$case_dir/worker/payload.txt")" = worker ] || fail "worker ref changed after preflight: worker content changed"
+  pass "fm-merge-local rejects worker branch-ref drift from the pinned candidate"
+}
+
 test_detached_and_different_repository_workers_refuse() {
   local case_dir other
   case_dir=$(make_case detached-worker)
@@ -155,6 +189,18 @@ test_unlanded_worker_states_refuse_without_mutation() {
     [ "$(git -C "$case_dir/worker" status --porcelain=v1 --untracked-files=all)" = "$before_status" ] || fail "$state worker: refusal changed worker state"
   done
   pass "fm-merge-local preserves modified, staged, and untracked worker state"
+}
+
+test_hidden_worker_dirt_refuses_without_mutation() {
+  local case_dir flag
+  for flag in assume-unchanged skip-worktree; do
+    case_dir=$(make_case "hidden-worker-$flag")
+    commit_candidate "$case_dir"
+    printf 'hidden worker dirt\n' >"$case_dir/worker/payload.txt"
+    git -C "$case_dir/worker" update-index --"$flag" payload.txt
+    refusal_preserves "$case_dir" "not clean"
+  done
+  pass "fm-merge-local detects worker dirt hidden by index flags"
 }
 
 test_missing_duplicate_and_subdirectory_worktree_metadata_refuse() {
@@ -207,6 +253,61 @@ test_target_difference_refuses_and_many_paths_have_bounded_diagnostic() {
   pass "fm-merge-local refuses distinct tracked dirt with a bounded diagnostic"
 }
 
+test_hidden_target_bytes_and_modes_refuse() {
+  local case_dir
+  case_dir=$(make_case hidden-target-bytes)
+  commit_candidate "$case_dir" candidate
+  printf 'hidden local bytes\n' >"$case_dir/project/payload.txt"
+  git -C "$case_dir/project" update-index --assume-unchanged payload.txt
+  refusal_preserves "$case_dir" "does not exactly match fm/task-x1"
+
+  case_dir=$(make_case hidden-target-mode)
+  commit_candidate "$case_dir" resolved
+  chmod +x "$case_dir/worker/payload.txt"
+  git -C "$case_dir/worker" add payload.txt
+  git -C "$case_dir/worker" commit -qm "make candidate executable"
+  printf 'resolved\n' >"$case_dir/project/payload.txt"
+  git -C "$case_dir/project" update-index --chmod=+x payload.txt
+  chmod -x "$case_dir/project/payload.txt"
+  git -C "$case_dir/project" config core.fileMode false
+  refusal_preserves "$case_dir" "does not exactly match fm/task-x1"
+  pass "fm-merge-local detects target byte and mode differences hidden by Git settings"
+}
+
+test_target_state_changed_after_preflight_refuses() {
+  local before_main before_worker case_dir fakebin rc real_git
+  case_dir=$(make_case target-churn)
+  commit_candidate "$case_dir" candidate
+  fakebin=$case_dir/fakebin
+  real_git=$(command -v git)
+  mkdir "$fakebin"
+  cat >"$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *' merge-base --is-ancestor '*)
+    if [ ! -e "$FM_TEST_MUTATION_MARKER" ]; then
+      : >"$FM_TEST_MUTATION_MARKER"
+      printf 'late target churn\n' >"$FM_TEST_TARGET/payload.txt"
+    fi
+    ;;
+esac
+exec "$REAL_GIT" "$@"
+SH
+  chmod +x "$fakebin/git"
+  before_main=$(git -C "$case_dir/project" rev-parse main)
+  before_worker=$(git -C "$case_dir/project" rev-parse fm/task-x1)
+  set +e
+  PATH="$fakebin:$PATH" REAL_GIT="$real_git" FM_TEST_TARGET="$case_dir/project" \
+    FM_TEST_MUTATION_MARKER="$case_dir/mutated" run_merge "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "target changed after preflight: command should refuse"
+  assert_grep 'does not exactly match fm/task-x1' "$case_dir/stderr" "target changed after preflight: final target recheck did not refuse"
+  assert_ref_unchanged "$case_dir" "$before_main" "$before_worker" "target changed after preflight"
+  [ "$(tr -d '\n' <"$case_dir/project/payload.txt")" = 'late target churn' ] || fail "target changed after preflight: target content changed"
+  pass "fm-merge-local rechecks target state at the final pre-mutation boundary"
+}
+
 test_untracked_content_is_preserved_or_git_refuses_collision() {
   local case_dir before_main before_worker fakebin rc real_git
   case_dir=$(make_case untracked-noncollision)
@@ -241,8 +342,10 @@ SH
   [ "$(tr -d '\n' <"$case_dir/project/runtime.log")" = 'runtime churn' ] || fail "untracked noncollision: live runtime churn was not preserved"
 
   case_dir=$(make_case untracked-collision)
-  commit_candidate "$case_dir"
-  printf 'untracked collision\n' >"$case_dir/project/payload.txt"
+  printf 'candidate collision\n' >"$case_dir/worker/collision.txt"
+  git -C "$case_dir/worker" add collision.txt
+  git -C "$case_dir/worker" commit -qm "add collision path"
+  printf 'untracked collision\n' >"$case_dir/project/collision.txt"
   before_main=$(git -C "$case_dir/project" rev-parse main)
   before_worker=$(git -C "$case_dir/project" rev-parse fm/task-x1)
   set +e
@@ -251,7 +354,7 @@ SH
   set -e
   expect_code 1 "$rc" "untracked collision: Git should refuse final collision"
   assert_ref_unchanged "$case_dir" "$before_main" "$before_worker" "untracked collision"
-  [ "$(tr -d '\n' <"$case_dir/project/payload.txt")" = 'untracked collision' ] || fail "untracked collision: target content changed"
+  [ "$(tr -d '\n' <"$case_dir/project/collision.txt")" = 'untracked collision' ] || fail "untracked collision: target content changed"
   pass "fm-merge-local leaves untracked files, symlinks, and directories to Git's final collision check"
 }
 
@@ -267,10 +370,14 @@ test_clean_target_ordinary_path() {
 test_clean_recorded_worker_fast_forwards
 test_foreign_same_repository_worker_refuses
 test_worker_state_changed_after_preflight_refuses
+test_worker_branch_ref_changed_after_preflight_refuses
 test_detached_and_different_repository_workers_refuse
 test_unlanded_worker_states_refuse_without_mutation
+test_hidden_worker_dirt_refuses_without_mutation
 test_missing_duplicate_and_subdirectory_worktree_metadata_refuse
 test_candidate_equivalent_target_index_and_worktree_fast_forward
 test_target_difference_refuses_and_many_paths_have_bounded_diagnostic
+test_hidden_target_bytes_and_modes_refuse
+test_target_state_changed_after_preflight_refuses
 test_untracked_content_is_preserved_or_git_refuses_collision
 test_clean_target_ordinary_path

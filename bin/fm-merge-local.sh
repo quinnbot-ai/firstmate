@@ -79,9 +79,51 @@ default_branch() {
 }
 
 BRANCH="fm/$ID"
+CANDIDATE=
+VERIFY_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-merge-local.XXXXXX") \
+  || { echo "error: cannot create verification workspace for task $ID" >&2; exit 1; }
+trap 'rm -rf -- "$VERIFY_DIR"' EXIT HUP INT TERM
+VERIFY_SEQUENCE=0
+
+tracked_state_matches() {
+  local checkout=$1 expected=$2 actual_entries expected_entries snapshot_index snapshot_entries
+  VERIFY_SEQUENCE=$((VERIFY_SEQUENCE + 1))
+  snapshot_index=$VERIFY_DIR/index-$VERIFY_SEQUENCE
+  expected_entries=$VERIFY_DIR/expected-$VERIFY_SEQUENCE
+  actual_entries=$VERIFY_DIR/actual-$VERIFY_SEQUENCE
+  snapshot_entries=$VERIFY_DIR/snapshot-$VERIFY_SEQUENCE
+
+  GIT_INDEX_FILE=$snapshot_index git -C "$checkout" read-tree "$expected" \
+    || return 1
+  GIT_INDEX_FILE=$snapshot_index git -C "$checkout" ls-files --stage -z >"$expected_entries" \
+    || return 1
+  git -C "$checkout" ls-files --stage -z >"$actual_entries" \
+    || return 1
+  cmp -s "$expected_entries" "$actual_entries" \
+    || return 1
+  GIT_INDEX_FILE=$snapshot_index git -c core.fileMode=true -c core.symlinks=true \
+    -C "$checkout" add -u -- \
+    || return 1
+  GIT_INDEX_FILE=$snapshot_index git -C "$checkout" ls-files --stage -z >"$snapshot_entries" \
+    || return 1
+  cmp -s "$expected_entries" "$snapshot_entries" \
+    || return 1
+  GIT_INDEX_FILE=$snapshot_index git -c core.fileMode=true -c core.symlinks=true \
+    -C "$checkout" diff-files --quiet --ignore-submodules=none --
+}
+
+checkout_has_in_progress_operation() {
+  local checkout=$1 marker marker_path
+  for marker in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD rebase-apply rebase-merge sequencer; do
+    marker_path=$(git -C "$checkout" rev-parse --path-format=absolute --git-path "$marker") || return 0
+    [ ! -e "$marker_path" ] || return 0
+  done
+  git -C "$checkout" ls-files -u | grep -q . && return 0
+  return 1
+}
 
 validate_task_custody() {
-  local worker_root worker_common worker_branch worker_head candidate worker_status
+  local worker_root worker_common worker_branch worker_head candidate_now untracked
   worker_root=$(git -C "$TASK_WORKTREE" rev-parse --show-toplevel 2>/dev/null) \
     || { echo "error: recorded worktree for task $ID is not a Git checkout" >&2; return 1; }
   worker_root=$(canonical_dir "$worker_root") \
@@ -97,59 +139,66 @@ validate_task_custody() {
   worker_branch=$(git -C "$TASK_WORKTREE" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
   [ "$worker_branch" = "$BRANCH" ] \
     || { echo "error: recorded worktree for task $ID is on '${worker_branch:-detached}', expected $BRANCH" >&2; return 1; }
-  candidate=$(git -C "$PROJECT_ROOT" rev-parse --verify --quiet "refs/heads/$BRANCH") \
+  candidate_now=$(git -C "$PROJECT_ROOT" rev-parse --verify --quiet "refs/heads/$BRANCH^{commit}") \
     || { echo "error: branch $BRANCH does not exist in $PROJECT_ROOT" >&2; return 1; }
+  if [ -z "$CANDIDATE" ]; then
+    CANDIDATE=$candidate_now
+  elif [ "$candidate_now" != "$CANDIDATE" ]; then
+    echo "error: branch $BRANCH moved after custody verification; refusing to merge" >&2
+    return 1
+  fi
   worker_head=$(git -C "$TASK_WORKTREE" rev-parse HEAD) \
     || { echo "error: cannot read recorded worktree HEAD for task $ID" >&2; return 1; }
-  [ "$worker_head" = "$candidate" ] \
+  [ "$worker_head" = "$CANDIDATE" ] \
     || { echo "error: recorded worktree HEAD for task $ID is stale versus $BRANCH" >&2; return 1; }
-  worker_status=$(git -C "$TASK_WORKTREE" status --porcelain=v1 --untracked-files=all) \
-    || { echo "error: cannot inspect recorded worktree state for task $ID" >&2; return 1; }
-  [ -z "$worker_status" ] \
+  if checkout_has_in_progress_operation "$TASK_WORKTREE"; then
+    echo "error: recorded worktree for task $ID has an unmerged index or operation in progress" >&2
+    return 1
+  fi
+  tracked_state_matches "$TASK_WORKTREE" "$CANDIDATE" \
     || { echo "error: recorded worktree for task $ID is not clean; refusing to land unlanded work" >&2; return 1; }
-}
-
-target_has_in_progress_operation() {
-  local marker
-  for marker in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD rebase-apply rebase-merge sequencer; do
-    marker=$(git -C "$PROJECT_ROOT" rev-parse --path-format=absolute --git-path "$marker") || return 0
-    [ ! -e "$marker" ] || return 0
-  done
-  git -C "$PROJECT_ROOT" ls-files -u | grep -q . && return 0
-  return 1
+  untracked=$VERIFY_DIR/untracked-$VERIFY_SEQUENCE
+  git -C "$TASK_WORKTREE" ls-files --others --exclude-standard -z >"$untracked" \
+    || { echo "error: cannot inspect untracked recorded-worktree state for task $ID" >&2; return 1; }
+  [ ! -s "$untracked" ] \
+    || { echo "error: recorded worktree for task $ID is not clean; refusing to land unlanded work" >&2; return 1; }
 }
 
 validate_task_custody || exit 1
 
 DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
 
+validate_target_state() {
+  local cur
+  cur=$(git -C "$PROJECT_ROOT" symbolic-ref --short HEAD 2>/dev/null || echo "")
+  [ "$cur" = "$DEFAULT" ] \
+    || { echo "error: $PROJECT_ROOT is on '$cur', expected default branch '$DEFAULT'; cannot merge safely" >&2; return 1; }
+  if checkout_has_in_progress_operation "$PROJECT_ROOT"; then
+    echo "error: $PROJECT_ROOT has an unmerged index or operation in progress; refusing to merge" >&2
+    return 1
+  fi
+  if ! tracked_state_matches "$PROJECT_ROOT" HEAD \
+    && ! tracked_state_matches "$PROJECT_ROOT" "$CANDIDATE"; then
+    echo "error: $PROJECT_ROOT has tracked dirt that does not exactly match $BRANCH; refusing to merge" >&2
+    return 1
+  fi
+}
+
 # The project's main checkout must be on its default branch so the fast-forward
 # lands predictably. Tracked dirt is allowed only when it already matches the
 # custody-verified candidate (firstmate never reconciles it manually).
-cur=$(git -C "$PROJECT_ROOT" symbolic-ref --short HEAD 2>/dev/null || echo "")
-[ "$cur" = "$DEFAULT" ] || { echo "error: $PROJECT_ROOT is on '$cur', expected default branch '$DEFAULT'; cannot merge safely" >&2; exit 1; }
-if target_has_in_progress_operation; then
-  echo "error: $PROJECT_ROOT has an unmerged index or operation in progress; refusing to merge" >&2
-  exit 1
-fi
-if ! git -C "$PROJECT_ROOT" diff --quiet -- \
-  || ! git -C "$PROJECT_ROOT" diff --cached --quiet --; then
-  if ! git -C "$PROJECT_ROOT" diff --quiet "$BRANCH" -- \
-    || ! git -C "$PROJECT_ROOT" diff --cached --quiet "$BRANCH" --; then
-    echo "error: $PROJECT_ROOT has tracked dirt that does not exactly match $BRANCH; refusing to merge" >&2
-    exit 1
-  fi
-fi
+validate_target_state || exit 1
 
 # Clean fast-forward only: DEFAULT must be an ancestor of BRANCH.
-if ! git -C "$PROJECT_ROOT" merge-base --is-ancestor "$DEFAULT" "$BRANCH"; then
+if ! git -C "$PROJECT_ROOT" merge-base --is-ancestor "$DEFAULT" "$CANDIDATE"; then
   echo "REFUSED: $BRANCH is not a fast-forward of $DEFAULT (it has diverged)." >&2
   echo "Have the crewmate rebase $BRANCH onto $DEFAULT, then retry." >&2
   exit 1
 fi
 
 validate_task_custody || exit 1
+validate_target_state || exit 1
 before=$(git -C "$PROJECT_ROOT" rev-parse --short "$DEFAULT")
-git -C "$PROJECT_ROOT" merge --ff-only "$BRANCH" >/dev/null
+git -C "$PROJECT_ROOT" merge --ff-only "$CANDIDATE" >/dev/null
 after=$(git -C "$PROJECT_ROOT" rev-parse --short "$DEFAULT")
 echo "merged $BRANCH into local $DEFAULT ($before -> $after) in $PROJECT_ROOT"
