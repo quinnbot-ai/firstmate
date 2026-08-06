@@ -546,7 +546,7 @@ fm_backend_zellij_lifecycle_state() {  # <expected-label>
     return 0
   fi
   [ -f "$receipt" ] || { printf 'running'; return 0; }
-  nonce= status= extra=
+  nonce='' status='' extra=''
   IFS=' ' read -r nonce status extra < "$receipt" 2>/dev/null || { printf 'unknown'; return 0; }
   if [ -n "$extra" ] || [ "$nonce" != "$expected" ]; then
     printf 'unknown'
