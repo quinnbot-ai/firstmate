@@ -224,6 +224,36 @@ SH
   pass "prepared transaction drift is preserved before the ref commits"
 }
 
+test_wrong_branch_transaction_is_refused() {
+  local values case_dir base fakebin real_git rc
+  values=$(make_case wrong-branch)
+  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+  base=$(printf '%s\n' "$values" | sed -n '2p')
+  git -C "$case_dir/project" branch other "$base"
+  fakebin="$case_dir/fakebin"
+  real_git=$(command -v git)
+  mkdir -p "$fakebin"
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -C ] && [ "${2:-}" = "$FM_TEST_RACE_PROJECT" ] && [[ " $* " = *" merge --ff-only "* ]]; then
+  "$FM_TEST_REAL_GIT" -C "$FM_TEST_RACE_PROJECT" symbolic-ref HEAD refs/heads/other
+fi
+exec "$FM_TEST_REAL_GIT" "$@"
+SH
+  chmod +x "$fakebin/git"
+  set +e
+  run_local_merge_with_path "$case_dir" "$fakebin" "$real_git" >"$case_dir/out" 2>"$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "a wrong-branch transaction must refuse local landing"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$base" ] || fail "wrong-branch transaction advanced the default ref"
+  [ "$(git -C "$case_dir/project" rev-parse other)" = "$base" ] || fail "wrong-branch transaction advanced the other ref"
+  [ "$(git -C "$case_dir/project" symbolic-ref HEAD)" = refs/heads/other ] || fail "boundary overwrote the raced branch switch"
+  [ ! -e "$case_dir/project/change.txt" ] || fail "refused wrong-branch transaction retained candidate checkout changes"
+  [ -z "$(git -C "$case_dir/project" status --short)" ] || fail "refused wrong-branch transaction left an incoherent checkout"
+  pass "local merge refuses a transaction for an unexpected branch"
+}
+
 test_github_merge_uses_verified_exact_sha() {
   local values case_dir base candidate
   values=$(make_case github-exact)
@@ -298,6 +328,7 @@ test_raced_local_edit_is_preserved
 test_intervening_base_movement_is_refused
 test_unchanged_path_drift_is_preserved
 test_prepared_transaction_drift_is_preserved
+test_wrong_branch_transaction_is_refused
 test_github_merge_uses_verified_exact_sha
 test_github_merge_refuses_changed_remote_head
 test_github_merge_accepts_live_head_without_recorded_head

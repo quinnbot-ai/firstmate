@@ -9,7 +9,9 @@ The shared merge boundary rejects a missing declaration at the exact candidate o
 Every sanctioned merge entry point delegates its final operation to [`bin/fm-merge-execute.sh`](../bin/fm-merge-execute.sh).
 `fm-pr-merge.sh` records forge metadata before delegating GitHub execution, while `fm-merge-local.sh` delegates approved local-only execution.
 The boundary verifies clean exact candidate and base commits, then verifies the committed declaration and receipt against the candidate's literal Python source before it merges.
-The local path lets Git own the checkout and ref transition while its prepared reference transaction enforces the verified base and clean candidate checkout, and the GitHub path submits an immediate REST merge conditioned on the verified head SHA.
+The local path lets Git own the checkout and ref transition while its prepared reference transaction verifies the expected default ref, base, and candidate on a quiescent project checkout.
+Concurrent uncooperative writers to that project checkout during landing are outside the supported boundary; best-effort dirty-state checks refuse detected drift but do not provide cross-writer atomicity.
+The GitHub path submits an immediate REST merge conditioned on the verified head SHA.
 
 ## Literal-source inventory
 
