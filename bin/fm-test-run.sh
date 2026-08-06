@@ -1853,6 +1853,7 @@ else
     active_workers=$((active_workers - 1))
     set +e
     wait "$pid"
+    terminate_and_reap_process_group "$pid"
     set -e
     work="$RUN_TMP/w$idx"
     rc=$(cat "$work/exit" 2>/dev/null || echo 1)
