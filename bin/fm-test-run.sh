@@ -1504,7 +1504,21 @@ RUN_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run.XXXXXX")
 RECORDS="$RUN_TMP/records.tsv"
 FAMILIES_TSV="$RUN_TMP/families.tsv"
 : >"$RECORDS"
-trap 'rm -rf "$RUN_TMP"' EXIT
+
+cleanup_run() {
+  local rc=$? pid
+  trap - EXIT INT TERM HUP
+  for pid in $(jobs -p 2>/dev/null); do
+    kill "$pid" 2>/dev/null || true
+  done
+  rm -rf "$RUN_TMP"
+  exit "$rc"
+}
+
+trap cleanup_run EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 RUN_STARTED_ISO=$(now_iso)
 RUN_STARTED_MS=$(now_ms)
@@ -1746,8 +1760,12 @@ else
         FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_BACKEND 2>/dev/null || true
       cd "$ROOT" || exit 1
       begin_ms=$(now_ms)
-      bash "$script" >"$work/output" 2>&1
+      bash "$script" >"$work/output" 2>&1 &
+      child_pid=$!
+      trap 'kill "$child_pid" 2>/dev/null || true; wait "$child_pid" 2>/dev/null || true; exit 143' INT TERM HUP
+      wait "$child_pid"
       rc=$?
+      trap - INT TERM HUP
       end_ms=$(now_ms)
       duration=$((end_ms - begin_ms))
       if [ "$duration" -lt 0 ]; then

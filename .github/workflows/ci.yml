@@ -322,12 +322,12 @@ jobs:
           if-no-files-found: warn
 
   macos-stock-bash:
-    name: Stock macOS Bash snapshot compatibility
+    name: Stock macOS Bash runner compatibility
     runs-on: macos-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
-      - name: Run snapshot consumers with stock Bash
+      - name: Run focused runner contract with stock Bash
         shell: /bin/bash {0}
         env:
           PATH: /bin:/usr/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin
@@ -347,6 +347,14 @@ jobs:
             /bin/bash -n "$f" || { echo "::error::stock macOS Bash 3.2 failed to parse $f"; parse_fail=1; }
           done < "$shell_inventory"
           [ "$parse_fail" -eq 0 ] || { echo "::error::stock macOS Bash 3.2 parse sweep failed"; exit 1; }
+
+          runner_test_output=$(bin/fm-test-run-stock-bash.sh)
+          printf '%s\n' "$runner_test_output"
+          runner_test_count=$(printf '%s\n' "$runner_test_output" | grep -c '^ok - ')
+          [ "$runner_test_count" -eq 19 ] || {
+            echo "::error::expected 19 focused runner contract tests, got $runner_test_count"
+            exit 1
+          }
 
           snapshot_output=$(/bin/bash tests/fm-fleet-snapshot-view.test.sh)
           printf '%s\n' "$snapshot_output"

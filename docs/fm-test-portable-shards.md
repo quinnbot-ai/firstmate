@@ -96,6 +96,14 @@ It separately verifies that the portable serial CI shards are non-empty, disjoin
 
 Portable shards, each portable serial shard, and the Herdr lane upload runner-generated timing JSON.
 `bin/fm-test-run.sh --aggregate-json` creates the combined summary artifact.
+
+## Stock macOS Bash compatibility
+
+The CI job `macos-stock-bash` runs the focused `tests/fm-test-run.test.sh` contract under `/bin/bash` from the macOS image, covering parallel scheduling, result aggregation, quoting, private temporary paths, signal cleanup, and the GNU/BSD `stat` difference.
+The same job performs the repository-wide Bash parse sweep before the focused contract run.
+The compatibility boundary is stock macOS Bash 3.2.57 plus the commands explicitly required by the focused fixtures, including `mktemp`, `stat`, `sleep`, and `python3` for JSON assertions.
+The local reproduction command is `bin/fm-test-run-stock-bash.sh`.
+When Bash 3.2 is unavailable locally, the compatibility check may emit `skip: stock Bash 3.2 unavailable (evidence: <version or missing /bin/bash>)` and exit successfully; CI remains required on `macos-latest` and does not accept that skip.
 `.github/workflows/ci.yml` owns the exact artifact names and aggregation wiring.
 
 ## Local entry points

@@ -256,6 +256,70 @@ assert "family" in doc["scripts"][0]
   pass "timing markers and JSON artifact are valid"
 }
 
+test_quoting_and_platform_temp_paths() {
+  local tmp repo fixture json out
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-quoted.XXXXXX")
+  repo="$tmp/repo with spaces"
+  fixture="$repo/fixture with spaces.test.sh"
+  json="$tmp/artifact with spaces/timing.json"
+  mkdir -p "$repo/bin"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+printf 'ok - quoted fixture\n'
+SH
+  chmod +x "$fixture"
+  out=$(cd "$repo" && ./bin/fm-test-run.sh --json "$json" "$fixture") \
+    || { rm -rf "$tmp"; fail "runner rejected a script or artifact path containing spaces"; }
+  assert_contains "$out" "FM_TEST_SUMMARY total=1 failed=0" "quoted path summary"
+  [ -f "$json" ] || { rm -rf "$tmp"; fail "quoted JSON path was not created"; }
+  rm -rf "$tmp"
+  pass "quoting, temporary paths, and platform stat fallback stay portable"
+}
+
+test_interrupt_cleans_parallel_worker() {
+  local tmp repo runner fixture evidence child_pid runner_pid rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-signal.XXXXXX")
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  fixture=tests/fm-brief.test.sh
+  evidence="$tmp/evidence"
+  mkdir -p "$repo/bin" "$repo/tests" "$evidence"
+  cp "$RUNNER" "$runner"
+  cat >"$repo/$fixture" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" >"$SCHED_EVIDENCE/child.pid"
+while :; do
+  sleep 1
+done
+SH
+  chmod +x "$runner" "$repo/$fixture"
+  SCHED_EVIDENCE="$evidence" "$runner" --jobs 2 "$fixture" >"$tmp/out" 2>"$tmp/err" &
+  runner_pid=$!
+  child_pid=
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if [ -s "$evidence/child.pid" ]; then
+      child_pid=$(cat "$evidence/child.pid")
+      break
+    fi
+    sleep 0.1
+  done
+  [ -n "$child_pid" ] || { kill "$runner_pid" 2>/dev/null || true; wait "$runner_pid" 2>/dev/null || true; rm -rf "$tmp"; fail "signal fixture never started"; }
+  kill -TERM "$runner_pid"
+  set +e
+  wait "$runner_pid"
+  rc=$?
+  set -e
+  [ "$rc" -eq 143 ] || { rm -rf "$tmp"; fail "runner TERM exit should be 143, got $rc"; }
+  if kill -0 "$child_pid" 2>/dev/null; then
+    rm -rf "$tmp"
+    fail "runner TERM left its worker child alive"
+  fi
+  rm -rf "$tmp"
+  pass "signals terminate parallel workers and clean private temporary state"
+}
+
 test_aggregate_exit_behavior() {
   local tmp pass_f fail_f rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-agg.XXXXXX")
@@ -847,6 +911,8 @@ test_changed_file_selection_is_conservative
 test_changed_dependency_selection_and_unmapped_failure
 test_empty_selection_emits_summary
 test_timing_markers_and_json
+test_quoting_and_platform_temp_paths
+test_interrupt_cleans_parallel_worker
 test_aggregate_exit_behavior
 test_gate_skip_accounting
 test_runtime_gate_required_and_optional_outcomes
