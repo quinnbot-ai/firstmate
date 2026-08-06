@@ -61,5 +61,31 @@ EOF
   pass "inventory excludes dynamically generated runtime tests"
 }
 
+test_merge_check_rejects_symlinked_test_source() {
+  local project external base candidate out rc
+  project=$(make_project symlinked-source)
+  "$INVENTORY" collect "$project" >/dev/null
+  git -C "$project" init -q
+  git -C "$project" add .firstmate tests
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm baseline
+  base=$(git -C "$project" rev-parse HEAD)
+  external="$TMP_ROOT/external-test.py"
+  cp "$project/tests/test_literal.py" "$external"
+  rm "$project/tests/test_literal.py"
+  ln -s "$external" "$project/tests/test_literal.py"
+  git -C "$project" add tests/test_literal.py
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm candidate
+  candidate=$(git -C "$project" rev-parse HEAD)
+  set +e
+  out=$("$INVENTORY" merge-check "$project" "$candidate" "$base" 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "merge-check must reject a test source symlink"
+  printf '%s\n' "$out" | grep -q 'must be a regular file' \
+    || fail "symlink refusal did not identify the exact-tree regular-file requirement"
+  pass "merge-check refuses test source outside the exact candidate tree"
+}
+
 test_collect_and_check_never_execute_candidate_code
 test_dynamic_runtime_tests_do_not_satisfy_literal_inventory
+test_merge_check_rejects_symlinked_test_source
