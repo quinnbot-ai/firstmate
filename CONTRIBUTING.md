@@ -9,9 +9,9 @@ We require this to reduce the maintainer's burden of reviewing and merging contr
 `no-mistakes` puts a local git proxy in front of your real remote.
 Pushing through it runs an AI-driven review/test/lint pipeline in an isolated worktree, forwards the push upstream only after every check passes, and opens a clean PR automatically.
 
-A GitHub Actions check (`Require no-mistakes`) runs on PR lifecycle events where the existing body can satisfy the contract and fails if the body is missing the deterministic signature that no-mistakes writes.
-It skips the initial `opened` event because a creation pipeline may not yet have had a chance to write the body, then enforces the signature on edits, later head changes, and reopens.
-GitHub Actions and Dependabot are exempt so their automation keeps working, but regular contributor PRs without the signature will not be reviewed or merged.
+A GitHub Actions check (`Require no-mistakes`) runs on `opened`, `edited`, `synchronize`, and `reopened` events so each lifecycle event records the latest-head required check.
+It passes marker-present events, notices and passes marker-absent openings, head changes, and reopens because they did not create a body-compliance opportunity, and fails a marker-absent body edit.
+GitHub Actions and Dependabot are exempt so their automation keeps working, while regular contributor body edits without the signature fail the required check.
 
 ## Workflow
 

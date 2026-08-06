@@ -4,8 +4,8 @@
 # The workflows are executable configuration, so this test parses their public
 # YAML contract rather than matching source text. It protects the cost boundary:
 # complete Ubuntu coverage remains on every PR, the only current macOS job uses
-# native path filtering plus a daily run, and no-mistakes ignores only the PR
-# creation event that can precede its signature.
+# native path filtering plus a daily run, and no-mistakes records every lifecycle
+# event while failing only a marker-absent body edit.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -64,10 +64,7 @@ paths = macos_pr.fetch("paths")
 macos_paths = %w[
   .github/workflows/macos-stock-bash.yml
   bin/**
-  tests/lib.sh
-  tests/fm-fleet-snapshot-view.test.sh
-  tests/fm-bearings-snapshot.test.sh
-  tests/fm-test-run.test.sh
+  tests/**
 ]
 require_equal(paths, macos_paths, "macOS PR paths")
 require_equal(macos_events.fetch("schedule"), [{"cron" => "17 5 * * *"}], "macOS daily schedule")
@@ -78,7 +75,7 @@ require_equal(macos_job.fetch("runs-on"), "macos-latest", "macOS runner")
 require_equal(macos_job.fetch("steps")[1].fetch("shell"), "/bin/bash {0}", "macOS stock Bash shell")
 
 types = no_mistakes.fetch(trigger).fetch("pull_request").fetch("types")
-require_equal(types, %w[edited synchronize reopened], "no-mistakes lifecycle events")
+require_equal(types, %w[opened edited synchronize reopened], "no-mistakes lifecycle events")
 check = no_mistakes.fetch("jobs").fetch("check")
 require_present(check.fetch("if").include?("github-actions[bot]"), "no-mistakes bot exemption")
 require_present(check.fetch("if").include?("dependabot[bot]"), "no-mistakes Dependabot exemption")
@@ -86,15 +83,54 @@ require_present(
   check.fetch("steps").any? { |step| step.dig("env", "PR_BODY") == "${{ github.event.pull_request.body }}" },
   "no-mistakes signature body input"
 )
+require_present(
+  check.fetch("steps").any? { |step| step.dig("env", "PR_ACTION") == "${{ github.event.action }}" },
+  "no-mistakes lifecycle action input"
+)
 concurrency = no_mistakes.fetch("concurrency").fetch("group")
+require_present(concurrency.include?("github.event.action == 'opened'"), "no-mistakes opening isolation")
 require_present(concurrency.include?("github.event.action == 'edited'"), "no-mistakes body-edit isolation")
-raise "no-mistakes concurrency must not restore opened-event handling" if concurrency.include?("opened")
 RUBY
+}
+
+no_mistakes_step() {
+  ruby - "$NO_MISTAKES_WORKFLOW" <<'RUBY'
+require "yaml"
+
+workflow = YAML.load_file(ARGV.fetch(0))
+step = workflow.fetch("jobs").fetch("check").fetch("steps").fetch(0)
+print step.fetch("run")
+RUBY
+}
+
+run_no_mistakes_fixture() {
+  local action=$1 body=$2 expected_code=$3 expected_message=$4 expected_detail=${5:-} output code
+  output=$(PR_ACTION="$action" PR_BODY="$body" PR_AUTHOR=fixture PR_NUMBER=123 /bin/bash -s <<< "$(no_mistakes_step)" 2>&1)
+  code=$?
+  expect_code "$expected_code" "$code" "no-mistakes $action fixture"
+  assert_contains "$output" "$expected_message" "no-mistakes $action fixture did not report expected result"
+  [ -z "$expected_detail" ] || assert_contains "$output" "$expected_detail" "no-mistakes $action fixture did not report lifecycle detail"
 }
 
 test_workflow_event_and_runner_contract() {
   assert_workflow_contract || fail "workflow scheduling contract failed"
-  pass "workflow scheduling retains Ubuntu PR coverage, gates macOS natively, and skips impossible no-mistakes opens"
+  pass "workflow scheduling retains Ubuntu PR coverage and gates macOS natively"
+}
+
+test_no_mistakes_lifecycle_fixtures() {
+  local action marker
+  marker='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
+
+  for action in opened edited synchronize reopened; do
+    run_no_mistakes_fixture "$action" "$marker" 0 "Found no-mistakes signature"
+  done
+
+  for action in opened synchronize reopened; do
+    run_no_mistakes_fixture "$action" "" 0 "::notice::No no-mistakes signature" "during $action"
+  done
+  run_no_mistakes_fixture edited "" 1 "::error::This PR was not raised through no-mistakes."
+  pass "no-mistakes lifecycle fixtures preserve notices and meaningful body-edit enforcement"
 }
 
 test_workflow_event_and_runner_contract
+test_no_mistakes_lifecycle_fixtures

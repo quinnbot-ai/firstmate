@@ -3,16 +3,13 @@ name: macOS stock Bash compatibility
 on:
   pull_request:
     branches: [main]
-    # This lane parses every tracked shell script, then runs the three focused
-    # stock-Bash contracts. Keep its filter native to Actions so a PR's
-    # relevance is visible before a macOS runner is acquired.
+    # This lane parses every tracked shell script, including test scripts, then
+    # runs the focused stock-Bash contracts. Keep its filter native to Actions
+    # so a PR's relevance is visible before a macOS runner is acquired.
     paths:
       - .github/workflows/macos-stock-bash.yml
       - bin/**
-      - tests/lib.sh
-      - tests/fm-fleet-snapshot-view.test.sh
-      - tests/fm-bearings-snapshot.test.sh
-      - tests/fm-test-run.test.sh
+      - tests/**
   schedule:
     - cron: '17 5 * * *'
 
