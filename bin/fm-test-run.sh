@@ -1554,6 +1554,28 @@ terminate_and_reap_process_tree() {
     grace=$((grace + 1))
   done
   for pid in "${process_tree_pids[@]}"; do
+    kill -STOP "$pid" 2>/dev/null || true
+  done
+  idx=0
+  while [ "$idx" -lt "${#process_tree_pids[@]}" ]; do
+    parent=${process_tree_pids[$idx]}
+    children=$(ps -eo pid=,ppid= 2>/dev/null | awk -v parent="$parent" '$2 == parent { print $1 }' || true)
+    while IFS= read -r child; do
+      [ -n "$child" ] || continue
+      seen=0
+      for pid in "${process_tree_pids[@]}"; do
+        if [ "$pid" = "$child" ]; then
+          seen=1
+          break
+        fi
+      done
+      if [ "$seen" -eq 0 ] && kill -STOP "$child" 2>/dev/null; then
+        process_tree_pids[${#process_tree_pids[@]}]=$child
+      fi
+    done <<<"$children"
+    idx=$((idx + 1))
+  done
+  for pid in "${process_tree_pids[@]}"; do
     state=$(ps -o stat= -p "$pid" 2>/dev/null | awk 'NR == 1 { print $1 }' || true)
     case "$state" in
       ""|Z*) ;;
@@ -1561,10 +1583,19 @@ terminate_and_reap_process_tree() {
     esac
   done
   wait "$root" 2>/dev/null || true
-  for pid in "${process_tree_pids[@]}"; do
-    while kill -0 "$pid" 2>/dev/null; do
-      sleep 0.01
+  grace=0
+  while [ "$grace" -lt 100 ]; do
+    running=0
+    for pid in "${process_tree_pids[@]}"; do
+      state=$(ps -o stat= -p "$pid" 2>/dev/null | awk 'NR == 1 { print $1 }' || true)
+      case "$state" in
+        ""|Z*) ;;
+        *) running=1; break ;;
+      esac
     done
+    [ "$running" -eq 1 ] || break
+    sleep 0.01
+    grace=$((grace + 1))
   done
 }
 
