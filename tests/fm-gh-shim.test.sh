@@ -16,8 +16,12 @@ SHIM="$ROOT/bin/fm-gh-shim.sh"
 WRAPPER="$ROOT/bin/fm-gh.sh"
 INSTALLER="$ROOT/bin/fm-gh-shim-install.sh"
 TMP_ROOT=$(fm_test_tmproot fm-gh-shim)
-# Normalize: $TMPDIR often carries a trailing slash, and these cases compare fixture
-# paths against the installer's own `cd`-normalized output.
+# Create before normalizing, then normalize: $TMPDIR often carries a trailing slash and
+# these cases compare fixture paths against the installer's own `cd`-normalized output,
+# so the path must be resolved rather than compared raw. The mkdir is not redundant,
+# because a cleanup trap registered inside the command substitution above can remove the
+# directory before it is ever used, which would make the normalizing `cd` fail.
+mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 
 # make_fake_gh <dir>: a stand-in real gh that appends its argv and the credential the
