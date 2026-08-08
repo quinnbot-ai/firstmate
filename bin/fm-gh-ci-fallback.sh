@@ -10,8 +10,8 @@
 # the caller's ambient GH_TOKEN/GITHUB_TOKEN unchanged. This script never calls
 # fm-gh.sh, never injects config/gh-credential's broader PR-capable credential,
 # and never prints a token. It falls back only after the original command reports
-# the known HTTP 403 personal-token denial for check-runs; every other result is
-# replayed unchanged.
+# the known GraphQL personal-token denial for statusCheckRollup; every other result
+# is replayed unchanged.
 #
 # The fallback is intentionally limited to the two literal argument vectors used
 # by the supported no-mistakes CI monitor: a selector, `--repo owner/repository`,
@@ -108,7 +108,7 @@ replay_original() {
 
 # Requiring the complete permission signature here keeps a changed gh failure
 # from being reinterpreted as CI state.
-if ! grep -Eiq 'HTTP 403: Resource not accessible by personal access token.*check-runs' \
+if ! grep -Fq 'GraphQL: Resource not accessible by personal access token (node.statusCheckRollup.nodes.0.commit.statusCheckRollup)' \
   "$ORIGINAL_OUT" "$ORIGINAL_ERR"; then
   replay_original
 fi

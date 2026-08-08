@@ -83,13 +83,13 @@ printf 'token:%s\n' "${GITHUB_TOKEN:-<none>}" >> "$FAKE_GH_LOG"
 if [ "${1:-}" = pr ] && [ "${2:-}" = checks ]; then
   case "${FM_TEST_CHECKS_ERROR:-403}" in
     403)
-      echo "HTTP 403: Resource not accessible by personal access token (check-runs)" >&2
+      echo "GraphQL: Resource not accessible by personal access token (node.statusCheckRollup.nodes.0.commit.statusCheckRollup)" >&2
       ;;
     403-rate-limit)
       echo "HTTP 403: API rate limit exceeded (check-runs)" >&2
       ;;
     403-other-api)
-      echo "HTTP 403: Resource not accessible by personal access token (actions/runs)" >&2
+      echo "GraphQL: Resource not accessible by personal access token (organization.t000)" >&2
       ;;
     *)
       echo "HTTP ${FM_TEST_CHECKS_ERROR}: simulated non-authorization failure" >&2
@@ -279,7 +279,7 @@ test_ci_pr_head_drift_refuses_stale_verdict() {
   expect_code 1 "$status" "workflow fallback while the PR head advances"
   assert_contains "$out" "PR head changed during workflow-runs lookup" \
     "head drift did not refuse the workflow fallback result"
-  assert_contains "$out" "HTTP 403" \
+  assert_contains "$out" "GraphQL: Resource not accessible by personal access token (node.statusCheckRollup.nodes.0.commit.statusCheckRollup)" \
     "head drift did not preserve the original gh pr checks failure"
   assert_not_contains "$out" '"bucket":"pass"' \
     "a superseded head's green workflow verdict escaped the fallback"
@@ -303,7 +303,7 @@ test_ci_unrelated_failures_preserve_original_result() {
     case "$error" in
       500) expected="HTTP 500" ;;
       403-rate-limit) expected="HTTP 403: API rate limit exceeded" ;;
-      403-other-api) expected="HTTP 403: Resource not accessible by personal access token (actions/runs)" ;;
+      403-other-api) expected="GraphQL: Resource not accessible by personal access token (organization.t000)" ;;
     esac
     status=0
     out=$(FAKE_GH_LOG="$case_dir/gh.calls" FM_TEST_PR_HEAD="$head" \
@@ -350,7 +350,7 @@ EOF
       gh $invocation 2>&1) || status=$?
 
     expect_code 1 "$status" "unsupported gh pr checks shape: $invocation"
-    assert_contains "$out" "HTTP 403" \
+    assert_contains "$out" "GraphQL: Resource not accessible by personal access token (node.statusCheckRollup.nodes.0.commit.statusCheckRollup)" \
       "unsupported gh pr checks shape did not retain real gh behavior: $invocation"
   done
   assert_no_grep 'argv:api' "$case_dir/gh.calls" \

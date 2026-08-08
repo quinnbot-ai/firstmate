@@ -16,7 +16,7 @@
 #   gh pr edit ...
 # The CI monitor's exact `gh pr checks ... --json name,state,bucket,completedAt[,link]`
 # vectors first try the real gh with the ambient narrow token. Only the known HTTP
-# 403 personal-token denial for check-runs reaches fm-gh-ci-fallback.sh, which uses
+# GraphQL personal-token denial for statusCheckRollup reaches fm-gh-ci-fallback.sh, which uses
 # that SAME token to read the PR's exact head and workflow runs filtered by that SHA.
 # It never reaches fm-gh.sh or config/gh-credential's broader token. Every other
 # invocation execs the real gh unchanged, so the shim's default remains current behavior.
