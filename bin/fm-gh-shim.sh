@@ -29,7 +29,7 @@ ROUTE=passthrough
 if [ "${FM_GH_SHIM_ACTIVE:-}" != "1" ] && [ "${1:-}" = "pr" ]; then
   case "${2:-}" in
     create | edit) ROUTE=credential ;;
-    checks) ROUTE=ci-fallback ;;
+    checks) ROUTE=ci-candidate ;;
   esac
 fi
 
@@ -98,8 +98,10 @@ if [ "$ROUTE" = credential ]; then
   exec "${FM_GH_SHIM_WRAPPER:-$SHIM_SRC_DIR/fm-gh.sh}" "$REAL_GH" "$@"
 fi
 
-if [ "$ROUTE" = ci-fallback ]; then
-  exec "${FM_GH_SHIM_CI_FALLBACK:-$SHIM_SRC_DIR/fm-gh-ci-fallback.sh}" "$REAL_GH" "$@"
+CI_FALLBACK="$SHIM_SRC_DIR/fm-gh-ci-fallback.sh"
+if [ "$ROUTE" = ci-candidate ] && [ -x "$CI_FALLBACK" ] && \
+  "$CI_FALLBACK" --supports "$@"; then
+  exec "${FM_GH_SHIM_CI_FALLBACK:-$CI_FALLBACK}" "$REAL_GH" "$@"
 fi
 
 exec "$REAL_GH" "$@"
