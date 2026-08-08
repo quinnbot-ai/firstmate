@@ -3,19 +3,21 @@
 # check-runs read but still permits workflow-runs reads.
 #
 # Usage: fm-gh-ci-fallback.sh <real-gh> pr checks <pr-number-or-url> --repo <owner/repo> --json <fields>
-#        fm-gh-ci-fallback.sh --supports pr checks <pr-number-or-url> [supported flags]
+#        fm-gh-ci-fallback.sh --supports pr checks <pr-number-or-url> --repo <owner/repo> --json <fields>
 #
 # Token routing is deliberately least-privilege. The original check-runs call,
 # the pull-request head lookup, and the exact-head workflow-runs lookup all use
 # the caller's ambient GH_TOKEN/GITHUB_TOKEN unchanged. This script never calls
 # fm-gh.sh, never injects config/gh-credential's broader PR-capable credential,
 # and never prints a token. It falls back only after the original command reports
-# a 403-style authorization failure; every other result is replayed unchanged.
+# the known HTTP 403 personal-token denial for check-runs; every other result is
+# replayed unchanged.
 #
-# The fallback is intentionally limited to the two JSON field sets used by the
-# supported no-mistakes CI monitor. Other `gh pr checks` invocations keep the real
-# gh result, so installing the PATH-wide shim does not silently change an
-# interactive command's output format.
+# The fallback is intentionally limited to the two literal argument vectors used
+# by the supported no-mistakes CI monitor: a selector, `--repo owner/repository`,
+# and `--json name,state,bucket,completedAt` with or without the final `link` field.
+# Other `gh pr checks` invocations keep the real gh result, so installing the
+# PATH-wide shim does not silently change an interactive command's output format.
 #
 # A fallback verdict is tied to the PR's exact current head SHA. The PR number
 # and owner/repository are strictly validated, the head is read from
@@ -35,38 +37,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 
 fallback_shape_parse() {
-  [ "$#" -ge 4 ] || return 1
+  [ "$#" -eq 7 ] || return 1
   [ "${1:-}" = pr ] && [ "${2:-}" = checks ] || return 1
+  [ "${4:-}" = --repo ] && [ "${6:-}" = --json ] || return 1
   SELECTOR=${3:-}
-  shift 3
-
-  REPO=
-  JSON_FIELDS=
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      --repo|-R)
-        [ "$#" -ge 2 ] || return 1
-        REPO=$2
-        shift 2
-        ;;
-      --repo=*|-R=*)
-        REPO=${1#*=}
-        shift
-        ;;
-      --json)
-        [ "$#" -ge 2 ] || return 1
-        JSON_FIELDS=$2
-        shift 2
-        ;;
-      --json=*)
-        JSON_FIELDS=${1#*=}
-        shift
-        ;;
-      *)
-        return 1
-        ;;
-    esac
-  done
+  REPO=${5:-}
+  JSON_FIELDS=${7:-}
 
   case "$JSON_FIELDS" in
     name,state,bucket,completedAt|name,state,bucket,completedAt,link) ;;
@@ -77,7 +53,7 @@ fallback_shape_parse() {
     https://github.com/*)
       fm_pr_url_parse "$SELECTOR" || return 1
       [ "$FM_PR_PROVIDER" = github ] || return 1
-      [ -z "$REPO" ] || [ "$REPO" = "$FM_PR_PATH" ] || return 1
+      [ "$REPO" = "$FM_PR_PATH" ] || return 1
       REPO=$FM_PR_PATH
       NUMBER=$FM_PR_NUMBER
       ;;
@@ -130,9 +106,9 @@ replay_original() {
   exit "$ORIGINAL_STATUS"
 }
 
-# Requiring the permission marker here keeps a changed gh failure from being
-# reinterpreted as CI state.
-if ! grep -Eiq '(^|[^0-9])403([^0-9]|$)|Resource not accessible by personal access token' \
+# Requiring the complete permission signature here keeps a changed gh failure
+# from being reinterpreted as CI state.
+if ! grep -Eiq 'HTTP 403: Resource not accessible by personal access token.*check-runs' \
   "$ORIGINAL_OUT" "$ORIGINAL_ERR"; then
   replay_original
 fi

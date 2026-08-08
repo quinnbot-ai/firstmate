@@ -15,11 +15,11 @@
 #   gh pr create ...
 #   gh pr edit ...
 # The CI monitor's exact `gh pr checks ... --json name,state,bucket,completedAt[,link]`
-# shape first tries the real gh with the ambient narrow token. Only a 403-style
-# authorization failure reaches fm-gh-ci-fallback.sh, which uses that SAME token
-# to read the PR's exact head and workflow runs filtered by that SHA. It never
-# reaches fm-gh.sh or config/gh-credential's broader token. Every other invocation
-# execs the real gh unchanged, so the shim's default remains current behavior.
+# vectors first try the real gh with the ambient narrow token. Only the known HTTP
+# 403 personal-token denial for check-runs reaches fm-gh-ci-fallback.sh, which uses
+# that SAME token to read the PR's exact head and workflow runs filtered by that SHA.
+# It never reaches fm-gh.sh or config/gh-credential's broader token. Every other
+# invocation execs the real gh unchanged, so the shim's default remains current behavior.
 set -eu
 
 # FM_GH_SHIM_ACTIVE is a hard recursion stop: if fm-gh.sh's credential prefix itself

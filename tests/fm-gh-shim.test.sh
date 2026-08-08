@@ -81,11 +81,20 @@ printf 'argv:%s\n' "$*" >> "$FAKE_GH_LOG"
 printf 'token:%s\n' "${GITHUB_TOKEN:-<none>}" >> "$FAKE_GH_LOG"
 
 if [ "${1:-}" = pr ] && [ "${2:-}" = checks ]; then
-  if [ "${FM_TEST_CHECKS_ERROR:-403}" = 403 ]; then
-    echo "HTTP 403: Resource not accessible by personal access token (check-runs)" >&2
-  else
-    echo "HTTP ${FM_TEST_CHECKS_ERROR}: simulated non-authorization failure" >&2
-  fi
+  case "${FM_TEST_CHECKS_ERROR:-403}" in
+    403)
+      echo "HTTP 403: Resource not accessible by personal access token (check-runs)" >&2
+      ;;
+    403-rate-limit)
+      echo "HTTP 403: API rate limit exceeded (check-runs)" >&2
+      ;;
+    403-other-api)
+      echo "HTTP 403: Resource not accessible by personal access token (actions/runs)" >&2
+      ;;
+    *)
+      echo "HTTP ${FM_TEST_CHECKS_ERROR}: simulated non-authorization failure" >&2
+      ;;
+  esac
   exit 1
 fi
 
@@ -277,9 +286,9 @@ test_ci_pr_head_drift_refuses_stale_verdict() {
   pass "a moving PR head cannot emit a stale workflow verdict"
 }
 
-test_ci_non_403_preserves_original_failure() {
-  local case_dir real_dir shim_dir head out status jq_bin
-  case_dir="$TMP_ROOT/ci-non-403"
+test_ci_unrelated_failures_preserve_original_result() {
+  local case_dir real_dir shim_dir head out status jq_bin error expected
+  case_dir="$TMP_ROOT/ci-unrelated-failures"
   real_dir="$case_dir/real"
   shim_dir="$case_dir/shim"
   head=cccccccccccccccccccccccccccccccccccccccc
@@ -290,23 +299,31 @@ test_ci_non_403_preserves_original_failure() {
   mkdir -p "$shim_dir"
   ln -sf "$SHIM" "$shim_dir/gh"
 
-  status=0
-  out=$(FAKE_GH_LOG="$case_dir/gh.calls" FM_TEST_PR_HEAD="$head" FM_TEST_CHECKS_ERROR=500 \
-    FM_TEST_WORKFLOW_PAGES="$case_dir/exact.json" FM_TEST_STALE_PAGES="$case_dir/stale.json" \
-    FM_TEST_JQ="$jq_bin" PATH="$shim_dir:$real_dir:$PATH" \
-    gh pr checks 7 --repo o/r --json name,state,bucket,completedAt 2>&1) || status=$?
+  for error in 500 403-rate-limit 403-other-api; do
+    case "$error" in
+      500) expected="HTTP 500" ;;
+      403-rate-limit) expected="HTTP 403: API rate limit exceeded" ;;
+      403-other-api) expected="HTTP 403: Resource not accessible by personal access token (actions/runs)" ;;
+    esac
+    status=0
+    out=$(FAKE_GH_LOG="$case_dir/gh.calls" FM_TEST_PR_HEAD="$head" \
+      FM_TEST_CHECKS_ERROR="$error" FM_TEST_WORKFLOW_PAGES="$case_dir/exact.json" \
+      FM_TEST_STALE_PAGES="$case_dir/stale.json" FM_TEST_JQ="$jq_bin" \
+      PATH="$shim_dir:$real_dir:$PATH" \
+      gh pr checks 7 --repo o/r --json name,state,bucket,completedAt 2>&1) || status=$?
 
-  expect_code 1 "$status" "non-authorization gh pr checks failure"
-  assert_contains "$out" "HTTP 500" \
-    "non-authorization failure was not replayed unchanged"
+    expect_code 1 "$status" "unrelated gh pr checks failure: $error"
+    assert_contains "$out" "$expected" \
+      "unrelated failure was not replayed unchanged: $error"
+  done
   assert_no_grep 'argv:api' "$case_dir/gh.calls" \
-    "non-authorization failure incorrectly reached the workflow-runs fallback"
-  pass "a non-403 gh pr checks failure is preserved without an API fallback"
+    "an unrelated failure incorrectly reached the workflow-runs fallback"
+  pass "unrelated check failures are preserved without an API fallback"
 }
 
-test_ci_interactive_flags_preserve_original_failure() {
-  local case_dir real_dir shim_dir out status
-  case_dir="$TMP_ROOT/ci-interactive"
+test_ci_unsupported_shapes_exec_real_gh_directly() {
+  local case_dir real_dir shim_dir out status invocation
+  case_dir="$TMP_ROOT/ci-unsupported-shapes"
   real_dir="$case_dir/real"
   shim_dir="$case_dir/shim"
   make_fake_ci_gh "$real_dir"
@@ -319,19 +336,28 @@ exit 99
 EOF
   chmod +x "$case_dir/fallback"
 
-  status=0
-  out=$(FAKE_GH_LOG="$case_dir/gh.calls" FM_TEST_FALLBACK_LOG="$case_dir/fallback.calls" \
-    FM_GH_SHIM_CI_FALLBACK="$case_dir/fallback" PATH="$shim_dir:$real_dir:$PATH" \
-    gh pr checks 7 --repo o/r --json name,state,bucket,completedAt --watch 2>&1) || status=$?
+  for invocation in \
+    "pr checks 7 --repo o/r --json name,state,bucket,completedAt --watch" \
+    "pr checks 7 -R o/r --json name,state,bucket,completedAt" \
+    "pr checks 7 --repo=o/r --json=name,state,bucket,completedAt" \
+    "pr checks 7 --json name,state,bucket,completedAt --repo o/r" \
+    "pr checks 7 --repo o/r --repo o/r --json name,state,bucket,completedAt" \
+    "pr checks https://github.com/o/r/pull/7 --json name,state,bucket,completedAt"; do
+    status=0
+    # shellcheck disable=SC2086 # Deliberate word splitting of the fixture argv.
+    out=$(FAKE_GH_LOG="$case_dir/gh.calls" FM_TEST_FALLBACK_LOG="$case_dir/fallback.calls" \
+      FM_GH_SHIM_CI_FALLBACK="$case_dir/fallback" PATH="$shim_dir:$real_dir:$PATH" \
+      gh $invocation 2>&1) || status=$?
 
-  expect_code 1 "$status" "interactive gh pr checks authorization failure"
-  assert_contains "$out" "HTTP 403" \
-    "interactive gh pr checks failure was not replayed unchanged"
+    expect_code 1 "$status" "unsupported gh pr checks shape: $invocation"
+    assert_contains "$out" "HTTP 403" \
+      "unsupported gh pr checks shape did not retain real gh behavior: $invocation"
+  done
   assert_no_grep 'argv:api' "$case_dir/gh.calls" \
-    "an interactive gh pr checks invocation incorrectly reached the CI fallback"
+    "an unsupported gh pr checks invocation incorrectly reached the CI fallback"
   assert_absent "$case_dir/fallback.calls" \
-    "an interactive gh pr checks invocation entered the capturing fallback helper"
-  pass "an interactive gh pr checks shape execs the real gh directly"
+    "an unsupported gh pr checks invocation entered the capturing fallback helper"
+  pass "unsupported gh pr checks shapes exec the real gh directly"
 }
 
 test_pr_create_routes_through_wrapper() {
@@ -664,8 +690,8 @@ test_ci_403_falls_back_to_exact_head_green_without_privileged_token
 test_ci_403_falls_back_to_exact_head_red
 test_ci_zero_exact_head_runs_stays_pending
 test_ci_pr_head_drift_refuses_stale_verdict
-test_ci_non_403_preserves_original_failure
-test_ci_interactive_flags_preserve_original_failure
+test_ci_unrelated_failures_preserve_original_result
+test_ci_unsupported_shapes_exec_real_gh_directly
 test_non_pr_invocations_pass_through_untouched
 test_wrapper_without_config_is_transparent
 test_configured_wrapper_replaces_ambient_tokens
