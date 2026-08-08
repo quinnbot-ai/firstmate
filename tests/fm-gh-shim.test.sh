@@ -159,6 +159,43 @@ write_empty_ci_pages() {
   printf '[{"workflow_runs":[]}]\n' > "$path"
 }
 
+write_multi_bucket_ci_pages() {
+  local path=$1
+  cat > "$path" << 'EOF'
+[
+  {
+    "workflow_runs": [
+      {
+        "name": "cancelled-workflow",
+        "status": "completed",
+        "conclusion": "cancelled",
+        "updated_at": "2026-08-07T12:34:56Z",
+        "html_url": "https://github.com/o/r/actions/runs/201"
+      }
+    ]
+  },
+  {
+    "workflow_runs": [
+      {
+        "name": "skipped-workflow",
+        "status": "completed",
+        "conclusion": "skipped",
+        "updated_at": "2026-08-07T12:35:56Z",
+        "html_url": "https://github.com/o/r/actions/runs/202"
+      },
+      {
+        "name": "queued-workflow",
+        "status": "queued",
+        "conclusion": null,
+        "updated_at": "2026-08-07T12:36:56Z",
+        "html_url": "https://github.com/o/r/actions/runs/203"
+      }
+    ]
+  }
+]
+EOF
+}
+
 test_ci_403_falls_back_to_exact_head_green_without_privileged_token() {
   local case_dir real_dir shim_dir home head out status jq_bin
   case_dir="$TMP_ROOT/ci-green"
@@ -253,6 +290,35 @@ test_ci_zero_exact_head_runs_stays_pending() {
   assert_not_contains "$out" '"bucket":"pass"' \
     "empty exact-head workflow evidence incorrectly certified green"
   pass "zero exact-head workflow runs remain explicitly pending"
+}
+
+test_ci_maps_cancel_skipping_and_pending_across_pages() {
+  local case_dir real_dir shim_dir head out status jq_bin
+  case_dir="$TMP_ROOT/ci-multi-bucket"
+  real_dir="$case_dir/real"
+  shim_dir="$case_dir/shim"
+  head=1212121212121212121212121212121212121212
+  jq_bin=$(command -v jq) || fail "jq is required to exercise gh's built-in --jq contract"
+  make_fake_ci_gh "$real_dir"
+  write_multi_bucket_ci_pages "$case_dir/exact.json"
+  write_ci_pages "$case_dir/stale.json" stale-head completed '"success"'
+  mkdir -p "$shim_dir"
+  ln -sf "$SHIM" "$shim_dir/gh"
+
+  status=0
+  out=$(FAKE_GH_LOG="$case_dir/gh.calls" FM_TEST_PR_HEAD="$head" \
+    FM_TEST_WORKFLOW_PAGES="$case_dir/exact.json" FM_TEST_STALE_PAGES="$case_dir/stale.json" \
+    FM_TEST_JQ="$jq_bin" GITHUB_TOKEN=narrow-ci-token PATH="$shim_dir:$real_dir:$PATH" \
+    gh pr checks 7 --repo o/r --json name,state,bucket,completedAt,link 2>&1) || status=$?
+
+  expect_code 0 "$status" "multi-page exact-head workflow fallback transport"
+  assert_contains "$out" '"name":"cancelled-workflow","state":"cancelled","bucket":"cancel"' \
+    "completed cancellation did not map to the cancellation bucket"
+  assert_contains "$out" '"name":"skipped-workflow","state":"skipped","bucket":"skipping"' \
+    "completed skip did not map to the skipping bucket"
+  assert_contains "$out" '"name":"queued-workflow","state":"queued","bucket":"pending"' \
+    "queued workflow did not remain pending"
+  pass "paginated exact-head runs map cancellation, skipping, and pending buckets"
 }
 
 test_ci_pr_head_drift_refuses_stale_verdict() {
@@ -689,6 +755,7 @@ test_pr_create_routes_through_wrapper
 test_ci_403_falls_back_to_exact_head_green_without_privileged_token
 test_ci_403_falls_back_to_exact_head_red
 test_ci_zero_exact_head_runs_stays_pending
+test_ci_maps_cancel_skipping_and_pending_across_pages
 test_ci_pr_head_drift_refuses_stale_verdict
 test_ci_unrelated_failures_preserve_original_result
 test_ci_unsupported_shapes_exec_real_gh_directly
