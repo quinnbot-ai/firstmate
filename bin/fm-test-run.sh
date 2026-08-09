@@ -172,7 +172,6 @@ JOURNAL_SIGNAL_DEFERRED=
 JOURNAL_PENDING_SIGNAL=
 JOURNAL_ACTIVE_SERIAL_WORKER=
 JOURNAL_ACTIVE_SERIAL_SCRIPT=
-JOURNAL_ACTIVE_SERIAL_INDEX=
 JOURNAL_ACTIVE_SERIAL_TERMINAL=
 declare -a JOURNAL_PARALLEL_WORKERS=()
 declare -a JOURNAL_PARALLEL_SCRIPTS=()
@@ -294,6 +293,7 @@ finally:
 PY
 }
 
+# shellcheck disable=SC2329 # Invoked indirectly through journal_signal_boundary_run.
 journal_sync_directories() {
   python3 - sync-directories "$@" <<'PY'
 import os
@@ -328,7 +328,6 @@ journal_register_worker() {
   local mode=$1 slot=$2 worker_id=$3 script=$4
   case "$mode" in
     serial)
-      JOURNAL_ACTIVE_SERIAL_INDEX=$slot
       JOURNAL_ACTIVE_SERIAL_SCRIPT=$script
       JOURNAL_ACTIVE_SERIAL_TERMINAL=
       JOURNAL_ACTIVE_SERIAL_WORKER=$worker_id
@@ -360,6 +359,7 @@ journal_start_worker() {
   journal_signal_boundary_finish "$operation_rc"
 }
 
+# shellcheck disable=SC2329 # Invoked through indirect journal lifecycle entry points.
 journal_write_run_record() {
   local state=$1 exit_code=${2:-}
   journal_write_record run "$JOURNAL_RUN_DIR/run.json" "$state" "$exit_code" \
@@ -372,6 +372,7 @@ journal_write_run_state() {
   journal_write_run_record "$@"
 }
 
+# shellcheck disable=SC2329 # Invoked indirectly through journal_signal_boundary_run.
 journal_initialize_records() {
   umask 077
   mkdir -p "$PROGRESS_JOURNAL/runs" \
@@ -2209,7 +2210,6 @@ run_one_serial() {
   record_script_result "$script" "$rc" "$duration" "$out" "$end_iso" serial
   JOURNAL_ACTIVE_SERIAL_WORKER=
   JOURNAL_ACTIVE_SERIAL_SCRIPT=
-  JOURNAL_ACTIVE_SERIAL_INDEX=
   JOURNAL_ACTIVE_SERIAL_TERMINAL=
 }
 
