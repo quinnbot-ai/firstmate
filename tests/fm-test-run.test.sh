@@ -1501,10 +1501,9 @@ test_progress_journal_defers_initialization_signal_until_started() {
   cat >"$tmp/bin/python3" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = - ] && [ "${2:-}" = sync-directories ]; then
-  "$REAL_PYTHON" "$@"
-  rc=$?
-  kill -TERM "$PPID"
-  exit "$rc"
+  printf 'ready\n' >"$SYNC_EVIDENCE"
+  sleep 0.2
+  exec "$REAL_PYTHON" "$@"
 fi
 if [ "${1:-}" = - ] && [ "${2:-}" = run ] && [ "${7:-}" = started ]; then
   "$REAL_PYTHON" "$@"
@@ -1520,11 +1519,37 @@ printf 'not ok - initialization signal should prevent launch\n'
 exit 1
 SH
   chmod +x "$tmp/bin/python3" "$fixture"
-  set +e
-  REAL_PYTHON="$real_python" STARTED_EVIDENCE="$tmp/started.json" PATH="$tmp/bin:$PATH" \
-    "$RUNNER" --progress-journal "$journal" "$fixture" >"$tmp/out" 2>"$tmp/err"
-  rc=$?
-  set -e
+  rc=$(REAL_PYTHON="$real_python" STARTED_EVIDENCE="$tmp/started.json" \
+    SYNC_EVIDENCE="$tmp/sync-ready" PATH="$tmp/bin:$PATH" \
+    "$real_python" - "$RUNNER" "$journal" "$fixture" "$tmp" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+import time
+
+runner, journal, fixture, root = sys.argv[1:]
+with open(os.path.join(root, "out"), "w", encoding="utf-8") as out, open(os.path.join(root, "err"), "w", encoding="utf-8") as err:
+    child = subprocess.Popen(
+        [runner, "--progress-journal", journal, fixture],
+        stdout=out,
+        stderr=err,
+        start_new_session=True,
+    )
+    deadline = time.monotonic() + 3
+    ready = os.path.join(root, "sync-ready")
+    while not os.path.exists(ready):
+        if child.poll() is not None:
+            raise SystemExit("runner exited before the directory sync helper")
+        if time.monotonic() >= deadline:
+            child.kill()
+            child.wait()
+            raise SystemExit("directory sync helper never became ready")
+        time.sleep(0.01)
+    os.killpg(child.pid, signal.SIGTERM)
+    print(child.wait(timeout=5))
+PY
+  ) || { cat "$tmp/out" "$tmp/err"; rm -rf "$tmp"; fail "process-group signal controller failed"; }
   [ "$rc" -eq 143 ] || { cat "$tmp/out" "$tmp/err"; rm -rf "$tmp"; fail "initialization signal should exit 143, got $rc"; }
   [ -f "$tmp/started.json" ] \
     || { rm -rf "$tmp"; fail "initialization signal exited before the started record was durable"; }
@@ -1544,7 +1569,7 @@ PY
   ! grep -Fq 'initialization signal should prevent launch' "$tmp/out" \
     || { rm -rf "$tmp"; fail "initialization signal launched a selected worker"; }
   rm -rf "$tmp"
-  pass "progress journal defers initialization signals until started state is durable"
+  pass "progress journal shields initialization helpers until started state is durable"
 }
 
 test_progress_journal_preserves_post_terminal_signal_outcome() {

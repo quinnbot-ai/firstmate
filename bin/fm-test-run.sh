@@ -293,11 +293,31 @@ journal_transition() {
   journal_write_record worker "$state_path" "$worker_id" "$state" "$ordinal" "$script" "$exit_code" "$duration_ms"
 }
 
-journal_write_run_state() {
+journal_write_run_record() {
   local state=$1 exit_code=${2:-}
-  [ -n "$JOURNAL_RUN_INITIALIZED" ] || return 0
   journal_write_record run "$JOURNAL_RUN_DIR/run.json" "$state" "$exit_code" \
     "$JOBS" "$SELECTION_DESC" "${SCRIPTS[@]+"${SCRIPTS[@]}"}"
+}
+
+journal_write_run_state() {
+  [ -n "$JOURNAL_RUN_INITIALIZED" ] || return 0
+  journal_write_run_record "$@"
+}
+
+journal_initialize_records() {
+  (
+    trap '' HUP INT TERM
+    umask 077
+    mkdir -p "$PROGRESS_JOURNAL/runs" \
+      || die "could not create progress journal: $PROGRESS_JOURNAL"
+    mkdir "$JOURNAL_RUN_DIR" \
+      || die "progress journal run already exists: $JOURNAL_RUN_ID"
+    mkdir "$JOURNAL_RUN_DIR/events" "$JOURNAL_RUN_DIR/states" \
+      || die "could not initialize progress journal run: $JOURNAL_RUN_ID"
+    journal_sync_directories "$@" \
+      || die "could not make progress journal durable: $JOURNAL_RUN_ID"
+    journal_write_run_record started
+  )
 }
 
 journal_initialize() {
@@ -313,16 +333,9 @@ journal_initialize() {
   while [ ! -e "$journal_existing_ancestor" ]; do
     journal_existing_ancestor=$(dirname "$journal_existing_ancestor")
   done
-  JOURNAL_INITIALIZING=1
-  (umask 077 && mkdir -p "$PROGRESS_JOURNAL/runs") \
-    || die "could not create progress journal: $PROGRESS_JOURNAL"
   JOURNAL_RUN_ID=$RUN_ID
   JOURNAL_RUNNER_PID=$$
   JOURNAL_RUN_DIR="$PROGRESS_JOURNAL/runs/$JOURNAL_RUN_ID"
-  (umask 077 && mkdir "$JOURNAL_RUN_DIR") \
-    || die "progress journal run already exists: $JOURNAL_RUN_ID"
-  (umask 077 && mkdir "$JOURNAL_RUN_DIR/events" "$JOURNAL_RUN_DIR/states") \
-    || die "could not initialize progress journal run: $JOURNAL_RUN_ID"
   journal_directories=("$JOURNAL_RUN_DIR/events" "$JOURNAL_RUN_DIR/states" \
     "$JOURNAL_RUN_DIR" "$PROGRESS_JOURNAL/runs")
   journal_sync_path=$PROGRESS_JOURNAL
@@ -331,10 +344,9 @@ journal_initialize() {
     [ "$journal_sync_path" != "$journal_existing_ancestor" ] || break
     journal_sync_path=$(dirname "$journal_sync_path")
   done
-  journal_sync_directories "${journal_directories[@]}" \
-    || die "could not make progress journal durable: $JOURNAL_RUN_ID"
+  JOURNAL_INITIALIZING=1
+  journal_initialize_records "${journal_directories[@]}"
   JOURNAL_RUN_INITIALIZED=1
-  journal_write_run_state started
   JOURNAL_INITIALIZING=
   if [ -n "$JOURNAL_PENDING_SIGNAL" ]; then
     exit "$JOURNAL_PENDING_SIGNAL"
