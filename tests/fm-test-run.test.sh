@@ -16,6 +16,37 @@ RUNNER="$ROOT/bin/fm-test-run.sh"
 assert_present "$RUNNER" "bin/fm-test-run.sh is missing"
 [ -x "$RUNNER" ] || fail "bin/fm-test-run.sh must be executable"
 
+run_in_new_process_group() {
+  local python=$1 cwd=$2 stdout_path=$3 stderr_path=$4
+  shift 4
+  "$python" - "$cwd" "$stdout_path" "$stderr_path" "$@" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+
+cwd, stdout_path, stderr_path, *command = sys.argv[1:]
+with open(stdout_path, "w", encoding="utf-8") as out, open(stderr_path, "w", encoding="utf-8") as err:
+    child = subprocess.Popen(
+        command,
+        cwd=cwd,
+        stdout=out,
+        stderr=err,
+        start_new_session=True,
+    )
+    try:
+        rc = child.wait(timeout=5)
+    except BaseException:
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        child.wait()
+        raise
+print(rc)
+PY
+}
+
 test_list_all_exact_suite_coverage() {
   local listed expected missing extra f
   listed=$("$RUNNER" --list --all | LC_ALL=C sort)
@@ -1433,10 +1464,9 @@ test_progress_journal_closes_startup_signal_windows() {
 if [ "${1:-}" = - ] && [ "${2:-}" = worker ]; then
   case "${3:-}" in
     */events/"$SIGNAL_WORKER".1.started.json)
-      "$REAL_PYTHON" "$@"
-      rc=$?
-      kill -TERM "$5"
-      exit "$rc"
+      group=$(ps -o pgid= -p "$5" | awk 'NR == 1 { gsub(/[[:space:]]/, "", $1); print $1 }')
+      kill -TERM -- "-$group"
+      exec "$REAL_PYTHON" "$@"
       ;;
   esac
 fi
@@ -1453,9 +1483,9 @@ exit 1
 SH
   chmod +x "$fixture"
   set +e
-  SIGNAL_WORKER=serial-1 REAL_PYTHON="$real_python" PATH="$tmp/bin:$PATH" \
-    "$RUNNER" --progress-journal "$journal" "$fixture" >"$tmp/serial.out" 2>"$tmp/serial.err"
-  rc=$?
+  rc=$(SIGNAL_WORKER=serial-1 REAL_PYTHON="$real_python" PATH="$tmp/bin:$PATH" \
+    run_in_new_process_group "$real_python" "$ROOT" "$tmp/serial.out" "$tmp/serial.err" \
+      "$RUNNER" --progress-journal "$journal" "$fixture")
   set -e
   [ "$rc" -eq 143 ] || { cat "$tmp/serial.out" "$tmp/serial.err"; rm -rf "$tmp"; fail "serial startup signal should exit 143, got $rc"; }
   run_dir=$(journal_run_dir "$journal")
@@ -1476,10 +1506,9 @@ exit 1
 SH
   chmod +x "$runner" "$repo/tests/fm-brief.test.sh"
   set +e
-  (cd "$repo" && SIGNAL_WORKER=parallel-1 REAL_PYTHON="$real_python" PATH="$tmp/bin:$PATH" \
-    "$runner" --jobs 2 --progress-journal "$journal" tests/fm-brief.test.sh) \
-    >"$tmp/parallel.out" 2>"$tmp/parallel.err"
-  rc=$?
+  rc=$(SIGNAL_WORKER=parallel-1 REAL_PYTHON="$real_python" PATH="$tmp/bin:$PATH" \
+    run_in_new_process_group "$real_python" "$repo" "$tmp/parallel.out" "$tmp/parallel.err" \
+      "$runner" --jobs 2 --progress-journal "$journal" tests/fm-brief.test.sh)
   set -e
   [ "$rc" -eq 143 ] || { cat "$tmp/parallel.out" "$tmp/parallel.err"; rm -rf "$tmp"; fail "parallel startup signal should exit 143, got $rc"; }
   run_dir=$(journal_run_dir "$journal")

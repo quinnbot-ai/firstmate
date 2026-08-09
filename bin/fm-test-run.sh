@@ -161,7 +161,7 @@ JOURNAL_RUN_DIR=
 JOURNAL_RUN_ID=
 JOURNAL_RUNNER_PID=
 JOURNAL_RUN_INITIALIZED=
-JOURNAL_INITIALIZING=
+JOURNAL_SIGNAL_DEFERRED=
 JOURNAL_PENDING_SIGNAL=
 JOURNAL_ACTIVE_SERIAL_WORKER=
 JOURNAL_ACTIVE_SERIAL_SCRIPT=
@@ -174,11 +174,33 @@ declare -a JOURNAL_PARALLEL_TERMINALS=()
 # shellcheck disable=SC2329 # Registered by the signal traps below.
 journal_handle_signal() {
   local rc=$1
-  if [ -n "$JOURNAL_INITIALIZING" ]; then
+  if [ -n "$JOURNAL_SIGNAL_DEFERRED" ]; then
     JOURNAL_PENDING_SIGNAL=$rc
     return 0
   fi
   exit "$rc"
+}
+
+journal_signal_boundary_begin() {
+  JOURNAL_SIGNAL_DEFERRED=1
+}
+
+journal_signal_boundary_run() {
+  (
+    trap '' HUP INT TERM
+    "$@"
+  )
+}
+
+journal_signal_boundary_finish() {
+  local operation_rc=$1 pending_signal
+  JOURNAL_SIGNAL_DEFERRED=
+  if [ -n "$JOURNAL_PENDING_SIGNAL" ]; then
+    pending_signal=$JOURNAL_PENDING_SIGNAL
+    JOURNAL_PENDING_SIGNAL=
+    exit "$pending_signal"
+  fi
+  return "$operation_rc"
 }
 
 journal_terminal_state_for_exit() {
@@ -295,6 +317,42 @@ journal_transition() {
   journal_write_record worker "$state_path" "$worker_id" "$state" "$ordinal" "$script" "$exit_code" "$duration_ms"
 }
 
+journal_register_worker() {
+  local mode=$1 slot=$2 worker_id=$3 script=$4
+  case "$mode" in
+    serial)
+      JOURNAL_ACTIVE_SERIAL_INDEX=$slot
+      JOURNAL_ACTIVE_SERIAL_SCRIPT=$script
+      JOURNAL_ACTIVE_SERIAL_TERMINAL=
+      JOURNAL_ACTIVE_SERIAL_WORKER=$worker_id
+      ;;
+    parallel)
+      JOURNAL_PARALLEL_SCRIPTS[slot]=$script
+      unset 'JOURNAL_PARALLEL_TERMINALS[slot]'
+      JOURNAL_PARALLEL_WORKERS[slot]=$worker_id
+      ;;
+    *)
+      die "unknown journal worker mode: $mode"
+      ;;
+  esac
+}
+
+journal_start_worker() {
+  local mode=$1 slot=$2 worker_id=$3 script=$4 operation_rc
+  if [ -z "$JOURNAL_RUN_DIR" ]; then
+    journal_register_worker "$mode" "$slot" "$worker_id" "$script"
+    return 0
+  fi
+  journal_signal_boundary_begin
+  journal_register_worker "$mode" "$slot" "$worker_id" "$script"
+  if journal_signal_boundary_run journal_transition "$worker_id" started "$script" 1; then
+    operation_rc=0
+  else
+    operation_rc=$?
+  fi
+  journal_signal_boundary_finish "$operation_rc"
+}
+
 journal_write_run_record() {
   local state=$1 exit_code=${2:-}
   journal_write_record run "$JOURNAL_RUN_DIR/run.json" "$state" "$exit_code" \
@@ -308,23 +366,20 @@ journal_write_run_state() {
 }
 
 journal_initialize_records() {
-  (
-    trap '' HUP INT TERM
-    umask 077
-    mkdir -p "$PROGRESS_JOURNAL/runs" \
-      || die "could not create progress journal: $PROGRESS_JOURNAL"
-    mkdir "$JOURNAL_RUN_DIR" \
-      || die "progress journal run already exists: $JOURNAL_RUN_ID"
-    mkdir "$JOURNAL_RUN_DIR/events" "$JOURNAL_RUN_DIR/states" \
-      || die "could not initialize progress journal run: $JOURNAL_RUN_ID"
-    journal_sync_directories "$@" \
-      || die "could not make progress journal durable: $JOURNAL_RUN_ID"
-    journal_write_run_record started
-  )
+  umask 077
+  mkdir -p "$PROGRESS_JOURNAL/runs" \
+    || die "could not create progress journal: $PROGRESS_JOURNAL"
+  mkdir "$JOURNAL_RUN_DIR" \
+    || die "progress journal run already exists: $JOURNAL_RUN_ID"
+  mkdir "$JOURNAL_RUN_DIR/events" "$JOURNAL_RUN_DIR/states" \
+    || die "could not initialize progress journal run: $JOURNAL_RUN_ID"
+  journal_sync_directories "$@" \
+    || die "could not make progress journal durable: $JOURNAL_RUN_ID"
+  journal_write_run_record started
 }
 
 journal_initialize() {
-  local journal_existing_ancestor journal_sync_path
+  local journal_existing_ancestor journal_sync_path operation_rc
   local -a journal_directories
   [ -n "$PROGRESS_JOURNAL" ] || return 0
   command -v python3 >/dev/null 2>&1 \
@@ -347,13 +402,14 @@ journal_initialize() {
     [ "$journal_sync_path" != "$journal_existing_ancestor" ] || break
     journal_sync_path=$(dirname "$journal_sync_path")
   done
-  JOURNAL_INITIALIZING=1
-  journal_initialize_records "${journal_directories[@]}"
-  JOURNAL_RUN_INITIALIZED=1
-  JOURNAL_INITIALIZING=
-  if [ -n "$JOURNAL_PENDING_SIGNAL" ]; then
-    exit "$JOURNAL_PENDING_SIGNAL"
+  journal_signal_boundary_begin
+  if journal_signal_boundary_run journal_initialize_records "${journal_directories[@]}"; then
+    JOURNAL_RUN_INITIALIZED=1
+    operation_rc=0
+  else
+    operation_rc=$?
   fi
+  journal_signal_boundary_finish "$operation_rc"
 }
 
 # shellcheck disable=SC2329 # Invoked indirectly by cleanup_run's signal path.
@@ -2116,11 +2172,7 @@ run_one_serial() {
 
   printf 'FM_TEST_BEGIN %s %s family=%s runtime_gate=%s gate_requirement=%s\n' \
     "$begin_iso" "$script" "$family" "$runtime" "$requirement"
-  JOURNAL_ACTIVE_SERIAL_INDEX=$((TOTAL + 1))
-  JOURNAL_ACTIVE_SERIAL_SCRIPT=$script
-  JOURNAL_ACTIVE_SERIAL_TERMINAL=
-  JOURNAL_ACTIVE_SERIAL_WORKER="serial-$JOURNAL_ACTIVE_SERIAL_INDEX"
-  journal_transition "$JOURNAL_ACTIVE_SERIAL_WORKER" started "$script" 1
+  journal_start_worker serial "$((TOTAL + 1))" "serial-$((TOTAL + 1))" "$script"
 
   set +e
   fifo="$RUN_TMP/serial.$TOTAL.fifo"
@@ -2245,10 +2297,7 @@ else
     printf 'FM_TEST_BEGIN %s %s family=%s runtime_gate=%s gate_requirement=%s\n' \
       "$(now_iso)" "$script" "$family" "$runtime" "$requirement"
     worker_id="parallel-$worker_n"
-    JOURNAL_PARALLEL_SCRIPTS[worker_n]=$script
-    unset 'JOURNAL_PARALLEL_TERMINALS[worker_n]'
-    JOURNAL_PARALLEL_WORKERS[worker_n]=$worker_id
-    journal_transition "$worker_id" started "$script" 1
+    journal_start_worker parallel "$worker_n" "$worker_id" "$script"
     monitor_mode=
     case $- in *m*) monitor_mode=1 ;; esac
     set -m
