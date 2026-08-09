@@ -274,7 +274,7 @@ journal_transition() {
   event="$JOURNAL_RUN_DIR/events/${worker_id}.${ordinal}.${state}.json"
   state_path="$JOURNAL_RUN_DIR/states/${worker_id}.json"
   # A repeated cleanup transition is idempotent. Immutable transition files
-  # are never replaced, while the current-state file is always replaced.
+  # are never replaced; current state advances only after its event exists.
   if [ ! -e "$event" ]; then
     journal_write_record worker "$event" "$worker_id" "$state" "$ordinal" "$script" "$exit_code" "$duration_ms" \
       || return $?
