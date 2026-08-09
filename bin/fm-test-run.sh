@@ -26,6 +26,10 @@
 #
 # Options:
 #   --json <path>   write a deterministic timing artifact after the run
+#   --progress-journal <directory>
+#                   write an opt-in durable progress journal. Each run gets
+#                   immutable worker transition records and atomically replaced
+#                   current-state records under the selected directory.
 #   --list          print selected script paths (one per line) and exit 0
 #   --base <ref>    with --changed, compare against this ref (default: origin/main)
 #   --exclude-family <name>
@@ -90,6 +94,7 @@ FAMILY=
 LANE=
 BASE_REF=origin/main
 JSON_PATH=
+PROGRESS_JOURNAL=
 SCRIPTS=()
 EXCLUDE_FAMILIES=()
 FAIL_ON_GATE_SKIP=
@@ -134,6 +139,145 @@ now_ms() {
     # Second precision only when python3 is unavailable.
     echo $(($(date +%s) * 1000))
   fi
+}
+
+# The progress journal is deliberately independent from timing JSON artifacts.
+# It contains no test stdout, environment, credentials, or process inventory:
+# only the stable run/worker identity, script path, transition, and terminal
+# result needed to diagnose an abrupt runner exit.
+#
+# A journal directory is append-only at the transition layer. A worker's
+# events/<worker>.<ordinal>.<state>.json record is created before its matching
+# states/<worker>.json is atomically replaced. Consequently, a crash can leave
+# an older current-state record but cannot tear or lose a completed transition.
+# Existing runs are never parsed, so malformed historical records are inert;
+# only a collision with this exact generated run ID is refused.
+JOURNAL_RUN_DIR=
+JOURNAL_RUN_ID=
+JOURNAL_RUNNER_PID=
+JOURNAL_ACTIVE_SERIAL_WORKER=
+JOURNAL_ACTIVE_SERIAL_SCRIPT=
+JOURNAL_ACTIVE_SERIAL_INDEX=
+declare -a JOURNAL_PARALLEL_WORKERS=()
+declare -a JOURNAL_PARALLEL_SCRIPTS=()
+declare -a JOURNAL_PARALLEL_WORKDIRS=()
+
+journal_terminal_state_for_exit() {
+  case "$1" in
+    0) printf '%s\n' passed ;;
+    124) printf '%s\n' timed-out ;;
+    *) printf '%s\n' failed ;;
+  esac
+}
+
+journal_write_record() {
+  local path=$1 worker_id=$2 state=$3 ordinal=$4 script=$5 exit_code=${6:-} duration_ms=${7:-}
+  python3 - "$path" "$JOURNAL_RUN_ID" "$worker_id" "$state" "$ordinal" "$script" \
+    "$JOURNAL_RUNNER_PID" "$exit_code" "$duration_ms" <<'PY'
+import datetime
+import json
+import os
+import sys
+
+path, run_id, worker_id, state, ordinal, script, runner_pid, exit_code, duration_ms = sys.argv[1:]
+record = {
+    "schema": 1,
+    "run_id": run_id,
+    "worker_id": worker_id,
+    "state": state,
+    "transition_ordinal": int(ordinal),
+    "recorded_at": datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+    "runner_pid": int(runner_pid),
+    "script": script,
+}
+if exit_code:
+    record["exit"] = int(exit_code)
+if duration_ms:
+    record["duration_ms"] = int(duration_ms)
+
+directory = os.path.dirname(path)
+tmp = os.path.join(directory, ".%s.%s.%s.tmp" % (os.path.basename(path), os.getpid(), ordinal))
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(record, fh, sort_keys=True, separators=(",", ":"))
+        fh.write("\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+    try:
+        directory_fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError:
+        pass
+finally:
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+PY
+}
+
+journal_transition() {
+  local worker_id=$1 state=$2 script=$3 ordinal=$4 exit_code=${5:-} duration_ms=${6:-}
+  local event state_path
+  [ -n "$JOURNAL_RUN_DIR" ] || return 0
+  event="$JOURNAL_RUN_DIR/events/${worker_id}.${ordinal}.${state}.json"
+  state_path="$JOURNAL_RUN_DIR/states/${worker_id}.json"
+  # A repeated cleanup transition is idempotent. Immutable transition files
+  # are never replaced, while the current-state file is always replaced.
+  if [ ! -e "$event" ]; then
+    journal_write_record "$event" "$worker_id" "$state" "$ordinal" "$script" "$exit_code" "$duration_ms"
+  fi
+  journal_write_record "$state_path" "$worker_id" "$state" "$ordinal" "$script" "$exit_code" "$duration_ms"
+}
+
+journal_initialize() {
+  local run_path
+  [ -n "$PROGRESS_JOURNAL" ] || return 0
+  command -v python3 >/dev/null 2>&1 \
+    || die "--progress-journal requires python3"
+  if [ -e "$PROGRESS_JOURNAL" ] && [ ! -d "$PROGRESS_JOURNAL" ]; then
+    die "--progress-journal is not a directory: $PROGRESS_JOURNAL"
+  fi
+  umask 077
+  mkdir -p "$PROGRESS_JOURNAL/runs" \
+    || die "could not create progress journal: $PROGRESS_JOURNAL"
+  JOURNAL_RUN_ID=$RUN_ID
+  JOURNAL_RUNNER_PID=$$
+  JOURNAL_RUN_DIR="$PROGRESS_JOURNAL/runs/$JOURNAL_RUN_ID"
+  mkdir "$JOURNAL_RUN_DIR" \
+    || die "progress journal run already exists: $JOURNAL_RUN_ID"
+  mkdir "$JOURNAL_RUN_DIR/events" "$JOURNAL_RUN_DIR/states" \
+    || die "could not initialize progress journal run: $JOURNAL_RUN_ID"
+  run_path="$JOURNAL_RUN_DIR/run.json"
+  journal_write_record "$run_path" run started 0 runner 0 0
+}
+
+# shellcheck disable=SC2329 # Invoked indirectly by cleanup_run's signal path.
+journal_mark_interrupted_workers() {
+  local slot worker_id script work rc duration
+  [ -n "$JOURNAL_RUN_DIR" ] || return 0
+  if [ -n "$JOURNAL_ACTIVE_SERIAL_WORKER" ]; then
+    journal_transition "$JOURNAL_ACTIVE_SERIAL_WORKER" interrupted \
+      "$JOURNAL_ACTIVE_SERIAL_SCRIPT" 2
+  fi
+  for slot in "${!JOURNAL_PARALLEL_WORKERS[@]}"; do
+    worker_id=${JOURNAL_PARALLEL_WORKERS[$slot]}
+    script=${JOURNAL_PARALLEL_SCRIPTS[$slot]}
+    work=${JOURNAL_PARALLEL_WORKDIRS[$slot]}
+    if [ -f "$work/exit" ]; then
+      rc=$(cat "$work/exit" 2>/dev/null || echo 1)
+      duration=$(cat "$work/duration_ms" 2>/dev/null || echo 0)
+      journal_transition "$worker_id" "$(journal_terminal_state_for_exit "$rc")" \
+        "$script" 2 "$rc" "$duration"
+    else
+      journal_transition "$worker_id" interrupted "$script" 2
+    fi
+  done
 }
 
 # Primary family for one tests/*.test.sh basename. Unmapped scripts are
@@ -1305,6 +1449,17 @@ while [ "$#" -gt 0 ]; do
       JSON_PATH=${1#--json=}
       shift
       ;;
+    --progress-journal)
+      [ "$#" -gt 1 ] || die "--progress-journal requires a directory"
+      [ -n "$2" ] || die "--progress-journal requires a non-empty directory"
+      PROGRESS_JOURNAL=$2
+      shift 2
+      ;;
+    --progress-journal=*)
+      PROGRESS_JOURNAL=${1#--progress-journal=}
+      [ -n "$PROGRESS_JOURNAL" ] || die "--progress-journal requires a non-empty directory"
+      shift
+      ;;
     --jobs)
       [ "$#" -gt 1 ] || die "--jobs requires a positive integer"
       JOBS=$2
@@ -1655,6 +1810,9 @@ terminate_and_reap_background_job() {
 cleanup_run() {
   local rc=$? pid serial_child_owned=0 cleanup_pids="$RUN_TMP/cleanup-pids"
   trap - EXIT INT TERM HUP
+  case "$rc" in
+    129|130|143) journal_mark_interrupted_workers || true ;;
+  esac
   jobs -p >"$cleanup_pids" 2>/dev/null || true
   if [ -n "$SERIAL_CHILD_PID" ]; then
     terminate_and_reap_process_group "$SERIAL_CHILD_PID"
@@ -1689,6 +1847,7 @@ trap 'exit 129' HUP
 RUN_STARTED_ISO=$(now_iso)
 RUN_STARTED_MS=$(now_ms)
 RUN_ID="fm-test-run-${RUN_STARTED_MS}-$$"
+journal_initialize
 TOTAL=0
 FAILED=0
 SKIPPED_GATE=0
@@ -1799,6 +1958,7 @@ record_script_result() {
     "$script" "$family" "$runtime" "$requirement" "$rc" "$duration" "$gate_skip" "$gate_outcome" >>"$RECORDS"
   family_bump "$family" "$duration" "$fail_delta"
   TOTAL=$((TOTAL + 1))
+  LAST_SCRIPT_RESULT_RC=$rc
 }
 
 run_one_serial() {
@@ -1814,6 +1974,10 @@ run_one_serial() {
 
   printf 'FM_TEST_BEGIN %s %s family=%s runtime_gate=%s gate_requirement=%s\n' \
     "$begin_iso" "$script" "$family" "$runtime" "$requirement"
+  JOURNAL_ACTIVE_SERIAL_INDEX=$((TOTAL + 1))
+  JOURNAL_ACTIVE_SERIAL_WORKER="serial-$JOURNAL_ACTIVE_SERIAL_INDEX"
+  JOURNAL_ACTIVE_SERIAL_SCRIPT=$script
+  journal_transition "$JOURNAL_ACTIVE_SERIAL_WORKER" started "$script" 1
 
   set +e
   fifo="$RUN_TMP/serial.$TOTAL.fifo"
@@ -1841,6 +2005,12 @@ run_one_serial() {
     duration=0
   fi
   record_script_result "$script" "$rc" "$duration" "$out" "$end_iso"
+  journal_transition "$JOURNAL_ACTIVE_SERIAL_WORKER" \
+    "$(journal_terminal_state_for_exit "$LAST_SCRIPT_RESULT_RC")" \
+    "$script" 2 "$LAST_SCRIPT_RESULT_RC" "$duration"
+  JOURNAL_ACTIVE_SERIAL_WORKER=
+  JOURNAL_ACTIVE_SERIAL_SCRIPT=
+  JOURNAL_ACTIVE_SERIAL_INDEX=
 }
 
 if [ "$JOBS" -eq 1 ]; then
@@ -1858,10 +2028,11 @@ else
   active_workers=0
 
   wait_one_job_worker() {
-    local slot=$1 pid idx work script rc duration mode out end_iso
+    local slot=$1 pid idx work script worker_id rc duration mode out end_iso
     pid=${WORKER_PIDS[$slot]}
     idx=${WORKER_IDX[$slot]}
     script=${WORKER_SCRIPTS[$slot]}
+    worker_id=${JOURNAL_PARALLEL_WORKERS[$slot]}
     unset 'WORKER_PIDS[slot]'
     unset 'WORKER_IDX[slot]'
     unset 'WORKER_SCRIPTS[slot]'
@@ -1888,6 +2059,12 @@ else
         ;;
     esac
     record_script_result "$script" "$rc" "$duration" "$out" "$end_iso"
+    journal_transition "$worker_id" \
+      "$(journal_terminal_state_for_exit "$LAST_SCRIPT_RESULT_RC")" \
+      "$script" 2 "$LAST_SCRIPT_RESULT_RC" "$duration"
+    unset 'JOURNAL_PARALLEL_WORKERS[slot]'
+    unset 'JOURNAL_PARALLEL_SCRIPTS[slot]'
+    unset 'JOURNAL_PARALLEL_WORKDIRS[slot]'
   }
 
   worker_pid_is_running() {
@@ -1930,6 +2107,11 @@ else
     requirement=$(runtime_gate_requirement "$runtime")
     printf 'FM_TEST_BEGIN %s %s family=%s runtime_gate=%s gate_requirement=%s\n' \
       "$(now_iso)" "$script" "$family" "$runtime" "$requirement"
+    worker_id="parallel-$worker_n"
+    journal_transition "$worker_id" started "$script" 1
+    JOURNAL_PARALLEL_WORKERS[worker_n]=$worker_id
+    JOURNAL_PARALLEL_SCRIPTS[worker_n]=$script
+    JOURNAL_PARALLEL_WORKDIRS[worker_n]=$work
     monitor_mode=
     case $- in *m*) monitor_mode=1 ;; esac
     set -m

@@ -1125,6 +1125,214 @@ assert len(doc["scripts"])==3
   pass "aggregate-json merges lane timing artifacts"
 }
 
+journal_run_dir() {
+  local journal=$1
+  find "$journal/runs" -mindepth 2 -maxdepth 2 -name run.json -type f -exec dirname {} \; | head -n 1
+}
+
+assert_journal_state() {
+  local path=$1 expected_state=$2 expected_worker=$3
+  python3 - "$path" "$expected_state" "$expected_worker" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    record = json.load(fh)
+assert record["schema"] == 1
+assert record["state"] == sys.argv[2]
+assert record["worker_id"] == sys.argv[3]
+assert record["run_id"]
+assert record["runner_pid"] > 0
+assert record["script"]
+assert record["transition_ordinal"] == 2
+PY
+}
+
+test_progress_journal_terminal_transitions_and_atomic_state() {
+  local tmp journal slow fail_f timeout_f run_dir
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-progress.XXXXXX")
+  journal="$tmp/journal"
+  slow="$tmp/slow.test.sh"
+  fail_f="$tmp/fail.test.sh"
+  timeout_f="$tmp/timeout.test.sh"
+  cat >"$slow" <<'SH'
+#!/usr/bin/env bash
+sleep 0.3
+printf 'ok - slow pass\n'
+SH
+  cat >"$fail_f" <<'SH'
+#!/usr/bin/env bash
+printf 'not ok - expected failure\n'
+exit 1
+SH
+  cat >"$timeout_f" <<'SH'
+#!/usr/bin/env bash
+printf 'not ok - conventional timeout exit\n'
+exit 124
+SH
+  chmod +x "$slow" "$fail_f" "$timeout_f"
+  python3 - "$RUNNER" "$journal" "$slow" "$fail_f" "$timeout_f" "$tmp" <<'PY' \
+    || { rm -rf "$tmp"; fail "journal replacement controller failed"; }
+import glob
+import json
+import os
+import subprocess
+import sys
+import time
+
+runner, journal, slow, failed, timeout, root = sys.argv[1:]
+with open(os.path.join(root, "out"), "w", encoding="utf-8") as out, open(os.path.join(root, "err"), "w", encoding="utf-8") as err:
+    child = subprocess.Popen(
+        [runner, "--progress-journal", journal, slow, failed, timeout],
+        stdout=out,
+        stderr=err,
+    )
+    deadline = time.monotonic() + 3
+    parsed = False
+    while child.poll() is None:
+        states = glob.glob(os.path.join(journal, "runs", "*", "states", "serial-1.json"))
+        for state_path in states:
+            with open(state_path, encoding="utf-8") as fh:
+                json.load(fh)
+            parsed = True
+        if time.monotonic() >= deadline:
+            child.kill()
+            child.wait()
+            raise SystemExit("journal run exceeded bounded replacement check")
+        time.sleep(0.01)
+    if child.wait() == 0:
+        raise SystemExit("failure and timeout fixtures must fail the aggregate")
+    if not parsed:
+        raise SystemExit("journal never exposed a parseable started current-state record")
+PY
+  run_dir=$(journal_run_dir "$journal")
+  [ -n "$run_dir" ] || { rm -rf "$tmp"; fail "progress journal did not create a run directory"; }
+  assert_journal_state "$run_dir/states/serial-1.json" passed serial-1 \
+    || { rm -rf "$tmp"; fail "serial pass state missing stable identity"; }
+  assert_journal_state "$run_dir/states/serial-2.json" failed serial-2 \
+    || { rm -rf "$tmp"; fail "serial failure state missing"; }
+  assert_journal_state "$run_dir/states/serial-3.json" timed-out serial-3 \
+    || { rm -rf "$tmp"; fail "serial timeout state missing"; }
+  [ -f "$run_dir/events/serial-1.1.started.json" ] \
+    && [ -f "$run_dir/events/serial-1.2.passed.json" ] \
+    && [ -f "$run_dir/events/serial-2.2.failed.json" ] \
+    && [ -f "$run_dir/events/serial-3.2.timed-out.json" ] \
+    || { rm -rf "$tmp"; fail "journal must preserve immutable terminal transitions"; }
+  if find "$run_dir" -name '.*.tmp' -print | grep -q .; then
+    rm -rf "$tmp"
+    fail "journal left a temporary replacement record behind"
+  fi
+  rm -rf "$tmp"
+  pass "progress journal records terminal transitions with atomically replaced state"
+}
+
+test_progress_journal_parallel_workers_preserve_transitions() {
+  local tmp repo runner journal run_dir rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-progress-parallel.XXXXXX")
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  journal="$tmp/journal"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$runner"
+  cat >"$repo/tests/fm-brief.test.sh" <<'SH'
+#!/usr/bin/env bash
+sleep 0.05
+printf 'ok - parallel one\n'
+SH
+  cat >"$repo/tests/fm-composer-lib.test.sh" <<'SH'
+#!/usr/bin/env bash
+sleep 0.05
+printf 'ok - parallel two\n'
+SH
+  chmod +x "$runner" "$repo/tests/fm-brief.test.sh" "$repo/tests/fm-composer-lib.test.sh"
+  set +e
+  (cd "$repo" && "$runner" --jobs 2 --progress-journal "$journal" \
+    tests/fm-brief.test.sh tests/fm-composer-lib.test.sh) >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || { cat "$tmp/out" "$tmp/err"; rm -rf "$tmp"; fail "parallel journal fixtures should pass"; }
+  run_dir=$(journal_run_dir "$journal")
+  [ "$(find "$run_dir/events" -type f | wc -l | tr -d ' ')" -eq 4 ] \
+    || { rm -rf "$tmp"; fail "concurrent workers lost a durable transition"; }
+  assert_journal_state "$run_dir/states/parallel-1.json" passed parallel-1 \
+    || { rm -rf "$tmp"; fail "parallel worker one state missing"; }
+  assert_journal_state "$run_dir/states/parallel-2.json" passed parallel-2 \
+    || { rm -rf "$tmp"; fail "parallel worker two state missing"; }
+  rm -rf "$tmp"
+  pass "progress journal preserves concurrent worker transitions"
+}
+
+test_progress_journal_ignores_malformed_prior_state() {
+  local tmp journal fixture run_dir
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-progress-malformed.XXXXXX")
+  journal="$tmp/journal"
+  fixture="$tmp/pass.test.sh"
+  mkdir -p "$journal/runs/stale/events" "$journal/runs/stale/states"
+  printf '{not json\n' >"$journal/runs/stale/states/bad.json"
+  printf '{not json\n' >"$journal/runs/stale/events/bad.json"
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+printf 'ok - pass\n'
+SH
+  chmod +x "$fixture"
+  "$RUNNER" --progress-journal "$journal" "$fixture" >"$tmp/out" 2>"$tmp/err" \
+    || { cat "$tmp/out" "$tmp/err"; rm -rf "$tmp"; fail "malformed historical journal state must not block a new run"; }
+  [ "$(cat "$journal/runs/stale/states/bad.json")" = '{not json' ] \
+    || { rm -rf "$tmp"; fail "malformed historical state was unexpectedly rewritten"; }
+  run_dir=$(journal_run_dir "$journal")
+  [ "$run_dir" != "$journal/runs/stale" ] \
+    || { rm -rf "$tmp"; fail "new run reused malformed historical state"; }
+  assert_journal_state "$run_dir/states/serial-1.json" passed serial-1 \
+    || { rm -rf "$tmp"; fail "new run did not write a valid isolated state"; }
+  rm -rf "$tmp"
+  pass "progress journal ignores malformed historical state deterministically"
+}
+
+test_progress_journal_marks_abrupt_interruptions() {
+  local tmp journal fixture run_dir rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-progress-interrupt.XXXXXX")
+  journal="$tmp/journal"
+  fixture="$tmp/slow.test.sh"
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+printf 'started\n' >"$SCHED_EVIDENCE/started"
+kill -TERM "$PPID"
+while :; do sleep 1; done
+SH
+  chmod +x "$fixture"
+  set +e
+  SCHED_EVIDENCE="$tmp" "$RUNNER" --progress-journal "$journal" "$fixture" >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 143 ] || { rm -rf "$tmp"; fail "interrupted runner should exit 143, got $rc"; }
+  run_dir=$(journal_run_dir "$journal")
+  assert_journal_state "$run_dir/states/serial-1.json" interrupted serial-1 \
+    || { rm -rf "$tmp"; fail "abrupt interrupt was not journaled"; }
+  [ -f "$run_dir/events/serial-1.2.interrupted.json" ] \
+    || { rm -rf "$tmp"; fail "interrupted transition was not preserved"; }
+  rm -rf "$tmp"
+  pass "progress journal records abrupt interruptions before cleanup"
+}
+
+test_progress_journal_disabled_mode_has_no_filesystem_effect() {
+  local tmp fixture absent
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-progress-disabled.XXXXXX")
+  fixture="$tmp/pass.test.sh"
+  absent="$tmp/not-created"
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+printf 'ok - disabled journal pass\n'
+SH
+  chmod +x "$fixture"
+  "$RUNNER" "$fixture" >"$tmp/out" 2>"$tmp/err" \
+    || { cat "$tmp/out" "$tmp/err"; rm -rf "$tmp"; fail "disabled journal fixture should pass"; }
+  [ ! -e "$absent" ] || { rm -rf "$tmp"; fail "runner created progress state without --progress-journal"; }
+  grep -Fq 'FM_TEST_SUMMARY total=1 failed=0' "$tmp/out" \
+    || { rm -rf "$tmp"; fail "disabled journal changed normal summary output"; }
+  rm -rf "$tmp"
+  pass "progress journal is fully disabled unless selected"
+}
+
 test_list_all_exact_suite_coverage
 test_family_selection
 test_single_script_selection
@@ -1152,3 +1360,8 @@ test_portable_serial_shard_lane_refusals
 test_jobs_requires_proven_isolated
 test_jobs_parallel_scheduler_and_failure_propagation
 test_aggregate_json
+test_progress_journal_terminal_transitions_and_atomic_state
+test_progress_journal_parallel_workers_preserve_transitions
+test_progress_journal_ignores_malformed_prior_state
+test_progress_journal_marks_abrupt_interruptions
+test_progress_journal_disabled_mode_has_no_filesystem_effect
