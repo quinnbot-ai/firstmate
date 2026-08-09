@@ -12,6 +12,14 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-check-lib.sh"
 
+# Fixture commits must not rely on a developer or CI runner identity.
+unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL EMAIL
+export GIT_CONFIG_NOSYSTEM=1
+export GIT_CONFIG_GLOBAL=/dev/null
+export GIT_CONFIG_COUNT=1
+export GIT_CONFIG_KEY_0=user.useConfigOnly
+export GIT_CONFIG_VALUE_0=true
+
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
 MIGRATE="$ROOT/bin/fm-pr-check-migrate.sh"
@@ -120,6 +128,8 @@ prepare_merge_repository() {
   rm -rf "$dir/project" "$dir/wt"
   fm_git_worktree "$dir/project" "$dir/wt" fm/task-a
   git -C "$dir/project" branch -M main
+  git -C "$dir/wt" config --local user.name 'Firstmate Tests'
+  git -C "$dir/wt" config --local user.email 'tests@example.invalid'
   mkdir -p "$dir/wt/.firstmate" "$dir/wt/tests"
   cat > "$dir/wt/.firstmate/test-inventory.json" <<'EOF'
 {"schema_version":1,"status":"test-bearing","baseline":{"version":1,"declarations":1,"test_files":1},"maximum_unreviewed_deletion":0}
