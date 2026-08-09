@@ -9,6 +9,7 @@ fm_git_identity fmtest fmtest@example.invalid
 MERGE_EXECUTE="$ROOT/bin/fm-merge-execute.sh"
 PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
 TMP_ROOT=$(fm_test_tmproot fm-pr-merge)
+REAL_GH_AXI=$(command -v gh-axi)
 
 make_case() {
   local name=$1 case_dir base candidate
@@ -52,19 +53,16 @@ run_local_merge_with_path() {
 add_github_mocks() {
   local case_dir=$1
   mkdir -p "$case_dir/fakebin"
-  cat > "$case_dir/fakebin/gh" <<'SH'
-#!/usr/bin/env bash
-[ "${FM_TEST_GH_UNAVAILABLE:-0}" -eq 0 ] || exit 1
-printf '%s\n' "$FM_TEST_GH_HEAD"
-SH
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+exec "$FM_TEST_REAL_GH_AXI" "$@"
+SH
+  cat > "$case_dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
 case "${1:-} ${2:-}" in
-  "api POST")
+  "api /graphql")
     post_count=$(grep -c '^api POST ' "$FM_TEST_GH_AXI_LOG")
-    envelope=false
-    [[ " $* " = *" --jq @base64 "* ]] && envelope=true
     api_head=$FM_TEST_GH_API_HEAD
     api_base=$FM_TEST_GH_BASE
     protection=${FM_TEST_GH_PROTECTION:-protected}
@@ -73,12 +71,11 @@ case "${1:-} ${2:-}" in
       api_base=${FM_TEST_GH_BASE_AFTER:-$api_base}
       protection=${FM_TEST_GH_PROTECTION_AFTER:-$protection}
     fi
-    body=$(python3 - "$api_head" "$api_base" "$protection" "$envelope" <<'PY'
-import base64
+    python3 - "$api_head" "$api_base" "$protection" <<'PY'
 import json
 import sys
 
-head, base, mode, envelope = sys.argv[1:]
+head, base, mode = sys.argv[1:]
 pull = {
     "headRefOid": head,
     "baseRefOid": base,
@@ -117,10 +114,8 @@ else:
     raise SystemExit(97)
 if rule is not ...:
     pull["baseRef"]["branchProtectionRule"] = rule
-document = pull
-if envelope == "true":
-    document = {"data": {"repository": {"pullRequest": pull}}}
-if mode == "graphql-error-null" and envelope == "true":
+document = {"data": {"repository": {"pullRequest": pull}}}
+if mode == "graphql-error-null":
     document["errors"] = [{"message": "branch protection resolver failed"}]
 raw = json.dumps(document, separators=(",", ":"))
 if mode == "duplicate-null":
@@ -138,41 +133,40 @@ elif mode == "duplicate-admin":
         '"isAdminEnforced":true',
         '"isAdminEnforced":true,"isAdminEnforced":true',
     )
-print(base64.b64encode(raw.encode()).decode())
+elif mode == "malformed-occurrence":
+    raw = raw.replace('"baseRef":{', '"branchProtectionRule":null,"baseRef":{')
+print(raw)
 PY
-    ) || exit $?
-    printf 'api_response:\n  body: %s\n  truncated: false\n' "$body"
-    [ "$protection" != malformed-occurrence ] || printf 'branchProtectionRule:null\n'
     ;;
-  "api PUT")
-    [ -z "${FM_TEST_GH_BASE_AT_MUTATION:-}" ] \
-      || printf 'mutation base: %s\n' "$FM_TEST_GH_BASE_AT_MUTATION" >> "$FM_TEST_GH_AXI_LOG"
-    if [ "${FM_TEST_GH_PROTECTION:-protected}" = null ]; then
-      body=$(python3 - "${FM_TEST_GH_MERGED:-true}" "$FM_TEST_GH_MERGE_SHA" <<'PY'
+  api\ *)
+    method=GET
+    previous=
+    for argument in "$@"; do
+      if [ "$previous" = --method ]; then
+        method=$argument
+        break
+      fi
+      previous=$argument
+    done
+    endpoint=${2:-}
+    case "$method $endpoint" in
+      PUT\ */pulls/*/merge)
+        [ -z "${FM_TEST_GH_BASE_AT_MUTATION:-}" ] \
+          || printf 'mutation base: %s\n' "$FM_TEST_GH_BASE_AT_MUTATION" >> "$FM_TEST_GH_AXI_LOG"
+        python3 - "${FM_TEST_GH_MERGED:-true}" "$FM_TEST_GH_MERGE_SHA" "$*" <<'PY'
 import base64
 import json
 import sys
 
-merged, sha = sys.argv[1:]
+merged, sha, arguments = sys.argv[1:]
 if merged not in {"true", "false"}:
     raise SystemExit(98)
 raw = json.dumps({"merged": merged == "true", "sha": sha}, separators=(",", ":"))
-print(base64.b64encode(raw.encode()).decode())
+print(base64.b64encode(raw.encode()).decode() if " --jq " in f" {arguments} " else raw)
 PY
-      ) || exit $?
-    else
-      case "${FM_TEST_GH_MERGED:-true}" in
-        true) body=dHJ1ZQ== ;;
-        false) body=ZmFsc2U= ;;
-        *) exit 98 ;;
-      esac
-    fi
-    printf 'api_response:\n  body: %s\n  truncated: false\n' "$body"
-    ;;
-  "api GET")
-    case "${3:-}" in
+        ;;
       */git/ref/heads/*)
-        body=$(python3 - "$FM_TEST_GH_MERGE_SHA" <<'PY'
+        python3 - "$FM_TEST_GH_MERGE_SHA" <<'PY'
 import base64
 import json
 import sys
@@ -180,10 +174,9 @@ import sys
 raw = json.dumps({"sha": sys.argv[1], "type": "commit"}, separators=(",", ":"))
 print(base64.b64encode(raw.encode()).decode())
 PY
-        )
         ;;
       */git/commits/*)
-        body=$(python3 - "$FM_TEST_GH_MERGE_SHA" "${FM_TEST_GH_BASE_AT_MUTATION:-$FM_TEST_GH_BASE}" "$FM_TEST_GH_API_HEAD" "$FM_TEST_GH_METHOD" <<'PY'
+        python3 - "$FM_TEST_GH_MERGE_SHA" "${FM_TEST_GH_BASE_AT_MUTATION:-$FM_TEST_GH_BASE}" "$FM_TEST_GH_API_HEAD" "$FM_TEST_GH_METHOD" <<'PY'
 import base64
 import json
 import sys
@@ -193,10 +186,9 @@ parents = [base] if method in {"rebase", "squash"} else [base, head]
 raw = json.dumps({"sha": sha, "parents": parents}, separators=(",", ":"))
 print(base64.b64encode(raw.encode()).decode())
 PY
-        )
         ;;
       */compare/*)
-        body=$(python3 - "${FM_TEST_GH_REBASE_AHEAD:-1}" "${FM_TEST_GH_REBASE_FIRST:-$FM_TEST_GH_MERGE_SHA}" "$FM_TEST_GH_BASE" <<'PY'
+        python3 - "${FM_TEST_GH_REBASE_AHEAD:-1}" "${FM_TEST_GH_REBASE_FIRST:-$FM_TEST_GH_MERGE_SHA}" "$FM_TEST_GH_BASE" <<'PY'
 import base64
 import json
 import sys
@@ -215,12 +207,12 @@ raw = json.dumps(
 )
 print(base64.b64encode(raw.encode()).decode())
 PY
-        )
         ;;
+      DELETE\ *) ;;
       *) exit 99 ;;
     esac
-    printf 'api_response:\n  body: %s\n  truncated: false\n' "$body"
     ;;
+  *) exit 99 ;;
 esac
 SH
   chmod +x "$case_dir/fakebin/gh" "$case_dir/fakebin/gh-axi"
@@ -241,6 +233,7 @@ run_github_merge() {
     FM_TEST_GH_METHOD="$method" \
     FM_TEST_GH_REBASE_AHEAD="${FM_TEST_GH_REBASE_AHEAD:-}" \
     FM_TEST_GH_REBASE_FIRST="${FM_TEST_GH_REBASE_FIRST:-}" \
+    FM_TEST_REAL_GH_AXI="$REAL_GH_AXI" \
     FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" task-x1 https://github.com/example/repo/pull/9 -- "--$method"
 }
@@ -427,8 +420,10 @@ test_github_merge_uses_verified_exact_sha() {
   add_github_mocks "$case_dir"
   run_github_merge "$case_dir" "$candidate" "$candidate" "$base" >/dev/null \
     || fail "GitHub boundary refused the verified candidate"
-  grep -qxF "api PUT /repos/example/repo/pulls/9/merge --field sha=$candidate --field merge_method=merge --jq .merged | tostring | @base64" "$case_dir/gh-axi.log" \
+  grep -qxF "api PUT /repos/example/repo/pulls/9/merge --field sha=$candidate --field merge_method=merge" "$case_dir/gh-axi.log" \
     || fail "GitHub boundary did not condition the merge on the verified exact SHA"
+  [ "$(grep -c '^api POST ' "$case_dir/gh-axi.log")" -eq 1 ] \
+    || fail "protected GitHub merge changed the legacy request sequence"
   pass "GitHub merge conditions its REST request on the verified candidate SHA"
 }
 
@@ -578,7 +573,7 @@ test_unprotected_github_merge_rejects_graphql_errors() {
   fm_write_meta "$case_dir/state/task-x1.meta" "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" "kind=ship" "mode=no-mistakes"
   add_github_mocks "$case_dir"
   set +e
-  FM_TEST_GH_PROTECTION=graphql-error-null \
+  FM_TEST_GH_PROTECTION=graphql-error-null FM_TEST_GH_PROTECTION_AFTER=null \
     run_github_merge "$case_dir" "$candidate" "$candidate" "$base" >"$case_dir/out" 2>"$case_dir/err"
   rc=$?
   set -e
@@ -586,6 +581,8 @@ test_unprotected_github_merge_rejects_graphql_errors() {
   grep -q 'malformed or ambiguous pull request data' "$case_dir/err" \
     || fail "GraphQL error refusal was not explicit"
   ! grep -q '^api PUT ' "$case_dir/gh-axi.log" || fail "GraphQL error null reached the merge API"
+  [ "$(grep -c '^api POST ' "$case_dir/gh-axi.log")" -eq 1 ] \
+    || fail "GraphQL error null was normalized before initial classification"
   pass "unprotected GitHub merge rejects null protection data accompanied by GraphQL errors"
 }
 
@@ -619,7 +616,7 @@ test_github_merge_refuses_ambiguous_protection_payloads() {
     fm_write_meta "$case_dir/state/task-x1.meta" "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" "kind=ship" "mode=no-mistakes"
     add_github_mocks "$case_dir"
     set +e
-    FM_TEST_GH_PROTECTION=$mode \
+    FM_TEST_GH_PROTECTION=$mode FM_TEST_GH_PROTECTION_AFTER=null \
       run_github_merge "$case_dir" "$candidate" "$candidate" "$base" >"$case_dir/out" 2>"$case_dir/err"
     rc=$?
     set -e
@@ -627,6 +624,8 @@ test_github_merge_refuses_ambiguous_protection_payloads() {
     grep -q 'malformed or ambiguous pull request data' "$case_dir/err" \
       || fail "$mode protection refusal was not explicit"
     ! grep -q '^api PUT ' "$case_dir/gh-axi.log" || fail "$mode protection data reached the merge API"
+    [ "$(grep -c '^api POST ' "$case_dir/gh-axi.log")" -eq 1 ] \
+      || fail "$mode protection data survived the raw response boundary"
   done
   pass "GitHub merge rejects malformed, misplaced, scalar, partial, and duplicate protection data"
 }
@@ -678,10 +677,10 @@ test_github_merge_accepts_live_head_without_recorded_head() {
   candidate=$(printf '%s\n' "$values" | sed -n '3p')
   fm_write_meta "$case_dir/state/task-x1.meta" "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" "kind=ship" "mode=no-mistakes"
   add_github_mocks "$case_dir"
-  FM_TEST_GH_UNAVAILABLE=1 run_github_merge "$case_dir" "$candidate" "$candidate" "$base" >/dev/null \
+  run_github_merge "$case_dir" "$candidate" "$candidate" "$base" >/dev/null \
     || fail "GitHub boundary refused a live exact head without recorded head metadata"
-  ! grep -q '^pr_head=' "$case_dir/state/task-x1.meta" || fail "unavailable gh unexpectedly recorded PR head metadata"
-  grep -qxF "api PUT /repos/example/repo/pulls/9/merge --field sha=$candidate --field merge_method=merge --jq .merged | tostring | @base64" "$case_dir/gh-axi.log" \
+  ! grep -q '^pr_head=' "$case_dir/state/task-x1.meta" || fail "merge unexpectedly recorded absent PR head metadata"
+  grep -qxF "api PUT /repos/example/repo/pulls/9/merge --field sha=$candidate --field merge_method=merge" "$case_dir/gh-axi.log" \
     || fail "live GraphQL head was not used for a wrapper-authenticated merge"
   pass "GitHub merge binds an absent recorded head to live and local heads"
 }

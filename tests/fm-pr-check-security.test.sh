@@ -34,6 +34,8 @@ REAL_MV=$(command -v mv)
 REAL_STAT=$(command -v stat)
 REAL_CHMOD=$(command -v chmod)
 REAL_BASENAME=$(command -v basename)
+REAL_GH_AXI=$(command -v gh-axi)
+REAL_NODE=$(command -v node)
 
 file_mode() {
   if [ "$(uname)" = Darwin ]; then
@@ -73,22 +75,8 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case " $* " in
-  *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
-  *" state "*)
-    [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
-    [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
-    printf '%s\n' "${FM_TEST_GH_STATE:-OPEN}"
-    ;;
-esac
-SH
-  cat > "$fakebin/gh-axi" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
-[ "${FM_TEST_GH_AXI_RC:-0}" = 0 ] || exit "$FM_TEST_GH_AXI_RC"
-case "${1:-} ${2:-}" in
-  "api POST")
-    body=$(python3 - "$FM_TEST_GH_API_HEAD" "$FM_TEST_GH_BASE" <<'PY'
-import base64
+  *" api /graphql "*)
+    python3 - "$FM_TEST_GH_API_HEAD" "$FM_TEST_GH_BASE" <<'PY'
 import json
 import sys
 
@@ -107,15 +95,23 @@ pull = {
         "isAdminEnforced": True,
     }},
 }
-print(base64.b64encode(json.dumps(pull, separators=(",", ":")).encode()).decode())
+print(json.dumps({"data": {"repository": {"pullRequest": pull}}}, separators=(",", ":")))
 PY
-    ) || exit $?
-    printf 'api_response:\n  body: %s\n  truncated: false\n' "$body"
     ;;
-  "api PUT")
-    printf 'api_response:\n  body: dHJ1ZQ==\n  truncated: false\n'
+  *" --method PUT "*) printf '{"merged":true}\n' ;;
+  *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
+  *" state "*)
+    [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
+    [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
+    printf '%s\n' "${FM_TEST_GH_STATE:-OPEN}"
     ;;
 esac
+SH
+  cat > "$fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+[ "${FM_TEST_GH_AXI_RC:-0}" = 0 ] || exit "$FM_TEST_GH_AXI_RC"
+exec "$FM_TEST_REAL_NODE" "$FM_TEST_REAL_GH_AXI" "$@"
 SH
   # Plain glab, reproducing the real CLI's contract: its field output on stdout
   # and exit 0 on success, and a non-zero exit with no stdout on any failure.
@@ -304,6 +300,8 @@ run_check_entry() {
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_REAL_GH_AXI="$REAL_GH_AXI" \
+    FM_TEST_REAL_NODE="$REAL_NODE" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_CHECK" "$@"
 }
@@ -314,6 +312,8 @@ run_merge_entry() {
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_REAL_GH_AXI="$REAL_GH_AXI" \
+    FM_TEST_REAL_NODE="$REAL_NODE" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_MERGE" "$@"
 }
@@ -618,7 +618,7 @@ test_valid_recording_and_merge_derivation() {
   FM_TEST_GH_HEAD=$expected FM_TEST_GH_API_HEAD=$expected FM_TEST_GH_BASE=$base \
     run_merge_entry "$dir" task-a https://github.com/my-org/repo_name.with-dots/pull/37 -- --merge \
     >/dev/null 2>/dev/null || fail "valid merge wrapper failed"
-  grep -qxF "api PUT /repos/my-org/repo_name.with-dots/pulls/37/merge --field sha=$expected --field merge_method=merge --jq .merged | tostring | @base64" "$dir/gh-axi.log" \
+  grep -qxF "api PUT /repos/my-org/repo_name.with-dots/pulls/37/merge --field sha=$expected --field merge_method=merge" "$dir/gh-axi.log" \
     || fail "merge wrapper did not preserve the repository, method, and exact head"
   set +e
   FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/merged-watch.out" 2> "$dir/merged-watch.err"

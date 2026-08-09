@@ -13,13 +13,14 @@ The local path lets Git own the checkout and ref transition while its prepared r
 Concurrent uncooperative writers to that project checkout during landing are outside the supported boundary; best-effort dirty-state checks refuse detected drift but do not provide cross-writer atomicity.
 The GitHub path submits an immediate REST merge conditioned on the verified head SHA.
 Its GraphQL response must contain exactly one base-branch protection entry.
-Any top-level GraphQL error or structurally unexpected response envelope fails closed before protection data is interpreted.
+The boundary captures that exact raw response before `gh-axi` normalization can collapse duplicate JSON keys or discard its error envelope.
+For the literal-null path, any top-level GraphQL error or structurally unexpected response envelope fails closed before protection data is interpreted.
 A structured protection rule remains supported only when it contains exactly one `requiresStrictStatusChecks` value and one `isAdminEnforced` value, both `true`.
 A literal `branchProtectionRule: null` is the one sanctioned unprotected-repository path and does not synthesize strict or administrator values.
 Selecting that path emits an explicit diagnostic before proceeding.
 Missing, duplicate, non-null scalar, partial-object, or null-with-child protection data is malformed or ambiguous and fails closed.
 Both protection paths verify the requested canonical PR identity, current exact head and base OIDs, and candidate ancestry.
-Immediately before mutation, the boundary re-reads the PR and refuses any identity, head, base, state, or protection-data drift, then rechecks that the clean local worktree remains at the exact head.
+Immediately before an unprotected mutation, the boundary re-reads the PR and refuses any identity, head, base, state, or protection-data drift, then rechecks that the clean local worktree remains at the exact head.
 The merge mutation is conditioned on that exact expected-head SHA, and both paths require GitHub to confirm that it merged the conditional request.
 GitHub's merge API exposes an expected-head precondition but no expected-base OID precondition.
 The unprotected response must also identify the resulting commit.
