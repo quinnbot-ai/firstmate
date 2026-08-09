@@ -1696,7 +1696,7 @@ if [ "$LIST_ONLY" -eq 1 ]; then
 fi
 
 # Verify selected scripts exist before starting.
-for s in "${SCRIPTS[@]}"; do
+for s in "${SCRIPTS[@]+"${SCRIPTS[@]}"}"; do
   [ -f "$s" ] || die "test script not found: $s"
   [ -x "$s" ] || [ -r "$s" ] || die "test script not readable: $s"
 done

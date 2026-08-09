@@ -190,7 +190,7 @@ test_empty_selection_emits_summary() {
   journal="$tmp/journal"
   init_changed_fixture_repo "$repo"
   printf 'documentation only\n' >"$repo/README.md"
-  out=$(cd "$repo" && bin/fm-test-run.sh --changed --base HEAD \
+  out=$(cd "$repo" && /bin/bash bin/fm-test-run.sh --changed --base HEAD \
     --progress-journal "$journal" --json "$tmp/artifacts/timing.json" 2>"$tmp/err") \
     || fail "empty valid changed selection must pass"
   [ "$out" = "FM_TEST_SUMMARY total=0 failed=0 skipped_gate=0 duration_ms=0" ] \
