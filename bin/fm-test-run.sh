@@ -239,19 +239,31 @@ try:
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, path)
+    directory_fd = os.open(directory, os.O_RDONLY)
     try:
-        directory_fd = os.open(directory, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-    except OSError:
-        pass
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 finally:
     try:
         os.unlink(tmp)
     except FileNotFoundError:
         pass
+PY
+}
+
+journal_sync_directories() {
+  python3 - sync-directories "$@" <<'PY'
+import os
+import sys
+
+_, *directories = sys.argv[1:]
+for directory in directories:
+    directory_fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 PY
 }
 
@@ -293,6 +305,10 @@ journal_initialize() {
     || die "progress journal run already exists: $JOURNAL_RUN_ID"
   (umask 077 && mkdir "$JOURNAL_RUN_DIR/events" "$JOURNAL_RUN_DIR/states") \
     || die "could not initialize progress journal run: $JOURNAL_RUN_ID"
+  journal_sync_directories "$JOURNAL_RUN_DIR/events" "$JOURNAL_RUN_DIR/states" \
+    "$JOURNAL_RUN_DIR" "$PROGRESS_JOURNAL/runs" "$PROGRESS_JOURNAL" \
+    "$PROGRESS_JOURNAL/.." \
+    || die "could not make progress journal durable: $JOURNAL_RUN_ID"
   JOURNAL_RUN_INITIALIZED=1
   journal_write_run_state started
 }
@@ -1861,7 +1877,7 @@ terminate_and_reap_background_job() {
 
 # shellcheck disable=SC2329 # Registered by the EXIT and signal traps below.
 cleanup_run() {
-  local rc=$? pid run_state serial_child_owned=0 cleanup_pids="$RUN_TMP/cleanup-pids"
+  local rc=$? pid run_state journal_rc=0 serial_child_owned=0 cleanup_pids="$RUN_TMP/cleanup-pids"
   trap - EXIT INT TERM HUP
   case "$rc" in
     129|130|143)
@@ -1871,7 +1887,10 @@ cleanup_run() {
     0) run_state=passed ;;
     *) run_state=failed ;;
   esac
-  journal_write_run_state "$run_state" "$rc" || true
+  journal_write_run_state "$run_state" "$rc" || journal_rc=$?
+  if [ "$rc" -eq 0 ] && [ "$journal_rc" -ne 0 ]; then
+    rc=$journal_rc
+  fi
   jobs -p >"$cleanup_pids" 2>/dev/null || true
   if [ -n "$SERIAL_CHILD_PID" ]; then
     terminate_and_reap_process_group "$SERIAL_CHILD_PID"

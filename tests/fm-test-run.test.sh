@@ -1600,6 +1600,110 @@ SH
   pass "journal persists adjudicated outcomes before bookkeeping"
 }
 
+test_progress_journal_terminal_publication_failure_changes_only_green_exit() {
+  local tmp python_path pass_fixture interrupt_fixture journal rc run_dir
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-progress-terminal-publication.XXXXXX")
+  python_path="$tmp/python"
+  pass_fixture="$tmp/pass.test.sh"
+  interrupt_fixture="$tmp/interrupt.test.sh"
+  mkdir -p "$python_path"
+  cat >"$python_path/sitecustomize.py" <<'PY'
+import os
+import stat
+import sys
+
+if len(sys.argv) > 6 and sys.argv[1] == "run" and sys.argv[6] == os.environ.get("FAIL_RUN_STATE"):
+    real_fsync = os.fsync
+
+    def fail_directory_fsync(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError("injected directory fsync failure")
+        real_fsync(fd)
+
+    os.fsync = fail_directory_fsync
+PY
+  cat >"$pass_fixture" <<'SH'
+#!/usr/bin/env bash
+printf 'ok - completed before publication failure\n'
+SH
+  cat >"$interrupt_fixture" <<'SH'
+#!/usr/bin/env bash
+kill -TERM "$PPID"
+while :; do sleep 1; done
+SH
+  chmod +x "$pass_fixture" "$interrupt_fixture"
+
+  journal="$tmp/pass-journal"
+  set +e
+  FAIL_RUN_STATE=passed PYTHONPATH="$python_path" \
+    "$RUNNER" --progress-journal "$journal" "$pass_fixture" >"$tmp/pass.out" 2>"$tmp/pass.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || { cat "$tmp/pass.out" "$tmp/pass.err"; rm -rf "$tmp"; fail "terminal publication failure left a green exit"; }
+  grep -Fq 'injected directory fsync failure' "$tmp/pass.err" \
+    || { cat "$tmp/pass.err"; rm -rf "$tmp"; fail "green run did not surface its terminal publication failure"; }
+  run_dir=$(journal_run_dir "$journal")
+  assert_journal_run "$run_dir/run.json" passed 0 1 serial "$pass_fixture" \
+    || { rm -rf "$tmp"; fail "terminal replacement did not precede its failed durability barrier"; }
+
+  journal="$tmp/interrupt-journal"
+  set +e
+  FAIL_RUN_STATE=interrupted PYTHONPATH="$python_path" \
+    "$RUNNER" --progress-journal "$journal" "$interrupt_fixture" >"$tmp/interrupt.out" 2>"$tmp/interrupt.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 143 ] || { cat "$tmp/interrupt.out" "$tmp/interrupt.err"; rm -rf "$tmp"; fail "terminal publication failure replaced interrupt exit with $rc"; }
+  grep -Fq 'injected directory fsync failure' "$tmp/interrupt.err" \
+    || { cat "$tmp/interrupt.err"; rm -rf "$tmp"; fail "interrupted run did not surface its terminal publication failure"; }
+  rm -rf "$tmp"
+  pass "terminal publication failure changes only an otherwise-green exit"
+}
+
+test_progress_journal_requires_durable_run_directory_chain() {
+  local tmp journal fixture rc real_python run_dir
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-progress-directory-barrier.XXXXXX")
+  journal="$tmp/journal"
+  fixture="$tmp/pass.test.sh"
+  real_python=$(command -v python3)
+  mkdir -p "$tmp/bin"
+  cat >"$tmp/bin/python3" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = - ] && [ "${2:-}" = sync-directories ]; then
+  shift 2
+  printf '%s\n' "$@" >"$BARRIER_EVIDENCE"
+  exit 73
+fi
+exec "$REAL_PYTHON" "$@"
+SH
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+printf 'not ok - initialization barrier should prevent launch\n'
+exit 1
+SH
+  chmod +x "$tmp/bin/python3" "$fixture"
+  set +e
+  BARRIER_EVIDENCE="$tmp/barriers" REAL_PYTHON="$real_python" PATH="$tmp/bin:$PATH" \
+    "$RUNNER" --progress-journal "$journal" "$fixture" >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || { cat "$tmp/out" "$tmp/err"; rm -rf "$tmp"; fail "directory barrier failure should fail initialization with 2, got $rc"; }
+  grep -Fq 'could not make progress journal durable' "$tmp/err" \
+    || { cat "$tmp/err"; rm -rf "$tmp"; fail "directory barrier failure was not actionable"; }
+  run_dir=$(find "$journal/runs" -mindepth 1 -maxdepth 1 -type d | head -n 1)
+  [ -n "$run_dir" ] || { rm -rf "$tmp"; fail "directory barrier fixture did not publish a run directory"; }
+  [ "$(sed -n '1p' "$tmp/barriers")" = "$run_dir/events" ] \
+    && [ "$(sed -n '2p' "$tmp/barriers")" = "$run_dir/states" ] \
+    && [ "$(sed -n '3p' "$tmp/barriers")" = "$run_dir" ] \
+    && [ "$(sed -n '4p' "$tmp/barriers")" = "$journal/runs" ] \
+    && [ "$(sed -n '5p' "$tmp/barriers")" = "$journal" ] \
+    && [ "$(sed -n '6p' "$tmp/barriers")" = "$journal/.." ] \
+    || { cat "$tmp/barriers"; rm -rf "$tmp"; fail "directory barrier omitted the published run chain"; }
+  [ ! -e "$run_dir/run.json" ] \
+    || { rm -rf "$tmp"; fail "run state published after its directory barrier failed"; }
+  rm -rf "$tmp"
+  pass "progress journal requires the published run directory chain to be durable"
+}
+
 test_progress_journal_restores_caller_umask() {
   local tmp journal fixture timing fixture_mode timing_mode
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-progress-umask.XXXXXX")
@@ -1680,5 +1784,7 @@ test_progress_journal_does_not_advance_state_after_event_failure
 test_progress_journal_closes_startup_signal_windows
 test_progress_journal_preserves_post_terminal_signal_outcome
 test_progress_journal_publishes_adjudicated_outcome_before_bookkeeping
+test_progress_journal_terminal_publication_failure_changes_only_green_exit
+test_progress_journal_requires_durable_run_directory_chain
 test_progress_journal_restores_caller_umask
 test_progress_journal_disabled_mode_has_no_filesystem_effect
