@@ -16,11 +16,13 @@ Its GraphQL response must contain exactly one base-branch protection entry.
 Any top-level GraphQL error or structurally unexpected response envelope fails closed before protection data is interpreted.
 A structured protection rule remains supported only when it contains exactly one `requiresStrictStatusChecks` value and one `isAdminEnforced` value, both `true`.
 A literal `branchProtectionRule: null` is the one sanctioned unprotected-repository path and does not synthesize strict or administrator values.
+Selecting that path emits an explicit diagnostic before proceeding.
 Missing, duplicate, non-null scalar, partial-object, or null-with-child protection data is malformed or ambiguous and fails closed.
 Both protection paths verify the requested canonical PR identity, current exact head and base OIDs, and candidate ancestry.
 Immediately before mutation, the boundary re-reads the PR and refuses any identity, head, base, state, or protection-data drift, then rechecks that the clean local worktree remains at the exact head.
-The merge mutation is conditioned on that exact expected-head SHA, and GitHub's post-mutation response must identify the resulting commit and confirm that the verified candidate merged.
+The merge mutation is conditioned on that exact expected-head SHA, and both paths require GitHub to confirm that it merged the conditional request.
 GitHub's merge API exposes an expected-head precondition but no expected-base OID precondition.
+The unprotected response must also identify the resulting commit.
 For the unprotected path, the boundary immediately re-reads the base ref after mutation and requires it to point to GitHub's reported result commit.
 Method-specific parent or history validation must attribute that result to the exact pre-mutation base and expected-head candidate.
 The unprotected rebase path rejects candidates containing originally empty commits because GitHub drops them and their missing rewrite can conceal unrelated mutation-time base advancement from this bounded history check.
