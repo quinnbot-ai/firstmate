@@ -12,7 +12,14 @@ The boundary verifies clean exact candidate and base commits, then verifies the 
 The local path lets Git own the checkout and ref transition while its prepared reference transaction verifies the expected default ref, base, and candidate on a quiescent project checkout.
 Concurrent uncooperative writers to that project checkout during landing are outside the supported boundary; best-effort dirty-state checks refuse detected drift but do not provide cross-writer atomicity.
 The GitHub path submits an immediate REST merge conditioned on the verified head SHA.
-GitHub execution requires strict, administrator-enforced base-branch protection so the conditional merge cannot bypass required status checks.
+Its GraphQL response must contain exactly one base-branch protection entry.
+A structured protection rule remains supported only when it contains exactly one `requiresStrictStatusChecks` value and one `isAdminEnforced` value, both `true`.
+A literal `branchProtectionRule: null` is the one sanctioned unprotected-repository path and does not synthesize strict or administrator values.
+Missing, duplicate, non-null scalar, partial-object, or null-with-child protection data is malformed or ambiguous and fails closed.
+Both protection paths bind the requested canonical PR identity to the current exact head and base OIDs and require the base to be an ancestor of the candidate.
+Immediately before mutation, the boundary re-reads the PR and refuses any identity, head, base, state, or protection-data drift, then rechecks that the clean local worktree remains at the exact head.
+The merge mutation is conditioned on that head SHA, and GitHub's post-mutation response must confirm that the verified candidate merged.
+The unprotected path does not claim that GitHub enforces required status checks; it preserves the exact-candidate boundary after the delivery lifecycle has established that the candidate's checks are green.
 
 ## Literal-source inventory
 

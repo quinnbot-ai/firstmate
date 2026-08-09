@@ -62,11 +62,38 @@ SH
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 case "${1:-} ${2:-}" in
   "api POST")
-    printf 'headRefOid: %s\nbaseRefOid: %s\nbaseRefName: main\nheadRefName: fm/task-x1\nstate: OPEN\nisDraft: false\nmerged: false\nnameWithOwner: example/repo\nrequiresStrictStatusChecks: true\nisAdminEnforced: true\n' \
-      "$FM_TEST_GH_API_HEAD" "$FM_TEST_GH_BASE"
+    post_count=$(grep -c '^api POST ' "$FM_TEST_GH_AXI_LOG")
+    api_head=$FM_TEST_GH_API_HEAD
+    api_base=$FM_TEST_GH_BASE
+    protection=${FM_TEST_GH_PROTECTION:-protected}
+    if [ "$post_count" -gt 1 ]; then
+      api_head=${FM_TEST_GH_API_HEAD_AFTER:-$api_head}
+      api_base=${FM_TEST_GH_BASE_AFTER:-$api_base}
+      protection=${FM_TEST_GH_PROTECTION_AFTER:-$protection}
+    fi
+    printf 'data:\n  repository:\n    pullRequest:\n      headRefOid: %s\n      baseRefOid: %s\n      baseRefName: main\n      headRefName: fm/task-x1\n      state: OPEN\n      isDraft: false\n      merged: false\n      headRepository:\n        nameWithOwner: example/repo\n      baseRef:\n' \
+      "$api_head" "$api_base"
+    case "$protection" in
+      protected)
+        printf '        branchProtectionRule:\n          requiresStrictStatusChecks: true\n          isAdminEnforced: true\n'
+        ;;
+      null)
+        printf '        branchProtectionRule: null\n'
+        ;;
+      partial)
+        printf '        branchProtectionRule:\n          requiresStrictStatusChecks: true\n'
+        ;;
+      duplicate-null)
+        printf '        branchProtectionRule: null\n        branchProtectionRule: null\n'
+        ;;
+      non-strict)
+        printf '        branchProtectionRule:\n          requiresStrictStatusChecks: false\n          isAdminEnforced: true\n'
+        ;;
+      *) exit 97 ;;
+    esac
     ;;
   "api PUT")
-    printf 'merged: true\n'
+    printf 'merged: %s\n' "${FM_TEST_GH_MERGED:-true}"
     ;;
 esac
 SH
@@ -78,6 +105,11 @@ run_github_merge() {
   local case_dir=$1 head=$2 api_head=$3 base=$4
   FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
     FM_TEST_GH_HEAD="$head" FM_TEST_GH_API_HEAD="$api_head" FM_TEST_GH_BASE="$base" \
+    FM_TEST_GH_API_HEAD_AFTER="${FM_TEST_GH_API_HEAD_AFTER:-}" \
+    FM_TEST_GH_BASE_AFTER="${FM_TEST_GH_BASE_AFTER:-}" \
+    FM_TEST_GH_PROTECTION="${FM_TEST_GH_PROTECTION:-protected}" \
+    FM_TEST_GH_PROTECTION_AFTER="${FM_TEST_GH_PROTECTION_AFTER:-}" \
+    FM_TEST_GH_MERGED="${FM_TEST_GH_MERGED:-true}" \
     FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" task-x1 https://github.com/example/repo/pull/9 -- --merge
 }
@@ -269,6 +301,23 @@ test_github_merge_uses_verified_exact_sha() {
   pass "GitHub merge conditions its REST request on the verified candidate SHA"
 }
 
+test_unprotected_github_merge_uses_verified_exact_sha() {
+  local values case_dir base candidate
+  values=$(make_case github-unprotected-exact)
+  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+  base=$(printf '%s\n' "$values" | sed -n '2p')
+  candidate=$(printf '%s\n' "$values" | sed -n '3p')
+  fm_write_meta "$case_dir/state/task-x1.meta" "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" "kind=ship" "mode=no-mistakes"
+  add_github_mocks "$case_dir"
+  FM_TEST_GH_PROTECTION=null run_github_merge "$case_dir" "$candidate" "$candidate" "$base" >"$case_dir/out" 2>"$case_dir/err" \
+    || fail "GitHub boundary refused the verified candidate for an unprotected repository"
+  grep -qxF "api PUT /repos/example/repo/pulls/9/merge --field sha=$candidate --field merge_method=merge" "$case_dir/gh-axi.log" \
+    || fail "unprotected GitHub boundary did not condition the merge on the verified exact SHA"
+  grep -q 'unprotected repository' "$case_dir/err" \
+    || fail "unprotected GitHub merge did not diagnose the sanctioned path"
+  pass "GitHub merge sanctions a null protection rule without weakening the exact candidate mutation"
+}
+
 test_github_merge_refuses_changed_remote_head() {
   local values case_dir base candidate rc
   values=$(make_case github-changed-head)
@@ -278,12 +327,120 @@ test_github_merge_refuses_changed_remote_head() {
   fm_write_meta "$case_dir/state/task-x1.meta" "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" "kind=ship" "mode=no-mistakes"
   add_github_mocks "$case_dir"
   set +e
-  run_github_merge "$case_dir" "$candidate" "$base" "$base" >"$case_dir/out" 2>"$case_dir/err"
+  FM_TEST_GH_PROTECTION=null FM_TEST_GH_API_HEAD_AFTER="$base" \
+    run_github_merge "$case_dir" "$candidate" "$candidate" "$base" >"$case_dir/out" 2>"$case_dir/err"
   rc=$?
   set -e
-  expect_code 1 "$rc" "changed GitHub head must refuse merging"
+  expect_code 1 "$rc" "GitHub head drift during verification must refuse merging"
+  grep -q 'exact candidate changed during merge verification' "$case_dir/err" \
+    || fail "GitHub head drift refusal did not identify the verification race"
   ! grep -q '^api PUT ' "$case_dir/gh-axi.log" || fail "changed GitHub head reached the merge API"
-  pass "GitHub merge refuses a remote head changed after metadata recording"
+  pass "unprotected GitHub merge refuses remote head drift during verification"
+}
+
+test_unprotected_github_merge_refuses_changed_remote_base() {
+  local values case_dir base candidate advanced_base rc
+  values=$(make_case github-changed-base)
+  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+  base=$(printf '%s\n' "$values" | sed -n '2p')
+  advanced_base=$(printf '%s\n' "$values" | sed -n '3p')
+  printf 'final candidate\n' > "$case_dir/wt/final.txt"
+  git -C "$case_dir/wt" add final.txt
+  git -C "$case_dir/wt" commit -qm final-candidate
+  candidate=$(git -C "$case_dir/wt" rev-parse HEAD)
+  fm_write_meta "$case_dir/state/task-x1.meta" "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" "kind=ship" "mode=no-mistakes"
+  add_github_mocks "$case_dir"
+  set +e
+  FM_TEST_GH_PROTECTION=null FM_TEST_GH_BASE_AFTER="$advanced_base" \
+    run_github_merge "$case_dir" "$candidate" "$candidate" "$base" >"$case_dir/out" 2>"$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "GitHub base drift during verification must refuse an unprotected merge"
+  git -C "$case_dir/wt" merge-base --is-ancestor "$advanced_base" "$candidate" \
+    || fail "base drift fixture did not remain inside candidate ancestry"
+  grep -q 'exact candidate changed during merge verification' "$case_dir/err" \
+    || fail "GitHub base drift refusal did not identify the verification race"
+  ! grep -q '^api PUT ' "$case_dir/gh-axi.log" || fail "changed GitHub base reached the merge API"
+  pass "unprotected GitHub merge refuses remote base drift even when the new base remains an ancestor"
+}
+
+test_github_merge_refuses_partial_protection_payload() {
+  local values case_dir base candidate rc
+  values=$(make_case github-partial-protection)
+  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+  base=$(printf '%s\n' "$values" | sed -n '2p')
+  candidate=$(printf '%s\n' "$values" | sed -n '3p')
+  fm_write_meta "$case_dir/state/task-x1.meta" "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" "kind=ship" "mode=no-mistakes"
+  add_github_mocks "$case_dir"
+  set +e
+  FM_TEST_GH_PROTECTION=partial \
+    run_github_merge "$case_dir" "$candidate" "$candidate" "$base" >"$case_dir/out" 2>"$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "partial protection data must refuse merging"
+  grep -q 'malformed or ambiguous base branch protection data' "$case_dir/err" \
+    || fail "partial protection refusal was not explicit"
+  ! grep -q '^api PUT ' "$case_dir/gh-axi.log" || fail "partial protection data reached the merge API"
+  pass "GitHub merge rejects a partial protection object instead of treating it as absent"
+}
+
+test_github_merge_refuses_ambiguous_null_protection_payload() {
+  local values case_dir base candidate rc
+  values=$(make_case github-ambiguous-null-protection)
+  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+  base=$(printf '%s\n' "$values" | sed -n '2p')
+  candidate=$(printf '%s\n' "$values" | sed -n '3p')
+  fm_write_meta "$case_dir/state/task-x1.meta" "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" "kind=ship" "mode=no-mistakes"
+  add_github_mocks "$case_dir"
+  set +e
+  FM_TEST_GH_PROTECTION=duplicate-null \
+    run_github_merge "$case_dir" "$candidate" "$candidate" "$base" >"$case_dir/out" 2>"$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "ambiguous null protection data must refuse merging"
+  grep -q 'malformed or ambiguous base branch protection data' "$case_dir/err" \
+    || fail "ambiguous null protection refusal was not explicit"
+  ! grep -q '^api PUT ' "$case_dir/gh-axi.log" || fail "ambiguous null protection data reached the merge API"
+  pass "GitHub merge rejects duplicate null protection markers"
+}
+
+test_protected_github_merge_still_requires_strict_checks() {
+  local values case_dir base candidate rc
+  values=$(make_case github-non-strict-protection)
+  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+  base=$(printf '%s\n' "$values" | sed -n '2p')
+  candidate=$(printf '%s\n' "$values" | sed -n '3p')
+  fm_write_meta "$case_dir/state/task-x1.meta" "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" "kind=ship" "mode=no-mistakes"
+  add_github_mocks "$case_dir"
+  set +e
+  FM_TEST_GH_PROTECTION=non-strict \
+    run_github_merge "$case_dir" "$candidate" "$candidate" "$base" >"$case_dir/out" 2>"$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "protected repositories must retain strict-check enforcement"
+  grep -q 'requires strict, admin-enforced base branch protection' "$case_dir/err" \
+    || fail "non-strict protected-repository refusal was unclear"
+  ! grep -q '^api PUT ' "$case_dir/gh-axi.log" || fail "non-strict protection reached the merge API"
+  pass "protected GitHub merge retains strict and administrator enforcement"
+}
+
+test_unprotected_github_merge_requires_post_mutation_confirmation() {
+  local values case_dir base candidate rc
+  values=$(make_case github-unconfirmed-merge)
+  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+  base=$(printf '%s\n' "$values" | sed -n '2p')
+  candidate=$(printf '%s\n' "$values" | sed -n '3p')
+  fm_write_meta "$case_dir/state/task-x1.meta" "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" "kind=ship" "mode=no-mistakes"
+  add_github_mocks "$case_dir"
+  set +e
+  FM_TEST_GH_PROTECTION=null FM_TEST_GH_MERGED=false \
+    run_github_merge "$case_dir" "$candidate" "$candidate" "$base" >"$case_dir/out" 2>"$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "unconfirmed exact-candidate mutation must fail"
+  grep -q 'did not merge the verified candidate' "$case_dir/err" \
+    || fail "unconfirmed exact-candidate mutation refusal was unclear"
+  pass "unprotected GitHub merge requires post-mutation candidate confirmation"
 }
 
 test_github_merge_accepts_live_head_without_recorded_head() {
@@ -330,6 +487,12 @@ test_unchanged_path_drift_is_preserved
 test_prepared_transaction_drift_is_preserved
 test_wrong_branch_transaction_is_refused
 test_github_merge_uses_verified_exact_sha
+test_unprotected_github_merge_uses_verified_exact_sha
 test_github_merge_refuses_changed_remote_head
+test_unprotected_github_merge_refuses_changed_remote_base
+test_github_merge_refuses_partial_protection_payload
+test_github_merge_refuses_ambiguous_null_protection_payload
+test_protected_github_merge_still_requires_strict_checks
+test_unprotected_github_merge_requires_post_mutation_confirmation
 test_github_merge_accepts_live_head_without_recorded_head
 test_invalid_merge_args_are_side_effect_free

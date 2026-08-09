@@ -130,6 +130,66 @@ api_value() {
   printf '%s\n' "$value"
 }
 
+api_field_count() {
+  local key=$1 payload=$2
+  printf '%s\n' "$payload" | awk -v key="$key" '
+    {
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
+      prefix = key ":"
+      if (substr(line, 1, length(prefix)) != prefix) next
+      suffix = substr(line, length(prefix) + 1)
+      if (suffix == "" || substr(suffix, 1, 1) == " ") count++
+    }
+    END { print count + 0 }
+  '
+}
+
+api_field_value_allow_empty() {
+  local key=$1 payload=$2
+  printf '%s\n' "$payload" | awk -v key="$key" '
+    {
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
+      prefix = key ":"
+      if (substr(line, 1, length(prefix)) != prefix) next
+      suffix = substr(line, length(prefix) + 1)
+      if (suffix != "" && substr(suffix, 1, 1) != " ") next
+      sub(/^ +/, "", suffix)
+      print suffix
+      exit
+    }
+  '
+}
+
+read_branch_protection() {
+  local payload=$1 diagnose=${2:-1} protection_count strict_count admin_count protection
+  protection_count=$(api_field_count branchProtectionRule "$payload")
+  strict_count=$(api_field_count requiresStrictStatusChecks "$payload")
+  admin_count=$(api_field_count isAdminEnforced "$payload")
+  [ "$protection_count" -eq 1 ] \
+    || die "GitHub response contained malformed or ambiguous base branch protection data"
+  protection=$(api_field_value_allow_empty branchProtectionRule "$payload")
+  case "$protection" in
+    null)
+      [ "$strict_count" -eq 0 ] && [ "$admin_count" -eq 0 ] \
+        || die "GitHub response contained malformed or ambiguous base branch protection data"
+      GITHUB_PROTECTION_PATH=unprotected
+      if [ "$diagnose" -eq 1 ]; then
+        echo "diagnostic: GitHub reports branchProtectionRule: null; using the sanctioned unprotected repository path" >&2
+      fi
+      ;;
+    '')
+      [ "$strict_count" -eq 1 ] && [ "$admin_count" -eq 1 ] \
+        || die "GitHub response contained malformed or ambiguous base branch protection data"
+      GITHUB_STRICT=$(api_value requiresStrictStatusChecks "$payload")
+      GITHUB_ADMIN_ENFORCED=$(api_value isAdminEnforced "$payload")
+      GITHUB_PROTECTION_PATH=protected
+      ;;
+    *) die "GitHub response contained malformed or ambiguous base branch protection data" ;;
+  esac
+}
+
 urlencode_ref() { python3 - "$1" <<'PY'
 import sys
 import urllib.parse
@@ -297,7 +357,9 @@ execute_local() {
 }
 
 execute_github() {
-  local query payload head base base_ref state draft merged strict admin_enforced recorded_pr recorded_head merge_output head_repo head_ref encoded_ref
+  local query payload confirm_payload head base base_ref state draft merged recorded_pr recorded_head merge_output head_repo head_ref encoded_ref
+  local confirm_head confirm_base confirm_base_ref confirm_state confirm_draft confirm_merged confirm_head_repo confirm_head_ref
+  local protection_path protection_strict protection_admin
   [ "$MODE" = no-mistakes ] || [ "$MODE" = direct-PR ] || die "task $ID is mode=$MODE, not a PR merge mode"
   [ "$KIND" = ship ] || die "task $ID is kind=$KIND, not ship"
   require_repository_state
@@ -311,15 +373,37 @@ execute_github() {
   payload=$(gh-axi api POST /graphql --field "query=$query") || die "cannot read the exact GitHub merge candidate"
   head=$(api_value headRefOid "$payload"); base=$(api_value baseRefOid "$payload"); base_ref=$(api_value baseRefName "$payload")
   head_ref=$(api_value headRefName "$payload"); head_repo=$(api_value nameWithOwner "$payload"); state=$(api_value state "$payload")
-  draft=$(api_value isDraft "$payload"); merged=$(api_value merged "$payload"); strict=$(api_value requiresStrictStatusChecks "$payload"); admin_enforced=$(api_value isAdminEnforced "$payload")
+  draft=$(api_value isDraft "$payload"); merged=$(api_value merged "$payload")
+  read_branch_protection "$payload"
+  protection_path=$GITHUB_PROTECTION_PATH
+  protection_strict=${GITHUB_STRICT:-}
+  protection_admin=${GITHUB_ADMIN_ENFORCED:-}
   [ "$state" = OPEN ] && [ "$draft" = false ] && [ "$merged" = false ] || die "GitHub pull request is not an open, mergeable candidate"
   [ -z "$recorded_head" ] || fm_pr_head_valid "$recorded_head" || die "task PR head metadata is invalid"
   [ -z "$recorded_head" ] || [ "$recorded_head" = "$head" ] || die "task PR head metadata does not match the current GitHub head"
   [ "$(git -C "$WORKTREE" rev-parse HEAD)" = "$head" ] || die "task worktree HEAD does not match the current GitHub PR head"
   git -C "$WORKTREE" cat-file -e "$base^{commit}" 2>/dev/null || git -C "$WORKTREE" fetch --quiet "https://github.com/$PR_OWNER/$PR_REPO.git" "$base"
   git -C "$WORKTREE" merge-base --is-ancestor "$base" "$head" || die "GitHub PR head does not contain the current base; update the branch and retry"
-  [ "$strict" = true ] && [ "$admin_enforced" = true ] || die "exact GitHub merge execution requires strict, admin-enforced base branch protection"
+  if [ "$GITHUB_PROTECTION_PATH" = protected ]; then
+    [ "$GITHUB_STRICT" = true ] && [ "$GITHUB_ADMIN_ENFORCED" = true ] \
+      || die "exact GitHub merge execution requires strict, admin-enforced base branch protection"
+  fi
   "$SCRIPT_DIR/fm-test-inventory.sh" merge-check "$WORKTREE" "$head" "$base"
+  confirm_payload=$(gh-axi api POST /graphql --field "query=$query") \
+    || die "cannot confirm the exact GitHub merge candidate"
+  confirm_head=$(api_value headRefOid "$confirm_payload"); confirm_base=$(api_value baseRefOid "$confirm_payload")
+  confirm_base_ref=$(api_value baseRefName "$confirm_payload"); confirm_head_ref=$(api_value headRefName "$confirm_payload")
+  confirm_head_repo=$(api_value nameWithOwner "$confirm_payload"); confirm_state=$(api_value state "$confirm_payload")
+  confirm_draft=$(api_value isDraft "$confirm_payload"); confirm_merged=$(api_value merged "$confirm_payload")
+  read_branch_protection "$confirm_payload" 0
+  [ "$confirm_head" = "$head" ] && [ "$confirm_base" = "$base" ] \
+    && [ "$confirm_base_ref" = "$base_ref" ] && [ "$confirm_head_ref" = "$head_ref" ] \
+    && [ "$confirm_head_repo" = "$head_repo" ] && [ "$confirm_state" = "$state" ] \
+    && [ "$confirm_draft" = "$draft" ] && [ "$confirm_merged" = "$merged" ] \
+    && [ "$GITHUB_PROTECTION_PATH" = "$protection_path" ] \
+    && [ "${GITHUB_STRICT:-}" = "$protection_strict" ] \
+    && [ "${GITHUB_ADMIN_ENFORCED:-}" = "$protection_admin" ] \
+    || die "GitHub pull request identity or exact candidate changed during merge verification"
   require_clean "$WORKTREE" "task worktree"
   require_clean "$PROJECT" "project checkout"
   [ "$(git -C "$WORKTREE" rev-parse HEAD)" = "$head" ] || die "task worktree HEAD changed during merge verification"

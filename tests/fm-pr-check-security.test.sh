@@ -87,7 +87,7 @@ printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 [ "${FM_TEST_GH_AXI_RC:-0}" = 0 ] || exit "$FM_TEST_GH_AXI_RC"
 case "${1:-} ${2:-}" in
   "api POST")
-    printf 'headRefOid: %s\nbaseRefOid: %s\nbaseRefName: main\nheadRefName: fm/task-a\nstate: OPEN\nisDraft: false\nmerged: false\nnameWithOwner: my-org/repo_name.with-dots\nrequiresStrictStatusChecks: true\nisAdminEnforced: true\n' \
+    printf 'data:\n  repository:\n    pullRequest:\n      headRefOid: %s\n      baseRefOid: %s\n      baseRefName: main\n      headRefName: fm/task-a\n      state: OPEN\n      isDraft: false\n      merged: false\n      headRepository:\n        nameWithOwner: my-org/repo_name.with-dots\n      baseRef:\n        branchProtectionRule:\n          requiresStrictStatusChecks: true\n          isAdminEnforced: true\n' \
       "$FM_TEST_GH_API_HEAD" "$FM_TEST_GH_BASE"
     ;;
   "api PUT")
