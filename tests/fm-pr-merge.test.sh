@@ -183,13 +183,36 @@ PY
         )
         ;;
       */git/commits/*)
-        body=$(python3 - "$FM_TEST_GH_MERGE_SHA" "${FM_TEST_GH_BASE_AT_MUTATION:-$FM_TEST_GH_BASE}" "$FM_TEST_GH_API_HEAD" <<'PY'
+        body=$(python3 - "$FM_TEST_GH_MERGE_SHA" "${FM_TEST_GH_BASE_AT_MUTATION:-$FM_TEST_GH_BASE}" "$FM_TEST_GH_API_HEAD" "$FM_TEST_GH_METHOD" <<'PY'
 import base64
 import json
 import sys
 
-sha, base, head = sys.argv[1:]
-raw = json.dumps({"sha": sha, "parents": [base, head]}, separators=(",", ":"))
+sha, base, head, method = sys.argv[1:]
+parents = [base] if method in {"rebase", "squash"} else [base, head]
+raw = json.dumps({"sha": sha, "parents": parents}, separators=(",", ":"))
+print(base64.b64encode(raw.encode()).decode())
+PY
+        )
+        ;;
+      */compare/*)
+        body=$(python3 - "${FM_TEST_GH_REBASE_AHEAD:-1}" "${FM_TEST_GH_REBASE_FIRST:-$FM_TEST_GH_MERGE_SHA}" "$FM_TEST_GH_BASE" <<'PY'
+import base64
+import json
+import sys
+
+ahead, first, base = sys.argv[1:]
+raw = json.dumps(
+    {
+        "status": "ahead",
+        "aheadBy": int(ahead),
+        "behindBy": 0,
+        "mergeBaseOid": base,
+        "firstOid": first,
+        "firstParents": [base],
+    },
+    separators=(",", ":"),
+)
 print(base64.b64encode(raw.encode()).decode())
 PY
         )
@@ -205,7 +228,7 @@ SH
 }
 
 run_github_merge() {
-  local case_dir=$1 head=$2 api_head=$3 base=$4
+  local case_dir=$1 head=$2 api_head=$3 base=$4 method=${5:-merge}
   FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
     FM_TEST_GH_HEAD="$head" FM_TEST_GH_API_HEAD="$api_head" FM_TEST_GH_BASE="$base" \
     FM_TEST_GH_API_HEAD_AFTER="${FM_TEST_GH_API_HEAD_AFTER:-}" \
@@ -215,8 +238,11 @@ run_github_merge() {
     FM_TEST_GH_BASE_AT_MUTATION="${FM_TEST_GH_BASE_AT_MUTATION:-}" \
     FM_TEST_GH_MERGE_SHA=9999999999999999999999999999999999999999 \
     FM_TEST_GH_MERGED="${FM_TEST_GH_MERGED:-true}" \
+    FM_TEST_GH_METHOD="$method" \
+    FM_TEST_GH_REBASE_AHEAD="${FM_TEST_GH_REBASE_AHEAD:-}" \
+    FM_TEST_GH_REBASE_FIRST="${FM_TEST_GH_REBASE_FIRST:-}" \
     FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" PATH="$case_dir/fakebin:$PATH" \
-    "$PR_MERGE" task-x1 https://github.com/example/repo/pull/9 -- --merge
+    "$PR_MERGE" task-x1 https://github.com/example/repo/pull/9 -- "--$method"
 }
 
 test_exact_literal_receipt_lands_candidate() {
@@ -496,6 +522,53 @@ test_unprotected_github_merge_refuses_unattributed_mutation_base_drift() {
   pass "unprotected GitHub merge refuses mutation-time drift outside the verified candidate"
 }
 
+test_unprotected_github_rebase_accepts_nonempty_candidate() {
+  local values case_dir base candidate
+  values=$(make_case github-rebase-nonempty)
+  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+  base=$(printf '%s\n' "$values" | sed -n '2p')
+  candidate=$(printf '%s\n' "$values" | sed -n '3p')
+  fm_write_meta "$case_dir/state/task-x1.meta" "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" "kind=ship" "mode=no-mistakes"
+  add_github_mocks "$case_dir"
+  FM_TEST_GH_PROTECTION=null \
+    run_github_merge "$case_dir" "$candidate" "$candidate" "$base" rebase >"$case_dir/out" 2>"$case_dir/err" \
+    || fail "unprotected GitHub rebase refused a nonempty exact candidate"
+  grep -qxF "api PUT /repos/example/repo/pulls/9/merge --field sha=$candidate --field merge_method=rebase --jq {merged: .merged, sha: .sha} | @base64" "$case_dir/gh-axi.log" \
+    || fail "unprotected GitHub rebase did not condition mutation on the exact candidate"
+  grep -q '^api GET /repos/example/repo/compare/' "$case_dir/gh-axi.log" \
+    || fail "unprotected GitHub rebase did not validate the rewritten sequence"
+  pass "unprotected GitHub rebase accepts a nonempty attributable candidate"
+}
+
+test_unprotected_github_rebase_refuses_empty_commit_masked_drift() {
+  local values case_dir base candidate advanced_base tree rc
+  values=$(make_case github-rebase-empty-masked-drift)
+  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+  base=$(printf '%s\n' "$values" | sed -n '2p')
+  git -C "$case_dir/wt" commit --allow-empty -qm empty-candidate
+  candidate=$(git -C "$case_dir/wt" rev-parse HEAD)
+  tree=$(git -C "$case_dir/wt" rev-parse "$base^{tree}")
+  advanced_base=$(printf 'unrelated rebase writer\n' | git -C "$case_dir/wt" commit-tree "$tree" -p "$base")
+  fm_write_meta "$case_dir/state/task-x1.meta" "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" "kind=ship" "mode=no-mistakes"
+  add_github_mocks "$case_dir"
+  set +e
+  FM_TEST_GH_PROTECTION=null FM_TEST_GH_BASE_AT_MUTATION="$advanced_base" \
+    FM_TEST_GH_REBASE_AHEAD=2 FM_TEST_GH_REBASE_FIRST="$advanced_base" \
+    run_github_merge "$case_dir" "$candidate" "$candidate" "$base" rebase >"$case_dir/out" 2>"$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "originally empty rebase commits must fail before mutation"
+  git -C "$case_dir/wt" diff-tree --quiet "$candidate^" "$candidate" -- \
+    || fail "empty-rebase fixture did not contain an originally empty commit"
+  ! git -C "$case_dir/wt" merge-base --is-ancestor "$advanced_base" "$candidate" \
+    || fail "empty-rebase fixture did not create unrelated base drift"
+  grep -q 'does not support originally empty candidate commits' "$case_dir/err" \
+    || fail "empty-rebase refusal did not identify the unsupported candidate"
+  ! grep -q '^api PUT ' "$case_dir/gh-axi.log" \
+    || fail "empty rebase candidate reached the mutation API"
+  pass "unprotected GitHub rebase rejects empty commits before masked base drift"
+}
+
 test_unprotected_github_merge_rejects_graphql_errors() {
   local values case_dir base candidate rc
   values=$(make_case github-graphql-error-null)
@@ -645,6 +718,8 @@ test_unprotected_github_merge_uses_verified_exact_sha
 test_github_merge_refuses_changed_remote_head
 test_unprotected_github_merge_refuses_changed_remote_base
 test_unprotected_github_merge_refuses_unattributed_mutation_base_drift
+test_unprotected_github_rebase_accepts_nonempty_candidate
+test_unprotected_github_rebase_refuses_empty_commit_masked_drift
 test_unprotected_github_merge_rejects_graphql_errors
 test_github_merge_refuses_partial_protection_payload
 test_github_merge_refuses_ambiguous_protection_payloads

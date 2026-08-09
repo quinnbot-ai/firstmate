@@ -23,6 +23,7 @@ The merge mutation is conditioned on that exact expected-head SHA, and GitHub's 
 GitHub's merge API exposes an expected-head precondition but no expected-base OID precondition.
 For the unprotected path, the boundary immediately re-reads the base ref after mutation and requires it to point to GitHub's reported result commit.
 Method-specific parent or history validation must attribute that result to the exact pre-mutation base and expected-head candidate.
+The unprotected rebase path rejects candidates containing originally empty commits because GitHub drops them and their missing rewrite can conceal unrelated mutation-time base advancement from this bounded history check.
 These adjacent pre-mutation and post-mutation base observations bound but cannot eliminate every residual external-writer race.
 That remaining window assumes Firstmate is the single merge authority and no concurrent uncooperative writer advances the base.
 The unprotected path does not claim that GitHub enforces required status checks; it preserves the exact-candidate boundary after the delivery lifecycle has established that the candidate's checks are green.

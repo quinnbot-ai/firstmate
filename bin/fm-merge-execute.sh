@@ -523,6 +523,7 @@ execute_github() {
   local protection_path protection_strict protection_admin
   local post_base_output post_base commit_output commit_values commit_sha commit_parent_one commit_parent_two
   local compare_output compare_values transition_status transition_ahead transition_behind transition_base transition_first transition_parent candidate_count
+  local candidate_commits candidate_commit diff_status
   [ "$MODE" = no-mistakes ] || [ "$MODE" = direct-PR ] || die "task $ID is mode=$MODE, not a PR merge mode"
   [ "$KIND" = ship ] || die "task $ID is kind=$KIND, not ship"
   require_repository_state
@@ -597,6 +598,21 @@ execute_github() {
   require_clean "$PROJECT" "project checkout"
   [ "$(git -C "$WORKTREE" rev-parse HEAD)" = "$head" ] || die "task worktree HEAD changed during merge verification"
   if [ "$protection_path" = unprotected ]; then
+    if [ "$MERGE_METHOD" = rebase ]; then
+      candidate_commits=$(git -C "$WORKTREE" rev-list --reverse "$base..$head") \
+        || die "cannot inspect the verified GitHub rebase candidate"
+      while IFS= read -r candidate_commit; do
+        [ -n "$candidate_commit" ] || continue
+        if git -C "$WORKTREE" diff-tree --quiet "$candidate_commit^" "$candidate_commit" --; then
+          die "unprotected GitHub rebase does not support originally empty candidate commits"
+        else
+          diff_status=$?
+          [ "$diff_status" -eq 1 ] || die "cannot inspect the verified GitHub rebase candidate"
+        fi
+      done <<EOF
+$candidate_commits
+EOF
+    fi
     merge_output=$(gh-axi api PUT "/repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER/merge" --field "sha=$head" --field "merge_method=$MERGE_METHOD" --jq '{merged: .merged, sha: .sha} | @base64') \
       || die "GitHub rejected the exact conditional merge"
     merge_values=$(decode_github_merge_object "$merge_output" result) || die "GitHub returned malformed merge confirmation data"
