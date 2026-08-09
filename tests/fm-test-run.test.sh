@@ -184,12 +184,14 @@ test_changed_dependency_selection_and_unmapped_failure() {
 }
 
 test_empty_selection_emits_summary() {
-  local tmp repo out json
+  local tmp repo out json journal run_dir
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-empty.XXXXXX")
   repo="$tmp/repo"
+  journal="$tmp/journal"
   init_changed_fixture_repo "$repo"
   printf 'documentation only\n' >"$repo/README.md"
-  out=$(cd "$repo" && bin/fm-test-run.sh --changed --base HEAD --json "$tmp/artifacts/timing.json" 2>"$tmp/err") \
+  out=$(cd "$repo" && bin/fm-test-run.sh --changed --base HEAD \
+    --progress-journal "$journal" --json "$tmp/artifacts/timing.json" 2>"$tmp/err") \
     || fail "empty valid changed selection must pass"
   [ "$out" = "FM_TEST_SUMMARY total=0 failed=0 skipped_gate=0 duration_ms=0" ] \
     || fail "empty selection summary is missing or non-deterministic: $out"
@@ -201,8 +203,15 @@ assert doc["summary"] == {"duration_ms": 0, "failed": 0, "skipped_gate": 0, "tot
 assert doc["scripts"] == []
 assert doc["families"] == []
 ' "$json" || { rm -rf "$tmp"; fail "empty selection JSON summary is wrong"; }
+  run_dir=$(journal_run_dir "$journal")
+  assert_journal_run "$run_dir/run.json" passed 0 1 serial \
+    || { rm -rf "$tmp"; fail "empty selection did not finalize its zero-worker plan"; }
+  if find "$run_dir/events" "$run_dir/states" -type f -print | grep -q .; then
+    rm -rf "$tmp"
+    fail "empty selection created an unplanned worker record"
+  fi
   rm -rf "$tmp"
-  pass "empty changed selection emits deterministic text and JSON summaries"
+  pass "empty changed selection emits summaries and a terminal zero-worker plan"
 }
 
 test_timing_markers_and_json() {
@@ -1131,8 +1140,8 @@ journal_run_dir() {
 }
 
 assert_journal_state() {
-  local path=$1 expected_state=$2 expected_worker=$3
-  python3 - "$path" "$expected_state" "$expected_worker" <<'PY'
+  local path=$1 expected_state=$2 expected_worker=$3 expected_script=${4:-} expected_exit=${5:-}
+  python3 - "$path" "$expected_state" "$expected_worker" "$expected_script" "$expected_exit" <<'PY'
 import json
 import sys
 
@@ -1145,6 +1154,11 @@ assert record["run_id"]
 assert record["runner_pid"] > 0
 assert record["script"]
 assert record["transition_ordinal"] == 2
+if sys.argv[4]:
+    assert record["script"] == sys.argv[4]
+if sys.argv[5]:
+    assert record["exit"] == int(sys.argv[5])
+    assert record["duration_ms"] >= 0
 PY
 }
 
@@ -1350,6 +1364,74 @@ SH
   pass "progress journal records abrupt interruptions before cleanup"
 }
 
+test_progress_journal_closes_startup_signal_windows() {
+  local tmp real_python fixture journal run_dir rc repo runner
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-progress-start-signal.XXXXXX")
+  real_python=$(command -v python3)
+  mkdir -p "$tmp/bin"
+  cat >"$tmp/bin/python3" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = - ] && [ "${2:-}" = worker ]; then
+  case "${3:-}" in
+    */events/"$SIGNAL_WORKER".1.started.json)
+      "$REAL_PYTHON" "$@"
+      rc=$?
+      kill -TERM "$5"
+      exit "$rc"
+      ;;
+  esac
+fi
+exec "$REAL_PYTHON" "$@"
+SH
+  chmod +x "$tmp/bin/python3"
+
+  fixture="$tmp/serial.test.sh"
+  journal="$tmp/serial-journal"
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+printf 'not ok - startup signal should prevent launch\n'
+exit 1
+SH
+  chmod +x "$fixture"
+  set +e
+  SIGNAL_WORKER=serial-1 REAL_PYTHON="$real_python" PATH="$tmp/bin:$PATH" \
+    "$RUNNER" --progress-journal "$journal" "$fixture" >"$tmp/serial.out" 2>"$tmp/serial.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 143 ] || { cat "$tmp/serial.out" "$tmp/serial.err"; rm -rf "$tmp"; fail "serial startup signal should exit 143, got $rc"; }
+  run_dir=$(journal_run_dir "$journal")
+  assert_journal_state "$run_dir/states/serial-1.json" interrupted serial-1 "$fixture" \
+    || { rm -rf "$tmp"; fail "serial startup signal orphaned its started worker"; }
+  assert_journal_run "$run_dir/run.json" interrupted 143 1 serial "$fixture" \
+    || { rm -rf "$tmp"; fail "serial startup signal did not finalize the run"; }
+
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  journal="$tmp/parallel-journal"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$runner"
+  cat >"$repo/tests/fm-brief.test.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'not ok - startup signal should prevent launch\n'
+exit 1
+SH
+  chmod +x "$runner" "$repo/tests/fm-brief.test.sh"
+  set +e
+  (cd "$repo" && SIGNAL_WORKER=parallel-1 REAL_PYTHON="$real_python" PATH="$tmp/bin:$PATH" \
+    "$runner" --jobs 2 --progress-journal "$journal" tests/fm-brief.test.sh) \
+    >"$tmp/parallel.out" 2>"$tmp/parallel.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 143 ] || { cat "$tmp/parallel.out" "$tmp/parallel.err"; rm -rf "$tmp"; fail "parallel startup signal should exit 143, got $rc"; }
+  run_dir=$(journal_run_dir "$journal")
+  assert_journal_state "$run_dir/states/parallel-1.json" interrupted parallel-1 tests/fm-brief.test.sh \
+    || { rm -rf "$tmp"; fail "parallel startup signal orphaned its started worker"; }
+  assert_journal_run "$run_dir/run.json" interrupted 143 2 parallel tests/fm-brief.test.sh \
+    || { rm -rf "$tmp"; fail "parallel startup signal did not finalize the run"; }
+  rm -rf "$tmp"
+  pass "progress journal closes serial and parallel startup signal windows"
+}
+
 test_progress_journal_preserves_post_terminal_signal_outcome() {
   local tmp journal fixture run_dir rc real_python
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-progress-terminal-signal.XXXXXX")
@@ -1381,7 +1463,7 @@ SH
   set -e
   [ "$rc" -eq 143 ] || { cat "$tmp/out" "$tmp/err"; rm -rf "$tmp"; fail "post-terminal signal should exit 143, got $rc"; }
   run_dir=$(journal_run_dir "$journal")
-  assert_journal_state "$run_dir/states/serial-1.json" passed serial-1 \
+  assert_journal_state "$run_dir/states/serial-1.json" passed serial-1 "$fixture" 0 \
     || { rm -rf "$tmp"; fail "post-terminal signal regressed completed worker state"; }
   [ ! -e "$run_dir/events/serial-1.2.interrupted.json" ] \
     || { rm -rf "$tmp"; fail "post-terminal signal created a conflicting interruption"; }
@@ -1466,6 +1548,7 @@ test_progress_journal_terminal_transitions_and_atomic_state
 test_progress_journal_parallel_workers_preserve_transitions
 test_progress_journal_ignores_malformed_prior_state
 test_progress_journal_marks_abrupt_interruptions
+test_progress_journal_closes_startup_signal_windows
 test_progress_journal_preserves_post_terminal_signal_outcome
 test_progress_journal_restores_caller_umask
 test_progress_journal_disabled_mode_has_no_filesystem_effect

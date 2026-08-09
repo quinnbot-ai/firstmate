@@ -161,15 +161,11 @@ JOURNAL_RUN_INITIALIZED=
 JOURNAL_ACTIVE_SERIAL_WORKER=
 JOURNAL_ACTIVE_SERIAL_SCRIPT=
 JOURNAL_ACTIVE_SERIAL_INDEX=
-JOURNAL_ACTIVE_SERIAL_STATE=
-JOURNAL_ACTIVE_SERIAL_EXIT=
-JOURNAL_ACTIVE_SERIAL_DURATION=
+JOURNAL_ACTIVE_SERIAL_TERMINAL=
 declare -a JOURNAL_PARALLEL_WORKERS=()
 declare -a JOURNAL_PARALLEL_SCRIPTS=()
 declare -a JOURNAL_PARALLEL_WORKDIRS=()
-declare -a JOURNAL_PARALLEL_STATES=()
-declare -a JOURNAL_PARALLEL_EXITS=()
-declare -a JOURNAL_PARALLEL_DURATIONS=()
+declare -a JOURNAL_PARALLEL_TERMINALS=()
 
 journal_terminal_state_for_exit() {
   case "$1" in
@@ -276,7 +272,7 @@ journal_write_run_state() {
   local state=$1 exit_code=${2:-}
   [ -n "$JOURNAL_RUN_INITIALIZED" ] || return 0
   journal_write_record run "$JOURNAL_RUN_DIR/run.json" "$state" "$exit_code" \
-    "$JOBS" "$SELECTION_DESC" "${SCRIPTS[@]}"
+    "$JOBS" "$SELECTION_DESC" "${SCRIPTS[@]+"${SCRIPTS[@]}"}"
 }
 
 journal_initialize() {
@@ -301,13 +297,17 @@ journal_initialize() {
 
 # shellcheck disable=SC2329 # Invoked indirectly by cleanup_run's signal path.
 journal_mark_interrupted_workers() {
-  local slot worker_id script work rc duration state
+  local slot worker_id script work rc duration state terminal rest
   [ -n "$JOURNAL_RUN_DIR" ] || return 0
   if [ -n "$JOURNAL_ACTIVE_SERIAL_WORKER" ]; then
-    if [ -n "$JOURNAL_ACTIVE_SERIAL_STATE" ]; then
-      journal_transition "$JOURNAL_ACTIVE_SERIAL_WORKER" "$JOURNAL_ACTIVE_SERIAL_STATE" \
-        "$JOURNAL_ACTIVE_SERIAL_SCRIPT" 2 "$JOURNAL_ACTIVE_SERIAL_EXIT" \
-        "$JOURNAL_ACTIVE_SERIAL_DURATION"
+    terminal=$JOURNAL_ACTIVE_SERIAL_TERMINAL
+    if [ -n "$terminal" ]; then
+      state=${terminal%%$'\t'*}
+      rest=${terminal#*$'\t'}
+      rc=${rest%%$'\t'*}
+      duration=${rest#*$'\t'}
+      journal_transition "$JOURNAL_ACTIVE_SERIAL_WORKER" "$state" \
+        "$JOURNAL_ACTIVE_SERIAL_SCRIPT" 2 "$rc" "$duration"
     else
       journal_transition "$JOURNAL_ACTIVE_SERIAL_WORKER" interrupted \
         "$JOURNAL_ACTIVE_SERIAL_SCRIPT" 2
@@ -317,10 +317,13 @@ journal_mark_interrupted_workers() {
     worker_id=${JOURNAL_PARALLEL_WORKERS[$slot]}
     script=${JOURNAL_PARALLEL_SCRIPTS[$slot]}
     work=${JOURNAL_PARALLEL_WORKDIRS[$slot]}
-    state=${JOURNAL_PARALLEL_STATES[$slot]:-}
-    if [ -n "$state" ]; then
-      journal_transition "$worker_id" "$state" "$script" 2 \
-        "${JOURNAL_PARALLEL_EXITS[$slot]}" "${JOURNAL_PARALLEL_DURATIONS[$slot]}"
+    terminal=${JOURNAL_PARALLEL_TERMINALS[$slot]:-}
+    if [ -n "$terminal" ]; then
+      state=${terminal%%$'\t'*}
+      rest=${terminal#*$'\t'}
+      rc=${rest%%$'\t'*}
+      duration=${rest#*$'\t'}
+      journal_transition "$worker_id" "$state" "$script" 2 "$rc" "$duration"
     elif [ -f "$work/exit" ]; then
       rc=$(cat "$work/exit" 2>/dev/null || echo 1)
       duration=$(cat "$work/duration_ms" 2>/dev/null || echo 0)
@@ -1690,22 +1693,6 @@ if [ "$LIST_ONLY" -eq 1 ]; then
   exit 0
 fi
 
-if [ "${#SCRIPTS[@]}" -eq 0 ]; then
-  log "nothing to run"
-  printf 'FM_TEST_SUMMARY total=0 failed=0 skipped_gate=0 duration_ms=0\n'
-  if [ -n "$JSON_PATH" ]; then
-    empty_rec=$(mktemp)
-    empty_fam=$(mktemp)
-    : >"$empty_rec"
-    : >"$empty_fam"
-    started=$(now_iso)
-    mkdir -p "$(dirname "$JSON_PATH")"
-    write_json_artifact "$JSON_PATH" "$started" "$started" "empty" 0 0 0 0 "$SELECTION_DESC" "$empty_rec" "$empty_fam"
-    rm -f "$empty_rec" "$empty_fam"
-  fi
-  exit 0
-fi
-
 # Verify selected scripts exist before starting.
 for s in "${SCRIPTS[@]}"; do
   [ -f "$s" ] || die "test script not found: $s"
@@ -1727,6 +1714,7 @@ FAMILIES_TSV="$RUN_TMP/families.tsv"
 SERIAL_CHILD_PID=
 SERIAL_TEE_PID=
 : >"$RECORDS"
+: >"$FAMILIES_TSV"
 
 # shellcheck disable=SC2329 # Invoked indirectly by the cleanup and worker signal traps.
 terminate_and_reap_process_tree() {
@@ -1911,6 +1899,17 @@ FAILED=0
 SKIPPED_GATE=0
 AGG_RC=0
 
+if [ "${#SCRIPTS[@]}" -eq 0 ]; then
+  log "nothing to run"
+  printf 'FM_TEST_SUMMARY total=0 failed=0 skipped_gate=0 duration_ms=0\n'
+  if [ -n "$JSON_PATH" ]; then
+    mkdir -p "$(dirname "$JSON_PATH")"
+    write_json_artifact "$JSON_PATH" "$RUN_STARTED_ISO" "$RUN_STARTED_ISO" \
+      "empty" 0 0 0 0 "$SELECTION_DESC" "$RECORDS" "$FAMILIES_TSV"
+  fi
+  exit 0
+fi
+
 # Family accumulators as TSV lines updated in-memory via temp files.
 # family -> count, duration_ms, failed
 family_bump() {
@@ -2021,7 +2020,7 @@ record_script_result() {
 
 run_one_serial() {
   local script=$1
-  local base family runtime requirement out fifo begin_iso begin_ms end_ms end_iso duration rc child_pid monitor_mode=
+  local base family runtime requirement out fifo begin_iso begin_ms end_ms end_iso duration rc child_pid monitor_mode= terminal_state
   base=$(basename "$script")
   family=$(family_for_basename "$base")
   runtime=$(runtime_gate_for_basename "$base")
@@ -2033,11 +2032,9 @@ run_one_serial() {
   printf 'FM_TEST_BEGIN %s %s family=%s runtime_gate=%s gate_requirement=%s\n' \
     "$begin_iso" "$script" "$family" "$runtime" "$requirement"
   JOURNAL_ACTIVE_SERIAL_INDEX=$((TOTAL + 1))
-  JOURNAL_ACTIVE_SERIAL_WORKER="serial-$JOURNAL_ACTIVE_SERIAL_INDEX"
   JOURNAL_ACTIVE_SERIAL_SCRIPT=$script
-  JOURNAL_ACTIVE_SERIAL_STATE=
-  JOURNAL_ACTIVE_SERIAL_EXIT=
-  JOURNAL_ACTIVE_SERIAL_DURATION=
+  JOURNAL_ACTIVE_SERIAL_TERMINAL=
+  JOURNAL_ACTIVE_SERIAL_WORKER="serial-$JOURNAL_ACTIVE_SERIAL_INDEX"
   journal_transition "$JOURNAL_ACTIVE_SERIAL_WORKER" started "$script" 1
 
   set +e
@@ -2066,18 +2063,15 @@ run_one_serial() {
     duration=0
   fi
   record_script_result "$script" "$rc" "$duration" "$out" "$end_iso"
-  JOURNAL_ACTIVE_SERIAL_STATE=$(journal_terminal_state_for_exit "$LAST_SCRIPT_RESULT_RC")
-  JOURNAL_ACTIVE_SERIAL_EXIT=$LAST_SCRIPT_RESULT_RC
-  JOURNAL_ACTIVE_SERIAL_DURATION=$duration
+  terminal_state=$(journal_terminal_state_for_exit "$LAST_SCRIPT_RESULT_RC")
+  JOURNAL_ACTIVE_SERIAL_TERMINAL="$terminal_state"$'\t'"$LAST_SCRIPT_RESULT_RC"$'\t'"$duration"
   journal_transition "$JOURNAL_ACTIVE_SERIAL_WORKER" \
-    "$JOURNAL_ACTIVE_SERIAL_STATE" \
+    "$terminal_state" \
     "$script" 2 "$LAST_SCRIPT_RESULT_RC" "$duration"
   JOURNAL_ACTIVE_SERIAL_WORKER=
   JOURNAL_ACTIVE_SERIAL_SCRIPT=
   JOURNAL_ACTIVE_SERIAL_INDEX=
-  JOURNAL_ACTIVE_SERIAL_STATE=
-  JOURNAL_ACTIVE_SERIAL_EXIT=
-  JOURNAL_ACTIVE_SERIAL_DURATION=
+  JOURNAL_ACTIVE_SERIAL_TERMINAL=
 }
 
 if [ "$JOBS" -eq 1 ]; then
@@ -2095,7 +2089,7 @@ else
   active_workers=0
 
   wait_one_job_worker() {
-    local slot=$1 pid idx work script worker_id rc duration mode out end_iso
+    local slot=$1 pid idx work script worker_id rc duration mode out end_iso terminal_state
     pid=${WORKER_PIDS[$slot]}
     idx=${WORKER_IDX[$slot]}
     script=${WORKER_SCRIPTS[$slot]}
@@ -2126,18 +2120,15 @@ else
         ;;
     esac
     record_script_result "$script" "$rc" "$duration" "$out" "$end_iso"
-    JOURNAL_PARALLEL_STATES[$slot]=$(journal_terminal_state_for_exit "$LAST_SCRIPT_RESULT_RC")
-    JOURNAL_PARALLEL_EXITS[$slot]=$LAST_SCRIPT_RESULT_RC
-    JOURNAL_PARALLEL_DURATIONS[$slot]=$duration
+    terminal_state=$(journal_terminal_state_for_exit "$LAST_SCRIPT_RESULT_RC")
+    JOURNAL_PARALLEL_TERMINALS[$slot]="$terminal_state"$'\t'"$LAST_SCRIPT_RESULT_RC"$'\t'"$duration"
     journal_transition "$worker_id" \
-      "${JOURNAL_PARALLEL_STATES[$slot]}" \
+      "$terminal_state" \
       "$script" 2 "$LAST_SCRIPT_RESULT_RC" "$duration"
     unset 'JOURNAL_PARALLEL_WORKERS[slot]'
     unset 'JOURNAL_PARALLEL_SCRIPTS[slot]'
     unset 'JOURNAL_PARALLEL_WORKDIRS[slot]'
-    unset 'JOURNAL_PARALLEL_STATES[slot]'
-    unset 'JOURNAL_PARALLEL_EXITS[slot]'
-    unset 'JOURNAL_PARALLEL_DURATIONS[slot]'
+    unset 'JOURNAL_PARALLEL_TERMINALS[slot]'
   }
 
   worker_pid_is_running() {
@@ -2181,10 +2172,11 @@ else
     printf 'FM_TEST_BEGIN %s %s family=%s runtime_gate=%s gate_requirement=%s\n' \
       "$(now_iso)" "$script" "$family" "$runtime" "$requirement"
     worker_id="parallel-$worker_n"
-    journal_transition "$worker_id" started "$script" 1
-    JOURNAL_PARALLEL_WORKERS[worker_n]=$worker_id
     JOURNAL_PARALLEL_SCRIPTS[worker_n]=$script
     JOURNAL_PARALLEL_WORKDIRS[worker_n]=$work
+    unset 'JOURNAL_PARALLEL_TERMINALS[worker_n]'
+    JOURNAL_PARALLEL_WORKERS[worker_n]=$worker_id
+    journal_transition "$worker_id" started "$script" 1
     monitor_mode=
     case $- in *m*) monitor_mode=1 ;; esac
     set -m
