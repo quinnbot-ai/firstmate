@@ -71,29 +71,79 @@ case "${1:-} ${2:-}" in
       api_base=${FM_TEST_GH_BASE_AFTER:-$api_base}
       protection=${FM_TEST_GH_PROTECTION_AFTER:-$protection}
     fi
-    printf 'data:\n  repository:\n    pullRequest:\n      headRefOid: %s\n      baseRefOid: %s\n      baseRefName: main\n      headRefName: fm/task-x1\n      state: OPEN\n      isDraft: false\n      merged: false\n      headRepository:\n        nameWithOwner: example/repo\n      baseRef:\n' \
-      "$api_head" "$api_base"
-    case "$protection" in
-      protected)
-        printf '        branchProtectionRule:\n          requiresStrictStatusChecks: true\n          isAdminEnforced: true\n'
-        ;;
-      null)
-        printf '        branchProtectionRule: null\n'
-        ;;
-      partial)
-        printf '        branchProtectionRule:\n          requiresStrictStatusChecks: true\n'
-        ;;
-      duplicate-null)
-        printf '        branchProtectionRule: null\n        branchProtectionRule: null\n'
-        ;;
-      non-strict)
-        printf '        branchProtectionRule:\n          requiresStrictStatusChecks: false\n          isAdminEnforced: true\n'
-        ;;
-      *) exit 97 ;;
-    esac
+    body=$(python3 - "$api_head" "$api_base" "$protection" <<'PY'
+import base64
+import json
+import sys
+
+head, base, mode = sys.argv[1:]
+pull = {
+    "headRefOid": head,
+    "baseRefOid": base,
+    "baseRefName": "main",
+    "headRefName": "fm/task-x1",
+    "state": "OPEN",
+    "isDraft": False,
+    "merged": False,
+    "headRepository": {"nameWithOwner": "example/repo"},
+    "baseRef": {},
+}
+if mode == "protected":
+    rule = {"requiresStrictStatusChecks": True, "isAdminEnforced": True}
+elif mode in {"null", "malformed-occurrence"}:
+    rule = None
+elif mode == "partial":
+    rule = {"requiresStrictStatusChecks": True}
+elif mode == "non-strict":
+    rule = {"requiresStrictStatusChecks": False, "isAdminEnforced": True}
+elif mode == "scalar":
+    rule = "null"
+elif mode == "absent":
+    rule = ...
+elif mode == "misplaced":
+    rule = ...
+    pull["branchProtectionRule"] = None
+elif mode == "null-child":
+    rule = None
+    pull["baseRef"]["requiresStrictStatusChecks"] = True
+elif mode in {"duplicate-null", "duplicate-strict", "duplicate-admin"}:
+    rule = None if mode == "duplicate-null" else {
+        "requiresStrictStatusChecks": True,
+        "isAdminEnforced": True,
+    }
+else:
+    raise SystemExit(97)
+if rule is not ...:
+    pull["baseRef"]["branchProtectionRule"] = rule
+raw = json.dumps(pull, separators=(",", ":"))
+if mode == "duplicate-null":
+    raw = raw.replace(
+        '"branchProtectionRule":null',
+        '"branchProtectionRule":null,"branchProtectionRule":null',
+    )
+elif mode == "duplicate-strict":
+    raw = raw.replace(
+        '"requiresStrictStatusChecks":true',
+        '"requiresStrictStatusChecks":true,"requiresStrictStatusChecks":true',
+    )
+elif mode == "duplicate-admin":
+    raw = raw.replace(
+        '"isAdminEnforced":true',
+        '"isAdminEnforced":true,"isAdminEnforced":true',
+    )
+print(base64.b64encode(raw.encode()).decode())
+PY
+    ) || exit $?
+    printf 'api_response:\n  body: %s\n  truncated: false\n' "$body"
+    [ "$protection" != malformed-occurrence ] || printf 'branchProtectionRule:null\n'
     ;;
   "api PUT")
-    printf 'merged: %s\n' "${FM_TEST_GH_MERGED:-true}"
+    case "${FM_TEST_GH_MERGED:-true}" in
+      true) body=dHJ1ZQ== ;;
+      false) body=ZmFsc2U= ;;
+      *) exit 98 ;;
+    esac
+    printf 'api_response:\n  body: %s\n  truncated: false\n' "$body"
     ;;
 esac
 SH
@@ -296,7 +346,7 @@ test_github_merge_uses_verified_exact_sha() {
   add_github_mocks "$case_dir"
   run_github_merge "$case_dir" "$candidate" "$candidate" "$base" >/dev/null \
     || fail "GitHub boundary refused the verified candidate"
-  grep -qxF "api PUT /repos/example/repo/pulls/9/merge --field sha=$candidate --field merge_method=merge" "$case_dir/gh-axi.log" \
+  grep -qxF "api PUT /repos/example/repo/pulls/9/merge --field sha=$candidate --field merge_method=merge --jq .merged | tostring | @base64" "$case_dir/gh-axi.log" \
     || fail "GitHub boundary did not condition the merge on the verified exact SHA"
   pass "GitHub merge conditions its REST request on the verified candidate SHA"
 }
@@ -311,7 +361,7 @@ test_unprotected_github_merge_uses_verified_exact_sha() {
   add_github_mocks "$case_dir"
   FM_TEST_GH_PROTECTION=null run_github_merge "$case_dir" "$candidate" "$candidate" "$base" >"$case_dir/out" 2>"$case_dir/err" \
     || fail "GitHub boundary refused the verified candidate for an unprotected repository"
-  grep -qxF "api PUT /repos/example/repo/pulls/9/merge --field sha=$candidate --field merge_method=merge" "$case_dir/gh-axi.log" \
+  grep -qxF "api PUT /repos/example/repo/pulls/9/merge --field sha=$candidate --field merge_method=merge --jq .merged | tostring | @base64" "$case_dir/gh-axi.log" \
     || fail "unprotected GitHub boundary did not condition the merge on the verified exact SHA"
   grep -q 'unprotected repository' "$case_dir/err" \
     || fail "unprotected GitHub merge did not diagnose the sanctioned path"
@@ -378,30 +428,32 @@ test_github_merge_refuses_partial_protection_payload() {
   rc=$?
   set -e
   expect_code 1 "$rc" "partial protection data must refuse merging"
-  grep -q 'malformed or ambiguous base branch protection data' "$case_dir/err" \
+  grep -q 'malformed or ambiguous pull request data' "$case_dir/err" \
     || fail "partial protection refusal was not explicit"
   ! grep -q '^api PUT ' "$case_dir/gh-axi.log" || fail "partial protection data reached the merge API"
   pass "GitHub merge rejects a partial protection object instead of treating it as absent"
 }
 
-test_github_merge_refuses_ambiguous_null_protection_payload() {
-  local values case_dir base candidate rc
-  values=$(make_case github-ambiguous-null-protection)
-  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
-  base=$(printf '%s\n' "$values" | sed -n '2p')
-  candidate=$(printf '%s\n' "$values" | sed -n '3p')
-  fm_write_meta "$case_dir/state/task-x1.meta" "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" "kind=ship" "mode=no-mistakes"
-  add_github_mocks "$case_dir"
-  set +e
-  FM_TEST_GH_PROTECTION=duplicate-null \
-    run_github_merge "$case_dir" "$candidate" "$candidate" "$base" >"$case_dir/out" 2>"$case_dir/err"
-  rc=$?
-  set -e
-  expect_code 1 "$rc" "ambiguous null protection data must refuse merging"
-  grep -q 'malformed or ambiguous base branch protection data' "$case_dir/err" \
-    || fail "ambiguous null protection refusal was not explicit"
-  ! grep -q '^api PUT ' "$case_dir/gh-axi.log" || fail "ambiguous null protection data reached the merge API"
-  pass "GitHub merge rejects duplicate null protection markers"
+test_github_merge_refuses_ambiguous_protection_payloads() {
+  local values case_dir base candidate mode rc
+  for mode in duplicate-null duplicate-strict duplicate-admin malformed-occurrence absent scalar misplaced null-child; do
+    values=$(make_case "github-ambiguous-$mode")
+    case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+    base=$(printf '%s\n' "$values" | sed -n '2p')
+    candidate=$(printf '%s\n' "$values" | sed -n '3p')
+    fm_write_meta "$case_dir/state/task-x1.meta" "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" "kind=ship" "mode=no-mistakes"
+    add_github_mocks "$case_dir"
+    set +e
+    FM_TEST_GH_PROTECTION=$mode \
+      run_github_merge "$case_dir" "$candidate" "$candidate" "$base" >"$case_dir/out" 2>"$case_dir/err"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "$mode protection data must refuse merging"
+    grep -q 'malformed or ambiguous pull request data' "$case_dir/err" \
+      || fail "$mode protection refusal was not explicit"
+    ! grep -q '^api PUT ' "$case_dir/gh-axi.log" || fail "$mode protection data reached the merge API"
+  done
+  pass "GitHub merge rejects malformed, misplaced, scalar, partial, and duplicate protection data"
 }
 
 test_protected_github_merge_still_requires_strict_checks() {
@@ -454,7 +506,7 @@ test_github_merge_accepts_live_head_without_recorded_head() {
   FM_TEST_GH_UNAVAILABLE=1 run_github_merge "$case_dir" "$candidate" "$candidate" "$base" >/dev/null \
     || fail "GitHub boundary refused a live exact head without recorded head metadata"
   ! grep -q '^pr_head=' "$case_dir/state/task-x1.meta" || fail "unavailable gh unexpectedly recorded PR head metadata"
-  grep -qxF "api PUT /repos/example/repo/pulls/9/merge --field sha=$candidate --field merge_method=merge" "$case_dir/gh-axi.log" \
+  grep -qxF "api PUT /repos/example/repo/pulls/9/merge --field sha=$candidate --field merge_method=merge --jq .merged | tostring | @base64" "$case_dir/gh-axi.log" \
     || fail "live GraphQL head was not used for a wrapper-authenticated merge"
   pass "GitHub merge binds an absent recorded head to live and local heads"
 }
@@ -491,7 +543,7 @@ test_unprotected_github_merge_uses_verified_exact_sha
 test_github_merge_refuses_changed_remote_head
 test_unprotected_github_merge_refuses_changed_remote_base
 test_github_merge_refuses_partial_protection_payload
-test_github_merge_refuses_ambiguous_null_protection_payload
+test_github_merge_refuses_ambiguous_protection_payloads
 test_protected_github_merge_still_requires_strict_checks
 test_unprotected_github_merge_requires_post_mutation_confirmation
 test_github_merge_accepts_live_head_without_recorded_head

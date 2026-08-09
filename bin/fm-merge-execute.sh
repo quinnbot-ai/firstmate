@@ -122,72 +122,132 @@ default_branch() {
   return 1
 }
 
-api_value() {
-  local key=$1 payload=$2 value count
-  value=$(printf '%s\n' "$payload" | sed -n "s/^[[:space:]]*${key}: //p")
-  count=$(printf '%s\n' "$value" | awk 'NF { count++ } END { print count + 0 }')
-  [ "$count" -eq 1 ] || die "GitHub response did not contain exactly one ${key} value"
-  printf '%s\n' "$value"
-}
+decode_github_pull() {
+  python3 - "$1" <<'PY'
+import base64
+import binascii
+import json
+import re
+import sys
 
-api_field_count() {
-  local key=$1 payload=$2
-  printf '%s\n' "$payload" | awk -v key="$key" '
-    {
-      line = $0
-      sub(/^[[:space:]]*/, "", line)
-      prefix = key ":"
-      if (substr(line, 1, length(prefix)) != prefix) next
-      suffix = substr(line, length(prefix) + 1)
-      if (suffix == "" || substr(suffix, 1, 1) == " ") count++
+
+class InvalidPayload(Exception):
+    pass
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise InvalidPayload
+        result[key] = value
+    return result
+
+
+def required_string(record, key):
+    value = record.get(key)
+    if not isinstance(value, str) or not value:
+        raise InvalidPayload
+    return value
+
+
+try:
+    lines = sys.argv[1].splitlines()
+    if len(lines) != 3 or lines[0] != "api_response:" or lines[2] != "  truncated: false":
+        raise InvalidPayload
+    match = re.fullmatch(r"  body: ([A-Za-z0-9+/]+={0,2})", lines[1])
+    if match is None:
+        raise InvalidPayload
+    decoded = base64.b64decode(match.group(1), validate=True)
+    pull = json.loads(decoded, object_pairs_hook=unique_object)
+    expected = {
+        "headRefOid",
+        "baseRefOid",
+        "baseRefName",
+        "headRefName",
+        "state",
+        "isDraft",
+        "merged",
+        "headRepository",
+        "baseRef",
     }
-    END { print count + 0 }
-  '
+    if not isinstance(pull, dict) or set(pull) != expected:
+        raise InvalidPayload
+    head = required_string(pull, "headRefOid")
+    base = required_string(pull, "baseRefOid")
+    if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head) is None:
+        raise InvalidPayload
+    if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", base) is None:
+        raise InvalidPayload
+    base_ref = required_string(pull, "baseRefName")
+    head_ref = required_string(pull, "headRefName")
+    state = required_string(pull, "state")
+    if type(pull["isDraft"]) is not bool or type(pull["merged"]) is not bool:
+        raise InvalidPayload
+    head_repository = pull["headRepository"]
+    if not isinstance(head_repository, dict) or set(head_repository) != {"nameWithOwner"}:
+        raise InvalidPayload
+    head_repo = required_string(head_repository, "nameWithOwner")
+    base_record = pull["baseRef"]
+    if not isinstance(base_record, dict) or set(base_record) != {"branchProtectionRule"}:
+        raise InvalidPayload
+    protection = base_record["branchProtectionRule"]
+    if protection is None:
+        protection_path, strict, admin = "unprotected", "absent", "absent"
+    elif isinstance(protection, dict) and set(protection) == {
+        "requiresStrictStatusChecks",
+        "isAdminEnforced",
+    }:
+        strict_value = protection["requiresStrictStatusChecks"]
+        admin_value = protection["isAdminEnforced"]
+        if type(strict_value) is not bool or type(admin_value) is not bool:
+            raise InvalidPayload
+        protection_path = "protected"
+        strict = str(strict_value).lower()
+        admin = str(admin_value).lower()
+    else:
+        raise InvalidPayload
+except (InvalidPayload, binascii.Error, json.JSONDecodeError, UnicodeDecodeError):
+    raise SystemExit(1)
+
+values = (
+    head,
+    base,
+    base_ref,
+    head_ref,
+    state,
+    str(pull["isDraft"]).lower(),
+    str(pull["merged"]).lower(),
+    head_repo,
+    protection_path,
+    strict,
+    admin,
+)
+print("\n".join(values))
+PY
 }
 
-api_field_value_allow_empty() {
-  local key=$1 payload=$2
-  printf '%s\n' "$payload" | awk -v key="$key" '
-    {
-      line = $0
-      sub(/^[[:space:]]*/, "", line)
-      prefix = key ":"
-      if (substr(line, 1, length(prefix)) != prefix) next
-      suffix = substr(line, length(prefix) + 1)
-      if (suffix != "" && substr(suffix, 1, 1) != " ") next
-      sub(/^ +/, "", suffix)
-      print suffix
-      exit
-    }
-  '
-}
+decode_github_scalar() {
+  python3 - "$1" <<'PY'
+import base64
+import binascii
+import re
+import sys
 
-read_branch_protection() {
-  local payload=$1 diagnose=${2:-1} protection_count strict_count admin_count protection
-  protection_count=$(api_field_count branchProtectionRule "$payload")
-  strict_count=$(api_field_count requiresStrictStatusChecks "$payload")
-  admin_count=$(api_field_count isAdminEnforced "$payload")
-  [ "$protection_count" -eq 1 ] \
-    || die "GitHub response contained malformed or ambiguous base branch protection data"
-  protection=$(api_field_value_allow_empty branchProtectionRule "$payload")
-  case "$protection" in
-    null)
-      [ "$strict_count" -eq 0 ] && [ "$admin_count" -eq 0 ] \
-        || die "GitHub response contained malformed or ambiguous base branch protection data"
-      GITHUB_PROTECTION_PATH=unprotected
-      if [ "$diagnose" -eq 1 ]; then
-        echo "diagnostic: GitHub reports branchProtectionRule: null; using the sanctioned unprotected repository path" >&2
-      fi
-      ;;
-    '')
-      [ "$strict_count" -eq 1 ] && [ "$admin_count" -eq 1 ] \
-        || die "GitHub response contained malformed or ambiguous base branch protection data"
-      GITHUB_STRICT=$(api_value requiresStrictStatusChecks "$payload")
-      GITHUB_ADMIN_ENFORCED=$(api_value isAdminEnforced "$payload")
-      GITHUB_PROTECTION_PATH=protected
-      ;;
-    *) die "GitHub response contained malformed or ambiguous base branch protection data" ;;
-  esac
+try:
+    lines = sys.argv[1].splitlines()
+    if len(lines) != 3 or lines[0] != "api_response:" or lines[2] != "  truncated: false":
+        raise ValueError
+    match = re.fullmatch(r"  body: ([A-Za-z0-9+/]+={0,2})", lines[1])
+    if match is None:
+        raise ValueError
+    value = base64.b64decode(match.group(1), validate=True).decode()
+    if "\n" in value or "\r" in value or not value:
+        raise ValueError
+except (ValueError, binascii.Error, UnicodeDecodeError):
+    raise SystemExit(1)
+print(value)
+PY
 }
 
 urlencode_ref() { python3 - "$1" <<'PY'
@@ -357,7 +417,7 @@ execute_local() {
 }
 
 execute_github() {
-  local query payload confirm_payload head base base_ref state draft merged recorded_pr recorded_head merge_output head_repo head_ref encoded_ref
+  local query payload pull_values confirm_payload confirm_values head base base_ref state draft merged recorded_pr recorded_head merge_output merge_result head_repo head_ref encoded_ref
   local confirm_head confirm_base confirm_base_ref confirm_state confirm_draft confirm_merged confirm_head_repo confirm_head_ref
   local protection_path protection_strict protection_admin
   [ "$MODE" = no-mistakes ] || [ "$MODE" = direct-PR ] || die "task $ID is mode=$MODE, not a PR merge mode"
@@ -370,45 +430,54 @@ execute_github() {
   recorded_head=$(meta_optional_value pr_head)
   [ "$recorded_pr" = "$URL" ] || die "task PR metadata does not match the requested PR"
   query="{repository(owner:\"$PR_OWNER\",name:\"$PR_REPO\"){pullRequest(number:$PR_NUMBER){headRefOid baseRefOid baseRefName headRefName state isDraft merged headRepository{nameWithOwner} baseRef{branchProtectionRule{requiresStrictStatusChecks isAdminEnforced}}}}}"
-  payload=$(gh-axi api POST /graphql --field "query=$query") || die "cannot read the exact GitHub merge candidate"
-  head=$(api_value headRefOid "$payload"); base=$(api_value baseRefOid "$payload"); base_ref=$(api_value baseRefName "$payload")
-  head_ref=$(api_value headRefName "$payload"); head_repo=$(api_value nameWithOwner "$payload"); state=$(api_value state "$payload")
-  draft=$(api_value isDraft "$payload"); merged=$(api_value merged "$payload")
-  read_branch_protection "$payload"
-  protection_path=$GITHUB_PROTECTION_PATH
-  protection_strict=${GITHUB_STRICT:-}
-  protection_admin=${GITHUB_ADMIN_ENFORCED:-}
+  payload=$(gh-axi api POST /graphql --field "query=$query" --jq '.data.repository.pullRequest | @base64') \
+    || die "cannot read the exact GitHub merge candidate"
+  pull_values=$(decode_github_pull "$payload") \
+    || die "GitHub response contained malformed or ambiguous pull request data"
+  head=$(printf '%s\n' "$pull_values" | sed -n '1p'); base=$(printf '%s\n' "$pull_values" | sed -n '2p')
+  base_ref=$(printf '%s\n' "$pull_values" | sed -n '3p'); head_ref=$(printf '%s\n' "$pull_values" | sed -n '4p')
+  state=$(printf '%s\n' "$pull_values" | sed -n '5p'); draft=$(printf '%s\n' "$pull_values" | sed -n '6p')
+  merged=$(printf '%s\n' "$pull_values" | sed -n '7p'); head_repo=$(printf '%s\n' "$pull_values" | sed -n '8p')
+  protection_path=$(printf '%s\n' "$pull_values" | sed -n '9p')
+  protection_strict=$(printf '%s\n' "$pull_values" | sed -n '10p')
+  protection_admin=$(printf '%s\n' "$pull_values" | sed -n '11p')
+  if [ "$protection_path" = unprotected ]; then
+    echo "diagnostic: GitHub reports branchProtectionRule: null; using the sanctioned unprotected repository path" >&2
+  fi
   [ "$state" = OPEN ] && [ "$draft" = false ] && [ "$merged" = false ] || die "GitHub pull request is not an open, mergeable candidate"
   [ -z "$recorded_head" ] || fm_pr_head_valid "$recorded_head" || die "task PR head metadata is invalid"
   [ -z "$recorded_head" ] || [ "$recorded_head" = "$head" ] || die "task PR head metadata does not match the current GitHub head"
   [ "$(git -C "$WORKTREE" rev-parse HEAD)" = "$head" ] || die "task worktree HEAD does not match the current GitHub PR head"
   git -C "$WORKTREE" cat-file -e "$base^{commit}" 2>/dev/null || git -C "$WORKTREE" fetch --quiet "https://github.com/$PR_OWNER/$PR_REPO.git" "$base"
   git -C "$WORKTREE" merge-base --is-ancestor "$base" "$head" || die "GitHub PR head does not contain the current base; update the branch and retry"
-  if [ "$GITHUB_PROTECTION_PATH" = protected ]; then
-    [ "$GITHUB_STRICT" = true ] && [ "$GITHUB_ADMIN_ENFORCED" = true ] \
+  if [ "$protection_path" = protected ]; then
+    [ "$protection_strict" = true ] && [ "$protection_admin" = true ] \
       || die "exact GitHub merge execution requires strict, admin-enforced base branch protection"
   fi
   "$SCRIPT_DIR/fm-test-inventory.sh" merge-check "$WORKTREE" "$head" "$base"
-  confirm_payload=$(gh-axi api POST /graphql --field "query=$query") \
+  confirm_payload=$(gh-axi api POST /graphql --field "query=$query" --jq '.data.repository.pullRequest | @base64') \
     || die "cannot confirm the exact GitHub merge candidate"
-  confirm_head=$(api_value headRefOid "$confirm_payload"); confirm_base=$(api_value baseRefOid "$confirm_payload")
-  confirm_base_ref=$(api_value baseRefName "$confirm_payload"); confirm_head_ref=$(api_value headRefName "$confirm_payload")
-  confirm_head_repo=$(api_value nameWithOwner "$confirm_payload"); confirm_state=$(api_value state "$confirm_payload")
-  confirm_draft=$(api_value isDraft "$confirm_payload"); confirm_merged=$(api_value merged "$confirm_payload")
-  read_branch_protection "$confirm_payload" 0
+  confirm_values=$(decode_github_pull "$confirm_payload") \
+    || die "GitHub response contained malformed or ambiguous pull request data"
+  confirm_head=$(printf '%s\n' "$confirm_values" | sed -n '1p'); confirm_base=$(printf '%s\n' "$confirm_values" | sed -n '2p')
+  confirm_base_ref=$(printf '%s\n' "$confirm_values" | sed -n '3p'); confirm_head_ref=$(printf '%s\n' "$confirm_values" | sed -n '4p')
+  confirm_state=$(printf '%s\n' "$confirm_values" | sed -n '5p'); confirm_draft=$(printf '%s\n' "$confirm_values" | sed -n '6p')
+  confirm_merged=$(printf '%s\n' "$confirm_values" | sed -n '7p'); confirm_head_repo=$(printf '%s\n' "$confirm_values" | sed -n '8p')
   [ "$confirm_head" = "$head" ] && [ "$confirm_base" = "$base" ] \
     && [ "$confirm_base_ref" = "$base_ref" ] && [ "$confirm_head_ref" = "$head_ref" ] \
     && [ "$confirm_head_repo" = "$head_repo" ] && [ "$confirm_state" = "$state" ] \
     && [ "$confirm_draft" = "$draft" ] && [ "$confirm_merged" = "$merged" ] \
-    && [ "$GITHUB_PROTECTION_PATH" = "$protection_path" ] \
-    && [ "${GITHUB_STRICT:-}" = "$protection_strict" ] \
-    && [ "${GITHUB_ADMIN_ENFORCED:-}" = "$protection_admin" ] \
+    && [ "$(printf '%s\n' "$confirm_values" | sed -n '9p')" = "$protection_path" ] \
+    && [ "$(printf '%s\n' "$confirm_values" | sed -n '10p')" = "$protection_strict" ] \
+    && [ "$(printf '%s\n' "$confirm_values" | sed -n '11p')" = "$protection_admin" ] \
     || die "GitHub pull request identity or exact candidate changed during merge verification"
   require_clean "$WORKTREE" "task worktree"
   require_clean "$PROJECT" "project checkout"
   [ "$(git -C "$WORKTREE" rev-parse HEAD)" = "$head" ] || die "task worktree HEAD changed during merge verification"
-  merge_output=$(gh-axi api PUT "/repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER/merge" --field "sha=$head" --field "merge_method=$MERGE_METHOD") || die "GitHub rejected the exact conditional merge"
-  [ "$(api_value merged "$merge_output")" = true ] || die "GitHub did not merge the verified candidate"
+  merge_output=$(gh-axi api PUT "/repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER/merge" --field "sha=$head" --field "merge_method=$MERGE_METHOD" --jq '.merged | tostring | @base64') \
+    || die "GitHub rejected the exact conditional merge"
+  merge_result=$(decode_github_scalar "$merge_output") || die "GitHub returned malformed merge confirmation data"
+  [ "$merge_result" = true ] || die "GitHub did not merge the verified candidate"
   if [ "$DELETE_BRANCH" -eq 1 ]; then
     [ "$head_repo" = "$PR_OWNER/$PR_REPO" ] || die "PR merged, but cross-repository head deletion is unsupported"
     encoded_ref=$(urlencode_ref "$head_ref")
