@@ -714,18 +714,102 @@ test_composer_state_prefers_trusted_exit_over_shell_prompt() {
   pass "fm_backend_zellij_composer_state: trusted lifecycle state proves exit independently of pane layout"
 }
 
-test_agent_state_maps_only_marker_proven_exit_to_dead() {
-  local state out
-  for state in idle composing submitted exited ambiguous unreachable; do
-    out=$(FM_ZELLIJ_TEST_STATE="$state" bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_composer_state() { printf "%s" "$FM_ZELLIJ_TEST_STATE"; }; fm_backend_zellij_agent_state firstmate:7 fm-fixture' "$ROOT")
+test_endpoint_evidence_recovery_matrix() {
+  local dir fb out title nonce
+  dir="$TMP_ROOT/endpoint-evidence"; mkdir -p "$dir/responses" "$dir/state"
+  title=$(zellij_expected_scoped_title fm-fixture)
+  fb=$(make_zellij_fakebin "$dir")
+
+  # Healthy task: every durable identity component agrees, then the known
+  # empty composer is independently observed through the screen capture.
+  zellij_pane_response "$dir" 1 7 3
+  zellij_tab_response "$dir" 2 3 "$title"
+  cp "$ROOT/tests/fixtures/zellij-composer-state/idle.txt" "$dir/responses/3.out"
+  out=$(PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST=firstmate FM_STATE_OVERRIDE="$dir/state" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_endpoint_evidence firstmate:7 fm-fixture 3' "$ROOT")
+  [ "$out" = $'state=live\nprovenance=endpoint-identity+screen-composer' ] \
+    || fail "a healthy Zellij task should have typed live evidence, got '$out'"
+
+  # Exited task: a matching nonce receipt alone is insufficient until the
+  # recorded ghost tab is still bound to this home's task identity.
+  rm -f "$dir/responses/.count" "$dir/responses/3.out"
+  printf '[]\n' > "$dir/responses/1.out"
+  zellij_tab_response "$dir" 2 3 "$title"
+  nonce=$(FM_STATE_OVERRIDE="$dir/state" fm_backend_zellij_lifecycle_arm fm-fixture) || fail "could not arm lifecycle fixture"
+  printf '%s 0\n' "$nonce" > "$dir/state/fixture.zellij-exited"
+  out=$(PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST=firstmate FM_STATE_OVERRIDE="$dir/state" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_endpoint_evidence firstmate:7 fm-fixture 3' "$ROOT")
+  [ "$out" = $'state=exited\nprovenance=nonce-receipt+ghost-tab' ] \
+    || fail "a nonce-proven ghost tab should have typed exited evidence, got '$out'"
+
+  # An absent pane plus no matching task tab is authoritatively missing, not a
+  # guessed exit or a legacy shell state.
+  rm -f "$dir/responses/.count" "$dir/state/fixture.zellij-exited"
+  printf '[]\n' > "$dir/responses/1.out"
+  printf '[]\n' > "$dir/responses/2.out"
+  out=$(PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST=firstmate FM_STATE_OVERRIDE="$dir/state" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_endpoint_evidence firstmate:7 fm-fixture 3' "$ROOT")
+  [ "$out" = $'state=missing\nprovenance=terminal-pane-and-task-tab-inventory' ] \
+    || fail "a missing task tab should have typed missing evidence, got '$out'"
+
+  # A stale pane id can still exist after a session churn. Its tab disagreement
+  # is an identity conflict, never a replacement candidate.
+  rm -f "$dir/responses/.count"
+  zellij_pane_response "$dir" 1 7 9
+  zellij_tab_response "$dir" 2 9 not-the-task
+  out=$(PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST=firstmate FM_STATE_OVERRIDE="$dir/state" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_endpoint_evidence firstmate:7 fm-fixture 3' "$ROOT")
+  [ "$out" = $'state=ambiguous\nprovenance=recorded-pane-tab-conflict' ] \
+    || fail "a stale pane id should remain ambiguous, got '$out'"
+
+  # A recreated session can reuse both numeric ids. The home-scoped label is
+  # the remaining durable identity and must reject that collision.
+  rm -f "$dir/responses/.count"
+  zellij_pane_response "$dir" 1 7 3
+  zellij_tab_response "$dir" 2 3 foreign-task
+  out=$(PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST=firstmate FM_STATE_OVERRIDE="$dir/state" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_endpoint_evidence firstmate:7 fm-fixture 3' "$ROOT")
+  [ "$out" = $'state=ambiguous\nprovenance=pane-tab-label-conflict' ] \
+    || fail "a reused session should remain ambiguous, got '$out'"
+
+  # Control surfaces that cannot provide a typed inventory stay unreachable.
+  rm -f "$dir/responses/.count"
+  printf '{not-json}\n' > "$dir/responses/1.out"
+  out=$(PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST=firstmate FM_STATE_OVERRIDE="$dir/state" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_endpoint_evidence firstmate:7 fm-fixture 3' "$ROOT")
+  [ "$out" = $'state=unreachable\nprovenance=malformed-pane-inventory' ] \
+    || fail "a malformed response should remain unreachable, got '$out'"
+
+  rm -f "$dir/responses/.count" "$dir/responses/1.out"
+  printf '1\n' > "$dir/responses/1.exit"
+  out=$(PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST=firstmate FM_STATE_OVERRIDE="$dir/state" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_endpoint_evidence firstmate:7 fm-fixture 3' "$ROOT")
+  [ "$out" = $'state=unreachable\nprovenance=pane-inventory' ] \
+    || fail "an unreadable control surface should remain unreachable, got '$out'"
+  pass "fm_backend_zellij_endpoint_evidence: distinguishes live, exited, missing, ambiguous, and unreachable recovery observations"
+}
+
+test_agent_state_translates_evidence_without_authorizing_uncertainty() {
+  local state expected out
+  for state in live exited missing ambiguous unreachable; do
     case "$state" in
-      idle|composing|submitted) [ "$out" = alive ] || fail "$state should map to alive, got $out" ;;
-      exited) [ "$out" = dead ] || fail "exited should map to dead, got $out" ;;
-      ambiguous) [ "$out" = ambiguous ] || fail "ambiguous should remain ambiguous, got $out" ;;
-      unreachable) [ "$out" = unreadable ] || fail "unreachable should remain non-actionable, got $out" ;;
+      live) expected=alive ;;
+      exited) expected=dead ;;
+      missing) expected=missing ;;
+      ambiguous) expected=ambiguous ;;
+      unreachable) expected=unreadable ;;
     esac
+    out=$(FM_ZELLIJ_TEST_STATE="$state" bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_endpoint_evidence() { printf "state=%s\\nprovenance=fixture\\n" "$FM_ZELLIJ_TEST_STATE"; }; fm_backend_zellij_agent_state firstmate:7 fm-fixture 3' "$ROOT")
+    [ "$out" = "$expected" ] || fail "$state should map to $expected, got $out"
   done
-  pass "fm_backend_zellij_agent_state: only the task-bound exited state licenses recovery"
+  pass "fm_backend_zellij_agent_state: preserves the evidence owner's non-actionable uncertainty"
 }
 
 test_send_key_normalizes_and_targets_pane() {
@@ -1257,7 +1341,8 @@ test_composer_state_reports_unreachable_target
 test_lifecycle_wrapper_publishes_nonce_bound_exit
 test_lifecycle_state_rejects_stale_and_malformed_receipts
 test_composer_state_prefers_trusted_exit_over_shell_prompt
-test_agent_state_maps_only_marker_proven_exit_to_dead
+test_endpoint_evidence_recovery_matrix
+test_agent_state_translates_evidence_without_authorizing_uncertainty
 test_send_key_normalizes_and_targets_pane
 test_send_literal_uses_paste_separator_for_option_shaped_text
 test_send_text_line_clears_partial_input_when_enter_fails

@@ -469,6 +469,11 @@ tests/fm-backend-zellij-smoke.test.sh
 The earlier real lifecycle smoke proved spawn, metadata, nested-subshell worktree discovery, send, capture, unlanded-work refusal, approved local landing, exact tab cleanup, and session cleanup without retaining task-specific ids or branch names here.
 It predates the current full-capture composer-layout classifier and does not verify that classifier's live rendered rows.
 
+The portable fake-CLI regression added on 2026-08-08 executes the recovery evidence matrix through `fm_backend_zellij_endpoint_evidence`.
+It proves the stable state and provenance outputs for a healthy endpoint, nonce-proven exit ghost, missing tab, stale pane, reused session identity, malformed JSON response, and unreadable pane inventory, then proves startup refuses malformed durable Zellij identity before runtime probing or respawn.
+No real Zellij session was changed for that regression.
+The remaining live-verification gap is one isolated non-`firstmate` session on a current supported Zellij release that reproduces the same read-only `list-sessions`, `list-panes --json`, `list-tabs --json`, and `dump-screen` observation paths against a supported harness, including a safe harness exit that writes the nonce receipt.
+
 ## Orca
 
 Real readiness was verified against `/usr/local/bin/orca` with `/Applications/Orca.app` bundle version 1.4.116.

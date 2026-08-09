@@ -502,7 +502,7 @@ secondmate_liveness_sweep() {
   # primary-only no-op there. Mid-session liveness remains explicitly out of
   # scope and requires a separate periodic signal.
   [ -d "$STATE" ] || return 0
-  local meta id window harness backend target agent_state out cause remote_host remote_rc readiness_reason route_out remote_backend
+  local meta id window harness backend target agent_state out cause remote_host remote_rc readiness_reason route_out remote_backend zellij_tab_id
   SECONDMATE_RESPAWNED_IDS=""
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
@@ -581,7 +581,19 @@ secondmate_liveness_sweep() {
     backend=$(fm_backend_of_meta "$meta")
     target=$(fm_backend_target_of_meta "$meta")
     [ -n "$target" ] || target="$window"
-    agent_state=$(fm_backend_agent_state "$backend" "$target" "fm-$id" 2>/dev/null) || agent_state=unreadable
+    zellij_tab_id=
+    if [ "$backend" = zellij ]; then
+      if ! fm_backend_validate_task_endpoint "$meta" "$id" >/dev/null 2>&1; then
+        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: Zellij endpoint identity metadata is stale, malformed, or contradictory; preserving task state"
+        continue
+      fi
+      target=$FM_BACKEND_VALIDATED_TARGET
+      zellij_tab_id=$(fm_backend_meta_exact_value "$meta" zellij_tab_id) || {
+        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: Zellij recorded tab identity is unreadable; preserving task state"
+        continue
+      }
+    fi
+    agent_state=$(fm_backend_agent_state "$backend" "$target" "fm-$id" "$zellij_tab_id" 2>/dev/null) || agent_state=unreadable
     case "$harness" in
       claude|codex|opencode|pi|pi-signed|grok|kimi) ;;
       *)

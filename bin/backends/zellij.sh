@@ -661,14 +661,153 @@ fm_backend_zellij_composer_state() {  # <target> [typed-baseline] [expected-labe
   printf '%s' "$after"
 }
 
-# fm_backend_zellij_agent_state: map the shared Zellij composer/lifecycle
-# vocabulary into fm_backend_agent_state's recovery vocabulary. Only an
-# authenticated nonce-bound exit receipt licenses recovery; unreachable and
-# unknown layouts remain non-actionable.
-fm_backend_zellij_agent_state() {  # <target> [expected-label]
-  case "$(fm_backend_zellij_composer_state "$1" '' "${2:-}")" in
-    idle|composing|submitted) printf 'alive' ;;
+# fm_backend_zellij_endpoint_evidence: read-only recovery observation for one
+# recorded endpoint. It prints exactly two stable key-value lines:
+#   state=live|exited|missing|ambiguous|unreachable
+#   provenance=<structural source>
+#
+# The expected tab id is durable metadata, not an optional convenience for
+# recovery. A live pane is accepted only when its owning tab still has the
+# expected home-scoped (or uniquely legacy) label and, when supplied, the same
+# recorded tab id. A nonce receipt is considered only after that identity
+# check. This makes a recreated session, reused pane id, stale tab id, or
+# malformed control surface non-actionable instead of confusing it with an
+# absent task.
+fm_backend_zellij_endpoint_evidence() {  # <target> [expected-label] [expected-tab-id]
+  local target=$1 expected_label=${2:-} expected_tab=${3:-}
+  local session pane sessions panes tabs pane_count pane_tab tab_count tab_name
+  local label_count scoped lifecycle capture layout
+
+  fm_backend_zellij_parse_target "$target" || {
+    printf 'state=unreachable\nprovenance=malformed-target\n'
+    return 0
+  }
+  session=$FM_BACKEND_ZELLIJ_SESSION
+  pane=$FM_BACKEND_ZELLIJ_PANE
+  case "$session:$pane" in
+    *[!A-Za-z0-9._@%+:-]*|*::*|:*|*:) printf 'state=unreachable\nprovenance=malformed-target\n'; return 0 ;;
+  esac
+  case "$pane" in *[!0-9]*|'') printf 'state=unreachable\nprovenance=malformed-target\n'; return 0 ;; esac
+  if [ -n "$expected_tab" ]; then
+    case "$expected_tab" in *[!0-9]*) printf 'state=unreachable\nprovenance=malformed-recorded-tab\n'; return 0 ;; esac
+  fi
+  if [ -n "$expected_label" ]; then
+    case "$expected_label" in fm-?*) ;; *) printf 'state=unreachable\nprovenance=malformed-task-label\n'; return 0 ;; esac
+  fi
+
+  sessions=$(zellij list-sessions --short --no-formatting 2>/dev/null) || {
+    printf 'state=unreachable\nprovenance=session-inventory\n'
+    return 0
+  }
+  if ! printf '%s\n' "$sessions" | grep -qxF "$session"; then
+    printf 'state=missing\nprovenance=session-inventory\n'
+    return 0
+  fi
+  panes=$(fm_backend_zellij_cli "$session" action list-panes --json 2>/dev/null) || {
+    printf 'state=unreachable\nprovenance=pane-inventory\n'
+    return 0
+  }
+  if ! printf '%s' "$panes" | jq -e 'type == "array" and all(.[]; type == "object" and (.id | type == "number") and (.tab_id | type == "number") and (.is_plugin | type == "boolean"))' >/dev/null 2>&1; then
+    printf 'state=unreachable\nprovenance=malformed-pane-inventory\n'
+    return 0
+  fi
+  tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null) || {
+    printf 'state=unreachable\nprovenance=tab-inventory\n'
+    return 0
+  }
+  if ! printf '%s' "$tabs" | jq -e 'type == "array" and all(.[]; type == "object" and (.tab_id | type == "number") and (.name | type == "string"))' >/dev/null 2>&1; then
+    printf 'state=unreachable\nprovenance=malformed-tab-inventory\n'
+    return 0
+  fi
+
+  pane_count=$(printf '%s' "$panes" | jq -r --argjson p "$pane" '[.[] | select(.id == $p and .is_plugin == false)] | length')
+  if [ "$pane_count" = 0 ]; then
+    if [ -z "$expected_label" ]; then
+      printf 'state=missing\nprovenance=terminal-pane-inventory\n'
+      return 0
+    fi
+    scoped=$(fm_backend_zellij_scoped_title "$expected_label")
+    if [ -n "$expected_tab" ]; then
+      tab_count=$(printf '%s' "$tabs" | jq -r --argjson t "$expected_tab" '[.[] | select(.tab_id == $t)] | length')
+      if [ "$tab_count" = 1 ]; then
+        tab_name=$(printf '%s' "$tabs" | jq -r --argjson t "$expected_tab" '.[] | select(.tab_id == $t) | .name')
+        if [ "$tab_name" != "$scoped" ]; then
+          label_count=$(printf '%s' "$tabs" | jq -r --arg want "$expected_label" '[.[] | select(.name == $want)] | length')
+          if [ "$tab_name" != "$expected_label" ] || [ "$label_count" != 1 ]; then
+            printf 'state=ambiguous\nprovenance=recorded-tab-label-conflict\n'
+            return 0
+          fi
+        fi
+        lifecycle=$(fm_backend_zellij_lifecycle_state "$expected_label")
+        case "$lifecycle" in
+          exited) printf 'state=exited\nprovenance=nonce-receipt+ghost-tab\n' ;;
+          unknown) printf 'state=ambiguous\nprovenance=invalid-lifecycle-receipt\n' ;;
+          *) printf 'state=ambiguous\nprovenance=unproven-ghost-tab\n' ;;
+        esac
+        return 0
+      fi
+    fi
+    label_count=$(printf '%s' "$tabs" | jq -r --arg scoped "$scoped" --arg legacy "$expected_label" '[.[] | select(.name == $scoped or .name == $legacy)] | length')
+    if [ "$label_count" = 0 ]; then
+      printf 'state=missing\nprovenance=terminal-pane-and-task-tab-inventory\n'
+    else
+      printf 'state=ambiguous\nprovenance=recorded-tab-missing-but-label-reused\n'
+    fi
+    return 0
+  fi
+  if [ "$pane_count" != 1 ]; then
+    printf 'state=ambiguous\nprovenance=duplicate-terminal-pane-id\n'
+    return 0
+  fi
+
+  pane_tab=$(printf '%s' "$panes" | jq -r --argjson p "$pane" '.[] | select(.id == $p and .is_plugin == false) | .tab_id')
+  if [ -n "$expected_tab" ] && [ "$pane_tab" != "$expected_tab" ]; then
+    printf 'state=ambiguous\nprovenance=recorded-pane-tab-conflict\n'
+    return 0
+  fi
+  tab_count=$(printf '%s' "$tabs" | jq -r --argjson t "$pane_tab" '[.[] | select(.tab_id == $t)] | length')
+  if [ "$tab_count" != 1 ]; then
+    printf 'state=ambiguous\nprovenance=pane-tab-inventory-conflict\n'
+    return 0
+  fi
+  if [ -n "$expected_label" ]; then
+    tab_name=$(printf '%s' "$tabs" | jq -r --argjson t "$pane_tab" '.[] | select(.tab_id == $t) | .name')
+    scoped=$(fm_backend_zellij_scoped_title "$expected_label")
+    if [ "$tab_name" != "$scoped" ]; then
+      label_count=$(printf '%s' "$tabs" | jq -r --arg want "$expected_label" '[.[] | select(.name == $want)] | length')
+      if [ "$tab_name" != "$expected_label" ] || [ "$label_count" != 1 ]; then
+        printf 'state=ambiguous\nprovenance=pane-tab-label-conflict\n'
+        return 0
+      fi
+    fi
+    lifecycle=$(fm_backend_zellij_lifecycle_state "$expected_label")
+    case "$lifecycle" in
+      exited) printf 'state=exited\nprovenance=nonce-receipt+endpoint-identity\n'; return 0 ;;
+      unknown) printf 'state=ambiguous\nprovenance=invalid-lifecycle-receipt\n'; return 0 ;;
+    esac
+  fi
+  capture=$(fm_backend_zellij_cli "$session" action dump-screen --pane-id "$pane" 2>/dev/null) || {
+    printf 'state=unreachable\nprovenance=screen-capture\n'
+    return 0
+  }
+  layout=$(fm_backend_zellij_composer_layout_state "$capture" "$expected_label")
+  case "$layout" in
+    idle|composing) printf 'state=live\nprovenance=endpoint-identity+screen-composer\n' ;;
+    *) printf 'state=ambiguous\nprovenance=endpoint-identity+unrecognized-screen\n' ;;
+  esac
+}
+
+# fm_backend_zellij_agent_state: translate the evidence owner's vocabulary to
+# fm_backend_agent_state's recovery vocabulary. `unreachable` deliberately
+# maps to the generic caller's `unreadable` compatibility state.
+fm_backend_zellij_agent_state() {  # <target> [expected-label] [expected-tab-id]
+  local evidence state
+  evidence=$(fm_backend_zellij_endpoint_evidence "$1" "${2:-}" "${3:-}")
+  state=$(printf '%s\n' "$evidence" | sed -n 's/^state=//p')
+  case "$state" in
+    live) printf 'alive' ;;
     exited) printf 'dead' ;;
+    missing) printf 'missing' ;;
     ambiguous) printf 'ambiguous' ;;
     unreachable|*) printf 'unreadable' ;;
   esac

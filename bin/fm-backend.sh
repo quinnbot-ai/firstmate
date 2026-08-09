@@ -888,16 +888,17 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 # Only `dead` and `missing` license recovery. The tmux adapter requires a
 # successful session inventory and returns `missing` only when it omits the
 # exact window; the Herdr adapter reuses its husk classifier. Zellij accepts
-# only its authenticated nonce-bound exit receipt as dead proof; a missing
-# screen or an unknown layout remains unreadable. Orca and cmux do not support
-# secondmate spawns.
-fm_backend_agent_state() {  # <backend> <target> [expected-label]
-  local backend=$1 target=$2 expected_label=${3:-}
+# only its authenticated nonce-bound exit receipt as dead proof. Its evidence
+# owner preserves missing, identity ambiguity, and unreachable control surfaces
+# before this generic compatibility boundary maps the last to unreadable. Orca
+# and cmux do not support secondmate spawns.
+fm_backend_agent_state() {  # <backend> <target> [expected-label] [expected-tab-id]
+  local backend=$1 target=$2 expected_label=${3:-} expected_tab_id=${4:-}
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }
   case "$backend" in
     tmux) fm_backend_tmux_agent_state "$target" ;;
     herdr) fm_backend_herdr_agent_state "$target" ;;
-    zellij) fm_backend_zellij_agent_state "$target" "$expected_label" ;;
+    zellij) fm_backend_zellij_agent_state "$target" "$expected_label" "$expected_tab_id" ;;
     *) printf 'unverified' ;;
   esac
 }

@@ -359,6 +359,9 @@ add_sm_home() {
   printf 'charter\n' > "$home/data/charter.md"
   {
     printf 'window=%s\n' "$window"
+    printf 'endpoint_task_id=%s\n' "$id"
+    printf 'worktree=%s\n' "$home/worktree"
+    printf 'project=%s\n' "$home/projects/fixture"
     printf 'kind=secondmate\n'
     printf 'harness=%s\n' "$harness"
     printf 'home=%s\n' "$home"
@@ -435,6 +438,38 @@ SH
   assert_not_contains "$(cat "$log")" "action close-pane" \
     "the recovery sweep should use the verified recorded tab instead of a missing pane"
   pass "sweep: closes a marker-proven Zellij ghost tab before respawn"
+}
+
+test_sweep_refuses_malformed_zellij_identity_before_probe_or_respawn() {
+  local w fb zellijfb log out fake_root
+  w=$(new_world sweep-zellij-invalid-identity)
+  add_sm_home "$w" sm1 firstmate:7 codex
+  {
+    printf '%s\n' 'backend=zellij'
+    printf '%s\n' 'zellij_session=firstmate'
+    printf '%s\n' 'zellij_tab_id=3'
+    printf '%s\n' 'zellij_tab_id=9'
+    printf '%s\n' 'zellij_pane_id=7'
+  } >> "$w/home/state/sm1.meta"
+  fake_root="$w/root"
+  mkdir -p "$fake_root/bin"
+  cat > "$fake_root/bin/fm-spawn.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'spawn\n' >> "${FM_ZELLIJ_CALL_LOG:?}"
+SH
+  chmod +x "$fake_root/bin/fm-spawn.sh"
+  fb=$(make_toolchain "$w"); zellijfb=$(make_liveness_zellij "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap_zellij "$zellijfb:$fb" "$w/home" "$fake_root" "$log")
+
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: skipped: Zellij endpoint identity metadata is stale, malformed, or contradictory" \
+    "malformed Zellij identity metadata must prevent recovery"
+  assert_not_contains "$(cat "$log")" "action list-panes" \
+    "invalid Zellij metadata must refuse before probing a potentially reused endpoint"
+  assert_not_contains "$(cat "$log")" "spawn" \
+    "invalid Zellij metadata must never respawn a secondmate"
+  pass "sweep: malformed Zellij identity refuses before any endpoint probe or recovery action"
 }
 
 test_sweep_leaves_alive_secondmate_untouched() {
@@ -613,6 +648,7 @@ test_herdr_agent_state_preserves_husk_classifier
 test_agent_state_dispatcher_and_compatibility
 test_sweep_respawns_confirmed_dead_secondmate
 test_sweep_closes_recorded_zellij_ghost_tab_before_respawn
+test_sweep_refuses_malformed_zellij_identity_before_probe_or_respawn
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_respawns_authoritatively_missing_pi_secondmate
 test_sweep_respawns_authoritatively_missing_pi_signed_secondmate

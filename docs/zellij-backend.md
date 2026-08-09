@@ -82,6 +82,8 @@ It emits `idle`, `composing`, `submitted`, `exited`, `ambiguous`, or `unreachabl
 Only a known empty composer is idle, only a known typed composer is composing, and submitted requires a composing baseline followed by a changed known idle layout.
 Spawn arms a per-launch random nonce in private lifecycle state and wraps each Zellij harness command so its return publishes a matching exit receipt.
 Only a receipt matching the current launch nonce proves exited for recovery; the visible task-bound marker is diagnostic and never lifecycle authority.
+Recovery reads the typed endpoint evidence emitted by `fm_backend_zellij_endpoint_evidence` in [`bin/backends/zellij.sh`](../bin/backends/zellij.sh), which preserves live, exited, missing, ambiguous, and unreachable observations with their structural provenance.
+Before startup recovery accepts that evidence, it validates the durable task binding and recorded session, tab, and pane metadata, while the evidence probe confirms the current home-scoped tab identity.
 The presentation parser scans the full capture for the bottom-most supported composer row, so a lower box border or footer does not hide a known idle or composing layout, while a later raw shell prompt invalidates the candidate.
 Unknown layouts, raw shell prompts, absent sessions, unreadable panes, and visible exit-marker text never become delivery or recovery proof.
 
@@ -92,6 +94,7 @@ A short viewport may expose fewer lines than requested.
 Closing a pane leaves an empty tab.
 Cleanup resolves and verifies the owning tab, then uses `close-tab-by-id` so both the task pane and tab disappear.
 During session-start secondmate recovery, a nonce-proven exit reuses the recorded tab id plus expected task label to close an empty ghost tab before respawning, while every inconclusive state remains untouched.
+An absent recorded task tab is missing and may be respawned, while a stale pane, reused session, duplicate legacy title, malformed response, unreadable control surface, or contradictory metadata remains non-actionable.
 Real test cleanup uses only an isolated non-`firstmate` session and the guard in `tests/zellij-test-safety.sh`; it never calls all-session deletion commands.
 
 ## Active limits
@@ -101,7 +104,7 @@ Real test cleanup uses only an isolated non-`firstmate` session and the guard in
 - There is no native busy or push-event signal, so supervision uses capture/hash polling for screen changes and each harness adapter's semantic lifecycle for worker state.
   Grok alone retains its isolated rendered-tail fallback.
 - There is no native agent-process liveness signal.
-  Recovery accepts only the nonce-bound private exit receipt emitted by the spawn wrapper, and leaves every other Zellij state inconclusive.
+  Recovery uses a nonce-bound private exit receipt only for exit proof, structurally proves an absent task tab before treating it as missing, and leaves every other uncertain observation untouched.
 - New-tab focus restoration has a narrow visible race.
 - CLI exit status is not meaningful; a target can still disappear after structural readiness checks.
 - Worktree cwd discovery requires the spawn-time marker probe.
