@@ -1148,6 +1148,34 @@ assert record["transition_ordinal"] == 2
 PY
 }
 
+assert_journal_run() {
+  local path=$1 expected_state=$2 expected_exit=$3 expected_jobs=$4 worker_prefix=$5
+  shift 5
+  python3 - "$path" "$expected_state" "$expected_exit" "$expected_jobs" "$worker_prefix" "$@" <<'PY'
+import json
+import sys
+
+path, expected_state, expected_exit, expected_jobs, worker_prefix, *scripts = sys.argv[1:]
+with open(path, encoding="utf-8") as fh:
+    record = json.load(fh)
+expected_workers = [
+    {"worker_id": "%s-%s" % (worker_prefix, index), "script": script}
+    for index, script in enumerate(scripts, start=1)
+]
+assert record["schema"] == 1
+assert record["state"] == expected_state
+assert record["run_id"]
+assert record["runner_pid"] > 0
+assert record["started_at"]
+assert record["finished_at"]
+assert record["selection"]
+assert record["jobs"] == int(expected_jobs)
+assert record["planned_worker_count"] == len(scripts)
+assert record["planned_workers"] == expected_workers
+assert record["exit"] == int(expected_exit)
+PY
+}
+
 test_progress_journal_terminal_transitions_and_atomic_state() {
   local tmp journal slow fail_f timeout_f run_dir
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-progress.XXXXXX")
@@ -1190,9 +1218,10 @@ with open(os.path.join(root, "out"), "w", encoding="utf-8") as out, open(os.path
     deadline = time.monotonic() + 3
     parsed = False
     while child.poll() is None:
-        states = glob.glob(os.path.join(journal, "runs", "*", "states", "serial-1.json"))
-        for state_path in states:
-            with open(state_path, encoding="utf-8") as fh:
+        records = glob.glob(os.path.join(journal, "runs", "*", "run.json"))
+        records += glob.glob(os.path.join(journal, "runs", "*", "states", "serial-1.json"))
+        for record_path in records:
+            with open(record_path, encoding="utf-8") as fh:
                 json.load(fh)
             parsed = True
         if time.monotonic() >= deadline:
@@ -1213,6 +1242,8 @@ PY
     || { rm -rf "$tmp"; fail "serial failure state missing"; }
   assert_journal_state "$run_dir/states/serial-3.json" timed-out serial-3 \
     || { rm -rf "$tmp"; fail "serial timeout state missing"; }
+  assert_journal_run "$run_dir/run.json" failed 1 1 serial "$slow" "$fail_f" "$timeout_f" \
+    || { rm -rf "$tmp"; fail "failed run did not preserve its selected plan"; }
   [ -f "$run_dir/events/serial-1.1.started.json" ] \
     && [ -f "$run_dir/events/serial-1.2.passed.json" ] \
     && [ -f "$run_dir/events/serial-2.2.failed.json" ] \
@@ -1258,6 +1289,9 @@ SH
     || { rm -rf "$tmp"; fail "parallel worker one state missing"; }
   assert_journal_state "$run_dir/states/parallel-2.json" passed parallel-2 \
     || { rm -rf "$tmp"; fail "parallel worker two state missing"; }
+  assert_journal_run "$run_dir/run.json" passed 0 2 parallel \
+    tests/fm-brief.test.sh tests/fm-composer-lib.test.sh \
+    || { rm -rf "$tmp"; fail "parallel run did not finalize its selected plan"; }
   rm -rf "$tmp"
   pass "progress journal preserves concurrent worker transitions"
 }
@@ -1310,8 +1344,76 @@ SH
     || { rm -rf "$tmp"; fail "abrupt interrupt was not journaled"; }
   [ -f "$run_dir/events/serial-1.2.interrupted.json" ] \
     || { rm -rf "$tmp"; fail "interrupted transition was not preserved"; }
+  assert_journal_run "$run_dir/run.json" interrupted 143 1 serial "$fixture" \
+    || { rm -rf "$tmp"; fail "interrupted run was not finalized"; }
   rm -rf "$tmp"
   pass "progress journal records abrupt interruptions before cleanup"
+}
+
+test_progress_journal_preserves_post_terminal_signal_outcome() {
+  local tmp journal fixture run_dir rc real_python
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-progress-terminal-signal.XXXXXX")
+  journal="$tmp/journal"
+  fixture="$tmp/pass.test.sh"
+  real_python=$(command -v python3)
+  mkdir -p "$tmp/bin"
+  cat >"$tmp/bin/python3" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}:${3:-}" in
+  -:worker:*/events/serial-1.2.passed.json)
+    "$REAL_PYTHON" "$@"
+    rc=$?
+    kill -TERM "$5"
+    exit "$rc"
+    ;;
+esac
+exec "$REAL_PYTHON" "$@"
+SH
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+printf 'ok - completed before signal\n'
+SH
+  chmod +x "$tmp/bin/python3" "$fixture"
+  set +e
+  REAL_PYTHON="$real_python" PATH="$tmp/bin:$PATH" \
+    "$RUNNER" --progress-journal "$journal" "$fixture" >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 143 ] || { cat "$tmp/out" "$tmp/err"; rm -rf "$tmp"; fail "post-terminal signal should exit 143, got $rc"; }
+  run_dir=$(journal_run_dir "$journal")
+  assert_journal_state "$run_dir/states/serial-1.json" passed serial-1 \
+    || { rm -rf "$tmp"; fail "post-terminal signal regressed completed worker state"; }
+  [ ! -e "$run_dir/events/serial-1.2.interrupted.json" ] \
+    || { rm -rf "$tmp"; fail "post-terminal signal created a conflicting interruption"; }
+  assert_journal_run "$run_dir/run.json" interrupted 143 1 serial "$fixture" \
+    || { rm -rf "$tmp"; fail "post-terminal signal did not finalize the run"; }
+  rm -rf "$tmp"
+  pass "progress journal keeps terminal worker outcomes monotonic on signal"
+}
+
+test_progress_journal_restores_caller_umask() {
+  local tmp journal fixture timing fixture_mode timing_mode
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-progress-umask.XXXXXX")
+  journal="$tmp/journal"
+  fixture="$tmp/pass.test.sh"
+  timing="$tmp/timing.json"
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+: >"$SCHED_EVIDENCE/fixture-created"
+printf 'ok - caller umask preserved\n'
+SH
+  chmod +x "$fixture"
+  (umask 022 && SCHED_EVIDENCE="$tmp" "$RUNNER" --progress-journal "$journal" \
+    --json "$timing" "$fixture") >"$tmp/out" 2>"$tmp/err" \
+    || { cat "$tmp/out" "$tmp/err"; rm -rf "$tmp"; fail "umask fixture should pass"; }
+  fixture_mode=$(stat -c %a "$tmp/fixture-created" 2>/dev/null || stat -f %Lp "$tmp/fixture-created")
+  timing_mode=$(stat -c %a "$timing" 2>/dev/null || stat -f %Lp "$timing")
+  [ "$fixture_mode" = 644 ] \
+    || { rm -rf "$tmp"; fail "journal changed test-created file mode to $fixture_mode"; }
+  [ "$timing_mode" = 644 ] \
+    || { rm -rf "$tmp"; fail "journal changed timing artifact mode to $timing_mode"; }
+  rm -rf "$tmp"
+  pass "progress journal restores the caller umask"
 }
 
 test_progress_journal_disabled_mode_has_no_filesystem_effect() {
@@ -1364,4 +1466,6 @@ test_progress_journal_terminal_transitions_and_atomic_state
 test_progress_journal_parallel_workers_preserve_transitions
 test_progress_journal_ignores_malformed_prior_state
 test_progress_journal_marks_abrupt_interruptions
+test_progress_journal_preserves_post_terminal_signal_outcome
+test_progress_journal_restores_caller_umask
 test_progress_journal_disabled_mode_has_no_filesystem_effect
