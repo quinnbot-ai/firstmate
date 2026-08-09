@@ -1662,10 +1662,10 @@ SH
 test_progress_journal_requires_durable_run_directory_chain() {
   local tmp journal fixture rc real_python run_dir
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-progress-directory-barrier.XXXXXX")
-  journal="$tmp/journal"
+  journal="$tmp/existing/new-a/new-b/journal"
   fixture="$tmp/pass.test.sh"
   real_python=$(command -v python3)
-  mkdir -p "$tmp/bin"
+  mkdir -p "$tmp/bin" "$tmp/existing"
   cat >"$tmp/bin/python3" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = - ] && [ "${2:-}" = sync-directories ]; then
@@ -1696,7 +1696,9 @@ SH
     && [ "$(sed -n '3p' "$tmp/barriers")" = "$run_dir" ] \
     && [ "$(sed -n '4p' "$tmp/barriers")" = "$journal/runs" ] \
     && [ "$(sed -n '5p' "$tmp/barriers")" = "$journal" ] \
-    && [ "$(sed -n '6p' "$tmp/barriers")" = "$journal/.." ] \
+    && [ "$(sed -n '6p' "$tmp/barriers")" = "$tmp/existing/new-a/new-b" ] \
+    && [ "$(sed -n '7p' "$tmp/barriers")" = "$tmp/existing/new-a" ] \
+    && [ "$(sed -n '8p' "$tmp/barriers")" = "$tmp/existing" ] \
     || { cat "$tmp/barriers"; rm -rf "$tmp"; fail "directory barrier omitted the published run chain"; }
   [ ! -e "$run_dir/run.json" ] \
     || { rm -rf "$tmp"; fail "run state published after its directory barrier failed"; }

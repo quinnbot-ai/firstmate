@@ -290,12 +290,18 @@ journal_write_run_state() {
 }
 
 journal_initialize() {
+  local journal_existing_ancestor journal_sync_path
+  local -a journal_directories
   [ -n "$PROGRESS_JOURNAL" ] || return 0
   command -v python3 >/dev/null 2>&1 \
     || die "--progress-journal requires python3"
   if [ -e "$PROGRESS_JOURNAL" ] && [ ! -d "$PROGRESS_JOURNAL" ]; then
     die "--progress-journal is not a directory: $PROGRESS_JOURNAL"
   fi
+  journal_existing_ancestor=$PROGRESS_JOURNAL
+  while [ ! -e "$journal_existing_ancestor" ]; do
+    journal_existing_ancestor=$(dirname "$journal_existing_ancestor")
+  done
   (umask 077 && mkdir -p "$PROGRESS_JOURNAL/runs") \
     || die "could not create progress journal: $PROGRESS_JOURNAL"
   JOURNAL_RUN_ID=$RUN_ID
@@ -305,9 +311,15 @@ journal_initialize() {
     || die "progress journal run already exists: $JOURNAL_RUN_ID"
   (umask 077 && mkdir "$JOURNAL_RUN_DIR/events" "$JOURNAL_RUN_DIR/states") \
     || die "could not initialize progress journal run: $JOURNAL_RUN_ID"
-  journal_sync_directories "$JOURNAL_RUN_DIR/events" "$JOURNAL_RUN_DIR/states" \
-    "$JOURNAL_RUN_DIR" "$PROGRESS_JOURNAL/runs" "$PROGRESS_JOURNAL" \
-    "$PROGRESS_JOURNAL/.." \
+  journal_directories=("$JOURNAL_RUN_DIR/events" "$JOURNAL_RUN_DIR/states" \
+    "$JOURNAL_RUN_DIR" "$PROGRESS_JOURNAL/runs")
+  journal_sync_path=$PROGRESS_JOURNAL
+  while :; do
+    journal_directories+=("$journal_sync_path")
+    [ "$journal_sync_path" != "$journal_existing_ancestor" ] || break
+    journal_sync_path=$(dirname "$journal_sync_path")
+  done
+  journal_sync_directories "${journal_directories[@]}" \
     || die "could not make progress journal durable: $JOURNAL_RUN_ID"
   JOURNAL_RUN_INITIALIZED=1
   journal_write_run_state started
