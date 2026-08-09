@@ -1536,18 +1536,25 @@ with open(os.path.join(root, "out"), "w", encoding="utf-8") as out, open(os.path
         stderr=err,
         start_new_session=True,
     )
-    deadline = time.monotonic() + 3
-    ready = os.path.join(root, "sync-ready")
-    while not os.path.exists(ready):
-        if child.poll() is not None:
-            raise SystemExit("runner exited before the directory sync helper")
-        if time.monotonic() >= deadline:
-            child.kill()
-            child.wait()
-            raise SystemExit("directory sync helper never became ready")
-        time.sleep(0.01)
-    os.killpg(child.pid, signal.SIGTERM)
-    print(child.wait(timeout=5))
+    try:
+        deadline = time.monotonic() + 3
+        ready = os.path.join(root, "sync-ready")
+        while not os.path.exists(ready):
+            if child.poll() is not None:
+                raise SystemExit("runner exited before the directory sync helper")
+            if time.monotonic() >= deadline:
+                raise SystemExit("directory sync helper never became ready")
+            time.sleep(0.01)
+        os.killpg(child.pid, signal.SIGTERM)
+        rc = child.wait(timeout=5)
+    except BaseException:
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        child.wait()
+        raise
+    print(rc)
 PY
   ) || { cat "$tmp/out" "$tmp/err"; rm -rf "$tmp"; fail "process-group signal controller failed"; }
   [ "$rc" -eq 143 ] || { cat "$tmp/out" "$tmp/err"; rm -rf "$tmp"; fail "initialization signal should exit 143, got $rc"; }
