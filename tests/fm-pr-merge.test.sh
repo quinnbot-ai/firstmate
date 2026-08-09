@@ -147,10 +147,54 @@ PY
   "api PUT")
     [ -z "${FM_TEST_GH_BASE_AT_MUTATION:-}" ] \
       || printf 'mutation base: %s\n' "$FM_TEST_GH_BASE_AT_MUTATION" >> "$FM_TEST_GH_AXI_LOG"
-    case "${FM_TEST_GH_MERGED:-true}" in
-      true) body=dHJ1ZQ== ;;
-      false) body=ZmFsc2U= ;;
-      *) exit 98 ;;
+    if [ "${FM_TEST_GH_PROTECTION:-protected}" = null ]; then
+      body=$(python3 - "${FM_TEST_GH_MERGED:-true}" "$FM_TEST_GH_MERGE_SHA" <<'PY'
+import base64
+import json
+import sys
+
+merged, sha = sys.argv[1:]
+if merged not in {"true", "false"}:
+    raise SystemExit(98)
+raw = json.dumps({"merged": merged == "true", "sha": sha}, separators=(",", ":"))
+print(base64.b64encode(raw.encode()).decode())
+PY
+      ) || exit $?
+    else
+      case "${FM_TEST_GH_MERGED:-true}" in
+        true) body=dHJ1ZQ== ;;
+        false) body=ZmFsc2U= ;;
+        *) exit 98 ;;
+      esac
+    fi
+    printf 'api_response:\n  body: %s\n  truncated: false\n' "$body"
+    ;;
+  "api GET")
+    case "${3:-}" in
+      */git/ref/heads/*)
+        body=$(python3 - "$FM_TEST_GH_MERGE_SHA" <<'PY'
+import base64
+import json
+import sys
+
+raw = json.dumps({"sha": sys.argv[1], "type": "commit"}, separators=(",", ":"))
+print(base64.b64encode(raw.encode()).decode())
+PY
+        )
+        ;;
+      */git/commits/*)
+        body=$(python3 - "$FM_TEST_GH_MERGE_SHA" "${FM_TEST_GH_BASE_AT_MUTATION:-$FM_TEST_GH_BASE}" "$FM_TEST_GH_API_HEAD" <<'PY'
+import base64
+import json
+import sys
+
+sha, base, head = sys.argv[1:]
+raw = json.dumps({"sha": sha, "parents": [base, head]}, separators=(",", ":"))
+print(base64.b64encode(raw.encode()).decode())
+PY
+        )
+        ;;
+      *) exit 99 ;;
     esac
     printf 'api_response:\n  body: %s\n  truncated: false\n' "$body"
     ;;
@@ -169,6 +213,7 @@ run_github_merge() {
     FM_TEST_GH_PROTECTION="${FM_TEST_GH_PROTECTION:-protected}" \
     FM_TEST_GH_PROTECTION_AFTER="${FM_TEST_GH_PROTECTION_AFTER:-}" \
     FM_TEST_GH_BASE_AT_MUTATION="${FM_TEST_GH_BASE_AT_MUTATION:-}" \
+    FM_TEST_GH_MERGE_SHA=9999999999999999999999999999999999999999 \
     FM_TEST_GH_MERGED="${FM_TEST_GH_MERGED:-true}" \
     FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" task-x1 https://github.com/example/repo/pull/9 -- --merge
@@ -371,8 +416,10 @@ test_unprotected_github_merge_uses_verified_exact_sha() {
   add_github_mocks "$case_dir"
   FM_TEST_GH_PROTECTION=null run_github_merge "$case_dir" "$candidate" "$candidate" "$base" >"$case_dir/out" 2>"$case_dir/err" \
     || fail "GitHub boundary refused the verified candidate for an unprotected repository"
-  grep -qxF "api PUT /repos/example/repo/pulls/9/merge --field sha=$candidate --field merge_method=merge --jq .merged | tostring | @base64" "$case_dir/gh-axi.log" \
+  grep -qxF "api PUT /repos/example/repo/pulls/9/merge --field sha=$candidate --field merge_method=merge --jq {merged: .merged, sha: .sha} | @base64" "$case_dir/gh-axi.log" \
     || fail "unprotected GitHub boundary did not condition the merge on the verified exact SHA"
+  grep -qxF "api GET /repos/example/repo/git/ref/heads/main --jq {sha: .object.sha, type: .object.type} | @base64" "$case_dir/gh-axi.log" \
+    || fail "unprotected GitHub boundary did not observe the post-mutation base"
   grep -q 'unprotected repository' "$case_dir/err" \
     || fail "unprotected GitHub merge did not diagnose the sanctioned path"
   pass "GitHub merge sanctions a null protection rule without weakening the exact candidate mutation"
@@ -424,26 +471,29 @@ test_unprotected_github_merge_refuses_changed_remote_base() {
   pass "unprotected GitHub merge refuses remote base drift even when the new base remains an ancestor"
 }
 
-test_unprotected_github_merge_exposes_residual_mutation_race() {
-  local values case_dir base candidate advanced_base
+test_unprotected_github_merge_refuses_unattributed_mutation_base_drift() {
+  local values case_dir base candidate advanced_base tree rc
   values=$(make_case github-mutation-base-race)
   case_dir=$(printf '%s\n' "$values" | sed -n '1p')
   base=$(printf '%s\n' "$values" | sed -n '2p')
-  advanced_base=$(printf '%s\n' "$values" | sed -n '3p')
-  printf 'final candidate\n' > "$case_dir/wt/final.txt"
-  git -C "$case_dir/wt" add final.txt
-  git -C "$case_dir/wt" commit -qm final-candidate
-  candidate=$(git -C "$case_dir/wt" rev-parse HEAD)
+  candidate=$(printf '%s\n' "$values" | sed -n '3p')
+  tree=$(git -C "$case_dir/wt" rev-parse "$base^{tree}")
+  advanced_base=$(printf 'unrelated base writer\n' | git -C "$case_dir/wt" commit-tree "$tree" -p "$base")
   fm_write_meta "$case_dir/state/task-x1.meta" "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" "kind=ship" "mode=no-mistakes"
   add_github_mocks "$case_dir"
+  set +e
   FM_TEST_GH_PROTECTION=null FM_TEST_GH_BASE_AT_MUTATION="$advanced_base" \
-    run_github_merge "$case_dir" "$candidate" "$candidate" "$base" >"$case_dir/out" 2>"$case_dir/err" \
-    || fail "unprotected GitHub boundary did not honor the documented single-authority containment"
+    run_github_merge "$case_dir" "$candidate" "$candidate" "$base" >"$case_dir/out" 2>"$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "unrelated base advancement during mutation must fail attribution"
+  ! git -C "$case_dir/wt" merge-base --is-ancestor "$advanced_base" "$candidate" \
+    || fail "mutation-drift fixture did not create an unrelated base advancement"
   grep -qxF "mutation base: $advanced_base" "$case_dir/gh-axi.log" \
     || fail "mutation-race fixture did not advance the base after adjacent verification"
-  grep -q 'pins the verified head but not the base' "$case_dir/err" \
-    || fail "unprotected GitHub merge did not disclose the residual base race"
-  pass "unprotected GitHub merge exposes its residual base race and authority assumption"
+  grep -q 'post-mutation base transition was not attributable' "$case_dir/err" \
+    || fail "unprotected GitHub merge did not diagnose unattributed mutation-time drift"
+  pass "unprotected GitHub merge refuses mutation-time drift outside the verified candidate"
 }
 
 test_unprotected_github_merge_rejects_graphql_errors() {
@@ -594,7 +644,7 @@ test_github_merge_uses_verified_exact_sha
 test_unprotected_github_merge_uses_verified_exact_sha
 test_github_merge_refuses_changed_remote_head
 test_unprotected_github_merge_refuses_changed_remote_base
-test_unprotected_github_merge_exposes_residual_mutation_race
+test_unprotected_github_merge_refuses_unattributed_mutation_base_drift
 test_unprotected_github_merge_rejects_graphql_errors
 test_github_merge_refuses_partial_protection_payload
 test_github_merge_refuses_ambiguous_protection_payloads

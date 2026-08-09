@@ -264,6 +264,93 @@ print(value)
 PY
 }
 
+decode_github_merge_object() {
+  python3 - "$1" "$2" <<'PY'
+import base64
+import binascii
+import json
+import re
+import sys
+
+
+class InvalidPayload(Exception):
+    pass
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise InvalidPayload
+        result[key] = value
+    return result
+
+
+def oid(value):
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value) is not None
+
+
+try:
+    lines = sys.argv[1].splitlines()
+    if len(lines) != 3 or lines[0] != "api_response:" or lines[2] != "  truncated: false":
+        raise InvalidPayload
+    match = re.fullmatch(r"  body: ([A-Za-z0-9+/]+={0,2})", lines[1])
+    if match is None:
+        raise InvalidPayload
+    decoded = base64.b64decode(match.group(1), validate=True)
+    document = json.loads(decoded, object_pairs_hook=unique_object)
+    mode = sys.argv[2]
+    if mode == "result":
+        if not isinstance(document, dict) or set(document) != {"merged", "sha"}:
+            raise InvalidPayload
+        if type(document["merged"]) is not bool or not oid(document["sha"]):
+            raise InvalidPayload
+        values = (str(document["merged"]).lower(), document["sha"])
+    elif mode == "ref":
+        if not isinstance(document, dict) or set(document) != {"sha", "type"}:
+            raise InvalidPayload
+        if not oid(document["sha"]) or document["type"] != "commit":
+            raise InvalidPayload
+        values = (document["sha"],)
+    elif mode == "commit":
+        if not isinstance(document, dict) or set(document) != {"sha", "parents"}:
+            raise InvalidPayload
+        parents = document["parents"]
+        if not oid(document["sha"]) or not isinstance(parents, list) or not parents or not all(oid(parent) for parent in parents):
+            raise InvalidPayload
+        values = (document["sha"], *parents)
+    elif mode == "compare":
+        expected = {"status", "aheadBy", "behindBy", "mergeBaseOid", "firstOid", "firstParents"}
+        if not isinstance(document, dict) or set(document) != expected:
+            raise InvalidPayload
+        parents = document["firstParents"]
+        if document["status"] not in {"ahead", "identical"}:
+            raise InvalidPayload
+        if type(document["aheadBy"]) is not int or document["aheadBy"] < 0:
+            raise InvalidPayload
+        if type(document["behindBy"]) is not int or document["behindBy"] < 0:
+            raise InvalidPayload
+        if not oid(document["mergeBaseOid"]) or not oid(document["firstOid"]):
+            raise InvalidPayload
+        if not isinstance(parents, list) or not parents or not all(oid(parent) for parent in parents):
+            raise InvalidPayload
+        values = (
+            document["status"],
+            str(document["aheadBy"]),
+            str(document["behindBy"]),
+            document["mergeBaseOid"],
+            document["firstOid"],
+            *parents,
+        )
+    else:
+        raise InvalidPayload
+except (InvalidPayload, binascii.Error, json.JSONDecodeError, UnicodeDecodeError):
+    raise SystemExit(1)
+
+print("\n".join(values))
+PY
+}
+
 urlencode_ref() { python3 - "$1" <<'PY'
 import sys
 import urllib.parse
@@ -431,9 +518,11 @@ execute_local() {
 }
 
 execute_github() {
-  local query payload pull_values envelope_payload envelope_values confirm_payload confirm_values head base base_ref state draft merged recorded_pr recorded_head merge_output merge_result head_repo head_ref encoded_ref
+  local query payload pull_values envelope_payload envelope_values confirm_payload confirm_values head base base_ref state draft merged recorded_pr recorded_head merge_output merge_values merge_result merge_sha head_repo head_ref encoded_ref
   local confirm_head confirm_base confirm_base_ref confirm_state confirm_draft confirm_merged confirm_head_repo confirm_head_ref
   local protection_path protection_strict protection_admin
+  local post_base_output post_base commit_output commit_values commit_sha commit_parent_one commit_parent_two
+  local compare_output compare_values transition_status transition_ahead transition_behind transition_base transition_first transition_parent candidate_count
   [ "$MODE" = no-mistakes ] || [ "$MODE" = direct-PR ] || die "task $ID is mode=$MODE, not a PR merge mode"
   [ "$KIND" = ship ] || die "task $ID is kind=$KIND, not ship"
   require_repository_state
@@ -465,7 +554,7 @@ execute_github() {
   protection_strict=$(printf '%s\n' "$pull_values" | sed -n '10p')
   protection_admin=$(printf '%s\n' "$pull_values" | sed -n '11p')
   if [ "$protection_path" = unprotected ]; then
-    # GitHub can bind only the verified head at mutation; the adjacent base re-read bounds but cannot close the residual race.
+    # GitHub binds only the verified head at mutation; adjacent pre/post base observations attribute the result but cannot close every external-writer race.
     # This path requires Firstmate single merge authority with no concurrent uncooperative base writer.
     echo "diagnostic: GitHub reports branchProtectionRule: null; using the sanctioned unprotected repository path" >&2
     echo "diagnostic: GitHub pins the verified head but not the base; proceeding under the Firstmate single-merge-authority assumption" >&2
@@ -507,10 +596,62 @@ execute_github() {
   require_clean "$WORKTREE" "task worktree"
   require_clean "$PROJECT" "project checkout"
   [ "$(git -C "$WORKTREE" rev-parse HEAD)" = "$head" ] || die "task worktree HEAD changed during merge verification"
-  merge_output=$(gh-axi api PUT "/repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER/merge" --field "sha=$head" --field "merge_method=$MERGE_METHOD" --jq '.merged | tostring | @base64') \
-    || die "GitHub rejected the exact conditional merge"
-  merge_result=$(decode_github_scalar "$merge_output") || die "GitHub returned malformed merge confirmation data"
-  [ "$merge_result" = true ] || die "GitHub did not merge the verified candidate"
+  if [ "$protection_path" = unprotected ]; then
+    merge_output=$(gh-axi api PUT "/repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER/merge" --field "sha=$head" --field "merge_method=$MERGE_METHOD" --jq '{merged: .merged, sha: .sha} | @base64') \
+      || die "GitHub rejected the exact conditional merge"
+    merge_values=$(decode_github_merge_object "$merge_output" result) || die "GitHub returned malformed merge confirmation data"
+    merge_result=$(printf '%s\n' "$merge_values" | sed -n '1p')
+    merge_sha=$(printf '%s\n' "$merge_values" | sed -n '2p')
+    [ "$merge_result" = true ] || die "GitHub did not merge the verified candidate"
+    encoded_ref=$(urlencode_ref "$base_ref")
+    post_base_output=$(gh-axi api GET "/repos/$PR_OWNER/$PR_REPO/git/ref/heads/$encoded_ref" --jq '{sha: .object.sha, type: .object.type} | @base64') \
+      || die "cannot observe the post-mutation GitHub base"
+    post_base=$(decode_github_merge_object "$post_base_output" ref) || die "GitHub returned malformed post-mutation base data"
+    [ "$post_base" = "$merge_sha" ] || die "post-mutation base transition was not attributable to the verified candidate and merge result"
+    commit_output=$(gh-axi api GET "/repos/$PR_OWNER/$PR_REPO/git/commits/$merge_sha" --jq '{sha: .sha, parents: [.parents[].sha]} | @base64') \
+      || die "cannot inspect the post-mutation GitHub merge result"
+    commit_values=$(decode_github_merge_object "$commit_output" commit) || die "GitHub returned malformed post-mutation merge result data"
+    commit_sha=$(printf '%s\n' "$commit_values" | sed -n '1p')
+    commit_parent_one=$(printf '%s\n' "$commit_values" | sed -n '2p')
+    commit_parent_two=$(printf '%s\n' "$commit_values" | sed -n '3p')
+    [ "$commit_sha" = "$merge_sha" ] || die "post-mutation base transition was not attributable to the verified candidate and merge result"
+    case "$MERGE_METHOD" in
+      merge)
+        [ "$commit_parent_one" = "$base" ] && [ "$commit_parent_two" = "$head" ] \
+          && [ "$(printf '%s\n' "$commit_values" | wc -l | tr -d ' ')" -eq 3 ] \
+          || die "post-mutation base transition was not attributable to the verified candidate and merge result"
+        ;;
+      squash)
+        [ "$commit_parent_one" = "$base" ] && [ -z "$commit_parent_two" ] \
+          || die "post-mutation base transition was not attributable to the verified candidate and merge result"
+        ;;
+      rebase)
+        [ -n "$commit_parent_one" ] && [ -z "$commit_parent_two" ] \
+          || die "post-mutation base transition was not attributable to the verified candidate and merge result"
+        candidate_count=$(git -C "$WORKTREE" rev-list --count "$base..$head") \
+          || die "cannot count the verified GitHub candidate commits"
+        compare_output=$(gh-axi api GET "/repos/$PR_OWNER/$PR_REPO/compare/$base...$merge_sha?per_page=1&page=1" --jq '{status: .status, aheadBy: .ahead_by, behindBy: .behind_by, mergeBaseOid: .merge_base_commit.sha, firstOid: .commits[0].sha, firstParents: [.commits[0].parents[].sha]} | @base64') \
+          || die "cannot attribute the rebased GitHub merge result"
+        compare_values=$(decode_github_merge_object "$compare_output" compare) || die "GitHub returned malformed rebased transition data"
+        transition_status=$(printf '%s\n' "$compare_values" | sed -n '1p')
+        transition_ahead=$(printf '%s\n' "$compare_values" | sed -n '2p')
+        transition_behind=$(printf '%s\n' "$compare_values" | sed -n '3p')
+        transition_base=$(printf '%s\n' "$compare_values" | sed -n '4p')
+        transition_first=$(printf '%s\n' "$compare_values" | sed -n '5p')
+        transition_parent=$(printf '%s\n' "$compare_values" | sed -n '6p')
+        [ "$transition_status" = ahead ] && [ "$transition_ahead" -eq "$candidate_count" ] \
+          && [ "$transition_behind" -eq 0 ] && [ "$transition_base" = "$base" ] \
+          && [ -n "$transition_first" ] && [ "$transition_parent" = "$base" ] \
+          && [ "$(printf '%s\n' "$compare_values" | wc -l | tr -d ' ')" -eq 6 ] \
+          || die "post-mutation base transition was not attributable to the verified candidate and merge result"
+        ;;
+    esac
+  else
+    merge_output=$(gh-axi api PUT "/repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER/merge" --field "sha=$head" --field "merge_method=$MERGE_METHOD" --jq '.merged | tostring | @base64') \
+      || die "GitHub rejected the exact conditional merge"
+    merge_result=$(decode_github_scalar "$merge_output") || die "GitHub returned malformed merge confirmation data"
+    [ "$merge_result" = true ] || die "GitHub did not merge the verified candidate"
+  fi
   if [ "$DELETE_BRANCH" -eq 1 ]; then
     [ "$head_repo" = "$PR_OWNER/$PR_REPO" ] || die "PR merged, but cross-repository head deletion is unsupported"
     encoded_ref=$(urlencode_ref "$head_ref")

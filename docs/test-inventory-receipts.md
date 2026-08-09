@@ -19,9 +19,11 @@ A literal `branchProtectionRule: null` is the one sanctioned unprotected-reposit
 Missing, duplicate, non-null scalar, partial-object, or null-with-child protection data is malformed or ambiguous and fails closed.
 Both protection paths verify the requested canonical PR identity, current exact head and base OIDs, and candidate ancestry.
 Immediately before mutation, the boundary re-reads the PR and refuses any identity, head, base, state, or protection-data drift, then rechecks that the clean local worktree remains at the exact head.
-The merge mutation is conditioned on that head SHA, and GitHub's post-mutation response must confirm that the verified candidate merged.
+The merge mutation is conditioned on that exact expected-head SHA, and GitHub's post-mutation response must identify the resulting commit and confirm that the verified candidate merged.
 GitHub's merge API exposes an expected-head precondition but no expected-base OID precondition.
-For the unprotected path, the adjacent pre-mutation base verification and post-mutation candidate confirmation bound but cannot eliminate the residual base race.
+For the unprotected path, the boundary immediately re-reads the base ref after mutation and requires it to point to GitHub's reported result commit.
+Method-specific parent or history validation must attribute that result to the exact pre-mutation base and expected-head candidate.
+These adjacent pre-mutation and post-mutation base observations bound but cannot eliminate every residual external-writer race.
 That remaining window assumes Firstmate is the single merge authority and no concurrent uncooperative writer advances the base.
 The unprotected path does not claim that GitHub enforces required status checks; it preserves the exact-candidate boundary after the delivery lifecycle has established that the candidate's checks are green.
 
