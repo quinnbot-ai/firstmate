@@ -144,9 +144,10 @@ now_ms() {
 }
 
 # The progress journal is deliberately independent from timing JSON artifacts.
-# It contains no test stdout, environment, credentials, or process inventory:
-# only the stable run/worker identity, script path, transition, and terminal
-# result needed to diagnose an abrupt runner exit.
+# It contains no test stdout, environment, credentials, or process inventory.
+# Records are limited to run and worker identities, the runner PID, timestamps,
+# selection and worker-plan metadata, script paths, transitions, exit codes,
+# and durations needed to diagnose an abrupt runner exit.
 #
 # A journal directory is append-only at the transition layer. A worker's
 # events/<worker>.<ordinal>.<state>.json record is created before its matching
