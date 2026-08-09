@@ -171,6 +171,7 @@ declare -a JOURNAL_PARALLEL_WORKERS=()
 declare -a JOURNAL_PARALLEL_SCRIPTS=()
 declare -a JOURNAL_PARALLEL_TERMINALS=()
 
+# shellcheck disable=SC2329 # Registered by the signal traps below.
 journal_handle_signal() {
   local rc=$1
   if [ -n "$JOURNAL_INITIALIZING" ]; then
@@ -300,6 +301,7 @@ journal_write_run_record() {
     "$JOBS" "$SELECTION_DESC" "${SCRIPTS[@]+"${SCRIPTS[@]}"}"
 }
 
+# shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap through cleanup_run.
 journal_write_run_state() {
   [ -n "$JOURNAL_RUN_INITIALIZED" ] || return 0
   journal_write_run_record "$@"
