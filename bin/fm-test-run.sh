@@ -2022,7 +2022,7 @@ record_script_result() {
 
 run_one_serial() {
   local script=$1
-  local base family runtime requirement out fifo begin_iso begin_ms end_ms end_iso duration rc child_pid monitor_mode= terminal_state
+  local base family runtime requirement out fifo begin_iso begin_ms end_ms end_iso duration rc child_pid monitor_mode='' terminal_state
   base=$(basename "$script")
   family=$(family_for_basename "$base")
   runtime=$(runtime_gate_for_basename "$base")
@@ -2123,7 +2123,7 @@ else
     esac
     record_script_result "$script" "$rc" "$duration" "$out" "$end_iso"
     terminal_state=$(journal_terminal_state_for_exit "$LAST_SCRIPT_RESULT_RC")
-    JOURNAL_PARALLEL_TERMINALS[$slot]="$terminal_state"$'\t'"$LAST_SCRIPT_RESULT_RC"$'\t'"$duration"
+    JOURNAL_PARALLEL_TERMINALS[slot]="$terminal_state"$'\t'"$LAST_SCRIPT_RESULT_RC"$'\t'"$duration"
     journal_transition "$worker_id" \
       "$terminal_state" \
       "$script" 2 "$LAST_SCRIPT_RESULT_RC" "$duration"
