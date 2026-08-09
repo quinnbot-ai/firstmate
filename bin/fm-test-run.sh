@@ -153,8 +153,15 @@ now_ms() {
 # events/<worker>.<ordinal>.<state>.json record is created before its matching
 # states/<worker>.json is atomically replaced. The atomically replaced run.json
 # records the selected worker plan and the run's started or terminal state.
+# Journal initialization durably publishes every newly created directory through
+# the first existing ancestor and the started run record before deferred INT,
+# TERM, or HUP delivery resumes. Each worker is likewise registered and its
+# started transition made durable before that worker can launch or a deferred
+# signal can terminate the runner. Terminal transitions record the adjudicated
+# result before summary bookkeeping, and signal cleanup preserves an already
+# adjudicated terminal result instead of replacing it with interrupted.
 # Consequently, a crash can leave an older current-state record but cannot tear
-# or lose a completed transition.
+# or lose a completed transition, and worker transitions advance monotonically.
 # Existing runs are never parsed, so malformed historical records are inert;
 # only a collision with this exact generated run ID is refused.
 JOURNAL_RUN_DIR=
