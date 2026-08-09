@@ -1539,10 +1539,13 @@ test_progress_journal_publishes_adjudicated_outcome_before_bookkeeping() {
   mkdir -p "$tmp/bin"
   cat >"$tmp/bin/mv" <<'SH'
 #!/usr/bin/env bash
+case "${FAKE_MV_MODE:-signal}:${2:-}" in
+  fail:*/families.tsv) exit 1 ;;
+esac
 /bin/mv "$@"
 rc=$?
-case "${2:-}" in
-  */families.tsv) kill -TERM "$PPID" ;;
+case "${FAKE_MV_MODE:-signal}:${2:-}" in
+  signal:*/families.tsv) kill -TERM "$PPID" ;;
 esac
 exit "$rc"
 SH
@@ -1580,8 +1583,21 @@ SH
   run_dir=$(journal_run_dir "$journal")
   assert_journal_state "$run_dir/states/parallel-1.json" failed parallel-1 tests/fm-brief.test.sh 1 \
     || { rm -rf "$tmp"; fail "parallel cleanup inferred raw child success instead of the adjudicated failure"; }
+
+  journal="$tmp/bookkeeping-failure-journal"
+  set +e
+  FAKE_MV_MODE=fail PATH="$tmp/bin:$PATH" "$RUNNER" --progress-journal "$journal" \
+    "$fixture" >"$tmp/failure.out" 2>"$tmp/failure.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || { cat "$tmp/failure.out" "$tmp/failure.err"; rm -rf "$tmp"; fail "bookkeeping failure should exit 1, got $rc"; }
+  run_dir=$(journal_run_dir "$journal")
+  assert_journal_state "$run_dir/states/serial-1.json" passed serial-1 "$fixture" 0 \
+    || { rm -rf "$tmp"; fail "bookkeeping failure left the adjudicated worker at started"; }
+  assert_journal_run "$run_dir/run.json" failed 1 1 serial "$fixture" \
+    || { rm -rf "$tmp"; fail "bookkeeping failure did not finalize the failed run"; }
   rm -rf "$tmp"
-  pass "journal cleanup trusts published adjudicated worker outcomes"
+  pass "journal persists adjudicated outcomes before bookkeeping"
 }
 
 test_progress_journal_restores_caller_umask() {

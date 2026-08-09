@@ -1958,7 +1958,7 @@ family_bump() {
 record_script_result() {
   local script=$1 rc=$2 duration=$3 out=$4 end_iso=$5 journal_slot=$6
   local base family runtime requirement gate_skip gate_outcome fail_delta
-  local runtime_signal runtime_signal_count runtime_signal_line terminal_state terminal_tuple
+  local runtime_signal runtime_signal_count runtime_signal_line terminal_state terminal_tuple worker_id
   base=$(basename "$script")
   family=$(family_for_basename "$base")
   runtime=$(runtime_gate_for_basename "$base")
@@ -2016,11 +2016,12 @@ record_script_result() {
   terminal_tuple="$terminal_state"$'\t'"$rc"$'\t'"$duration"
   if [ "$journal_slot" = serial ]; then
     JOURNAL_ACTIVE_SERIAL_TERMINAL=$terminal_tuple
+    worker_id=$JOURNAL_ACTIVE_SERIAL_WORKER
   else
     JOURNAL_PARALLEL_TERMINALS[$journal_slot]=$terminal_tuple
+    worker_id=${JOURNAL_PARALLEL_WORKERS[$journal_slot]}
   fi
-  LAST_SCRIPT_RESULT_STATE=$terminal_state
-  LAST_SCRIPT_RESULT_RC=$rc
+  journal_transition "$worker_id" "$terminal_state" "$script" 2 "$rc" "$duration"
 
   printf 'FM_TEST_GATE %s runtime=%s requirement=%s outcome=%s\n' \
     "$script" "$runtime" "$requirement" "$gate_outcome"
@@ -2086,9 +2087,6 @@ run_one_serial() {
     duration=0
   fi
   record_script_result "$script" "$rc" "$duration" "$out" "$end_iso" serial
-  journal_transition "$JOURNAL_ACTIVE_SERIAL_WORKER" \
-    "$LAST_SCRIPT_RESULT_STATE" \
-    "$script" 2 "$LAST_SCRIPT_RESULT_RC" "$duration"
   JOURNAL_ACTIVE_SERIAL_WORKER=
   JOURNAL_ACTIVE_SERIAL_SCRIPT=
   JOURNAL_ACTIVE_SERIAL_INDEX=
@@ -2110,11 +2108,10 @@ else
   active_workers=0
 
   wait_one_job_worker() {
-    local slot=$1 pid idx work script worker_id rc duration mode out end_iso
+    local slot=$1 pid idx work script rc duration mode out end_iso
     pid=${WORKER_PIDS[$slot]}
     idx=${WORKER_IDX[$slot]}
     script=${WORKER_SCRIPTS[$slot]}
-    worker_id=${JOURNAL_PARALLEL_WORKERS[$slot]}
     unset 'WORKER_PIDS[slot]'
     unset 'WORKER_IDX[slot]'
     unset 'WORKER_SCRIPTS[slot]'
@@ -2141,9 +2138,6 @@ else
         ;;
     esac
     record_script_result "$script" "$rc" "$duration" "$out" "$end_iso" "$slot"
-    journal_transition "$worker_id" \
-      "$LAST_SCRIPT_RESULT_STATE" \
-      "$script" 2 "$LAST_SCRIPT_RESULT_RC" "$duration"
     unset 'JOURNAL_PARALLEL_WORKERS[slot]'
     unset 'JOURNAL_PARALLEL_SCRIPTS[slot]'
     unset 'JOURNAL_PARALLEL_WORKDIRS[slot]'
