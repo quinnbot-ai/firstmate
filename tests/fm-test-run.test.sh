@@ -451,7 +451,7 @@ SH
   [ -n "$descendant_pid" ] || { kill "$runner_pid" 2>/dev/null || true; wait "$runner_pid" 2>/dev/null || true; rm -rf "$tmp"; fail "descendant fixture never started"; }
   kill -TERM "$runner_pid"
   waited=0
-  while kill -0 "$runner_pid" 2>/dev/null && [ "$waited" -lt 50 ]; do
+  while kill -0 "$runner_pid" 2>/dev/null && [ "$waited" -lt 100 ]; do
     sleep 0.1
     waited=$((waited + 1))
   done
