@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # fm-test-run.sh - single owner of Firstmate's behavior-test runner, portable
 # CI lane composition, declarative runtime-gate evidence, local --jobs for the
-# proven-isolated set, timing markers, and the complete-regression coverage guard.
+# proven-isolated set, timing markers, durable progress journals, and the
+# complete-regression coverage guard.
 #
 # Selection modes (exactly one of: --all, --family, --changed, --lane,
 # --proven-isolated, or script paths):
@@ -27,9 +28,10 @@
 # Options:
 #   --json <path>   write a deterministic timing artifact after the run
 #   --progress-journal <directory>
-#                   write an opt-in durable progress journal. Each run gets
-#                   immutable worker transition records and atomically replaced
-#                   current-state records under the selected directory.
+#                   write an opt-in durable progress journal. Each selected worker
+#                   gets immutable transition records and atomically replaced
+#                   current-state records under the selected directory. Requires
+#                   python3 when enabled.
 #   --list          print selected script paths (one per line) and exit 0
 #   --base <ref>    with --changed, compare against this ref (default: origin/main)
 #   --exclude-family <name>
