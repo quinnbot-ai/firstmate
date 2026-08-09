@@ -319,29 +319,6 @@ print("\n".join(values))
 PY
 }
 
-decode_github_scalar() {
-  python3 - "$1" <<'PY'
-import base64
-import binascii
-import re
-import sys
-
-try:
-    lines = sys.argv[1].splitlines()
-    if len(lines) != 3 or lines[0] != "api_response:" or lines[2] != "  truncated: false":
-        raise ValueError
-    match = re.fullmatch(r"  body: ([A-Za-z0-9+/]+={0,2})", lines[1])
-    if match is None:
-        raise ValueError
-    value = base64.b64decode(match.group(1), validate=True).decode()
-    if "\n" in value or "\r" in value or not value:
-        raise ValueError
-except (ValueError, binascii.Error, UnicodeDecodeError):
-    raise SystemExit(1)
-print(value)
-PY
-}
-
 decode_github_merge_object() {
   python3 - "$1" "$2" <<'PY'
 import base64

@@ -34,8 +34,6 @@ REAL_MV=$(command -v mv)
 REAL_STAT=$(command -v stat)
 REAL_CHMOD=$(command -v chmod)
 REAL_BASENAME=$(command -v basename)
-REAL_GH_AXI=$(command -v gh-axi)
-REAL_NODE=$(command -v node)
 
 file_mode() {
   if [ "$(uname)" = Darwin ]; then
@@ -109,9 +107,94 @@ esac
 SH
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
+set -u
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 [ "${FM_TEST_GH_AXI_RC:-0}" = 0 ] || exit "$FM_TEST_GH_AXI_RC"
-exec "$FM_TEST_REAL_NODE" "$FM_TEST_REAL_GH_AXI" "$@"
+[ "${1:-}" = api ] || exit 2
+shift
+method=GET
+case "${1:-}" in
+  GET | POST | PUT | PATCH | DELETE | HEAD)
+    method=$1
+    shift
+    ;;
+esac
+[ "$#" -ge 1 ] || exit 2
+endpoint=$1
+shift
+gh_args=(api "$endpoint" --method "$method")
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --field | --header | --jq | --template)
+      [ "$#" -ge 2 ] || exit 2
+      gh_args+=("$1" "$2")
+      shift 2
+      ;;
+    --field=* | --header=* | --jq=* | --template=* | --paginate)
+      gh_args+=("$1")
+      shift
+      ;;
+    *) exit 2 ;;
+  esac
+done
+raw=$(gh "${gh_args[@]}") || exit $?
+python3 - "$raw" <<'PY'
+import json
+import re
+import sys
+
+
+def scalar(value):
+    if value is None:
+        return "null"
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if isinstance(value, (int, float)):
+        return json.dumps(value, separators=(",", ":"))
+    if (
+        not value
+        or value in {"true", "false", "null"}
+        or re.fullmatch(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?", value)
+        or re.fullmatch(r"[A-Za-z0-9_./+=-]+", value) is None
+    ):
+        return json.dumps(value, ensure_ascii=False)
+    return value
+
+
+def emit_mapping(value, depth=0):
+    prefix = "  " * depth
+    for key, child in value.items():
+        if isinstance(child, dict):
+            print(f"{prefix}{key}:")
+            emit_mapping(child, depth + 1)
+        elif isinstance(child, list):
+            if all(not isinstance(item, (dict, list)) for item in child):
+                rendered = ",".join(scalar(item) for item in child)
+                print(f"{prefix}{key}[{len(child)}]: {rendered}")
+            else:
+                print(f"{prefix}{key}: {scalar(json.dumps(child, separators=(',', ':')))}")
+        else:
+            print(f"{prefix}{key}: {scalar(child)}")
+
+
+raw = sys.argv[1]
+try:
+    document = json.loads(raw)
+except json.JSONDecodeError:
+    body = raw.strip()
+    print("api_response:")
+    print(f"  body: {scalar(body[:4000])}")
+    print(f"  truncated: {'true' if len(body) > 4000 else 'false'}")
+    if len(body) > 4000:
+        print(f"  original_length: {len(body)}")
+else:
+    if isinstance(document, dict):
+        emit_mapping(document)
+    else:
+        print(scalar(document))
+PY
 SH
   # Plain glab, reproducing the real CLI's contract: its field output on stdout
   # and exit 0 on success, and a non-zero exit with no stdout on any failure.
@@ -300,8 +383,6 @@ run_check_entry() {
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
-    FM_TEST_REAL_GH_AXI="$REAL_GH_AXI" \
-    FM_TEST_REAL_NODE="$REAL_NODE" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_CHECK" "$@"
 }
@@ -312,8 +393,6 @@ run_merge_entry() {
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
-    FM_TEST_REAL_GH_AXI="$REAL_GH_AXI" \
-    FM_TEST_REAL_NODE="$REAL_NODE" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_MERGE" "$@"
 }
