@@ -166,7 +166,6 @@ JOURNAL_ACTIVE_SERIAL_INDEX=
 JOURNAL_ACTIVE_SERIAL_TERMINAL=
 declare -a JOURNAL_PARALLEL_WORKERS=()
 declare -a JOURNAL_PARALLEL_SCRIPTS=()
-declare -a JOURNAL_PARALLEL_WORKDIRS=()
 declare -a JOURNAL_PARALLEL_TERMINALS=()
 
 journal_terminal_state_for_exit() {
@@ -2018,7 +2017,7 @@ record_script_result() {
     JOURNAL_ACTIVE_SERIAL_TERMINAL=$terminal_tuple
     worker_id=$JOURNAL_ACTIVE_SERIAL_WORKER
   else
-    JOURNAL_PARALLEL_TERMINALS[$journal_slot]=$terminal_tuple
+    JOURNAL_PARALLEL_TERMINALS[journal_slot]=$terminal_tuple
     worker_id=${JOURNAL_PARALLEL_WORKERS[$journal_slot]}
   fi
   journal_transition "$worker_id" "$terminal_state" "$script" 2 "$rc" "$duration"
@@ -2140,7 +2139,6 @@ else
     record_script_result "$script" "$rc" "$duration" "$out" "$end_iso" "$slot"
     unset 'JOURNAL_PARALLEL_WORKERS[slot]'
     unset 'JOURNAL_PARALLEL_SCRIPTS[slot]'
-    unset 'JOURNAL_PARALLEL_WORKDIRS[slot]'
     unset 'JOURNAL_PARALLEL_TERMINALS[slot]'
   }
 
@@ -2186,7 +2184,6 @@ else
       "$(now_iso)" "$script" "$family" "$runtime" "$requirement"
     worker_id="parallel-$worker_n"
     JOURNAL_PARALLEL_SCRIPTS[worker_n]=$script
-    JOURNAL_PARALLEL_WORKDIRS[worker_n]=$work
     unset 'JOURNAL_PARALLEL_TERMINALS[worker_n]'
     JOURNAL_PARALLEL_WORKERS[worker_n]=$worker_id
     journal_transition "$worker_id" started "$script" 1
