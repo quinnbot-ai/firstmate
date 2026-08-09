@@ -1491,6 +1491,62 @@ SH
   pass "progress journal closes serial and parallel startup signal windows"
 }
 
+test_progress_journal_defers_initialization_signal_until_started() {
+  local tmp journal fixture run_dir rc real_python
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-progress-init-signal.XXXXXX")
+  journal="$tmp/journal"
+  fixture="$tmp/not-run.test.sh"
+  real_python=$(command -v python3)
+  mkdir -p "$tmp/bin"
+  cat >"$tmp/bin/python3" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = - ] && [ "${2:-}" = sync-directories ]; then
+  "$REAL_PYTHON" "$@"
+  rc=$?
+  kill -TERM "$PPID"
+  exit "$rc"
+fi
+if [ "${1:-}" = - ] && [ "${2:-}" = run ] && [ "${7:-}" = started ]; then
+  "$REAL_PYTHON" "$@"
+  rc=$?
+  cp "$3" "$STARTED_EVIDENCE"
+  exit "$rc"
+fi
+exec "$REAL_PYTHON" "$@"
+SH
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+printf 'not ok - initialization signal should prevent launch\n'
+exit 1
+SH
+  chmod +x "$tmp/bin/python3" "$fixture"
+  set +e
+  REAL_PYTHON="$real_python" STARTED_EVIDENCE="$tmp/started.json" PATH="$tmp/bin:$PATH" \
+    "$RUNNER" --progress-journal "$journal" "$fixture" >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 143 ] || { cat "$tmp/out" "$tmp/err"; rm -rf "$tmp"; fail "initialization signal should exit 143, got $rc"; }
+  [ -f "$tmp/started.json" ] \
+    || { rm -rf "$tmp"; fail "initialization signal exited before the started record was durable"; }
+  python3 - "$tmp/started.json" <<'PY' \
+    || { rm -rf "$tmp"; fail "initialization signal did not preserve the durable started state"; }
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    record = json.load(fh)
+assert record["state"] == "started"
+PY
+  run_dir=$(journal_run_dir "$journal")
+  [ -n "$run_dir" ] || { rm -rf "$tmp"; fail "initialization signal orphaned the durable run directory"; }
+  assert_journal_run "$run_dir/run.json" interrupted 143 1 serial "$fixture" \
+    || { rm -rf "$tmp"; fail "initialization signal did not finalize the durable run"; }
+  ! grep -Fq 'initialization signal should prevent launch' "$tmp/out" \
+    || { rm -rf "$tmp"; fail "initialization signal launched a selected worker"; }
+  rm -rf "$tmp"
+  pass "progress journal defers initialization signals until started state is durable"
+}
+
 test_progress_journal_preserves_post_terminal_signal_outcome() {
   local tmp journal fixture run_dir rc real_python
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-progress-terminal-signal.XXXXXX")
@@ -1784,6 +1840,7 @@ test_progress_journal_ignores_malformed_prior_state
 test_progress_journal_marks_abrupt_interruptions
 test_progress_journal_does_not_advance_state_after_event_failure
 test_progress_journal_closes_startup_signal_windows
+test_progress_journal_defers_initialization_signal_until_started
 test_progress_journal_preserves_post_terminal_signal_outcome
 test_progress_journal_publishes_adjudicated_outcome_before_bookkeeping
 test_progress_journal_terminal_publication_failure_changes_only_green_exit

@@ -160,6 +160,8 @@ JOURNAL_RUN_DIR=
 JOURNAL_RUN_ID=
 JOURNAL_RUNNER_PID=
 JOURNAL_RUN_INITIALIZED=
+JOURNAL_INITIALIZING=
+JOURNAL_PENDING_SIGNAL=
 JOURNAL_ACTIVE_SERIAL_WORKER=
 JOURNAL_ACTIVE_SERIAL_SCRIPT=
 JOURNAL_ACTIVE_SERIAL_INDEX=
@@ -167,6 +169,15 @@ JOURNAL_ACTIVE_SERIAL_TERMINAL=
 declare -a JOURNAL_PARALLEL_WORKERS=()
 declare -a JOURNAL_PARALLEL_SCRIPTS=()
 declare -a JOURNAL_PARALLEL_TERMINALS=()
+
+journal_handle_signal() {
+  local rc=$1
+  if [ -n "$JOURNAL_INITIALIZING" ]; then
+    JOURNAL_PENDING_SIGNAL=$rc
+    return 0
+  fi
+  exit "$rc"
+}
 
 journal_terminal_state_for_exit() {
   case "$1" in
@@ -302,6 +313,7 @@ journal_initialize() {
   while [ ! -e "$journal_existing_ancestor" ]; do
     journal_existing_ancestor=$(dirname "$journal_existing_ancestor")
   done
+  JOURNAL_INITIALIZING=1
   (umask 077 && mkdir -p "$PROGRESS_JOURNAL/runs") \
     || die "could not create progress journal: $PROGRESS_JOURNAL"
   JOURNAL_RUN_ID=$RUN_ID
@@ -323,6 +335,10 @@ journal_initialize() {
     || die "could not make progress journal durable: $JOURNAL_RUN_ID"
   JOURNAL_RUN_INITIALIZED=1
   journal_write_run_state started
+  JOURNAL_INITIALIZING=
+  if [ -n "$JOURNAL_PENDING_SIGNAL" ]; then
+    exit "$JOURNAL_PENDING_SIGNAL"
+  fi
 }
 
 # shellcheck disable=SC2329 # Invoked indirectly by cleanup_run's signal path.
@@ -1930,9 +1946,9 @@ cleanup_run() {
 }
 
 trap cleanup_run EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-trap 'exit 129' HUP
+trap 'journal_handle_signal 130' INT
+trap 'journal_handle_signal 143' TERM
+trap 'journal_handle_signal 129' HUP
 
 RUN_STARTED_ISO=$(now_iso)
 RUN_STARTED_MS=$(now_ms)
