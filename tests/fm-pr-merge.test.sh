@@ -63,6 +63,8 @@ printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 case "${1:-} ${2:-}" in
   "api POST")
     post_count=$(grep -c '^api POST ' "$FM_TEST_GH_AXI_LOG")
+    envelope=false
+    [[ " $* " = *" --jq @base64 "* ]] && envelope=true
     api_head=$FM_TEST_GH_API_HEAD
     api_base=$FM_TEST_GH_BASE
     protection=${FM_TEST_GH_PROTECTION:-protected}
@@ -71,12 +73,12 @@ case "${1:-} ${2:-}" in
       api_base=${FM_TEST_GH_BASE_AFTER:-$api_base}
       protection=${FM_TEST_GH_PROTECTION_AFTER:-$protection}
     fi
-    body=$(python3 - "$api_head" "$api_base" "$protection" <<'PY'
+    body=$(python3 - "$api_head" "$api_base" "$protection" "$envelope" <<'PY'
 import base64
 import json
 import sys
 
-head, base, mode = sys.argv[1:]
+head, base, mode, envelope = sys.argv[1:]
 pull = {
     "headRefOid": head,
     "baseRefOid": base,
@@ -90,7 +92,7 @@ pull = {
 }
 if mode == "protected":
     rule = {"requiresStrictStatusChecks": True, "isAdminEnforced": True}
-elif mode in {"null", "malformed-occurrence"}:
+elif mode in {"null", "malformed-occurrence", "graphql-error-null"}:
     rule = None
 elif mode == "partial":
     rule = {"requiresStrictStatusChecks": True}
@@ -115,7 +117,12 @@ else:
     raise SystemExit(97)
 if rule is not ...:
     pull["baseRef"]["branchProtectionRule"] = rule
-raw = json.dumps(pull, separators=(",", ":"))
+document = pull
+if envelope == "true":
+    document = {"data": {"repository": {"pullRequest": pull}}}
+if mode == "graphql-error-null" and envelope == "true":
+    document["errors"] = [{"message": "branch protection resolver failed"}]
+raw = json.dumps(document, separators=(",", ":"))
 if mode == "duplicate-null":
     raw = raw.replace(
         '"branchProtectionRule":null',
@@ -138,6 +145,8 @@ PY
     [ "$protection" != malformed-occurrence ] || printf 'branchProtectionRule:null\n'
     ;;
   "api PUT")
+    [ -z "${FM_TEST_GH_BASE_AT_MUTATION:-}" ] \
+      || printf 'mutation base: %s\n' "$FM_TEST_GH_BASE_AT_MUTATION" >> "$FM_TEST_GH_AXI_LOG"
     case "${FM_TEST_GH_MERGED:-true}" in
       true) body=dHJ1ZQ== ;;
       false) body=ZmFsc2U= ;;
@@ -159,6 +168,7 @@ run_github_merge() {
     FM_TEST_GH_BASE_AFTER="${FM_TEST_GH_BASE_AFTER:-}" \
     FM_TEST_GH_PROTECTION="${FM_TEST_GH_PROTECTION:-protected}" \
     FM_TEST_GH_PROTECTION_AFTER="${FM_TEST_GH_PROTECTION_AFTER:-}" \
+    FM_TEST_GH_BASE_AT_MUTATION="${FM_TEST_GH_BASE_AT_MUTATION:-}" \
     FM_TEST_GH_MERGED="${FM_TEST_GH_MERGED:-true}" \
     FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" task-x1 https://github.com/example/repo/pull/9 -- --merge
@@ -414,6 +424,48 @@ test_unprotected_github_merge_refuses_changed_remote_base() {
   pass "unprotected GitHub merge refuses remote base drift even when the new base remains an ancestor"
 }
 
+test_unprotected_github_merge_exposes_residual_mutation_race() {
+  local values case_dir base candidate advanced_base
+  values=$(make_case github-mutation-base-race)
+  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+  base=$(printf '%s\n' "$values" | sed -n '2p')
+  advanced_base=$(printf '%s\n' "$values" | sed -n '3p')
+  printf 'final candidate\n' > "$case_dir/wt/final.txt"
+  git -C "$case_dir/wt" add final.txt
+  git -C "$case_dir/wt" commit -qm final-candidate
+  candidate=$(git -C "$case_dir/wt" rev-parse HEAD)
+  fm_write_meta "$case_dir/state/task-x1.meta" "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" "kind=ship" "mode=no-mistakes"
+  add_github_mocks "$case_dir"
+  FM_TEST_GH_PROTECTION=null FM_TEST_GH_BASE_AT_MUTATION="$advanced_base" \
+    run_github_merge "$case_dir" "$candidate" "$candidate" "$base" >"$case_dir/out" 2>"$case_dir/err" \
+    || fail "unprotected GitHub boundary did not honor the documented single-authority containment"
+  grep -qxF "mutation base: $advanced_base" "$case_dir/gh-axi.log" \
+    || fail "mutation-race fixture did not advance the base after adjacent verification"
+  grep -q 'pins the verified head but not the base' "$case_dir/err" \
+    || fail "unprotected GitHub merge did not disclose the residual base race"
+  pass "unprotected GitHub merge exposes its residual base race and authority assumption"
+}
+
+test_unprotected_github_merge_rejects_graphql_errors() {
+  local values case_dir base candidate rc
+  values=$(make_case github-graphql-error-null)
+  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+  base=$(printf '%s\n' "$values" | sed -n '2p')
+  candidate=$(printf '%s\n' "$values" | sed -n '3p')
+  fm_write_meta "$case_dir/state/task-x1.meta" "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" "kind=ship" "mode=no-mistakes"
+  add_github_mocks "$case_dir"
+  set +e
+  FM_TEST_GH_PROTECTION=graphql-error-null \
+    run_github_merge "$case_dir" "$candidate" "$candidate" "$base" >"$case_dir/out" 2>"$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "GraphQL errors must not sanction a null protection rule"
+  grep -q 'malformed or ambiguous pull request data' "$case_dir/err" \
+    || fail "GraphQL error refusal was not explicit"
+  ! grep -q '^api PUT ' "$case_dir/gh-axi.log" || fail "GraphQL error null reached the merge API"
+  pass "unprotected GitHub merge rejects null protection data accompanied by GraphQL errors"
+}
+
 test_github_merge_refuses_partial_protection_payload() {
   local values case_dir base candidate rc
   values=$(make_case github-partial-protection)
@@ -542,6 +594,8 @@ test_github_merge_uses_verified_exact_sha
 test_unprotected_github_merge_uses_verified_exact_sha
 test_github_merge_refuses_changed_remote_head
 test_unprotected_github_merge_refuses_changed_remote_base
+test_unprotected_github_merge_exposes_residual_mutation_race
+test_unprotected_github_merge_rejects_graphql_errors
 test_github_merge_refuses_partial_protection_payload
 test_github_merge_refuses_ambiguous_protection_payloads
 test_protected_github_merge_still_requires_strict_checks

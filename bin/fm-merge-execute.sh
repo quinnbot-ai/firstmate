@@ -123,7 +123,7 @@ default_branch() {
 }
 
 decode_github_pull() {
-  python3 - "$1" <<'PY'
+  python3 - "$1" "${2:-pull}" <<'PY'
 import base64
 import binascii
 import json
@@ -159,7 +159,21 @@ try:
     if match is None:
         raise InvalidPayload
     decoded = base64.b64decode(match.group(1), validate=True)
-    pull = json.loads(decoded, object_pairs_hook=unique_object)
+    document = json.loads(decoded, object_pairs_hook=unique_object)
+    if sys.argv[2] == "envelope":
+        if not isinstance(document, dict) or "errors" in document or set(document) != {"data"}:
+            raise InvalidPayload
+        data = document["data"]
+        if not isinstance(data, dict) or set(data) != {"repository"}:
+            raise InvalidPayload
+        repository = data["repository"]
+        if not isinstance(repository, dict) or set(repository) != {"pullRequest"}:
+            raise InvalidPayload
+        pull = repository["pullRequest"]
+    elif sys.argv[2] == "pull":
+        pull = document
+    else:
+        raise InvalidPayload
     expected = {
         "headRefOid",
         "baseRefOid",
@@ -417,7 +431,7 @@ execute_local() {
 }
 
 execute_github() {
-  local query payload pull_values confirm_payload confirm_values head base base_ref state draft merged recorded_pr recorded_head merge_output merge_result head_repo head_ref encoded_ref
+  local query payload pull_values envelope_payload envelope_values confirm_payload confirm_values head base base_ref state draft merged recorded_pr recorded_head merge_output merge_result head_repo head_ref encoded_ref
   local confirm_head confirm_base confirm_base_ref confirm_state confirm_draft confirm_merged confirm_head_repo confirm_head_ref
   local protection_path protection_strict protection_admin
   [ "$MODE" = no-mistakes ] || [ "$MODE" = direct-PR ] || die "task $ID is mode=$MODE, not a PR merge mode"
@@ -434,6 +448,15 @@ execute_github() {
     || die "cannot read the exact GitHub merge candidate"
   pull_values=$(decode_github_pull "$payload") \
     || die "GitHub response contained malformed or ambiguous pull request data"
+  if [ "$(printf '%s\n' "$pull_values" | sed -n '9p')" = unprotected ]; then
+    envelope_payload=$(gh-axi api POST /graphql --field "query=$query" --jq '@base64') \
+      || die "cannot validate the unprotected GitHub response envelope"
+    envelope_values=$(decode_github_pull "$envelope_payload" envelope) \
+      || die "GitHub response contained malformed or ambiguous pull request data"
+    [ "$envelope_values" = "$pull_values" ] \
+      || die "GitHub pull request identity or exact candidate changed during merge verification"
+    pull_values=$envelope_values
+  fi
   head=$(printf '%s\n' "$pull_values" | sed -n '1p'); base=$(printf '%s\n' "$pull_values" | sed -n '2p')
   base_ref=$(printf '%s\n' "$pull_values" | sed -n '3p'); head_ref=$(printf '%s\n' "$pull_values" | sed -n '4p')
   state=$(printf '%s\n' "$pull_values" | sed -n '5p'); draft=$(printf '%s\n' "$pull_values" | sed -n '6p')
@@ -442,7 +465,10 @@ execute_github() {
   protection_strict=$(printf '%s\n' "$pull_values" | sed -n '10p')
   protection_admin=$(printf '%s\n' "$pull_values" | sed -n '11p')
   if [ "$protection_path" = unprotected ]; then
+    # GitHub can bind only the verified head at mutation; the adjacent base re-read bounds but cannot close the residual race.
+    # This path requires Firstmate single merge authority with no concurrent uncooperative base writer.
     echo "diagnostic: GitHub reports branchProtectionRule: null; using the sanctioned unprotected repository path" >&2
+    echo "diagnostic: GitHub pins the verified head but not the base; proceeding under the Firstmate single-merge-authority assumption" >&2
   fi
   [ "$state" = OPEN ] && [ "$draft" = false ] && [ "$merged" = false ] || die "GitHub pull request is not an open, mergeable candidate"
   [ -z "$recorded_head" ] || fm_pr_head_valid "$recorded_head" || die "task PR head metadata is invalid"
@@ -455,10 +481,17 @@ execute_github() {
       || die "exact GitHub merge execution requires strict, admin-enforced base branch protection"
   fi
   "$SCRIPT_DIR/fm-test-inventory.sh" merge-check "$WORKTREE" "$head" "$base"
-  confirm_payload=$(gh-axi api POST /graphql --field "query=$query" --jq '.data.repository.pullRequest | @base64') \
-    || die "cannot confirm the exact GitHub merge candidate"
-  confirm_values=$(decode_github_pull "$confirm_payload") \
-    || die "GitHub response contained malformed or ambiguous pull request data"
+  if [ "$protection_path" = unprotected ]; then
+    confirm_payload=$(gh-axi api POST /graphql --field "query=$query" --jq '@base64') \
+      || die "cannot confirm the exact GitHub merge candidate"
+    confirm_values=$(decode_github_pull "$confirm_payload" envelope) \
+      || die "GitHub response contained malformed or ambiguous pull request data"
+  else
+    confirm_payload=$(gh-axi api POST /graphql --field "query=$query" --jq '.data.repository.pullRequest | @base64') \
+      || die "cannot confirm the exact GitHub merge candidate"
+    confirm_values=$(decode_github_pull "$confirm_payload") \
+      || die "GitHub response contained malformed or ambiguous pull request data"
+  fi
   confirm_head=$(printf '%s\n' "$confirm_values" | sed -n '1p'); confirm_base=$(printf '%s\n' "$confirm_values" | sed -n '2p')
   confirm_base_ref=$(printf '%s\n' "$confirm_values" | sed -n '3p'); confirm_head_ref=$(printf '%s\n' "$confirm_values" | sed -n '4p')
   confirm_state=$(printf '%s\n' "$confirm_values" | sed -n '5p'); confirm_draft=$(printf '%s\n' "$confirm_values" | sed -n '6p')

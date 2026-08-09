@@ -13,12 +13,16 @@ The local path lets Git own the checkout and ref transition while its prepared r
 Concurrent uncooperative writers to that project checkout during landing are outside the supported boundary; best-effort dirty-state checks refuse detected drift but do not provide cross-writer atomicity.
 The GitHub path submits an immediate REST merge conditioned on the verified head SHA.
 Its GraphQL response must contain exactly one base-branch protection entry.
+Any top-level GraphQL error or structurally unexpected response envelope fails closed before protection data is interpreted.
 A structured protection rule remains supported only when it contains exactly one `requiresStrictStatusChecks` value and one `isAdminEnforced` value, both `true`.
 A literal `branchProtectionRule: null` is the one sanctioned unprotected-repository path and does not synthesize strict or administrator values.
 Missing, duplicate, non-null scalar, partial-object, or null-with-child protection data is malformed or ambiguous and fails closed.
-Both protection paths bind the requested canonical PR identity to the current exact head and base OIDs and require the base to be an ancestor of the candidate.
+Both protection paths verify the requested canonical PR identity, current exact head and base OIDs, and candidate ancestry.
 Immediately before mutation, the boundary re-reads the PR and refuses any identity, head, base, state, or protection-data drift, then rechecks that the clean local worktree remains at the exact head.
 The merge mutation is conditioned on that head SHA, and GitHub's post-mutation response must confirm that the verified candidate merged.
+GitHub's merge API exposes an expected-head precondition but no expected-base OID precondition.
+For the unprotected path, the adjacent pre-mutation base verification and post-mutation candidate confirmation bound but cannot eliminate the residual base race.
+That remaining window assumes Firstmate is the single merge authority and no concurrent uncooperative writer advances the base.
 The unprotected path does not claim that GitHub enforces required status checks; it preserves the exact-candidate boundary after the delivery lifecycle has established that the candidate's checks are green.
 
 ## Literal-source inventory

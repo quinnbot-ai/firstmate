@@ -87,11 +87,33 @@ printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 [ "${FM_TEST_GH_AXI_RC:-0}" = 0 ] || exit "$FM_TEST_GH_AXI_RC"
 case "${1:-} ${2:-}" in
   "api POST")
-    printf 'data:\n  repository:\n    pullRequest:\n      headRefOid: %s\n      baseRefOid: %s\n      baseRefName: main\n      headRefName: fm/task-a\n      state: OPEN\n      isDraft: false\n      merged: false\n      headRepository:\n        nameWithOwner: my-org/repo_name.with-dots\n      baseRef:\n        branchProtectionRule:\n          requiresStrictStatusChecks: true\n          isAdminEnforced: true\n' \
-      "$FM_TEST_GH_API_HEAD" "$FM_TEST_GH_BASE"
+    body=$(python3 - "$FM_TEST_GH_API_HEAD" "$FM_TEST_GH_BASE" <<'PY'
+import base64
+import json
+import sys
+
+head, base = sys.argv[1:]
+pull = {
+    "headRefOid": head,
+    "baseRefOid": base,
+    "baseRefName": "main",
+    "headRefName": "fm/task-a",
+    "state": "OPEN",
+    "isDraft": False,
+    "merged": False,
+    "headRepository": {"nameWithOwner": "my-org/repo_name.with-dots"},
+    "baseRef": {"branchProtectionRule": {
+        "requiresStrictStatusChecks": True,
+        "isAdminEnforced": True,
+    }},
+}
+print(base64.b64encode(json.dumps(pull, separators=(",", ":")).encode()).decode())
+PY
+    ) || exit $?
+    printf 'api_response:\n  body: %s\n  truncated: false\n' "$body"
     ;;
   "api PUT")
-    printf 'merged: true\n'
+    printf 'api_response:\n  body: dHJ1ZQ==\n  truncated: false\n'
     ;;
 esac
 SH
@@ -596,7 +618,7 @@ test_valid_recording_and_merge_derivation() {
   FM_TEST_GH_HEAD=$expected FM_TEST_GH_API_HEAD=$expected FM_TEST_GH_BASE=$base \
     run_merge_entry "$dir" task-a https://github.com/my-org/repo_name.with-dots/pull/37 -- --merge \
     >/dev/null 2>/dev/null || fail "valid merge wrapper failed"
-  grep -qxF "api PUT /repos/my-org/repo_name.with-dots/pulls/37/merge --field sha=$expected --field merge_method=merge" "$dir/gh-axi.log" \
+  grep -qxF "api PUT /repos/my-org/repo_name.with-dots/pulls/37/merge --field sha=$expected --field merge_method=merge --jq .merged | tostring | @base64" "$dir/gh-axi.log" \
     || fail "merge wrapper did not preserve the repository, method, and exact head"
   set +e
   FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/merged-watch.out" 2> "$dir/merged-watch.err"
