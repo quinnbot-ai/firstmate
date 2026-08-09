@@ -214,6 +214,21 @@ assert doc["families"] == []
   pass "empty changed selection emits summaries and a terminal zero-worker plan"
 }
 
+test_empty_selection_preserves_disabled_fast_path() {
+  local tmp repo out
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-empty-disabled.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+  printf 'documentation only\n' >"$repo/README.md"
+  out=$(cd "$repo" && TMPDIR="$tmp/missing" /bin/bash bin/fm-test-run.sh \
+    --changed --base HEAD --jobs 2 2>"$tmp/err") \
+    || { cat "$tmp/err"; rm -rf "$tmp"; fail "disabled empty selection must not require runner temp state"; }
+  [ "$out" = "FM_TEST_SUMMARY total=0 failed=0 skipped_gate=0 duration_ms=0" ] \
+    || { rm -rf "$tmp"; fail "disabled empty selection changed its summary: $out"; }
+  rm -rf "$tmp"
+  pass "empty disabled selection exits before journal runner setup"
+}
+
 test_timing_markers_and_json() {
   local tmp fixture out json begin_n end_n summary
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-timing.XXXXXX")
@@ -1364,6 +1379,50 @@ SH
   pass "progress journal records abrupt interruptions before cleanup"
 }
 
+test_progress_journal_does_not_advance_state_after_event_failure() {
+  local tmp journal fixture run_dir rc real_python
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-progress-event-failure.XXXXXX")
+  journal="$tmp/journal"
+  fixture="$tmp/slow.test.sh"
+  real_python=$(command -v python3)
+  mkdir -p "$tmp/bin"
+  cat >"$tmp/bin/python3" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}:${3:-}" in
+  -:worker:*/events/serial-1.2.interrupted.json) exit 1 ;;
+esac
+exec "$REAL_PYTHON" "$@"
+SH
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+kill -TERM "$PPID"
+while :; do sleep 1; done
+SH
+  chmod +x "$tmp/bin/python3" "$fixture"
+  set +e
+  REAL_PYTHON="$real_python" PATH="$tmp/bin:$PATH" \
+    "$RUNNER" --progress-journal "$journal" "$fixture" >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 143 ] || { cat "$tmp/out" "$tmp/err"; rm -rf "$tmp"; fail "event-write failure interrupt should exit 143, got $rc"; }
+  run_dir=$(journal_run_dir "$journal")
+  [ ! -e "$run_dir/events/serial-1.2.interrupted.json" ] \
+    || { rm -rf "$tmp"; fail "failed immutable event write unexpectedly created an event"; }
+  python3 - "$run_dir/states/serial-1.json" "$fixture" <<'PY' \
+    || { rm -rf "$tmp"; fail "current state advanced without its immutable event"; }
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    record = json.load(fh)
+assert record["state"] == "started"
+assert record["transition_ordinal"] == 1
+assert record["script"] == sys.argv[2]
+PY
+  rm -rf "$tmp"
+  pass "journal state never advances past a failed event write"
+}
+
 test_progress_journal_closes_startup_signal_windows() {
   local tmp real_python fixture journal run_dir rc repo runner
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-progress-start-signal.XXXXXX")
@@ -1473,6 +1532,58 @@ SH
   pass "progress journal keeps terminal worker outcomes monotonic on signal"
 }
 
+test_progress_journal_publishes_adjudicated_outcome_before_bookkeeping() {
+  local tmp fixture journal run_dir rc repo runner
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-progress-adjudicated-signal.XXXXXX")
+  fixture="$tmp/serial.test.sh"
+  mkdir -p "$tmp/bin"
+  cat >"$tmp/bin/mv" <<'SH'
+#!/usr/bin/env bash
+/bin/mv "$@"
+rc=$?
+case "${2:-}" in
+  */families.tsv) kill -TERM "$PPID" ;;
+esac
+exit "$rc"
+SH
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+printf 'ok - raw child passed\nskip: injected gate\n'
+SH
+  chmod +x "$tmp/bin/mv" "$fixture"
+
+  journal="$tmp/serial-journal"
+  set +e
+  PATH="$tmp/bin:$PATH" "$RUNNER" --progress-journal "$journal" \
+    --fail-on-gate-skip 'injected gate' "$fixture" >"$tmp/serial.out" 2>"$tmp/serial.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 143 ] || { cat "$tmp/serial.out" "$tmp/serial.err"; rm -rf "$tmp"; fail "serial bookkeeping signal should exit 143, got $rc"; }
+  run_dir=$(journal_run_dir "$journal")
+  assert_journal_state "$run_dir/states/serial-1.json" failed serial-1 "$fixture" 1 \
+    || { rm -rf "$tmp"; fail "serial bookkeeping signal lost the adjudicated failure"; }
+
+  repo="$tmp/repo"
+  runner="$repo/bin/fm-test-run.sh"
+  journal="$tmp/parallel-journal"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$runner"
+  cp "$fixture" "$repo/tests/fm-brief.test.sh"
+  chmod +x "$runner" "$repo/tests/fm-brief.test.sh"
+  set +e
+  (cd "$repo" && PATH="$tmp/bin:$PATH" "$runner" --jobs 2 \
+    --progress-journal "$journal" --fail-on-gate-skip 'injected gate' tests/fm-brief.test.sh) \
+    >"$tmp/parallel.out" 2>"$tmp/parallel.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 143 ] || { cat "$tmp/parallel.out" "$tmp/parallel.err"; rm -rf "$tmp"; fail "parallel bookkeeping signal should exit 143, got $rc"; }
+  run_dir=$(journal_run_dir "$journal")
+  assert_journal_state "$run_dir/states/parallel-1.json" failed parallel-1 tests/fm-brief.test.sh 1 \
+    || { rm -rf "$tmp"; fail "parallel cleanup inferred raw child success instead of the adjudicated failure"; }
+  rm -rf "$tmp"
+  pass "journal cleanup trusts published adjudicated worker outcomes"
+}
+
 test_progress_journal_restores_caller_umask() {
   local tmp journal fixture timing fixture_mode timing_mode
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-progress-umask.XXXXXX")
@@ -1523,6 +1634,7 @@ test_single_script_selection
 test_changed_file_selection_is_conservative
 test_changed_dependency_selection_and_unmapped_failure
 test_empty_selection_emits_summary
+test_empty_selection_preserves_disabled_fast_path
 test_timing_markers_and_json
 test_quoting_and_platform_temp_paths
 test_stock_bash_wrapper_pins_nested_runner
@@ -1548,7 +1660,9 @@ test_progress_journal_terminal_transitions_and_atomic_state
 test_progress_journal_parallel_workers_preserve_transitions
 test_progress_journal_ignores_malformed_prior_state
 test_progress_journal_marks_abrupt_interruptions
+test_progress_journal_does_not_advance_state_after_event_failure
 test_progress_journal_closes_startup_signal_windows
 test_progress_journal_preserves_post_terminal_signal_outcome
+test_progress_journal_publishes_adjudicated_outcome_before_bookkeeping
 test_progress_journal_restores_caller_umask
 test_progress_journal_disabled_mode_has_no_filesystem_effect

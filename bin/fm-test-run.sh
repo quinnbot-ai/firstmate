@@ -265,7 +265,8 @@ journal_transition() {
   # A repeated cleanup transition is idempotent. Immutable transition files
   # are never replaced, while the current-state file is always replaced.
   if [ ! -e "$event" ]; then
-    journal_write_record worker "$event" "$worker_id" "$state" "$ordinal" "$script" "$exit_code" "$duration_ms"
+    journal_write_record worker "$event" "$worker_id" "$state" "$ordinal" "$script" "$exit_code" "$duration_ms" \
+      || return $?
   fi
   journal_write_record worker "$state_path" "$worker_id" "$state" "$ordinal" "$script" "$exit_code" "$duration_ms"
 }
@@ -299,7 +300,7 @@ journal_initialize() {
 
 # shellcheck disable=SC2329 # Invoked indirectly by cleanup_run's signal path.
 journal_mark_interrupted_workers() {
-  local slot worker_id script work rc duration state terminal rest
+  local slot worker_id script rc duration state terminal rest
   [ -n "$JOURNAL_RUN_DIR" ] || return 0
   if [ -n "$JOURNAL_ACTIVE_SERIAL_WORKER" ]; then
     terminal=$JOURNAL_ACTIVE_SERIAL_TERMINAL
@@ -318,7 +319,6 @@ journal_mark_interrupted_workers() {
   for slot in "${!JOURNAL_PARALLEL_WORKERS[@]}"; do
     worker_id=${JOURNAL_PARALLEL_WORKERS[$slot]}
     script=${JOURNAL_PARALLEL_SCRIPTS[$slot]}
-    work=${JOURNAL_PARALLEL_WORKDIRS[$slot]}
     terminal=${JOURNAL_PARALLEL_TERMINALS[$slot]:-}
     if [ -n "$terminal" ]; then
       state=${terminal%%$'\t'*}
@@ -326,11 +326,6 @@ journal_mark_interrupted_workers() {
       rc=${rest%%$'\t'*}
       duration=${rest#*$'\t'}
       journal_transition "$worker_id" "$state" "$script" 2 "$rc" "$duration"
-    elif [ -f "$work/exit" ]; then
-      rc=$(cat "$work/exit" 2>/dev/null || echo 1)
-      duration=$(cat "$work/duration_ms" 2>/dev/null || echo 0)
-      journal_transition "$worker_id" "$(journal_terminal_state_for_exit "$rc")" \
-        "$script" 2 "$rc" "$duration"
     else
       journal_transition "$worker_id" interrupted "$script" 2
     fi
@@ -1695,6 +1690,23 @@ if [ "$LIST_ONLY" -eq 1 ]; then
   exit 0
 fi
 
+if [ "${#SCRIPTS[@]}" -eq 0 ] && [ -z "$PROGRESS_JOURNAL" ]; then
+  log "nothing to run"
+  printf 'FM_TEST_SUMMARY total=0 failed=0 skipped_gate=0 duration_ms=0\n'
+  if [ -n "$JSON_PATH" ]; then
+    empty_rec=$(mktemp)
+    empty_fam=$(mktemp)
+    : >"$empty_rec"
+    : >"$empty_fam"
+    started=$(now_iso)
+    mkdir -p "$(dirname "$JSON_PATH")"
+    write_json_artifact "$JSON_PATH" "$started" "$started" \
+      "empty" 0 0 0 0 "$SELECTION_DESC" "$empty_rec" "$empty_fam"
+    rm -f "$empty_rec" "$empty_fam"
+  fi
+  exit 0
+fi
+
 # Verify selected scripts exist before starting.
 for s in "${SCRIPTS[@]+"${SCRIPTS[@]}"}"; do
   [ -f "$s" ] || die "test script not found: $s"
@@ -1703,7 +1715,7 @@ done
 
 # --jobs N>1 only for the proven-isolated set. Stateful families stay serial.
 if [ "$JOBS" -gt 1 ]; then
-  for s in "${SCRIPTS[@]}"; do
+  for s in "${SCRIPTS[@]+"${SCRIPTS[@]}"}"; do
     if ! is_proven_isolated_script "$s"; then
       die "--jobs $JOBS refused: $s is not in the proven-isolated set (see bin/fm-test-isolation-proof.sh --list). Stateful families stay serial."
     fi
@@ -1944,9 +1956,9 @@ family_bump() {
 }
 
 record_script_result() {
-  local script=$1 rc=$2 duration=$3 out=$4 end_iso=$5
+  local script=$1 rc=$2 duration=$3 out=$4 end_iso=$5 journal_slot=$6
   local base family runtime requirement gate_skip gate_outcome fail_delta
-  local runtime_signal runtime_signal_count runtime_signal_line
+  local runtime_signal runtime_signal_count runtime_signal_line terminal_state terminal_tuple
   base=$(basename "$script")
   family=$(family_for_basename "$base")
   runtime=$(runtime_gate_for_basename "$base")
@@ -2000,6 +2012,16 @@ record_script_result() {
     gate_outcome=unexpectedly-skipped
   fi
 
+  terminal_state=$(journal_terminal_state_for_exit "$rc")
+  terminal_tuple="$terminal_state"$'\t'"$rc"$'\t'"$duration"
+  if [ "$journal_slot" = serial ]; then
+    JOURNAL_ACTIVE_SERIAL_TERMINAL=$terminal_tuple
+  else
+    JOURNAL_PARALLEL_TERMINALS[$journal_slot]=$terminal_tuple
+  fi
+  LAST_SCRIPT_RESULT_STATE=$terminal_state
+  LAST_SCRIPT_RESULT_RC=$rc
+
   printf 'FM_TEST_GATE %s runtime=%s requirement=%s outcome=%s\n' \
     "$script" "$runtime" "$requirement" "$gate_outcome"
 
@@ -2017,12 +2039,11 @@ record_script_result() {
     "$script" "$family" "$runtime" "$requirement" "$rc" "$duration" "$gate_skip" "$gate_outcome" >>"$RECORDS"
   family_bump "$family" "$duration" "$fail_delta"
   TOTAL=$((TOTAL + 1))
-  LAST_SCRIPT_RESULT_RC=$rc
 }
 
 run_one_serial() {
   local script=$1
-  local base family runtime requirement out fifo begin_iso begin_ms end_ms end_iso duration rc child_pid monitor_mode='' terminal_state
+  local base family runtime requirement out fifo begin_iso begin_ms end_ms end_iso duration rc child_pid monitor_mode=''
   base=$(basename "$script")
   family=$(family_for_basename "$base")
   runtime=$(runtime_gate_for_basename "$base")
@@ -2064,11 +2085,9 @@ run_one_serial() {
   if [ "$duration" -lt 0 ]; then
     duration=0
   fi
-  record_script_result "$script" "$rc" "$duration" "$out" "$end_iso"
-  terminal_state=$(journal_terminal_state_for_exit "$LAST_SCRIPT_RESULT_RC")
-  JOURNAL_ACTIVE_SERIAL_TERMINAL="$terminal_state"$'\t'"$LAST_SCRIPT_RESULT_RC"$'\t'"$duration"
+  record_script_result "$script" "$rc" "$duration" "$out" "$end_iso" serial
   journal_transition "$JOURNAL_ACTIVE_SERIAL_WORKER" \
-    "$terminal_state" \
+    "$LAST_SCRIPT_RESULT_STATE" \
     "$script" 2 "$LAST_SCRIPT_RESULT_RC" "$duration"
   JOURNAL_ACTIVE_SERIAL_WORKER=
   JOURNAL_ACTIVE_SERIAL_SCRIPT=
@@ -2091,7 +2110,7 @@ else
   active_workers=0
 
   wait_one_job_worker() {
-    local slot=$1 pid idx work script worker_id rc duration mode out end_iso terminal_state
+    local slot=$1 pid idx work script worker_id rc duration mode out end_iso
     pid=${WORKER_PIDS[$slot]}
     idx=${WORKER_IDX[$slot]}
     script=${WORKER_SCRIPTS[$slot]}
@@ -2121,11 +2140,9 @@ else
         rc=1
         ;;
     esac
-    record_script_result "$script" "$rc" "$duration" "$out" "$end_iso"
-    terminal_state=$(journal_terminal_state_for_exit "$LAST_SCRIPT_RESULT_RC")
-    JOURNAL_PARALLEL_TERMINALS[slot]="$terminal_state"$'\t'"$LAST_SCRIPT_RESULT_RC"$'\t'"$duration"
+    record_script_result "$script" "$rc" "$duration" "$out" "$end_iso" "$slot"
     journal_transition "$worker_id" \
-      "$terminal_state" \
+      "$LAST_SCRIPT_RESULT_STATE" \
       "$script" 2 "$LAST_SCRIPT_RESULT_RC" "$duration"
     unset 'JOURNAL_PARALLEL_WORKERS[slot]'
     unset 'JOURNAL_PARALLEL_SCRIPTS[slot]'
