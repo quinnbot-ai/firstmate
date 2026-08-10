@@ -1507,6 +1507,11 @@ process_queued_heartbeats() {  # <state>
       status=1
       break
     fi
+    if [ "${FM_HEARTBEAT_TEST_FAIL_BEFORE_ACK:-0}" = 1 ] \
+      && [ "$REFILL_DEDUPE_ESCALATED" = true ]; then
+      status=1
+      break
+    fi
     if ! fm_heartbeat_state_commit_locked "$seq" "$REFILL_DEDUPE_PENDING_FINGERPRINT" \
       "$REFILL_DEDUPE_PENDING_TIMESTAMP"; then
       log "ERROR: could not acknowledge heartbeat observation at sequence $seq"

@@ -450,7 +450,7 @@ fm_heartbeat_state_read_locked() {
   FM_HEARTBEAT_ACK_SEQ=0
   FM_HEARTBEAT_FINGERPRINT=none
   FM_HEARTBEAT_TIMESTAMP=0
-  [ -r "$file" ] || return 0
+  [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] || return 0
   {
     IFS= read -r version || return 0
     IFS= read -r seq || return 0
@@ -460,15 +460,17 @@ fm_heartbeat_state_read_locked() {
   } < "$file"
   [ "$version" = v1 ] || return 0
   case "$seq" in ''|*[!0-9]*) return 0 ;; esac
-  FM_HEARTBEAT_ACK_SEQ=$seq
   case "$fingerprint" in
-    none) FM_HEARTBEAT_FINGERPRINT=none; FM_HEARTBEAT_TIMESTAMP=0; return 0 ;;
+    none) [ "$timestamp" = 0 ] || return 0 ;;
     sha256=*) stored_hash=${fingerprint#sha256=} ;;
     *) return 0 ;;
   esac
-  [ "${#stored_hash}" -eq 64 ] || return 0
-  case "$stored_hash" in *[!0-9a-f]*) return 0 ;; esac
-  case "$timestamp" in ''|*[!0-9]*) return 0 ;; esac
+  if [ "$fingerprint" != none ]; then
+    [ "${#stored_hash}" -eq 64 ] || return 0
+    case "$stored_hash" in *[!0-9a-f]*) return 0 ;; esac
+    case "$timestamp" in ''|*[!0-9]*) return 0 ;; esac
+  fi
+  FM_HEARTBEAT_ACK_SEQ=$seq
   FM_HEARTBEAT_FINGERPRINT=$fingerprint
   FM_HEARTBEAT_TIMESTAMP=$timestamp
 }
@@ -486,6 +488,9 @@ fm_heartbeat_state_commit_locked() {
       ;;
     *) return 1 ;;
   esac
+  if [ -e "$FM_HEARTBEAT_STATE" ] || [ -L "$FM_HEARTBEAT_STATE" ]; then
+    [ -f "$FM_HEARTBEAT_STATE" ] && [ ! -L "$FM_HEARTBEAT_STATE" ] || return 1
+  fi
   old_umask=$(umask)
   umask 077
   tmp=$(mktemp "$STATE/.subsuper-heartbeat-state.tmp.XXXXXX") || { umask "$old_umask"; return 1; }
@@ -495,9 +500,11 @@ fm_heartbeat_state_commit_locked() {
     rm -f "$tmp"
     return 1
   fi
-  FM_HEARTBEAT_ACK_SEQ=$seq
-  FM_HEARTBEAT_FINGERPRINT=$fingerprint
-  FM_HEARTBEAT_TIMESTAMP=$timestamp
+  [ -f "$FM_HEARTBEAT_STATE" ] && [ ! -L "$FM_HEARTBEAT_STATE" ] || return 1
+  fm_heartbeat_state_read_locked
+  [ "$FM_HEARTBEAT_ACK_SEQ" = "$seq" ] \
+    && [ "$FM_HEARTBEAT_FINGERPRINT" = "$fingerprint" ] \
+    && [ "$FM_HEARTBEAT_TIMESTAMP" = "$timestamp" ]
 }
 
 fm_heartbeat_compact_locked() {

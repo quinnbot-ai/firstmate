@@ -15,7 +15,7 @@ Visible symptom before this regression: unchanged evidence appended an identical
 The route now uses the same durable-state pattern as the existing signal, stale, and catch-all escalation dedupe rather than session memory.
 The public boundary regression executes `fm-watch.sh`, `fm-refill.sh`, and `fm-supervise-daemon.sh`, then observes the injected captain-visible digest across unchanged cycles and a daemon restart.
 It also drains an empty observation through primary-session catch-up while the daemon is down, corrupts the shared sequence sidecar, and queues the prior actionable state, proving the heartbeat journal retains the drained transition and assigns the returning observation a monotonic identity before restart replay.
-The focused state matrix additionally covered producer-side canonical ready-id ordering, count changes and same-count replacements beyond capped display ids, live-worker changes, restart-persistent home scope, malformed and stale state, backward clock movement, failed escalation-buffer appends, escalation-age sidecar failure, and preservation of a typed failure batched beside suppressed refill evidence.
+The focused state matrix additionally covered producer-side canonical ready-id ordering, count changes and same-count replacements beyond capped display ids, live-worker changes, restart-persistent home scope, fully malformed state, invalid state destination types, backward clock movement, failed escalation-buffer appends, escalation-age sidecar failure, at-least-once replay across an append-to-ack crash, and preservation of a typed failure batched beside suppressed refill evidence.
 The existing per-home daemon singleton test coverage remains the concurrency boundary for the read-check-write transition.
 
 ```sh
@@ -23,7 +23,7 @@ bin/fm-test-run.sh tests/fm-refill.test.sh tests/fm-daemon.test.sh \
   tests/fm-wake-queue.test.sh tests/fm-wake-daemon-lifecycle-e2e.test.sh
 ```
 
-Observed result: every selected suite exited 0, including `heartbeat journal survives drains and reconciles malformed sequence state`, `lifecycle: real away daemon survives restart, drain races, and sequence corruption`, and `away refill escalation dedupes stable state, re-surfaces safely, and preserves other events`.
+Observed result: every selected suite exited 0, including `heartbeat state validates fully and rejects malformed destinations`, `lifecycle: real away daemon survives drain races and replays pre-ack crashes at least once`, and `away refill escalation dedupes stable state, re-surfaces safely, and preserves other events`.
 
 ## Native session-start delivery
 

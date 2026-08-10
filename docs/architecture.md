@@ -35,6 +35,7 @@ A valid but non-actionable heartbeat ends that refill episode, so empty-to-nonem
 The daemon atomically records each acknowledged sequence together with its refill fingerprint and timestamp under `state/.subsuper-heartbeat-state`, then compacts acknowledged observations while the queue lock excludes concurrent appends.
 The daemon's existing per-home singleton lock serializes concurrent cycles.
 Refill dedupe state advances only with the durable heartbeat acknowledgement after its escalation buffer append succeeds, so a failed append remains eligible for retry.
+Delivery across the append-to-ack crash window is deliberately at least once: a crash may re-deliver an identical refill digest, consumers must tolerate that duplicate, and the observation is never suppressed without its durable acknowledgement.
 Malformed, stale, or future-dated state fails open, and refill suppression never affects typed failures or other buffered captain-relevant events.
 Absorbed wakes advance their suppression markers, log to `state/.watch-triage.log`, and keep the watcher blocking without a queue record or LLM turn.
 After each drain, `fm-wake-drain.sh` runs the same liveness guard as the supervision scripts, so a lapsed watcher chain surfaces even on a turn that only drains and handles queued wakes.

@@ -193,9 +193,64 @@ wait_for_enter_count() {  # <sent-log> <count>
   return 1
 }
 
+wait_for_file_text() {  # <file> <fixed-text>
+  local file=$1 expected=$2 i=0
+  while [ "$i" -lt 100 ]; do
+    grep -F "$expected" "$file" >/dev/null 2>&1 && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+heartbeat_observation_payload() {  # <state> <sequence>
+  awk -F '\t' -v wanted="$2" \
+    '$2 == wanted && $3 == "heartbeat" && $4 == "heartbeat" {
+      sub(/^heartbeat /, "", $5)
+      print $5
+      exit
+    }' \
+    "$1/.subsuper-heartbeat-observations" "$1/.wake-queue" 2>/dev/null
+}
+
+file_occurrence_count() {  # <file> <fixed-text>
+  awk -v needle="$2" '
+    BEGIN { count = 0 }
+    {
+      line = $0
+      while ((position = index(line, needle)) > 0) {
+        count++
+        line = substr(line, position + length(needle))
+      }
+    }
+    END { print count }
+  ' "$1" 2>/dev/null
+}
+
+wait_for_file_occurrence_count() {  # <file> <fixed-text> <minimum-count>
+  local file=$1 expected=$2 minimum=$3 i=0 actual
+  while [ "$i" -lt 100 ]; do
+    actual=$(file_occurrence_count "$file" "$expected")
+    [ "$actual" -ge "$minimum" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+wait_for_file_empty() {  # <file>
+  local file=$1 i=0
+  while [ "$i" -lt 100 ]; do
+    [ ! -s "$file" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
 test_refill_heartbeat_dedupes_through_daemon_process() {
   (
-    local dir state fakebin out sent pane ready_file daemon_pid baseline queued_seq
+    local dir state fakebin out sent pane ready_file daemon_pid baseline queued_seq evidence occurrence_before occurrence_after
     dir=$(make_supercase wd-refill-dedupe)
     state="$dir/state"
     fakebin="$dir/fakebin"
@@ -248,6 +303,8 @@ SH
     daemon_pid=$!
     wait_for_enter_count "$sent" 1 \
       || fail "the real away daemon did not inject the first refill digest: $(cat "$dir/daemon.err")"
+    wait_for_file_empty "$state/.subsuper-escalations" \
+      || fail "the first refill digest was delivered but not durably cleared"
     grep -F 'refill: ready=4 live=0 ids=beta,alpha fingerprint=' "$sent" >/dev/null \
       || fail "the first daemon digest omitted capped producer evidence"
     queued_seq=$(cat "$state/.wake-queue.seq")
@@ -284,6 +341,9 @@ SH
     printf 'count-change\n' > "$ready_file"
     run_refill_cycle "$dir" "$state" "$fakebin" "$out" "$ready_file"
     queued_seq=$(cat "$state/.wake-queue.seq")
+    evidence=$(heartbeat_observation_payload "$state" "$queued_seq")
+    [ -n "$evidence" ] || fail "the ready-set count change lacked durable producer evidence"
+    occurrence_before=$(file_occurrence_count "$sent" "$evidence")
     PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
       FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=fakepane \
       FM_FAKE_TMUX_CAPTURE="$pane" FM_FAKE_TMUX_SENT="$sent" FM_FAKE_READY_FILE="$ready_file" \
@@ -293,8 +353,10 @@ SH
     daemon_pid=$!
     wait_for_heartbeat_cursor "$state" "$queued_seq" \
       || fail "the daemon did not process a ready-set count change"
-    wait_for_enter_count "$sent" 2 \
+    wait_for_file_occurrence_count "$sent" "$evidence" $((occurrence_before + 1)) \
       || fail "a ready-set change beyond capped display ids was suppressed"
+    wait_for_file_empty "$state/.subsuper-escalations" \
+      || fail "the ready-set count change was delivered but not durably cleared"
     kill "$daemon_pid" 2>/dev/null || true
     wait "$daemon_pid" 2>/dev/null || true
     daemon_pid=
@@ -302,6 +364,9 @@ SH
     printf 'replacement\n' > "$ready_file"
     run_refill_cycle "$dir" "$state" "$fakebin" "$out" "$ready_file"
     queued_seq=$(cat "$state/.wake-queue.seq")
+    evidence=$(heartbeat_observation_payload "$state" "$queued_seq")
+    [ -n "$evidence" ] || fail "the ready-set replacement lacked durable producer evidence"
+    occurrence_before=$(file_occurrence_count "$sent" "$evidence")
     PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
       FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=fakepane \
       FM_FAKE_TMUX_CAPTURE="$pane" FM_FAKE_TMUX_SENT="$sent" FM_FAKE_READY_FILE="$ready_file" \
@@ -311,8 +376,10 @@ SH
     daemon_pid=$!
     wait_for_heartbeat_cursor "$state" "$queued_seq" \
       || fail "the daemon did not process a same-count ready-set replacement"
-    wait_for_enter_count "$sent" 3 \
+    wait_for_file_occurrence_count "$sent" "$evidence" $((occurrence_before + 1)) \
       || fail "a same-count ready-set replacement beyond capped display ids was suppressed"
+    wait_for_file_empty "$state/.subsuper-escalations" \
+      || fail "the ready-set replacement was delivered but not durably cleared"
     kill "$daemon_pid" 2>/dev/null || true
     wait "$daemon_pid" 2>/dev/null || true
     daemon_pid=
@@ -327,6 +394,9 @@ SH
     printf 'replacement\n' > "$ready_file"
     run_refill_cycle "$dir" "$state" "$fakebin" "$out" "$ready_file"
     queued_seq=$(cat "$state/.wake-queue.seq")
+    evidence=$(heartbeat_observation_payload "$state" "$queued_seq")
+    [ -n "$evidence" ] || fail "the post-drain replacement lacked durable producer evidence"
+    occurrence_before=$(file_occurrence_count "$sent" "$evidence")
     [ "$queued_seq" -gt "$(heartbeat_cursor_seq "$state")" ] \
       || fail "a malformed queue sequence regressed behind the durable heartbeat acknowledgement"
 
@@ -339,16 +409,63 @@ SH
     daemon_pid=$!
     wait_for_heartbeat_cursor "$state" "$queued_seq" \
       || fail "the restarted daemon did not replay drained and queued heartbeat transitions in order"
-    wait_for_enter_count "$sent" 4 \
+    wait_for_file_occurrence_count "$sent" "$evidence" $((occurrence_before + 1)) \
       || fail "the queued empty-to-nonempty transition was suppressed after restart"
-    [ "$(grep -c '^\[ENTER\]$' "$sent" || true)" -eq 4 ] \
-      || fail "restart replay injected a duplicate refill digest"
+    wait_for_file_empty "$state/.subsuper-escalations" \
+      || fail "the empty-to-nonempty transition was delivered but not durably cleared"
     kill "$daemon_pid" 2>/dev/null || true
     wait "$daemon_pid" 2>/dev/null || true
     daemon_pid=
+    occurrence_after=$(file_occurrence_count "$sent" "$evidence")
+    [ "$occurrence_after" -eq $((occurrence_before + 1)) ] \
+      || fail "restart replay injected a duplicate refill digest"
+
+    printf 'count-change\n' > "$ready_file"
+    run_refill_cycle "$dir" "$state" "$fakebin" "$out" "$ready_file"
+    queued_seq=$(cat "$state/.wake-queue.seq")
+    evidence=$(heartbeat_observation_payload "$state" "$queued_seq")
+    [ -n "$evidence" ] || fail "the pre-ack crash observation lacked durable producer evidence"
+    occurrence_before=$(file_occurrence_count "$sent" "$evidence")
+    PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+      FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=fakepane \
+      FM_FAKE_TMUX_CAPTURE="$pane" FM_FAKE_TMUX_SENT="$sent" FM_FAKE_READY_FILE="$ready_file" \
+      FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_HEARTBEAT_MAX=1 \
+      FM_REFILL_IDS_MAX=2 FM_ESCALATE_BATCH_SECS=999 FM_HOUSEKEEPING_TICK=999999 \
+      FM_HEARTBEAT_TEST_FAIL_BEFORE_ACK=1 \
+      "$DAEMON" > "$dir/pre-ack-crash.out" 2> "$dir/pre-ack-crash.err" &
+    daemon_pid=$!
+    wait_for_file_text "$state/.subsuper-escalations" "$evidence" \
+      || fail "the pre-ack crash fixture never durably appended its refill digest"
+    kill "$daemon_pid" 2>/dev/null || true
+    wait "$daemon_pid" 2>/dev/null || true
+    daemon_pid=
+    wait_for_file_occurrence_count "$sent" "$evidence" $((occurrence_before + 1)) \
+      || fail "daemon cleanup did not deliver the pre-ack refill digest"
+    [ "$(heartbeat_cursor_seq "$state")" -lt "$queued_seq" ] \
+      || fail "the pre-ack crash fixture unexpectedly acknowledged its observation"
+
+    PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+      FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=fakepane \
+      FM_FAKE_TMUX_CAPTURE="$pane" FM_FAKE_TMUX_SENT="$sent" FM_FAKE_READY_FILE="$ready_file" \
+      FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_HEARTBEAT_MAX=1 \
+      FM_REFILL_IDS_MAX=2 FM_ESCALATE_BATCH_SECS=0 FM_HOUSEKEEPING_TICK=999999 \
+      "$DAEMON" > "$dir/at-least-once-replay.out" 2> "$dir/at-least-once-replay.err" &
+    daemon_pid=$!
+    wait_for_heartbeat_cursor "$state" "$queued_seq" \
+      || fail "the restarted daemon suppressed its unacknowledged refill observation"
+    wait_for_file_occurrence_count "$sent" "$evidence" $((occurrence_before + 2)) \
+      || fail "the restarted daemon did not redeliver the unacknowledged refill digest"
+    wait_for_file_empty "$state/.subsuper-escalations" \
+      || fail "the redelivered refill digest was not durably cleared"
+    kill "$daemon_pid" 2>/dev/null || true
+    wait "$daemon_pid" 2>/dev/null || true
+    daemon_pid=
+    occurrence_after=$(file_occurrence_count "$sent" "$evidence")
+    [ "$occurrence_after" -eq $((occurrence_before + 2)) ] \
+      || fail "the acknowledged crash replay was delivered more than once"
     trap - EXIT
   ) || fail "real away-daemon refill process case failed"
-  pass "lifecycle: real away daemon survives restart, drain races, and sequence corruption"
+  pass "lifecycle: real away daemon survives drain races and replays pre-ack crashes at least once"
 }
 
 test_routine_then_terminal_after_restart
