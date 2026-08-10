@@ -11,7 +11,7 @@
 #     clears its marker) -> resumed/busy (clears without escalating)
 #
 # This proves the operator-visible routing/queueing/dedupe behavior through real
-# fm-watch.sh runs plus the daemon's own functions. The captain-relevant
+# fm-watch.sh and fm-supervise-daemon.sh processes. The captain-relevant
 # status-phrase matrix and the lock-primitive races stay as focused units
 # (fm-daemon.test.sh, fm-watcher-lock.test.sh) - an e2e cannot deterministically
 # cover a race, and the phrase list is a product contract worth a dedicated test.
@@ -153,100 +153,197 @@ test_stale_pane_transient_persistent_resume() {
   pass "lifecycle: stale pane transient self-handles, persistent escalates once and clears, resumed clears quietly"
 }
 
-# This deliberately drives the executable producer path instead of constructing
-# a heartbeat payload. It is the regression for the overnight refill loop:
-# watcher -> fm-refill -> durable queue -> away-supervisor routing.
-run_refill_cycle() {  # <home> <state> <fakebin> <out> <ready-case>
-  local home=$1 state=$2 fakebin=$3 out=$4 ready_case=$5 pid
+run_refill_cycle() {  # <home> <state> <fakebin> <out> <ready-file>
+  local home=$1 state=$2 fakebin=$3 out=$4 ready_file=$5 pid
   rm -f "$state/.last-heartbeat"
   : > "$out"
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 FM_HEARTBEAT_MAX=1 FM_REFILL_IDS_MAX=2 \
-    FM_FAKE_READY_CASE="$ready_case" \
+    FM_FAKE_READY_FILE="$ready_file" \
     "$WATCH" > "$out" &
   pid=$!
-  wait_for_exit "$pid" 50 || fail "refill heartbeat watcher pass ($ready_case) did not exit"
-  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_latest_payload heartbeat heartbeat' \
-    _ "$ROOT/bin/fm-wake-lib.sh"
+  wait_for_exit "$pid" 50 || fail "refill heartbeat watcher pass did not exit"
+  grep -Fx heartbeat "$out" >/dev/null || fail "refill heartbeat watcher did not emit its wake reason"
 }
 
-test_refill_heartbeat_dedupes_after_real_producer_path() {
-  local dir state fakebin out payload initial_fingerprint changed_fingerprint
-  dir=$(make_supercase wd-refill-dedupe)
-  state="$dir/state"
-  fakebin="$dir/fakebin"
-  out="$dir/watch.out"
-  mkdir -p "$dir/config" "$dir/data"
-  printf '# Backlog\n' > "$dir/data/backlog.md"
-  cat > "$fakebin/tasks-axi" <<'SH'
+heartbeat_cursor_seq() {
+  sed -n '2p' "$1/.subsuper-heartbeat-cursor" 2>/dev/null
+}
+
+wait_for_heartbeat_cursor() {  # <state> <minimum-sequence>
+  local state=$1 minimum=$2 i=0 seq
+  while [ "$i" -lt 100 ]; do
+    seq=$(heartbeat_cursor_seq "$state")
+    case "$seq" in ''|*[!0-9]*) seq=0 ;; esac
+    [ "$seq" -ge "$minimum" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+wait_for_enter_count() {  # <sent-log> <count>
+  local sent=$1 count=$2 i=0 actual
+  while [ "$i" -lt 100 ]; do
+    actual=$(grep -c '^\[ENTER\]$' "$sent" 2>/dev/null || true)
+    [ "$actual" -ge "$count" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+test_refill_heartbeat_dedupes_through_daemon_process() {
+  (
+    local dir state fakebin out sent pane ready_file daemon_pid baseline queued_seq
+    dir=$(make_supercase wd-refill-dedupe)
+    state="$dir/state"
+    fakebin="$dir/fakebin"
+    out="$dir/watch.out"
+    sent="$dir/sent.log"
+    pane="$dir/pane.txt"
+    ready_file="$dir/ready-case"
+    daemon_pid=
+
+    cleanup_refill_daemon() {
+      [ -z "$daemon_pid" ] || ! kill -0 "$daemon_pid" 2>/dev/null \
+        || { kill "$daemon_pid" 2>/dev/null || true; wait "$daemon_pid" 2>/dev/null || true; }
+      fm_test_cleanup
+    }
+    trap cleanup_refill_daemon EXIT
+
+    mkdir -p "$dir/config" "$dir/data"
+    printf '# Backlog\n' > "$dir/data/backlog.md"
+    : > "$sent"
+    : > "$pane"
+    printf 'initial\n' > "$ready_file"
+    cat > "$fakebin/tasks-axi" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
   --version|-v|-V) printf 'tasks-axi 0.2.5\n' ;;
   update) printf '%s\n' '--archive-body' ;;
   mv) printf '%s\n' '[<id>...]' ;;
   ready)
-    case "${FM_FAKE_READY_CASE:-initial}" in
+    case "$(cat "${FM_FAKE_READY_FILE:?}")" in
       initial) printf 'count: 4\nready[4]{id,state,kind,repo,title}:\n  beta,queued,task,"-",beta\n  alpha,queued,task,"-",alpha\n  hidden-a,queued,task,"-",hidden a\n  hidden-b,queued,task,"-",hidden b\n' ;;
       reordered) printf 'count: 4\nready[4]{id,state,kind,repo,title}:\n  beta,queued,task,"-",beta\n  alpha,queued,task,"-",alpha\n  hidden-b,queued,task,"-",hidden b\n  hidden-a,queued,task,"-",hidden a\n' ;;
       count-change) printf 'count: 5\nready[5]{id,state,kind,repo,title}:\n  beta,queued,task,"-",beta\n  alpha,queued,task,"-",alpha\n  hidden-a,queued,task,"-",hidden a\n  hidden-b,queued,task,"-",hidden b\n  hidden-c,queued,task,"-",hidden c\n' ;;
       replacement) printf 'count: 5\nready[5]{id,state,kind,repo,title}:\n  beta,queued,task,"-",beta\n  alpha,queued,task,"-",alpha\n  hidden-a,queued,task,"-",hidden a\n  hidden-b,queued,task,"-",hidden b\n  hidden-d,queued,task,"-",hidden d\n' ;;
+      empty) printf 'count: 0\nready: 0 unblocked queued tasks\n' ;;
       *) exit 1 ;;
     esac
     ;;
   *) exit 1 ;;
 esac
 SH
-  chmod +x "$fakebin/tasks-axi"
+    chmod +x "$fakebin/tasks-axi"
 
-  # A first real watcher pass produces the refill evidence and the supervisor
-  # surfaces it once.
-  date '+%s' > "$state/.afk"
-  payload=$(run_refill_cycle "$dir" "$state" "$fakebin" "$out" initial)
-  case "$payload" in
-    'heartbeat refill: ready=4 live=0 ids=beta,alpha fingerprint='*) ;;
-    *) fail "real refill producer did not queue capped evidence: $payload" ;;
-  esac
-  initial_fingerprint=${payload##* fingerprint=}
-  FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat handle_wake heartbeat "$state" "$payload"
-  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 1 ] \
-    || fail "first real refill heartbeat did not reach one escalation"
+    date '+%s' > "$state/.afk"
+    PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+      FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=fakepane \
+      FM_FAKE_TMUX_CAPTURE="$pane" FM_FAKE_TMUX_SENT="$sent" FM_FAKE_READY_FILE="$ready_file" \
+      FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 FM_HEARTBEAT_MAX=1 \
+      FM_REFILL_IDS_MAX=2 FM_ESCALATE_BATCH_SECS=0 FM_HOUSEKEEPING_TICK=999999 \
+      "$DAEMON" > "$dir/daemon.out" 2> "$dir/daemon.err" &
+    daemon_pid=$!
+    wait_for_enter_count "$sent" 1 \
+      || fail "the real away daemon did not inject the first refill digest: $(cat "$dir/daemon.err")"
+    grep -F 'refill: ready=4 live=0 ids=beta,alpha fingerprint=' "$sent" >/dev/null \
+      || fail "the first daemon digest omitted capped producer evidence"
+    queued_seq=$(cat "$state/.wake-queue.seq")
+    wait_for_heartbeat_cursor "$state" "$queued_seq" \
+      || fail "the daemon did not commit the first durable heartbeat cursor"
+    baseline=$(heartbeat_cursor_seq "$state")
+    wait_for_heartbeat_cursor "$state" $((baseline + 1)) \
+      || fail "the daemon did not process a repeated refill cycle"
+    [ "$(grep -c '^\[ENTER\]$' "$sent" || true)" -eq 1 ] \
+      || fail "unchanged refill state consumed another daemon injection"
+    kill "$daemon_pid" 2>/dev/null || true
+    wait "$daemon_pid" 2>/dev/null || true
+    daemon_pid=
 
-  # Force the next scheduled heartbeat without changing fleet evidence. The
-  # durable refill state survives the watcher restart and suppresses its digest.
-  : > "$state/.subsuper-escalations"
-  payload=$(run_refill_cycle "$dir" "$state" "$fakebin" "$out" reordered)
-  [ "${payload##* fingerprint=}" = "$initial_fingerprint" ] \
-    || fail "canonical ready-id ordering changed the producer fingerprint"
-  FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat handle_wake heartbeat "$state" "$payload"
-  [ ! -s "$state/.subsuper-escalations" ] \
-    || fail "unchanged real refill heartbeat created a second away digest"
+    printf 'reordered\n' > "$ready_file"
+    run_refill_cycle "$dir" "$state" "$fakebin" "$out" "$ready_file"
+    queued_seq=$(cat "$state/.wake-queue.seq")
 
-  payload=$(run_refill_cycle "$dir" "$state" "$fakebin" "$out" count-change)
-  case "$payload" in
-    'heartbeat refill: ready=5 live=0 ids=beta,alpha fingerprint='*) ;;
-    *) fail "count-change case did not preserve the capped display ids: $payload" ;;
-  esac
-  changed_fingerprint=${payload##* fingerprint=}
-  [ "$changed_fingerprint" != "$initial_fingerprint" ] \
-    || fail "a ready-count change beyond the display cap kept the old fingerprint"
-  FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat handle_wake heartbeat "$state" "$payload"
-  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 1 ] \
-    || fail "a ready-count change beyond the display cap was suppressed"
+    PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+      FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=fakepane \
+      FM_FAKE_TMUX_CAPTURE="$pane" FM_FAKE_TMUX_SENT="$sent" FM_FAKE_READY_FILE="$ready_file" \
+      FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 FM_HEARTBEAT_MAX=1 \
+      FM_REFILL_IDS_MAX=2 FM_ESCALATE_BATCH_SECS=0 FM_HOUSEKEEPING_TICK=999999 \
+      "$DAEMON" > "$dir/reordered.out" 2> "$dir/reordered.err" &
+    daemon_pid=$!
+    wait_for_heartbeat_cursor "$state" "$queued_seq" \
+      || fail "the restarted daemon did not process reordered refill evidence"
+    [ "$(grep -c '^\[ENTER\]$' "$sent" || true)" -eq 1 ] \
+      || fail "canonical ready-id reordering changed the refill identity"
+    kill "$daemon_pid" 2>/dev/null || true
+    wait "$daemon_pid" 2>/dev/null || true
+    daemon_pid=
 
-  : > "$state/.subsuper-escalations"
-  payload=$(run_refill_cycle "$dir" "$state" "$fakebin" "$out" replacement)
-  case "$payload" in
-    'heartbeat refill: ready=5 live=0 ids=beta,alpha fingerprint='*) ;;
-    *) fail "replacement case did not preserve the capped display ids: $payload" ;;
-  esac
-  [ "${payload##* fingerprint=}" != "$changed_fingerprint" ] \
-    || fail "a same-count replacement beyond the display cap kept the old fingerprint"
-  FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat handle_wake heartbeat "$state" "$payload"
-  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 1 ] \
-    || fail "a same-count replacement beyond the display cap was suppressed"
-  pass "lifecycle: refill dedupe covers complete canonical ready state behind capped display ids"
+    printf 'count-change\n' > "$ready_file"
+    run_refill_cycle "$dir" "$state" "$fakebin" "$out" "$ready_file"
+    queued_seq=$(cat "$state/.wake-queue.seq")
+    PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+      FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=fakepane \
+      FM_FAKE_TMUX_CAPTURE="$pane" FM_FAKE_TMUX_SENT="$sent" FM_FAKE_READY_FILE="$ready_file" \
+      FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 FM_HEARTBEAT_MAX=1 \
+      FM_REFILL_IDS_MAX=2 FM_ESCALATE_BATCH_SECS=0 FM_HOUSEKEEPING_TICK=999999 \
+      "$DAEMON" > "$dir/count-change.out" 2> "$dir/count-change.err" &
+    daemon_pid=$!
+    wait_for_heartbeat_cursor "$state" "$queued_seq" \
+      || fail "the daemon did not process a ready-set count change"
+    wait_for_enter_count "$sent" 2 \
+      || fail "a ready-set change beyond capped display ids was suppressed"
+    kill "$daemon_pid" 2>/dev/null || true
+    wait "$daemon_pid" 2>/dev/null || true
+    daemon_pid=
+
+    printf 'replacement\n' > "$ready_file"
+    run_refill_cycle "$dir" "$state" "$fakebin" "$out" "$ready_file"
+    queued_seq=$(cat "$state/.wake-queue.seq")
+    PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+      FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=fakepane \
+      FM_FAKE_TMUX_CAPTURE="$pane" FM_FAKE_TMUX_SENT="$sent" FM_FAKE_READY_FILE="$ready_file" \
+      FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 FM_HEARTBEAT_MAX=1 \
+      FM_REFILL_IDS_MAX=2 FM_ESCALATE_BATCH_SECS=0 FM_HOUSEKEEPING_TICK=999999 \
+      "$DAEMON" > "$dir/replacement.out" 2> "$dir/replacement.err" &
+    daemon_pid=$!
+    wait_for_heartbeat_cursor "$state" "$queued_seq" \
+      || fail "the daemon did not process a same-count ready-set replacement"
+    wait_for_enter_count "$sent" 3 \
+      || fail "a same-count ready-set replacement beyond capped display ids was suppressed"
+    kill "$daemon_pid" 2>/dev/null || true
+    wait "$daemon_pid" 2>/dev/null || true
+    daemon_pid=
+
+    printf 'empty\n' > "$ready_file"
+    run_refill_cycle "$dir" "$state" "$fakebin" "$out" "$ready_file"
+    printf 'replacement\n' > "$ready_file"
+    run_refill_cycle "$dir" "$state" "$fakebin" "$out" "$ready_file"
+    queued_seq=$(cat "$state/.wake-queue.seq")
+
+    PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+      FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=fakepane \
+      FM_FAKE_TMUX_CAPTURE="$pane" FM_FAKE_TMUX_SENT="$sent" FM_FAKE_READY_FILE="$ready_file" \
+      FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 FM_HEARTBEAT_MAX=1 \
+      FM_REFILL_IDS_MAX=2 FM_ESCALATE_BATCH_SECS=0 FM_HOUSEKEEPING_TICK=999999 \
+      "$DAEMON" > "$dir/restart.out" 2> "$dir/restart.err" &
+    daemon_pid=$!
+    wait_for_heartbeat_cursor "$state" "$queued_seq" \
+      || fail "the restarted daemon did not replay queued heartbeat transitions in order"
+    wait_for_enter_count "$sent" 4 \
+      || fail "the queued empty-to-nonempty transition was suppressed after restart"
+    [ "$(grep -c '^\[ENTER\]$' "$sent" || true)" -eq 4 ] \
+      || fail "restart replay injected a duplicate refill digest"
+    kill "$daemon_pid" 2>/dev/null || true
+    wait "$daemon_pid" 2>/dev/null || true
+    daemon_pid=
+    trap - EXIT
+  ) || fail "real away-daemon refill process case failed"
+  pass "lifecycle: real away daemon dedupes refill cycles and replays restart transitions in order"
 }
 
 test_routine_then_terminal_after_restart
 test_stale_pane_transient_persistent_resume
-test_refill_heartbeat_dedupes_after_real_producer_path
+test_refill_heartbeat_dedupes_through_daemon_process

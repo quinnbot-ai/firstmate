@@ -822,6 +822,20 @@ test_heartbeat_refill_escalation_dedupe() {
     || fail "refill suppression changed a neighboring captain-relevant batch"
   grep -F "typed failure: retain this event" "$state/.subsuper-escalations" >/dev/null \
     || fail "refill suppression dropped a typed failure"
+
+  rm -f "$state/.subsuper-refill-escalation"
+  rm -f "$state/.subsuper-escalations" "$state/.subsuper-escalations.since"
+  mkdir "$state/.subsuper-escalations"
+  if FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat \
+    handle_wake heartbeat "$state" "$payload" 2>/dev/null; then
+    fail "a failed escalation append still reported successful refill handling"
+  fi
+  [ ! -e "$state/.subsuper-refill-escalation" ] \
+    || fail "a failed escalation append persisted suppressing dedupe state"
+  rmdir "$state/.subsuper-escalations"
+  FM_STATE_OVERRIDE="$state" FM_INJECT_SKIP=heartbeat handle_wake heartbeat "$state" "$payload"
+  [ -s "$state/.subsuper-escalations" ] \
+    || fail "refill evidence was not retried after an escalation append failure"
   pass "away refill escalation dedupes stable state, re-surfaces safely, and preserves other events"
 }
 

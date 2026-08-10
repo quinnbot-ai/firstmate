@@ -36,8 +36,9 @@
 #     to daemon-owned one-shot behavior and enqueues every wake to
 #     state/.wake-queue BEFORE advancing its suppression markers, so a
 #     crash/restart/missed injection is recovered on the next fm-wake-drain.sh.
-#     The daemon never consumes the queue; it reads the latest queued heartbeat
-#     payload only to route refill evidence through its existing digest path.
+#     The daemon never consumes the queue; it processes queued heartbeat
+#     observations in order under the queue lock and records a home-local cursor
+#     only after each observation reaches its existing digest path.
 #   - Fail-safe-to-escalate: any wake the classifier cannot confidently mark
 #     routine is escalated.
 #   - Bounded wedge latency: a stale pane without a declared external wait is
@@ -449,6 +450,8 @@ classify_unknown() {  # <reason>
 # Refill:   state/.subsuper-refill-escalation  last actionable refill identity
 #           and its escalation epoch. This is durable across daemon and primary
 #           restarts, unlike the session-scoped delivery buffer.
+# Cursor:   state/.subsuper-heartbeat-cursor  last ordered durable heartbeat
+#           observation handled by this home's away supervisor.
 
 refill_fingerprint() {  # <heartbeat payload> -> producer's complete refill identity
   local payload=$1 line rest ready live ids fingerprint
@@ -532,6 +535,34 @@ refill_dedupe_forget_if_inactive() {  # <state> <heartbeat payload>
   fingerprint=$(refill_fingerprint "$payload") || return 0
   heartbeat_payload_is_actionable "$payload" && return 0
   rm -f "$state/.subsuper-refill-escalation"
+}
+
+heartbeat_cursor_read() {  # <state> -> HEARTBEAT_CURSOR_SEQ
+  local state=$1 file version seq
+  HEARTBEAT_CURSOR_SEQ=0
+  file="$state/.subsuper-heartbeat-cursor"
+  [ -r "$file" ] || return 0
+  {
+    IFS= read -r version || return 0
+    IFS= read -r seq || return 0
+    IFS= read -r && return 0
+  } < "$file"
+  [ "$version" = v1 ] || return 0
+  case "$seq" in ''|*[!0-9]*) return 0 ;; esac
+  HEARTBEAT_CURSOR_SEQ=$seq
+}
+
+heartbeat_cursor_record() {  # <state> <queue-sequence>
+  local state=$1 seq=$2 tmp old_umask
+  case "$seq" in ''|*[!0-9]*) return 1 ;; esac
+  old_umask=$(umask)
+  umask 077
+  tmp=$(mktemp "$state/.subsuper-heartbeat-cursor.tmp.XXXXXX") || { umask "$old_umask"; return 1; }
+  umask "$old_umask"
+  if ! { printf 'v1\n%s\n' "$seq" > "$tmp" && mv -f "$tmp" "$state/.subsuper-heartbeat-cursor"; }; then
+    rm -f "$tmp"
+    return 1
+  fi
 }
 
 _stale_key() { printf '%s' "$1" | tr ':/.' '___'; }
@@ -734,10 +765,16 @@ stale_window_is_busy() {  # <window> <state>
 }
 
 escalate_add() {  # <state> <distilled-item>
-  local state=$1 item=$2 buf
+  local state=$1 item=$2 buf empty=false
   buf="$state/.subsuper-escalations"
-  [ -s "$buf" ] || _now > "${buf}.since"
-  printf '%s\n' "$item" >> "$buf"
+  [ -s "$buf" ] || empty=true
+  if [ "$empty" = true ] && ! _now > "${buf}.since"; then
+    return 1
+  fi
+  if ! printf '%s\n' "$item" >> "$buf"; then
+    [ -s "$buf" ] || rm -f "${buf}.since"
+    return 1
+  fi
 }
 
 # Flush the escalation buffer as ONE batched, single-line digest to the
@@ -1349,7 +1386,10 @@ handle_wake() {  # <reason> <state> [durable-payload]
             return
           fi
           log "escalate: $reason -> $distilled"
-          escalate_add "$state" "$distilled"
+          if ! escalate_add "$state" "$distilled"; then
+            log "ERROR: could not append refill escalation; dedupe state left unchanged"
+            return 1
+          fi
           refill_dedupe_record "$state" "$refill_fingerprint_value" \
             || log "ERROR: could not persist refill escalation dedupe state; next evidence will fail open"
           [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ] && { escalate_flush "$state" || true; }
@@ -1408,6 +1448,30 @@ handle_wake() {  # <reason> <state> [durable-payload]
       log "self-handle: $reason -> $distilled"
       ;;
   esac
+}
+
+process_queued_heartbeats() {  # <state>
+  local state=$1 epoch seq kind key payload cursor status=0
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  heartbeat_cursor_read "$state"
+  cursor=$HEARTBEAT_CURSOR_SEQ
+  while IFS=$(printf '\t') read -r epoch seq kind key payload; do
+    [ "$kind" = heartbeat ] && [ "$key" = heartbeat ] || continue
+    case "$seq" in ''|*[!0-9]*) continue ;; esac
+    [ "$seq" -gt "$cursor" ] || continue
+    if ! handle_wake heartbeat "$state" "$payload"; then
+      status=1
+      break
+    fi
+    if ! heartbeat_cursor_record "$state" "$seq"; then
+      log "ERROR: could not persist heartbeat queue cursor at sequence $seq"
+      status=1
+      break
+    fi
+    cursor=$seq
+  done < "$FM_WAKE_QUEUE" 2>/dev/null
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$status"
 }
 
 # --- log --------------------------------------------------------------------
@@ -1590,7 +1654,10 @@ fm_super_main() {
     WATCHER_PID=$!
   }
 
-  local rc reason wake_payload
+  process_queued_heartbeats "$STATE" \
+    || log "ERROR: queued heartbeat processing stopped before the durable cursor advanced"
+
+  local rc reason
   while true; do
     # --- pane-gone guard (preserved) ---------------------------------------
     # With the #29 watcher's enqueue-before-suppress, a wake is no longer
@@ -1637,13 +1704,15 @@ fm_super_main() {
           continue
         fi
         log "wake: $reason"
-        wake_payload=
         case "$reason" in
           heartbeat|heartbeat:*)
-            wake_payload=$(fm_wake_latest_payload heartbeat heartbeat 2>/dev/null) || wake_payload=
+            process_queued_heartbeats "$STATE" \
+              || log "ERROR: queued heartbeat processing stopped before the durable cursor advanced"
+            ;;
+          *)
+            handle_wake "$reason" "$STATE"
             ;;
         esac
-        handle_wake "$reason" "$STATE" "$wake_payload"
         trim_log
       fi
       start_watcher || continue

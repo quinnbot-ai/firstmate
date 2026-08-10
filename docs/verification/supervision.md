@@ -13,9 +13,9 @@ Initiating trigger: every actionable refill heartbeat enters the away-supervisor
 Masking condition: `FM_INJECT_SKIP=heartbeat` keeps evidence-free heartbeats quiet but intentionally preserves actionable refill evidence.
 Visible symptom before this regression: unchanged evidence appended an identical refill digest on every housekeeping cycle.
 The route now uses the same durable-state pattern as the existing signal, stale, and catch-all escalation dedupe rather than session memory.
-The public boundary regression drives `fm-watch.sh`, `fm-refill.sh`, the durable wake payload, and away-supervisor routing twice with unchanged ready work and no live workers.
-The first heartbeat produced one digest and the second produced none.
-The focused state matrix additionally covered producer-side canonical ready-id ordering, count changes and same-count replacements beyond capped display ids, live-worker changes, restart-persistent home scope, malformed and stale state, backward clock movement, empty-to-nonempty transitions, and preservation of a typed failure batched beside suppressed refill evidence.
+The public boundary regression executes `fm-watch.sh`, `fm-refill.sh`, and `fm-supervise-daemon.sh`, then observes the injected captain-visible digest across unchanged cycles and a daemon restart.
+It also queues an empty observation followed by the prior actionable state while the daemon is down, proving the restarted daemon replays both transitions in order instead of selecting only the latest payload.
+The focused state matrix additionally covered producer-side canonical ready-id ordering, count changes and same-count replacements beyond capped display ids, live-worker changes, restart-persistent home scope, malformed and stale state, backward clock movement, failed escalation-buffer appends, and preservation of a typed failure batched beside suppressed refill evidence.
 The existing per-home daemon singleton test coverage remains the concurrency boundary for the read-check-write transition.
 
 ```sh
@@ -23,7 +23,7 @@ bin/fm-test-run.sh tests/fm-refill.test.sh tests/fm-daemon.test.sh \
   tests/fm-wake-daemon-lifecycle-e2e.test.sh
 ```
 
-Observed result: every selected suite exited 0, including `lifecycle: refill dedupe covers complete canonical ready state behind capped display ids` and `away refill escalation dedupes stable state, re-surfaces safely, and preserves other events`.
+Observed result: every selected suite exited 0, including `lifecycle: real away daemon dedupes refill cycles and replays restart transitions in order` and `away refill escalation dedupes stable state, re-surfaces safely, and preserves other events`.
 
 ## Native session-start delivery
 
