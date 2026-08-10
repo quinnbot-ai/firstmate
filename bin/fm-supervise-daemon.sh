@@ -1483,8 +1483,10 @@ process_queued_heartbeats() {  # <state>
     return 1
   fi
   for quarantine in "$state"/.subsuper-heartbeat-state.corrupt.*; do
-    [ -d "$quarantine" ] && [ ! -L "$quarantine" ] \
-      && { [ -e "$quarantine/state" ] || [ -L "$quarantine/state" ]; } || continue
+    if [ ! -d "$quarantine" ] || [ -L "$quarantine" ] \
+      || { [ ! -e "$quarantine/state" ] && [ ! -L "$quarantine/state" ]; }; then
+      continue
+    fi
     quarantine_present=true
   done
   if [ ! -e "$FM_HEARTBEAT_STATE" ]; then

@@ -262,6 +262,7 @@ test_refill_heartbeat_dedupes_through_daemon_process() {
     ready_file="$dir/ready-case"
     daemon_pid=
 
+    # shellcheck disable=SC2329 # Registered by the subshell's EXIT trap below.
     cleanup_refill_daemon() {
       [ -z "$daemon_pid" ] || ! kill -0 "$daemon_pid" 2>/dev/null \
         || { kill "$daemon_pid" 2>/dev/null || true; wait "$daemon_pid" 2>/dev/null || true; }

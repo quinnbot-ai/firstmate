@@ -447,6 +447,7 @@ fm_wake_clean_field() {
 
 fm_heartbeat_state_quarantine_locked() {
   local quarantine
+  # shellcheck disable=SC2034 # Output consumed by callers after sourcing this library.
   FM_HEARTBEAT_STATE_QUARANTINE=
   if [ ! -e "$FM_HEARTBEAT_STATE" ] && [ ! -L "$FM_HEARTBEAT_STATE" ]; then
     return 0
@@ -459,6 +460,7 @@ fm_heartbeat_state_quarantine_locked() {
     rmdir "$quarantine" 2>/dev/null || true
     return 1
   fi
+  # shellcheck disable=SC2034 # Output consumed by callers after sourcing this library.
   FM_HEARTBEAT_STATE_QUARANTINE=$quarantine
 }
 
