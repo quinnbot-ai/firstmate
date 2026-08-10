@@ -485,15 +485,11 @@ SH
   pass 'capture covers session and Relay channels and fails visibly when unavailable'
 }
 
-test_agents_trigger_is_concise_and_agent_agnostic() {
+test_agents_trigger_stays_absent_after_pure_kun_resolution() {
   local line
   line=$(grep -F 'Link intake:' "$ROOT/AGENTS.md" || true)
-  [ -n "$line" ] || fail 'AGENTS link-intake trigger is absent'
-  assert_contains "$line" 'captain sends meaningful URL input' 'trigger does not cover meaningful captain URLs'
-  assert_contains "$line" 'bin/fm-link-intake.sh' 'trigger does not name the authoritative helper'
-  [ "$(printf '%s\n' "$line" | wc -l | tr -d ' ')" = 1 ] || fail 'AGENTS link-intake trigger is not one concise line'
-  assert_not_contains "$line" 'Claude' 'trigger is not agent-agnostic'
-  pass 'AGENTS has one concise agent-agnostic link-intake trigger'
+  [ -z "$line" ] || fail 'pure-Kun resolution must not retain the fork global link-intake trigger'
+  pass 'pure-Kun resolution keeps link-intake out of the global AGENTS contract'
 }
 
 test_canonical_duplicate_converges_and_preserves_evidence
@@ -507,4 +503,4 @@ test_atomic_generation_switch_is_process_crash_safe
 test_validation_rejects_bidirectional_divergence
 test_odd_urls_never_control_filenames_or_shell
 test_capture_covers_supported_channels_and_fails_loudly
-test_agents_trigger_is_concise_and_agent_agnostic
+test_agents_trigger_stays_absent_after_pure_kun_resolution
