@@ -167,7 +167,7 @@ run_refill_cycle() {  # <home> <state> <fakebin> <out> <ready-file>
 }
 
 heartbeat_cursor_seq() {
-  sed -n '2p' "$1/.subsuper-heartbeat-cursor" 2>/dev/null
+  sed -n '2p' "$1/.subsuper-heartbeat-state" 2>/dev/null
 }
 
 wait_for_heartbeat_cursor() {  # <state> <minimum-sequence>
@@ -319,9 +319,16 @@ SH
 
     printf 'empty\n' > "$ready_file"
     run_refill_cycle "$dir" "$state" "$fakebin" "$out" "$ready_file"
+    FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/orphan-drain.out" \
+      || fail "primary-session catch-up could not drain the orphaned empty heartbeat"
+    grep -F 'refill: ready=0 live=0' "$dir/orphan-drain.out" >/dev/null \
+      || fail "the crash-orphan drain fixture did not consume the empty main-queue heartbeat"
+    printf 'broken\n' > "$state/.wake-queue.seq"
     printf 'replacement\n' > "$ready_file"
     run_refill_cycle "$dir" "$state" "$fakebin" "$out" "$ready_file"
     queued_seq=$(cat "$state/.wake-queue.seq")
+    [ "$queued_seq" -gt "$(heartbeat_cursor_seq "$state")" ] \
+      || fail "a malformed queue sequence regressed behind the durable heartbeat acknowledgement"
 
     PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
       FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=fakepane \
@@ -331,7 +338,7 @@ SH
       "$DAEMON" > "$dir/restart.out" 2> "$dir/restart.err" &
     daemon_pid=$!
     wait_for_heartbeat_cursor "$state" "$queued_seq" \
-      || fail "the restarted daemon did not replay queued heartbeat transitions in order"
+      || fail "the restarted daemon did not replay drained and queued heartbeat transitions in order"
     wait_for_enter_count "$sent" 4 \
       || fail "the queued empty-to-nonempty transition was suppressed after restart"
     [ "$(grep -c '^\[ENTER\]$' "$sent" || true)" -eq 4 ] \
@@ -341,7 +348,7 @@ SH
     daemon_pid=
     trap - EXIT
   ) || fail "real away-daemon refill process case failed"
-  pass "lifecycle: real away daemon dedupes refill cycles and replays restart transitions in order"
+  pass "lifecycle: real away daemon survives restart, drain races, and sequence corruption"
 }
 
 test_routine_then_terminal_after_restart

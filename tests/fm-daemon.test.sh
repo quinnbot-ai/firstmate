@@ -823,6 +823,15 @@ test_heartbeat_refill_escalation_dedupe() {
   grep -F "typed failure: retain this event" "$state/.subsuper-escalations" >/dev/null \
     || fail "refill suppression dropped a typed failure"
 
+  : > "$state/.subsuper-escalations"
+  rm -f "$state/.subsuper-escalations.since"
+  mkdir "$state/.subsuper-escalations.since"
+  escalate_add "$state" "typed failure: sidecar must not hide this event" \
+    || fail "a failed escalation-age sidecar rejected a durable buffer append"
+  grep -F "typed failure: sidecar must not hide this event" "$state/.subsuper-escalations" >/dev/null \
+    || fail "a failed escalation-age sidecar lost captain-relevant evidence"
+  rmdir "$state/.subsuper-escalations.since"
+
   rm -f "$state/.subsuper-refill-escalation"
   rm -f "$state/.subsuper-escalations" "$state/.subsuper-escalations.since"
   mkdir "$state/.subsuper-escalations"

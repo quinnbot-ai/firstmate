@@ -212,6 +212,28 @@ test_drain_dedupes_obvious_duplicates() {
   pass "drain collapses obvious duplicate heartbeat and signal records"
 }
 
+test_heartbeat_journal_and_sequence_are_durable() {
+  local dir state out previous next
+  dir=$(make_case heartbeat-durability)
+  state="$dir/state"
+  out="$dir/drain.out"
+  append_wake "$state" heartbeat heartbeat "heartbeat refill: ready=0 live=0 ids= fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
+    || fail "first durable heartbeat append failed"
+  previous=$(cat "$state/.wake-queue.seq")
+  printf 'v1\n%s\nnone\n0\n' "$previous" > "$state/.subsuper-heartbeat-state"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "heartbeat fixture drain failed"
+  [ -s "$state/.subsuper-heartbeat-observations" ] \
+    || fail "normal drain consumed the unacknowledged heartbeat journal"
+  printf 'broken\n' > "$state/.wake-queue.seq"
+  append_wake "$state" heartbeat heartbeat "heartbeat refill: ready=1 live=0 ids=next fingerprint=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" \
+    || fail "heartbeat append after malformed sequence failed"
+  next=$(cat "$state/.wake-queue.seq")
+  [ "$next" -gt "$previous" ] || fail "heartbeat sequence regressed behind its durable acknowledgement"
+  [ "$(awk -F '\t' 'NF >= 5 { count++ } END { print count + 0 }' "$state/.subsuper-heartbeat-observations")" -eq 2 ] \
+    || fail "heartbeat journal lost an observation across drain and sequence recovery"
+  pass "heartbeat journal survives drains and reconciles malformed sequence state"
+}
+
 # The drain runs at the top of every wake-handling turn, so it also asserts
 # watcher liveness via fm-guard.sh: a lapsed re-arm chain then surfaces even on a
 # plain drain-and-handle turn that runs no other supervision script. It must warn
@@ -444,6 +466,7 @@ test_not_working_stale_enqueue_before_suppressor
 test_check_output_is_queued
 test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates
+test_heartbeat_journal_and_sequence_are_durable
 test_drain_asserts_watcher_liveness
 test_structural_signal_enrichment_preserves_raw_rows
 test_enrichment_caps_and_status_file_failures

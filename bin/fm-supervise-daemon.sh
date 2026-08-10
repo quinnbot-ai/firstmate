@@ -36,9 +36,9 @@
 #     to daemon-owned one-shot behavior and enqueues every wake to
 #     state/.wake-queue BEFORE advancing its suppression markers, so a
 #     crash/restart/missed injection is recovered on the next fm-wake-drain.sh.
-#     The daemon never consumes the queue; it processes queued heartbeat
-#     observations in order under the queue lock and records a home-local cursor
-#     only after each observation reaches its existing digest path.
+#     Heartbeats additionally enter a home-local observation journal that normal
+#     drains do not consume. The daemon acknowledges those observations in order
+#     together with their refill suppression state after durable digest handling.
 #   - Fail-safe-to-escalate: any wake the classifier cannot confidently mark
 #     routine is escalated.
 #   - Bounded wedge latency: a stale pane without a declared external wait is
@@ -447,11 +447,8 @@ classify_unknown() {  # <reason>
 # Buffer:   state/.subsuper-escalations    one distilled line per escalation.
 # Seen:     state/.subsuper-seen-status-<task>  last status line the scan
 #           escalated, so the catch-all does not re-fire the same terminal.
-# Refill:   state/.subsuper-refill-escalation  last actionable refill identity
-#           and its escalation epoch. This is durable across daemon and primary
-#           restarts, unlike the session-scoped delivery buffer.
-# Cursor:   state/.subsuper-heartbeat-cursor  last ordered durable heartbeat
-#           observation handled by this home's away supervisor.
+# Heartbeat lifecycle: bin/fm-wake-lib.sh owns the durable observation journal,
+# monotonic sequence, acknowledgement, and refill suppression state.
 
 refill_fingerprint() {  # <heartbeat payload> -> producer's complete refill identity
   local payload=$1 line rest ready live ids fingerprint
@@ -479,6 +476,12 @@ refill_fingerprint() {  # <heartbeat payload> -> producer's complete refill iden
 # a complete successor. Invalid, future-dated, or stale records fail open.
 refill_dedupe_read() {  # <state> -> REFILL_DEDUPE_FINGERPRINT/TIMESTAMP
   local state=$1 file version fingerprint timestamp stored_hash
+  if [ "${REFILL_DEDUPE_TRANSACTION_ACTIVE:-false}" = true ]; then
+    [ "${REFILL_DEDUPE_CURRENT_FINGERPRINT:-none}" != none ] || return 1
+    REFILL_DEDUPE_FINGERPRINT=$REFILL_DEDUPE_CURRENT_FINGERPRINT
+    REFILL_DEDUPE_TIMESTAMP=$REFILL_DEDUPE_CURRENT_TIMESTAMP
+    return 0
+  fi
   file="$state/.subsuper-refill-escalation"
   [ -r "$file" ] || return 1
   {
@@ -516,6 +519,12 @@ refill_dedupe_should_escalate() {  # <state> <fingerprint>
 
 refill_dedupe_record() {  # <state> <fingerprint>
   local state=$1 fingerprint=$2 tmp old_umask
+  if [ "${REFILL_DEDUPE_TRANSACTION_ACTIVE:-false}" = true ]; then
+    REFILL_DEDUPE_PENDING_FINGERPRINT=$fingerprint
+    REFILL_DEDUPE_PENDING_TIMESTAMP=$(_now)
+    REFILL_DEDUPE_ESCALATED=true
+    return 0
+  fi
   mkdir -p "$state" || return 1
   old_umask=$(umask)
   umask 077
@@ -534,6 +543,11 @@ refill_dedupe_forget_if_inactive() {  # <state> <heartbeat payload>
   local state=$1 payload=$2 fingerprint
   fingerprint=$(refill_fingerprint "$payload") || return 0
   heartbeat_payload_is_actionable "$payload" && return 0
+  if [ "${REFILL_DEDUPE_TRANSACTION_ACTIVE:-false}" = true ]; then
+    REFILL_DEDUPE_PENDING_FINGERPRINT=none
+    REFILL_DEDUPE_PENDING_TIMESTAMP=0
+    return 0
+  fi
   rm -f "$state/.subsuper-refill-escalation"
 }
 
@@ -768,13 +782,13 @@ escalate_add() {  # <state> <distilled-item>
   local state=$1 item=$2 buf empty=false
   buf="$state/.subsuper-escalations"
   [ -s "$buf" ] || empty=true
-  if [ "$empty" = true ] && ! _now > "${buf}.since"; then
-    return 1
-  fi
   if ! printf '%s\n' "$item" >> "$buf"; then
-    [ -s "$buf" ] || rm -f "${buf}.since"
     return 1
   fi
+  if [ "$empty" = true ]; then
+    _now 2>/dev/null > "${buf}.since" || true
+  fi
+  return 0
 }
 
 # Flush the escalation buffer as ONE batched, single-line digest to the
@@ -1154,8 +1168,9 @@ housekeeping() {  # <state>
     case "$?" in
       0) rm -f "$marker" ;;
       2) rm -f "$marker" ;;
-      *) escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
-         stale_marker_remove "$win" "$state" ;;
+      *) if escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"; then
+           stale_marker_remove "$win" "$state"
+         fi ;;
     esac
   done
 
@@ -1188,8 +1203,9 @@ housekeeping() {  # <state>
       *)
         last=$(last_status_line "$state/$task.status")
         if [ -n "$last" ] && status_is_paused "$last"; then
-          escalate_add "$state" "paused ${age}s (awaiting external, recheck whether the wait still holds): $win"
-          _now > "$marker"
+          if escalate_add "$state" "paused ${age}s (awaiting external, recheck whether the wait still holds): $win"; then
+            _now > "$marker"
+          fi
         else
           rm -f "$marker"
         fi
@@ -1208,8 +1224,9 @@ housekeeping() {  # <state>
       [ -n "$f" ] || continue
       seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
       [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] && continue
-      escalate_add "$state" "$(basename "$f"): $last (catch-all scan)"
-      mark_status_seen "$state" "$task" "$last"
+      if escalate_add "$state" "$(basename "$f"): $last (catch-all scan)"; then
+        mark_status_seen "$state" "$task" "$last"
+      fi
     done < <(scan_captain_relevant_statuses "$state")
   fi
 }
@@ -1392,12 +1409,18 @@ handle_wake() {  # <reason> <state> [durable-payload]
           fi
           refill_dedupe_record "$state" "$refill_fingerprint_value" \
             || log "ERROR: could not persist refill escalation dedupe state; next evidence will fail open"
-          [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ] && { escalate_flush "$state" || true; }
+          if [ "${REFILL_DEDUPE_TRANSACTION_ACTIVE:-false}" != true ] \
+            && [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ]; then
+            escalate_flush "$state" || true
+          fi
           return
         fi
       fi
       log "escalate: $reason -> $distilled"
-      escalate_add "$state" "$distilled"
+      if ! escalate_add "$state" "$distilled"; then
+        log "ERROR: could not append escalation; suppression state left unchanged"
+        return 1
+      fi
       # A terminal-stale escalate must not leave a persistence marker behind, or
       # housekeeping re-escalates the same pane as a false wedge later.
       [ "$kind" = "stale" ] && stale_marker_remove "$arg" "$state"
@@ -1451,25 +1474,57 @@ handle_wake() {  # <reason> <state> [durable-payload]
 }
 
 process_queued_heartbeats() {  # <state>
-  local state=$1 epoch seq kind key payload cursor status=0
+  local state=$1 epoch seq kind key payload cursor fingerprint timestamp status=0
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
-  heartbeat_cursor_read "$state"
-  cursor=$HEARTBEAT_CURSOR_SEQ
+  if [ ! -e "$FM_HEARTBEAT_STATE" ]; then
+    heartbeat_cursor_read "$state"
+    cursor=$HEARTBEAT_CURSOR_SEQ
+    fingerprint=none
+    timestamp=0
+    if refill_dedupe_read "$state"; then
+      fingerprint=$REFILL_DEDUPE_FINGERPRINT
+      timestamp=$REFILL_DEDUPE_TIMESTAMP
+    fi
+    if ! fm_heartbeat_state_commit_locked "$cursor" "$fingerprint" "$timestamp"; then
+      log "ERROR: could not initialize durable heartbeat acknowledgement state"
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      return 1
+    fi
+  fi
+  fm_heartbeat_state_read_locked
+  cursor=$FM_HEARTBEAT_ACK_SEQ
+  REFILL_DEDUPE_TRANSACTION_ACTIVE=true
   while IFS=$(printf '\t') read -r epoch seq kind key payload; do
     [ "$kind" = heartbeat ] && [ "$key" = heartbeat ] || continue
     case "$seq" in ''|*[!0-9]*) continue ;; esac
     [ "$seq" -gt "$cursor" ] || continue
+    REFILL_DEDUPE_CURRENT_FINGERPRINT=$FM_HEARTBEAT_FINGERPRINT
+    REFILL_DEDUPE_CURRENT_TIMESTAMP=$FM_HEARTBEAT_TIMESTAMP
+    REFILL_DEDUPE_PENDING_FINGERPRINT=$FM_HEARTBEAT_FINGERPRINT
+    REFILL_DEDUPE_PENDING_TIMESTAMP=$FM_HEARTBEAT_TIMESTAMP
+    REFILL_DEDUPE_ESCALATED=false
     if ! handle_wake heartbeat "$state" "$payload"; then
       status=1
       break
     fi
-    if ! heartbeat_cursor_record "$state" "$seq"; then
-      log "ERROR: could not persist heartbeat queue cursor at sequence $seq"
+    if ! fm_heartbeat_state_commit_locked "$seq" "$REFILL_DEDUPE_PENDING_FINGERPRINT" \
+      "$REFILL_DEDUPE_PENDING_TIMESTAMP"; then
+      log "ERROR: could not acknowledge heartbeat observation at sequence $seq"
       status=1
       break
     fi
     cursor=$seq
-  done < "$FM_WAKE_QUEUE" 2>/dev/null
+    fm_heartbeat_compact_locked "$cursor" \
+      || log "ERROR: could not compact acknowledged heartbeat observations"
+    if [ "$REFILL_DEDUPE_ESCALATED" = true ] \
+      && [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ]; then
+      escalate_flush "$state" || true
+    fi
+  done < <(
+    awk -F '\t' 'NF >= 5 && $2 ~ /^[0-9]+$/ && !seen[$2]++ { print }' \
+      "$FM_HEARTBEAT_OBSERVATIONS" "$FM_WAKE_QUEUE" 2>/dev/null | sort -t "$(printf '\t')" -k2,2n
+  )
+  REFILL_DEDUPE_TRANSACTION_ACTIVE=false
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   return "$status"
 }
