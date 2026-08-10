@@ -923,6 +923,83 @@ EOF
   pass "the shim routes at most once even when the credential re-resolves gh from PATH"
 }
 
+test_shim_bounds_reentrant_real_gh() {
+  local case_dir real_dir shim_dir rc count
+  case_dir="$TMP_ROOT/shim-reentrant-real"
+  real_dir="$case_dir/real"
+  shim_dir="$case_dir/shim"
+  mkdir -p "$real_dir" "$shim_dir"
+  ln -sf "$SHIM" "$shim_dir/gh"
+  cat > "$real_dir/gh" <<'SH'
+#!/usr/bin/env bash
+set -u
+count=0
+[ ! -f "$FM_TEST_REENTRANT_COUNT" ] || count=$(cat "$FM_TEST_REENTRANT_COUNT")
+count=$((count + 1))
+printf '%s\n' "$count" > "$FM_TEST_REENTRANT_COUNT"
+if [ "$count" -gt 4 ]; then
+  echo "fixture safety cap: reentrant real gh exceeded four invocations" >&2
+  exit 99
+fi
+exec gh "$@"
+SH
+  chmod +x "$real_dir/gh"
+
+  set +e
+  FM_TEST_REENTRANT_COUNT="$case_dir/reentrant.count" PATH="$shim_dir:$real_dir:$PATH" \
+    gh api user >"$case_dir/out" 2>"$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 70 "$rc" "a real-gh candidate that re-enters the shim must fail typed"
+  count=$(cat "$case_dir/reentrant.count")
+  [ "$count" -eq 2 ] || fail "shim recursion invoked the reentrant real gh $count times instead of twice"
+  assert_grep 'fm-gh-shim: recursion detected after two shim entries' "$case_dir/err" \
+    "shim recursion failure was not actionable"
+  assert_no_grep 'fixture safety cap' "$case_dir/err" \
+    "shim recursion reached the fixture safety cap"
+  pass "the gh shim bounds repeated PATH resolution to two real-gh invocations"
+}
+
+test_wrapper_bounds_recursive_credential_prefix() {
+  local case_dir real_dir home tools rc count
+  case_dir="$TMP_ROOT/wrapper-recursive-prefix"
+  real_dir="$case_dir/real"
+  home="$case_dir/home"
+  tools="$case_dir/tools"
+  make_fake_gh "$real_dir"
+  mkdir -p "$tools"
+  cat > "$tools/reentrant-credential" <<'SH'
+#!/usr/bin/env bash
+set -u
+count=0
+[ ! -f "$FM_TEST_REENTRANT_COUNT" ] || count=$(cat "$FM_TEST_REENTRANT_COUNT")
+count=$((count + 1))
+printf '%s\n' "$count" > "$FM_TEST_REENTRANT_COUNT"
+if [ "$count" -gt 4 ]; then
+  echo "fixture safety cap: credential prefix exceeded four invocations" >&2
+  exit 99
+fi
+exec "$FM_TEST_GH_WRAPPER" "$@"
+SH
+  chmod +x "$tools/reentrant-credential"
+  make_home "$home" "$tools/reentrant-credential"
+
+  set +e
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_TEST_GH_WRAPPER="$WRAPPER" \
+    FM_TEST_REENTRANT_COUNT="$case_dir/reentrant.count" \
+    "$WRAPPER" "$real_dir/gh" api user >"$case_dir/out" 2>"$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 70 "$rc" "a recursive credential prefix must fail typed"
+  count=$(cat "$case_dir/reentrant.count")
+  [ "$count" -eq 1 ] || fail "recursive credential prefix ran $count times instead of once"
+  assert_grep 'fm-gh: credential-wrapper recursion detected' "$case_dir/err" \
+    "credential-wrapper recursion failure was not actionable"
+  assert_no_grep 'fixture safety cap' "$case_dir/err" \
+    "credential-wrapper recursion reached the fixture safety cap"
+  pass "the credential wrapper bounds a recursive configured prefix to one invocation"
+}
+
 # find_bash32: echo the path of an available bash 3.2, or nothing. macOS still ships
 # 3.2 as the system bash, and firstmate scripts must keep working under it.
 find_bash32() {
@@ -1073,6 +1150,8 @@ test_configured_wrapper_replaces_ambient_tokens
 test_wrapper_ignores_comments_and_blank_lines
 test_wrapper_ignores_indented_comments
 test_shim_does_not_recurse_when_credential_resolves_gh_through_it
+test_shim_bounds_reentrant_real_gh
+test_wrapper_bounds_recursive_credential_prefix
 test_bash32_runs_both_credential_paths
 test_installer_reports_and_enforces_precedence
 test_installer_refuses_to_replace_a_foreign_gh

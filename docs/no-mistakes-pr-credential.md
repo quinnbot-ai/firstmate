@@ -40,6 +40,7 @@ Because no supported configuration seam exists, firstmate intercepts `gh` on the
 - `bin/fm-gh.sh` runs one command with this home's PR-capable credential injected, reading the command prefix from `config/gh-credential`.
   When configured, it removes ambient `GH_TOKEN` and `GITHUB_TOKEN` before starting that prefix because `gh` gives `GH_TOKEN` precedence, so a daemon's inherited token cannot override the injected credential.
   With no such file it execs the command unchanged, so an unconfigured home behaves exactly as before.
+  A credential prefix may execute its trailing command once; recursive wrapper entry fails with exit 70 and names the invalid prefix contract.
 - `bin/fm-gh-shim.sh` is installed as a symlink named `gh`.
   It routes `gh pr create` and `gh pr edit` through `fm-gh.sh`.
   On either credential-routed mutation, a caller-supplied `--repo` or `-R` wins unchanged.
@@ -48,10 +49,14 @@ Because no supported configuration seam exists, firstmate intercepts `gh` on the
   A missing registration, unavailable checkout, gate mismatch, contradictory remote, malformed URL, non-GitHub URL, or unavailable `sqlite3` refuses the mutation with a repair-oriented diagnostic rather than letting `gh` infer a repository.
   The shim never rewrites the gate's remotes and never selects a target from remote ordering, account identity, or the gate's upstream relationship.
   It sends only no-mistakes' JSON `gh pr checks` shape through the bounded CI fallback, and execs the real `gh` directly for every other call.
+  Credential routing may re-enter the shim once when a valid prefix resolves `gh` from `PATH`; a third shim entry fails with exit 70 and identifies the credential or installed-target loop.
 - `bin/fm-gh-ci-fallback.sh` first runs the real `gh pr checks` with the ambient narrow token.
   Only the personal-token denial whose GraphQL error path names a `statusCheckRollup` component, at whatever depth GitHub currently reports it, causes it to resolve the PR's exact head SHA and read every workflow run filtered by that SHA with the same token; it never calls `fm-gh.sh` or exposes `config/gh-credential` to CI reads.
   Successful, failed, cancelled, skipped, and pending workflow conclusions are returned in the JSON check shape no-mistakes already consumes, while no exact-head workflow runs emits an explicit pending placeholder rather than a false green verdict.
-- The GitHub merge boundary resolves the genuine `gh` binary itself, so its raw GraphQL capture remains valid when the shim is installed on `PATH`.
+- The GitHub merge boundary resolves the genuine `gh` binary itself, so its raw GraphQL capture remains valid when a same-home or current foreign-home shim is installed on `PATH`.
+  A side-effect-free identity probe lets it skip current shims independent of their home path.
+  The generated capture wrapper independently stops a stale, unrecognized, or mid-update executable that re-enters `PATH`, preserving exit 70 rather than allowing a wrapper-shim process tree to grow.
+  The merge operator's repository-lock handoff is also depth-bound to its one intentional child entry, so losing or contradicting that lock across a mid-flight home update fails before merge verification or mutation.
 - `bin/fm-gh-shim-install.sh` installs, removes, and verifies that symlink, and reports whether the install directory actually precedes the real `gh` on the evaluated `PATH`.
 
 Nothing installs the shim automatically.

@@ -76,6 +76,28 @@ Before the fix, the fixture selected `kunchenguid/firstmate` and failed the expe
 After the fix, both `gh pr create` and `gh pr edit` name `quinnbot-ai/firstmate`, and the recorded argument stream contains no `kunchenguid/firstmate` target.
 Disconfirming cases prove the resolver does not merely prefer a remote named `fork`: an ordinary registration with only a canonical `origin` still succeeds, explicit `--repo` and `-R` remain byte-for-byte unchanged, and missing, contradictory, malformed, or non-GitHub registration evidence stops before the real `gh` runs.
 
+## Cross-home merge recursion diagnosis
+
+The merge incident had a distinct trigger, masking condition, and symptom from the pull-request target defect.
+The trigger was `fm-merge-execute.sh` running from one Firstmate home while the first `gh` on `PATH` resolved to another home's installed shim, or while that installed target changed between selection and execution during a home update.
+The masking condition was path identity: commit `6cbc520a` taught the GraphQL capture to skip only the shim file beside the running merge script, and its regression fixture symlinked `gh` back to that exact file.
+The symptom was the generated capture wrapper executing the foreign shim, followed by the foreign shim selecting the generated wrapper as its real `gh`, producing the exact recursive edge `capture wrapper -> foreign fm-gh-shim -> capture wrapper`.
+Each wrapper entry also created a `tee` process, so the tree rooted at the guarded merge grew until the host exceeded 4,000 processes and the affected merge machinery was killed.
+
+The repository-lock path deliberately starts `fm-merge-execute.sh` once more with an inherited locked descriptor.
+Inspection of the current scripts found no edge from the GitHub shim or capture wrapper back to `fm-merge-execute.sh`, so the unbounded edge was below that one intended re-entry rather than repeated merge-operator launches.
+The new merge depth marker nevertheless proves that the lock handoff occurs exactly once and fails with exit 70 if a mid-flight script update loses or contradicts the inherited lock state.
+
+The affected fork-manager pull request used an aligned project gate, while the stale upstream Firstmate gate remained elsewhere in the same machine-wide shim environment.
+That is disconfirming evidence against gate `origin` divergence as the direct recursion cause: origin divergence causes PR target misrouting, while cross-home executable identity and mid-flight replacement cause capture recursion.
+An older open prospecting pull request was also inspected, but its durable record attributes the open state to an explicit merge-authority hold and later branch-custody divergence, not to the recursion path.
+
+The bounded pre-fix reproduction placed a re-resolving `gh` ahead of the fake genuine binary and capped it after four invocations.
+The same-home shim case passed, while the adversarial case reached all four entries and returned only a flattened exit 1.
+After the fix, a current foreign-home shim is recognized by a side-effect-free probe and skipped, preserving one GraphQL request and one exact SHA-conditioned mutation.
+An unrecognized stale or replaced executable that re-enters `PATH` reaches the selected executable exactly once, reaches the GraphQL command exactly once, and stops at the second capture-wrapper entry with the typed exit 70 diagnostic.
+Separate fixtures prove the shim permits the existing one-time credential re-resolution but stops a third shim entry, the credential wrapper stops its first recursive prefix entry, and the merge operator stops an unlocked re-entry before mutation.
+
 ## Interception cannot be scoped to a task worktree
 
 The `pr` step runs in the no-mistakes daemon process, which resolves its environment once from the login shell at startup and caches it.
@@ -88,7 +110,10 @@ The routing mechanism is owned only by [`../no-mistakes-pr-credential.md`](../no
 `tests/fm-gh-shim.test.sh` drives the public shim and wrapper interfaces with local fakes and disposable Git repositories, touching no network and no real `gh`.
 The fork-target fixture creates a complete no-mistakes repository registration, bare gate, and linked worktree, so the implicit target is exercised from the same divergent topology as the incident.
 Additional adversarial cases cover a normal canonical origin, exact explicit repository preservation, an unregistered checkout, a missing database record, a registered target contradicted by the source checkout's remotes, a malformed target, and a non-GitHub target.
-`tests/fm-pr-merge.test.sh` drives protected GitHub merge capture through the public merge interface both without the shim and with a symlink to this repository's shim prefixed on `PATH`, and proves both paths preserve the single GraphQL request and exact SHA-conditioned merge mutation.
+`tests/fm-pr-merge.test.sh` drives protected GitHub merge capture through the public merge interface without a shim, through a same-home shim, and through a current shim copied into a distinct Firstmate-home path.
+Those valid paths preserve the single GraphQL request and exact SHA-conditioned merge mutation.
+Its reentrant executable fixture would reproduce the stale or mid-update loop but carries its own four-entry safety cap; the product guard now stops it at one selected-executable invocation with exit 70 before the cap can fire.
+The same suite proves the merge operator's inherited-lock handoff is the only accepted self-entry.
 
 Eight CI cases reproduce the check-runs authorization boundary and exercise the fallback through the shim's public `gh` interface.
 The fake applies the helper's real jq expression to paginated raw workflow-run fixtures, so the assertions cover the same transformation `gh api --paginate --slurp --jq` performs.
@@ -128,6 +153,8 @@ ok - configured fm-gh.sh exposes only the prefix-injected GitHub token
 ok - fm-gh.sh reads only the first non-empty, non-comment, trimmed prefix line
 ok - fm-gh.sh ignores credential comments after trimming whitespace
 ok - the shim routes at most once even when the credential re-resolves gh from PATH
+ok - the gh shim bounds repeated PATH resolution to two real-gh invocations
+ok - the credential wrapper bounds a recursive configured prefix to one invocation
 ok - fm-gh.sh runs both the unconfigured and configured paths under bash 3.2
 ok - the installer creates, verifies, reports precedence for, and removes the shim
 ok - the installer refuses to overwrite or remove a gh it does not own

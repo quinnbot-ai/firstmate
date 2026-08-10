@@ -27,9 +27,30 @@
 # invocation execs the real gh unchanged, so the shim's default remains current behavior.
 set -eu
 
-# FM_GH_SHIM_ACTIVE is a hard recursion stop: if fm-gh.sh's credential prefix itself
-# resolves gh through this shim, the second entry passes straight through rather than
-# routing again.
+# The merge capture boundary uses this side-effect-free probe to skip a shim from any
+# Firstmate home, not only the source-relative copy it happens to be running from.
+if [ "${FM_GH_SHIM_PROBE:-}" = 1 ] && [ "$#" -eq 1 ] \
+  && [ "$1" = --firstmate-gh-shim-probe ]; then
+  echo firstmate-gh-shim-v1
+  exit 0
+fi
+
+# FM_GH_SHIM_ACTIVE keeps credential routing one-shot when the configured prefix
+# resolves gh through this shim once more. A separate depth bound fails loudly if a
+# stale shim, capture wrapper, or credential helper continues resolving gh recursively.
+SHIM_DEPTH=${FM_GH_SHIM_DEPTH:-0}
+case "$SHIM_DEPTH" in
+  '' | *[!0-9]*)
+    echo "fm-gh-shim: invalid recursion depth; refusing gh dispatch" >&2
+    exit 70
+    ;;
+esac
+if [ "$SHIM_DEPTH" -ge 2 ]; then
+  echo "fm-gh-shim: recursion detected after two shim entries; inspect the credential prefix and installed gh targets" >&2
+  exit 70
+fi
+export FM_GH_SHIM_DEPTH=$((SHIM_DEPTH + 1))
+
 ROUTE=passthrough
 if [ "${FM_GH_SHIM_ACTIVE:-}" != "1" ] && [ "${1:-}" = "pr" ]; then
   case "${2:-}" in
