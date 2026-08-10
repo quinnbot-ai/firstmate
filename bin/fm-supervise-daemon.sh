@@ -1475,15 +1475,29 @@ handle_wake() {  # <reason> <state> [durable-payload]
 
 process_queued_heartbeats() {  # <state>
   local state=$1 epoch seq kind key payload cursor fingerprint timestamp status=0
+  local quarantine quarantine_present=false recovery_escalated=false recovery_tmp old_umask
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  if ! fm_heartbeat_state_quarantine_locked; then
+    log "ERROR: could not quarantine malformed durable heartbeat acknowledgement state"
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    return 1
+  fi
+  for quarantine in "$state"/.subsuper-heartbeat-state.corrupt.*; do
+    [ -d "$quarantine" ] && [ ! -L "$quarantine" ] \
+      && { [ -e "$quarantine/state" ] || [ -L "$quarantine/state" ]; } || continue
+    quarantine_present=true
+  done
   if [ ! -e "$FM_HEARTBEAT_STATE" ]; then
-    heartbeat_cursor_read "$state"
-    cursor=$HEARTBEAT_CURSOR_SEQ
+    cursor=0
     fingerprint=none
     timestamp=0
-    if refill_dedupe_read "$state"; then
-      fingerprint=$REFILL_DEDUPE_FINGERPRINT
-      timestamp=$REFILL_DEDUPE_TIMESTAMP
+    if [ "$quarantine_present" != true ]; then
+      heartbeat_cursor_read "$state"
+      cursor=$HEARTBEAT_CURSOR_SEQ
+      if refill_dedupe_read "$state"; then
+        fingerprint=$REFILL_DEDUPE_FINGERPRINT
+        timestamp=$REFILL_DEDUPE_TIMESTAMP
+      fi
     fi
     if ! fm_heartbeat_state_commit_locked "$cursor" "$fingerprint" "$timestamp"; then
       log "ERROR: could not initialize durable heartbeat acknowledgement state"
@@ -1491,6 +1505,30 @@ process_queued_heartbeats() {  # <state>
       return 1
     fi
   fi
+  for quarantine in "$state"/.subsuper-heartbeat-state.corrupt.*; do
+    [ -d "$quarantine" ] && [ ! -L "$quarantine" ] \
+      && { [ -e "$quarantine/state" ] || [ -L "$quarantine/state" ]; } \
+      && [ ! -e "$quarantine/reported" ] && [ ! -L "$quarantine/reported" ] || continue
+    if ! escalate_add "$state" \
+      "typed failure: malformed heartbeat acknowledgement quarantined; replaying unacknowledged refill observations at least once"; then
+      log "ERROR: could not append malformed heartbeat state diagnostic"
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      return 1
+    fi
+    old_umask=$(umask)
+    umask 077
+    recovery_tmp=$(mktemp "$quarantine/reported.tmp.XXXXXX") \
+      || { umask "$old_umask"; fm_lock_release "$FM_WAKE_QUEUE_LOCK"; return 1; }
+    umask "$old_umask"
+    if ! { printf 'v1\n' > "$recovery_tmp" && mv -f "$recovery_tmp" "$quarantine/reported"; }; then
+      rm -f "$recovery_tmp"
+      log "ERROR: could not acknowledge malformed heartbeat state diagnostic"
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      return 1
+    fi
+    recovery_escalated=true
+    log "ERROR: quarantined malformed durable heartbeat acknowledgement state"
+  done
   fm_heartbeat_state_read_locked
   cursor=$FM_HEARTBEAT_ACK_SEQ
   REFILL_DEDUPE_TRANSACTION_ACTIVE=true
@@ -1531,6 +1569,10 @@ process_queued_heartbeats() {  # <state>
   )
   REFILL_DEDUPE_TRANSACTION_ACTIVE=false
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  if [ "$recovery_escalated" = true ] \
+    && [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ]; then
+    escalate_flush "$state" || true
+  fi
   return "$status"
 }
 

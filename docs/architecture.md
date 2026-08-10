@@ -33,6 +33,7 @@ The producer hashes the complete canonically sorted ready-id set plus live-worke
 It immediately surfaces a new actionable identity, suppresses an unchanged identity, and re-surfaces unchanged evidence after `FM_REFILL_RESURFACE_SECS` (default 3600 seconds).
 A valid but non-actionable heartbeat ends that refill episode, so empty-to-nonempty and capacity-recovery-to-drained transitions surface promptly even when they return to an earlier identity.
 The daemon atomically records each acknowledged sequence together with its refill fingerprint and timestamp under `state/.subsuper-heartbeat-state`, then compacts acknowledged observations while the queue lock excludes concurrent appends.
+If that owned destination has become a non-regular path, the daemon moves it into a home-local quarantine, buffers a typed recovery failure before marking that diagnostic reported, resets acknowledgement to an unsuppressed state, and continues replaying every queued transition in order.
 The daemon's existing per-home singleton lock serializes concurrent cycles.
 Refill dedupe state advances only with the durable heartbeat acknowledgement after its escalation buffer append succeeds, so a failed append remains eligible for retry.
 Delivery across the append-to-ack crash window is deliberately at least once: a crash may re-deliver an identical refill digest, consumers must tolerate that duplicate, and the observation is never suppressed without its durable acknowledgement.

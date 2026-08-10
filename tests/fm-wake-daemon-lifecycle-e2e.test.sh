@@ -251,6 +251,8 @@ wait_for_file_empty() {  # <file>
 test_refill_heartbeat_dedupes_through_daemon_process() {
   (
     local dir state fakebin out sent pane ready_file daemon_pid baseline queued_seq evidence occurrence_before occurrence_after
+    local corrupt_a_seq corrupt_b_seq corrupt_a_evidence corrupt_b_evidence corrupt_a_before corrupt_b_before
+    local diagnostic diagnostic_before quarantine
     dir=$(make_supercase wd-refill-dedupe)
     state="$dir/state"
     fakebin="$dir/fakebin"
@@ -463,9 +465,51 @@ SH
     occurrence_after=$(file_occurrence_count "$sent" "$evidence")
     [ "$occurrence_after" -eq $((occurrence_before + 2)) ] \
       || fail "the acknowledged crash replay was delivered more than once"
+
+    rm -f "$state/.subsuper-heartbeat-state"
+    mkdir "$state/.subsuper-heartbeat-state"
+    printf 'replacement\n' > "$ready_file"
+    run_refill_cycle "$dir" "$state" "$fakebin" "$out" "$ready_file"
+    corrupt_a_seq=$(cat "$state/.wake-queue.seq")
+    corrupt_a_evidence=$(heartbeat_observation_payload "$state" "$corrupt_a_seq")
+    [ -n "$corrupt_a_evidence" ] || fail "the first corrupt-state observation lacked durable evidence"
+    corrupt_a_before=$(file_occurrence_count "$sent" "$corrupt_a_evidence")
+    printf 'initial\n' > "$ready_file"
+    run_refill_cycle "$dir" "$state" "$fakebin" "$out" "$ready_file"
+    corrupt_b_seq=$(cat "$state/.wake-queue.seq")
+    corrupt_b_evidence=$(heartbeat_observation_payload "$state" "$corrupt_b_seq")
+    [ -n "$corrupt_b_evidence" ] || fail "the changed corrupt-state observation lacked durable evidence"
+    corrupt_b_before=$(file_occurrence_count "$sent" "$corrupt_b_evidence")
+    diagnostic="typed failure: malformed heartbeat acknowledgement quarantined; replaying unacknowledged refill observations at least once"
+    diagnostic_before=$(file_occurrence_count "$sent" "$diagnostic")
+    PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+      FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=fakepane \
+      FM_FAKE_TMUX_CAPTURE="$pane" FM_FAKE_TMUX_SENT="$sent" FM_FAKE_READY_FILE="$ready_file" \
+      FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_HEARTBEAT_MAX=1 \
+      FM_REFILL_IDS_MAX=2 FM_ESCALATE_BATCH_SECS=0 FM_HOUSEKEEPING_TICK=999999 \
+      "$DAEMON" > "$dir/corrupt-state-replay.out" 2> "$dir/corrupt-state-replay.err" &
+    daemon_pid=$!
+    wait_for_heartbeat_cursor "$state" "$corrupt_b_seq" \
+      || fail "malformed owned state starved a later changed refill observation"
+    wait_for_file_occurrence_count "$sent" "$corrupt_a_evidence" $((corrupt_a_before + 1)) \
+      || fail "the first observation behind malformed owned state was suppressed"
+    wait_for_file_occurrence_count "$sent" "$corrupt_b_evidence" $((corrupt_b_before + 1)) \
+      || fail "the changed observation behind malformed owned state was suppressed"
+    wait_for_file_occurrence_count "$sent" "$diagnostic" $((diagnostic_before + 1)) \
+      || fail "malformed owned state did not emit its typed diagnostic"
+    wait_for_file_empty "$state/.subsuper-escalations" \
+      || fail "the corrupt-state replay digest was delivered but not durably cleared"
+    kill "$daemon_pid" 2>/dev/null || true
+    wait "$daemon_pid" 2>/dev/null || true
+    daemon_pid=
+    [ -f "$state/.subsuper-heartbeat-state" ] \
+      || fail "malformed owned state was not replaced by a regular acknowledgement"
+    quarantine=$(find "$state" -maxdepth 1 -type d -name '.subsuper-heartbeat-state.corrupt.*' -print -quit)
+    [ -n "$quarantine" ] && [ -d "$quarantine/state" ] && [ -f "$quarantine/reported" ] \
+      || fail "malformed owned state was not preserved in a reported quarantine"
     trap - EXIT
   ) || fail "real away-daemon refill process case failed"
-  pass "lifecycle: real away daemon survives drain races and replays pre-ack crashes at least once"
+  pass "lifecycle: real away daemon replays pre-ack crashes and quarantined-state transitions"
 }
 
 test_routine_then_terminal_after_restart

@@ -235,7 +235,7 @@ test_heartbeat_journal_and_sequence_are_durable() {
 }
 
 test_heartbeat_state_validation_fails_open() {
-  local dir state observed
+  local dir state observed quarantine
   dir=$(make_case heartbeat-state-validation)
   state="$dir/state"
   printf 'v1\n999\nbroken\n0\n' > "$state/.subsuper-heartbeat-state"
@@ -256,7 +256,21 @@ test_heartbeat_state_validation_fails_open() {
   fi
   [ -z "$(find "$state/.subsuper-heartbeat-state" -mindepth 1 -print -quit)" ] \
     || fail "heartbeat acknowledgement commit moved state inside a malformed directory"
-  pass "heartbeat state validates fully and rejects malformed destinations"
+  quarantine=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_heartbeat_state_quarantine_locked
+    printf "%s\n" "$FM_HEARTBEAT_STATE_QUARANTINE"
+  ' _ "$ROOT/bin/fm-wake-lib.sh")
+  [ -d "$quarantine/state" ] \
+    || fail "malformed heartbeat acknowledgement state was not quarantined"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_heartbeat_state_commit_locked 7 none 0
+  ' _ "$ROOT/bin/fm-wake-lib.sh" \
+    || fail "heartbeat acknowledgement did not recover after quarantine"
+  [ "$(sed -n '2p' "$state/.subsuper-heartbeat-state")" = 7 ] \
+    || fail "recovered heartbeat acknowledgement was not committed at its exact destination"
+  pass "heartbeat state validates fully and quarantines malformed destinations"
 }
 
 # The drain runs at the top of every wake-handling turn, so it also asserts

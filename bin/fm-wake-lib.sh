@@ -445,6 +445,23 @@ fm_wake_clean_field() {
   LC_ALL=C tr '\t\r\n' '   '
 }
 
+fm_heartbeat_state_quarantine_locked() {
+  local quarantine
+  FM_HEARTBEAT_STATE_QUARANTINE=
+  if [ ! -e "$FM_HEARTBEAT_STATE" ] && [ ! -L "$FM_HEARTBEAT_STATE" ]; then
+    return 0
+  fi
+  if [ -f "$FM_HEARTBEAT_STATE" ] && [ ! -L "$FM_HEARTBEAT_STATE" ]; then
+    return 0
+  fi
+  quarantine=$(mktemp -d "$STATE/.subsuper-heartbeat-state.corrupt.XXXXXX") || return 1
+  if ! mv "$FM_HEARTBEAT_STATE" "$quarantine/state"; then
+    rmdir "$quarantine" 2>/dev/null || true
+    return 1
+  fi
+  FM_HEARTBEAT_STATE_QUARANTINE=$quarantine
+}
+
 fm_heartbeat_state_read_locked() {
   local file=${1:-$FM_HEARTBEAT_STATE} version seq fingerprint timestamp stored_hash
   FM_HEARTBEAT_ACK_SEQ=0
