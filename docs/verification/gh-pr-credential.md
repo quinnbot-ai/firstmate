@@ -4,7 +4,7 @@ Repeatable evidence for the `gh` shim that routes pull-request mutations through
 Current behavior and rationale are owned by [`../no-mistakes-pr-credential.md`](../no-mistakes-pr-credential.md), the configuration schema by [`../configuration.md`](../configuration.md) ("Pull-request credential"), and the upstream ask by [`../proposals/nm-pr-step-interception.md`](../proposals/nm-pr-step-interception.md); this page records evidence only.
 
 Date: 2026-08-09.
-Comparison base: `fork/main` at `ae95570`.
+Comparison base: `fork/main` at `1c9ebcb6`.
 Shell: GNU bash 5.3.9 (macOS 26.5).
 `gh` 2.92.0.
 no-mistakes v1.41.2 installed; upstream source read at release 1.46.0, commit `20892e6`.
@@ -52,6 +52,30 @@ The installed v1.41.2 CI implementation calls `gh pr checks <selector> --repo <o
 Current upstream adds `link` to that exact JSON field set.
 Both implementations treat a nonzero check-runs read as unavailable CI state, so a persistent 403 cannot become a terminal verdict without a fallback.
 
+## Divergent gate repository diagnosis
+
+The trigger was a credential-routed `gh pr create` or `gh pr edit` invocation without an explicit `--repo` or `-R`.
+The masking condition was a no-mistakes gate checkout whose `origin` named the upstream parent while the repository registration's canonical push target named a fork.
+The visible symptom was an explicit upstream target inserted by the shim, which caused the `fm-gh-ci-fallback-signature` delivery to open `kunchenguid/firstmate` PR 2038 instead of `quinnbot-ai/firstmate` PR 106.
+A second delivery, `fm-gh-ci-fallback-slurp`, reproduced the same misrouting by opening upstream PR 2040 before fork redelivery.
+Both upstream pull requests were closed, establishing recurrence rather than a one-off run failure.
+
+The 2026-08-09 incident leaves all three layers visible on disk.
+`$HOME/.no-mistakes/state.sqlite` registers the Firstmate repository with `upstream_url=https://github.com/kunchenguid/firstmate.git` and `fork_url=https://github.com/quinnbot-ai/firstmate.git`.
+The corresponding `$HOME/.no-mistakes/repos/<repo-id>.git` gate has `origin=https://github.com/kunchenguid/firstmate.git`.
+The run's `push.log` says `pushing to fork https://github.com/quinnbot-ai/firstmate.git`, while its `pr.log` records `https://github.com/kunchenguid/firstmate/pull/2038`.
+That separates the proven fork-aware delivery path from the failing gate-origin PR path without relying on account identity or remote naming conventions.
+
+Commit `96f668c` introduced origin pinning to prevent `gh` from inferring a fork's parent when an implicit PR target was used.
+That change correctly failed closed when `origin` was absent and preserved explicit repository selection, but it assumed that the gate repository's `origin` was also the delivery target.
+No-mistakes' repository model disproves that assumption: `Repo.PushURL()` chooses a configured `fork_url` before `upstream_url`, and the push step uses that result while the gate's `origin` can remain upstream.
+The canonical owner is therefore the no-mistakes repository registration, with the registered checkout and its `no-mistakes` remote used to corroborate gate identity.
+
+The behavioral counterfactual creates a registered checkout with `origin=kunchenguid/firstmate`, `fork=quinnbot-ai/firstmate`, and a gate checkout with `origin=kunchenguid/firstmate`.
+Before the fix, the fixture selected `kunchenguid/firstmate` and failed the expected fork-target assertion.
+After the fix, both `gh pr create` and `gh pr edit` name `quinnbot-ai/firstmate`, and the recorded argument stream contains no `kunchenguid/firstmate` target.
+Disconfirming cases prove the resolver does not merely prefer a remote named `fork`: an ordinary registration with only a canonical `origin` still succeeds, explicit `--repo` and `-R` remain byte-for-byte unchanged, and missing, contradictory, malformed, or non-GitHub registration evidence stops before the real `gh` runs.
+
 ## Interception cannot be scoped to a task worktree
 
 The `pr` step runs in the no-mistakes daemon process, which resolves its environment once from the login shell at startup and caches it.
@@ -61,7 +85,9 @@ Nothing placed inside a task worktree is on the `PATH` that resolves `gh` for th
 
 The routing mechanism is owned only by [`../no-mistakes-pr-credential.md`](../no-mistakes-pr-credential.md); this section records its empirical verification.
 
-`tests/fm-gh-shim.test.sh` drives the public shim and wrapper interfaces with local fakes, touching no network and no real `gh`.
+`tests/fm-gh-shim.test.sh` drives the public shim and wrapper interfaces with local fakes and disposable Git repositories, touching no network and no real `gh`.
+The fork-target fixture creates a complete no-mistakes repository registration, bare gate, and linked worktree, so the implicit target is exercised from the same divergent topology as the incident.
+Additional adversarial cases cover a normal canonical origin, exact explicit repository preservation, an unregistered checkout, a missing database record, a registered target contradicted by the source checkout's remotes, a malformed target, and a non-GitHub target.
 `tests/fm-pr-merge.test.sh` drives protected GitHub merge capture through the public merge interface both without the shim and with a symlink to this repository's shim prefixed on `PATH`, and proves both paths preserve the single GraphQL request and exact SHA-conditioned merge mutation.
 
 Eight CI cases reproduce the check-runs authorization boundary and exercise the fallback through the shim's public `gh` interface.
@@ -81,10 +107,13 @@ The wrapper now expands the prefix as `${PREFIX[@]+"${PREFIX[@]}"}`, and both wr
 
 ```console
 $ bash tests/fm-gh-shim.test.sh
-ok - gh pr create without --repo injects its checkout origin into the credential route
-ok - repository-like option values cannot suppress origin targeting
-ok - caller-supplied --repo and -R always win over the checkout origin
-ok - credential-routed pr edit without --repo refuses when origin is unavailable
+ok - gh pr create without --repo uses the registered canonical fork target
+ok - a normal canonical origin routes safely despite repository-like option values
+ok - caller-supplied --repo and -R are preserved exactly
+ok - credential-routed pr edit refuses without a canonical registration
+ok - missing canonical target evidence fails closed
+ok - contradictory canonical target evidence fails closed
+ok - malformed and non-GitHub canonical targets fail closed
 ok - a check-runs 403 reaches a green exact-head workflow verdict without the privileged token
 ok - a denial naming statusCheckRollup deeper in its path still reaches the exact-head verdict
 ok - a check-runs 403 reaches a red exact-head workflow verdict
