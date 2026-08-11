@@ -358,7 +358,10 @@ case "$MODE" in
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+When it is implemented and committed, push your branch and open a PR with \`fm-pr-create.sh\` through Firstmate's GitHub route, then append \`done: PR {url}\` to the status file and stop.
+Create generated direct-PR bodies with \`$FM_ROOT/bin/fm-pr-create.sh\`: supply exactly one concise one-line \`--problem\` sentence, one concise one-line \`--outcome\` sentence, and \`--tests\`; it writes those sections in order and only adds worker provenance from recorded task metadata.
+Pass \`--repo <owner/name>\` explicitly through that helper, which routes the GitHub mutation through \`bin/fm-gh.sh\`.
+An explicitly provided custom \`--body\` or \`--body-file\` remains unchanged; do not add model self-report as provenance.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
     ;;

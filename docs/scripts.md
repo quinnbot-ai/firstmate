@@ -102,6 +102,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-pr-check-migrate.sh` | Quarantine older task polls without execution and rebuild only canonical polls       |
 | `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, then atomically arm a static merge poll |
 | `fm-pr-merge.sh`         | Record PR metadata, then merge a task's canonical full GitHub URL                    |
+| `fm-pr-create.sh`        | Create a direct PR with an explicit custom body or a metadata-derived concise narrative |
 | `fm-gh.sh`               | Run one GitHub command with this home's configured PR-capable credential injected    |
 | `fm-gh-ci-fallback.sh`   | Recover exact-head workflow verdicts when check-runs reads are forbidden             |
 | `fm-gh-shim.sh`          | Route PR mutations and bounded CI reads while passing every other `gh` call through |
