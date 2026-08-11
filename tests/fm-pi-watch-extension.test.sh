@@ -404,21 +404,9 @@ test_pi_hung_successor_falls_back_to_typed_wake() {
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
-  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
-#!/usr/bin/env bash
-printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
-count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
-if [ "$count" -eq 1 ]; then
-  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
-  printf 'signal: synthetic wake\n'
-  exit 0
-fi
-trap 'exit 0' TERM INT
-while :; do sleep 0.02; done
-SH
-  chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_PI_ARM_READY_TIMEOUT_MS=250 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { EventEmitter } from "node:events";
 import { pathToFileURL } from "node:url";
 
 let tool = null;
@@ -439,16 +427,75 @@ const pi = {
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
-mod.default(pi);
+if (typeof mod.createPiWatchExtensionForTest !== "function") {
+  throw new Error("Pi extension did not expose its deterministic lifecycle construction seam");
+}
+const arms = [];
+const readinessTimeouts = [];
+const retireTimeouts = [];
+const retryDelays = [];
+const signals = [];
+const lifecycle = {
+  spawnArm() {
+    const arm = new EventEmitter();
+    arm.pid = 7000 + arms.length;
+    arm.stdout = new EventEmitter();
+    arm.stderr = new EventEmitter();
+    arm.kill = (signal) => {
+      signals.push(`${arm.pid}:${signal}`);
+      queueMicrotask(() => arm.emit("close", null, signal));
+      return true;
+    };
+    arms.push(arm);
+    appendFileSync(process.env.FM_ARM_LOG, `arm=${arm.pid}\n`);
+    if (arms.length === 1) {
+      queueMicrotask(() => {
+        arm.stdout.emit("data", Buffer.from("signal: synthetic wake\n"));
+        arm.emit("close", 0, null);
+      });
+    }
+    return arm;
+  },
+  async waitForReadiness(_arm, timeoutMs) {
+    readinessTimeouts.push(timeoutMs);
+    return false;
+  },
+  retireArm(arm, timeoutMs) {
+    retireTimeouts.push(timeoutMs);
+    return new Promise((resolve) => {
+      arm.once("close", () => resolve(true));
+      arm.kill("SIGTERM");
+    });
+  },
+  async waitForRetry(delayMs) {
+    retryDelays.push(delayMs);
+  },
+};
+mod.createPiWatchExtensionForTest(pi, lifecycle);
 await tool.execute("tool-call-hung-successor", {}, undefined, undefined, {});
-for (let i = 0; i < 500 && !prompt; i += 1) {
+const hungSuccessorPromptDeadlineMs = 15_000;
+const hungSuccessorPromptDeadline = Date.now() + hungSuccessorPromptDeadlineMs;
+while (!prompt && Date.now() < hungSuccessorPromptDeadline) {
   await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!prompt) {
+  throw new Error(`timed out after ${hungSuccessorPromptDeadlineMs}ms waiting for the hung-successor wake prompt`);
 }
 const rows = existsSync(process.env.FM_ARM_LOG)
   ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
   : [];
 if (rows.length !== 4) throw new Error(`expected one successor plus two retries, got ${rows.length}: ${rows.join(" | ")}`);
 if (rowsAtPrompt !== 4) throw new Error(`wake arrived before restoration exhausted (${rowsAtPrompt} arm rows)`);
+if (readinessTimeouts.length !== 3 || readinessTimeouts.some((timeoutMs) => timeoutMs !== 250)) {
+  throw new Error(`expected three 250ms readiness timeouts, got ${readinessTimeouts.join(",")}`);
+}
+if (retireTimeouts.length !== 3 || retireTimeouts.some((timeoutMs) => timeoutMs !== 1000)) {
+  throw new Error(`expected three 1000ms retirement waits, got ${retireTimeouts.join(",")}`);
+}
+if (signals.length !== 3 || signals.some((signal) => !signal.endsWith(":SIGTERM"))) {
+  throw new Error(`expected SIGTERM and close for every unready successor, got ${signals.join(" | ")}`);
+}
+if (retryDelays.join(",") !== "5,10") throw new Error(`expected retries after 5ms then 10ms, got ${retryDelays.join(",")}`);
 if (!prompt.includes("signal: synthetic wake")) throw new Error(`original wake was lost: ${prompt}`);
 if (!prompt.includes("could not restore watcher continuity after 2 retries")) throw new Error(`missing typed restoration failure: ${prompt}`);
 await new Promise((resolve) => setTimeout(resolve, 100));
@@ -457,9 +504,9 @@ if (stableRows.length !== 4) throw new Error(`single-flight recovery launched ${
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi must deliver the actionable wake after bounded hung-successor recovery"
+  [ "$status" -eq 0 ] || fail "Pi must deliver the actionable wake after bounded hung-successor recovery; captured child output: $out"
   [ -z "$out" ] || fail "Pi hung-successor test printed output: $out"
-  pass "Pi hung successor falls back to one typed actionable wake"
+  pass "Pi hung successor lifecycle falls back to one typed actionable wake"
 }
 
 test_pi_unretired_successor_falls_back_without_retry() {

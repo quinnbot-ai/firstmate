@@ -38,7 +38,7 @@ def require_present(value, label)
 end
 
 ci_events = ci.fetch(trigger)
-require_equal(ci_events.keys, ["pull_request"], "CI events")
+require_equal(ci_events.keys.sort, ["pull_request", "push"], "CI events")
 require_equal(ci_events.fetch("pull_request").fetch("branches"), ["main"], "CI PR target")
 
 ubuntu_jobs = %w[
@@ -50,10 +50,12 @@ ubuntu_jobs = %w[
   tests-herdr
   tests-timing-aggregate
   invariants
+  macos-stock-bash
 ]
 require_equal(ci.fetch("jobs").keys.sort, ubuntu_jobs.sort, "CI job inventory")
 ci.fetch("jobs").each do |name, job|
-  require_equal(job.fetch("runs-on"), "ubuntu-latest", "CI job #{name} runner")
+  runner = name == "macos-stock-bash" ? "macos-latest" : "ubuntu-latest"
+  require_equal(job.fetch("runs-on"), runner, "CI job #{name} runner")
 end
 
 macos_events = macos.fetch(trigger)

@@ -76,13 +76,13 @@ test_claude_adapter_registration() {
   local source commands
   for source in startup resume clear; do
     commands=$(sessionstart_commands "$source")
-    [ "$commands" = $'fm-sessionstart-nudge.sh\nfm-claude-calm-nudge.sh' ] \
+    [ "$commands" = $'fm-sessionstart-run.sh\nfm-claude-calm-nudge.sh' ] \
       || fail "Claude $source SessionStart routing changed unexpectedly: $commands"
   done
   for source in compact fork; do
     commands=$(sessionstart_commands "$source")
-    [ "$commands" = 'fm-claude-calm-nudge.sh' ] \
-      || fail "Claude $source must reload Calm without running the operational digest: $commands"
+    [ "$commands" = $'fm-sessionstart-run.sh\nfm-claude-calm-nudge.sh' ] \
+      || fail "Claude $source SessionStart routing changed unexpectedly: $commands"
   done
   grep -Fq 'disable-model-invocation: true' "$ROOT/.claude/commands/calm.md" \
     || fail "Claude Calm command must remain user invoked"
@@ -92,7 +92,7 @@ test_claude_adapter_registration() {
     || fail "Claude Calm output style is not registered"
   grep -Fq 'keep-coding-instructions: true' "$ROOT/.claude/output-styles/firstmate-calm.md" \
     || fail "Claude Calm output style must preserve coding instructions"
-  pass "Claude Calm reloads on startup, resume, clear, compact, and fork without widening the operational digest"
+  pass "Claude Calm reloads alongside Kun's deterministic SessionStart runner"
   pass "Claude Calm registers its native command and safe output style"
 }
 

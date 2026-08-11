@@ -185,14 +185,6 @@
       "audience": "agent-runtime"
     },
     {
-      "path": ".claude/commands/calm.md",
-      "audience": "agent-runtime"
-    },
-    {
-      "path": ".claude/output-styles/firstmate-calm.md",
-      "audience": "agent-runtime"
-    },
-    {
       "path": "AGENTS.md",
       "audience": "agent-runtime"
     },
@@ -207,6 +199,14 @@
     {
       "path": "README.md",
       "audience": "public-product"
+    },
+    {
+      "path": "VISION.md",
+      "audience": "public-product"
+    },
+    {
+      "path": "docs/agent-control.md",
+      "audience": "maintainer-architecture"
     },
     {
       "path": "docs/architecture.md",
@@ -273,20 +273,8 @@
       "audience": "operator-current"
     },
     {
-      "path": "docs/no-mistakes-pr-credential.md",
-      "audience": "operator-current"
-    },
-    {
-      "path": "docs/link-intake.md",
-      "audience": "operator-current"
-    },
-    {
       "path": "docs/orca-backend.md",
       "audience": "operator-current"
-    },
-    {
-      "path": "docs/proposals/nm-pr-step-interception.md",
-      "audience": "maintainer-architecture"
     },
     {
       "path": "docs/remote-secondmates.md",
@@ -299,10 +287,6 @@
     {
       "path": "docs/sessionstart-nudge.md",
       "audience": "operator-current"
-    },
-    {
-      "path": "docs/test-inventory-receipts.md",
-      "audience": "maintainer-architecture"
     },
     {
       "path": "docs/subagent-guard.md",
@@ -349,7 +333,7 @@
       "audience": "maintainer-verification"
     },
     {
-      "path": "docs/verification/gh-pr-credential.md",
+      "path": "docs/verification/muse.md",
       "audience": "maintainer-verification"
     },
     {
@@ -362,10 +346,6 @@
     },
     {
       "path": "docs/verification/runtime-backends.md",
-      "audience": "maintainer-verification"
-    },
-    {
-      "path": "docs/verification/link-intake.md",
       "audience": "maintainer-verification"
     },
     {
@@ -393,8 +373,36 @@
       "audience": "operator-current"
     },
     {
-      "path": "skills/stow/SKILL.md",
-      "audience": "public-product"
+      "path": ".claude/commands/calm.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".claude/output-styles/firstmate-calm.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "docs/link-intake.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/no-mistakes-pr-credential.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/proposals/nm-pr-step-interception.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/test-inventory-receipts.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/gh-pr-credential.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/link-intake.md",
+      "audience": "maintainer-verification"
     },
     {
       "path": "tests/fixtures/zellij-composer-state/ambiguous.txt",
@@ -411,6 +419,10 @@
     {
       "path": "tests/fixtures/zellij-composer-state/idle.txt",
       "audience": "maintainer-verification"
+    },
+    {
+      "path": "skills/stow/SKILL.md",
+      "audience": "public-product"
     }
   ]
 }
