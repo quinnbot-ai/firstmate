@@ -27,6 +27,7 @@ CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects" "$REMOTE_ROOT" "$CLAIMS"
 cleanup() {
   local worker_pid='' wait_attempt=0
+  exec 9>&- 2>/dev/null || true
   touch "$TMP_ROOT/provision.release" "$TMP_ROOT/seed.release" "$TMP_ROOT/handoff.release" \
     "$TMP_ROOT/inherit.release" "$TMP_ROOT/launch.release" 2>/dev/null || true
   FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" \
@@ -150,7 +151,11 @@ case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
   inherit-partial:fm-remote-inherit.sh:config/crew-harness) exit 255 ;;
   inherit-block:fm-remote-inherit.sh:data/captain-shared.md)
     cat > "$FM_FAKE_INHERIT_PAYLOAD"
-    touch "$FM_FAKE_INHERIT_ENTERED"
+    if [ -n "${FM_FAKE_INHERIT_EVENT:-}" ]; then
+      printf '%s:%s\n' "$command_name" "$command_rel" > "$FM_FAKE_INHERIT_EVENT"
+    else
+      touch "$FM_FAKE_INHERIT_ENTERED"
+    fi
     while [ ! -f "$FM_FAKE_INHERIT_RELEASE" ]; do sleep 0.02; done
     "$FM_FAKE_REMOTE_ENTRYPOINT" "$@" < "$FM_FAKE_INHERIT_PAYLOAD"
     exit $?
@@ -271,6 +276,7 @@ remote_env() {
   FM_FAKE_DOCTOR_LOG="$DOCTOR_LOG" \
   FM_FAKE_DOCTOR_REPAIRED="$TMP_ROOT/doctor.repaired" \
   FM_FAKE_INHERIT_ENTERED="$TMP_ROOT/inherit.entered" \
+  FM_FAKE_INHERIT_EVENT="$TMP_ROOT/inherit.event" \
   FM_FAKE_INHERIT_RELEASE="$TMP_ROOT/inherit.release" \
   FM_FAKE_INHERIT_PAYLOAD="$TMP_ROOT/inherit.payload" \
   FM_FAKE_LAUNCH_ENTERED="$TMP_ROOT/launch.entered" \
@@ -281,6 +287,27 @@ remote_env() {
 
 sha256_file() {
   if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'; else sha256sum "$1" | awk '{print $1}'; fi
+}
+
+open_inherit_event() {
+  rm -f "$TMP_ROOT/inherit.entered" "$TMP_ROOT/inherit.release" "$TMP_ROOT/inherit.payload" \
+    "$TMP_ROOT/inherit.event"
+  mkfifo "$TMP_ROOT/inherit.event" || fail "could not create inheritance event fixture"
+  exec 9<> "$TMP_ROOT/inherit.event" || fail "could not open inheritance event fixture"
+}
+
+wait_for_inherit_block() { # <pid> <early-exit-error> <timeout-error>
+  local pid=$1 early_exit_error=$2 timeout_error=$3 observed=''
+  if ! IFS= read -r -t 45 observed <&9; then
+    exec 9>&-
+    if ! kill -0 "$pid" 2>/dev/null; then
+      fail "$early_exit_error"
+    fi
+    fail "$timeout_error"
+  fi
+  exec 9>&-
+  [ "$observed" = 'fm-remote-inherit.sh:data/captain-shared.md' ] \
+    || fail "inheritance event reached an unexpected target: $observed"
 }
 
 seed_env() {
@@ -617,7 +644,7 @@ mv -f "$TMP_ROOT/remote-ios-before-legacy.meta" "$remote_route_meta"
 rm -f "$TMUX_STATE"
 pass "non-herdr remote endpoints are refused without changing either route"
 
-rm -f "$TMP_ROOT/inherit.entered" "$TMP_ROOT/inherit.release" "$TMP_ROOT/inherit.payload"
+open_inherit_event
 cat > "$PARENT/data/captain-shared.md" <<'EOF'
 # Shared captain preferences
 This file is main-authoritative and maintained by the main firstmate.
@@ -628,15 +655,9 @@ EOF
 FM_FAKE_SSH_MODE=inherit-block remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
   > "$TMP_ROOT/spawn-concurrent.out" 2>&1 &
 spawn_concurrent=$!
-spawn_inherit_wait=0
-# Earlier inherited files traverse the worker before captain-shared.md, so give
-# a loaded portable runner 30 seconds to reach this deliberately blocked write.
-while [ ! -f "$TMP_ROOT/inherit.entered" ]; do
-  kill -0 "$spawn_concurrent" 2>/dev/null || fail "remote spawn exited before its blocked inheritance write"
-  spawn_inherit_wait=$((spawn_inherit_wait + 1))
-  [ "$spawn_inherit_wait" -le 1500 ] || fail "remote spawn never reached its blocked inheritance write"
-  sleep 0.02
-done
+wait_for_inherit_block "$spawn_concurrent" \
+  "remote spawn exited before its blocked inheritance write" \
+  "remote spawn never reached its blocked inheritance write"
 cat > "$PARENT/data/captain-shared.md" <<'EOF'
 # Shared captain preferences
 This file is main-authoritative and maintained by the main firstmate.
@@ -714,7 +735,7 @@ remote_env "$ROOT/bin/fm-procevent-remote-reply.sh" handle ios 2 "$PARTIAL_CONFI
   || fail "converged remote config acknowledgment was not ingested"
 pass "partial remote inheritance retains reread intent through bootstrap convergence"
 
-rm -f "$TMP_ROOT/inherit.entered" "$TMP_ROOT/inherit.release" "$TMP_ROOT/inherit.payload"
+open_inherit_event
 cat > "$PARENT/data/captain-shared.md" <<'EOF'
 # Shared captain preferences
 This file is main-authoritative and maintained by the main firstmate.
@@ -725,13 +746,9 @@ EOF
 FM_FAKE_SSH_MODE=inherit-block remote_env "$ROOT/bin/fm-config-push.sh" \
   > "$TMP_ROOT/config-concurrent-first.out" 2>&1 &
 config_first=$!
-inherit_wait=0
-while [ ! -f "$TMP_ROOT/inherit.entered" ]; do
-  kill -0 "$config_first" 2>/dev/null || fail "first inheritance transaction exited before its blocked write"
-  inherit_wait=$((inherit_wait + 1))
-  [ "$inherit_wait" -le 250 ] || fail "first inheritance transaction never reached its blocked write"
-  sleep 0.02
-done
+wait_for_inherit_block "$config_first" \
+  "first inheritance transaction exited before its blocked write" \
+  "first inheritance transaction never reached its blocked write"
 cat > "$PARENT/data/captain-shared.md" <<'EOF'
 # Shared captain preferences
 This file is main-authoritative and maintained by the main firstmate.
