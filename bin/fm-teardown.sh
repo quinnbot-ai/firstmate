@@ -1308,6 +1308,24 @@ cleanup_stale_lock_for_safety_check() {
   return "$TEARDOWN_TREEHOUSE_LOCK_REFUSED"
 }
 
+# Recheck the worktree directly before a return.  A stale index lock can make the
+# recheck itself fail before treehouse sees it, so use the same fail-closed proof
+# as the initial safety inspection before retrying that exact recheck.
+teardown_return_boundary_check() {
+  local dir=$1 post_cleanup_check=${2:-} rc
+  [ -n "$post_cleanup_check" ] || return 0
+
+  if "$post_cleanup_check"; then
+    return 0
+  fi
+  rc=$?
+  if [ "$rc" -eq "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ]; then
+    cleanup_stale_lock_for_safety_check "$dir" || return 1
+    "$post_cleanup_check" && return 0
+  fi
+  return 1
+}
+
 # Return a worktree/home via `treehouse return --force`, tolerating a transient or
 # stale git index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return() {
@@ -1316,7 +1334,7 @@ teardown_treehouse_return() {
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
-  if [ -n "$post_cleanup_check" ] && ! "$post_cleanup_check"; then
+  if ! teardown_return_boundary_check "$dir" "$post_cleanup_check"; then
     echo "teardown: $label return aborted because its boundary safety check failed" >&2
     return 1
   fi
@@ -1345,7 +1363,7 @@ teardown_treehouse_return() {
     echo "teardown: $label return failed with transient git lock ($lock_desc); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
     sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
 
-    if [ -n "$post_cleanup_check" ] && ! "$post_cleanup_check"; then
+    if ! teardown_return_boundary_check "$dir" "$post_cleanup_check"; then
       echo "teardown: $label return aborted on retry because its boundary safety check failed" >&2
       return 1
     fi
@@ -1370,7 +1388,7 @@ teardown_treehouse_return() {
     if fm_lock_is_provably_stale "$lock" "$dir" "$STALE_WORKTREE_LOCK_AGE_SECS"; then
       rm -f "$lock"
       echo "teardown: removed provably-stale git lock $lock (age >= ${STALE_WORKTREE_LOCK_AGE_SECS}s, no live holder) and retrying $label return" >&2
-      if [ -n "$post_cleanup_check" ] && ! "$post_cleanup_check"; then
+      if ! teardown_return_boundary_check "$dir" "$post_cleanup_check"; then
         echo "teardown: $label return aborted after stale-lock cleanup because safety checks failed" >&2
         return 1
       fi
@@ -2255,7 +2273,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ -d "$WT" ]; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     if [ "$branch" != "HEAD" ]; then
-      git -C "$WT" checkout --detach -q 2>/dev/null || exit 1
+      git -C "$WT" checkout --detach -q 2>/dev/null || true
     fi
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
       "$WT/.opencode/plugins/fm-busy-state.js" \
@@ -2267,7 +2285,7 @@ elif [ "$LEGACY_DETACHED_RESUME" != 1 ] && [ -d "$WT" ] && [ "$KIND" != secondma
   if [ "$LEGACY_DETACHED_ENDPOINT" != 1 ]; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     if [ "$branch" != "HEAD" ]; then
-      git -C "$WT" checkout --detach -q 2>/dev/null || exit 1
+      git -C "$WT" checkout --detach -q 2>/dev/null || true
     fi
     # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
