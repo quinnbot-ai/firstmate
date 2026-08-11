@@ -332,6 +332,29 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   pass "fm-brief.sh: faster paths use configured authority without stacked review"
 }
 
+test_direct_pr_brief_routes_narrative_to_its_single_owner() {
+  local home brief
+  home="$TMP_ROOT/direct-pr-narrative-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" brief-direct-narrative some-proj --mode direct-PR >/dev/null 2>&1
+  brief="$home/data/brief-direct-narrative/brief.md"
+  assert_grep 'fm-pr-create.sh' "$brief" \
+    "direct-PR brief did not route generated narratives to their owner"
+  # shellcheck disable=SC2016 # Literal Markdown flags must remain unexpanded.
+  assert_grep 'one concise one-line `--problem` sentence, one concise one-line `--outcome` sentence, and `--tests`' "$brief" \
+    "direct-PR brief did not require Problem, Outcome, Tests order"
+  assert_grep 'only adds worker provenance from recorded task metadata' "$brief" \
+    "direct-PR brief did not constrain provenance to recorded metadata"
+  # shellcheck disable=SC2016 # Literal Markdown flags must remain unexpanded.
+  assert_grep 'custom `--body` or `--body-file` remains unchanged' "$brief" \
+    "direct-PR brief did not preserve explicit custom PR bodies"
+  if grep -qx '## Problem' "$brief"; then
+    fail "direct-PR brief duplicated the generated body template instead of referencing its owner"
+  fi
+  pass "fm-brief.sh: direct-PR narrative guidance points to the single body owner"
+}
+
 # Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
 # reference must render as plain prose with no dangling apostrophe artifact.
 test_no_mistakes_dod_wording() {
@@ -730,6 +753,7 @@ test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
+test_direct_pr_brief_routes_narrative_to_its_single_owner
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
