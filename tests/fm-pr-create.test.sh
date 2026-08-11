@@ -21,6 +21,10 @@ set -eu
   printf '%s\n' 'gh did not receive the single fm-gh wrapper boundary' >&2
   exit 70
 }
+[ "${FM_GH_SHIM_ACTIVE:-}" = 1 ] || {
+  printf '%s\n' 'gh did not receive the one-shot shim guard' >&2
+  exit 70
+}
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 body=
 while [ "$#" -gt 0 ]; do
@@ -46,7 +50,7 @@ SH
 run_create() {
   local dir=$1
   shift
-  env -u FM_GH_WRAPPER_DEPTH \
+  env -u FM_GH_WRAPPER_DEPTH -u FM_GH_SHIM_ACTIVE \
     FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" FM_ROOT_OVERRIDE="$ROOT" \
     FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_BODY="$dir/body.md" \
     PATH="$dir/fakebin:$PATH" "$OWNER" "$@"

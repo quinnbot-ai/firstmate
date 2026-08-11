@@ -190,7 +190,7 @@ if [ "$CUSTOM_BODY_SET" -eq 1 ] || [ "$CUSTOM_BODY_FILE_SET" -eq 1 ]; then
   else
     args+=(--body "$CUSTOM_BODY")
   fi
-  exec "$SCRIPT_DIR/fm-gh.sh" gh "${args[@]}"
+  exec env FM_GH_SHIM_ACTIVE=1 "$SCRIPT_DIR/fm-gh.sh" gh "${args[@]}"
 fi
 
 one_line_text "$PROBLEM" || die "--problem must be one non-empty line of at most 240 characters"
@@ -218,4 +218,4 @@ args=(pr create --repo "$REPO" --title "$TITLE" --body-file "$body_file")
 [ -z "$BASE" ] || args+=(--base "$BASE")
 [ -z "$HEAD" ] || args+=(--head "$HEAD")
 [ "$DRAFT" -eq 0 ] || args+=(--draft)
-"$SCRIPT_DIR/fm-gh.sh" gh "${args[@]}"
+FM_GH_SHIM_ACTIVE=1 "$SCRIPT_DIR/fm-gh.sh" gh "${args[@]}"
