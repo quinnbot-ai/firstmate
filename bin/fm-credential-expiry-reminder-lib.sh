@@ -116,8 +116,14 @@ fm_credential_expiry_reminder_state_read() { # <path>
 fm_credential_expiry_reminder_state_write() { # <dir> <key> <expires-at> <now>
   local dir=$1 key=$2 expires=$3 now=$4 tmp
   tmp=$(umask 077; mktemp "$dir/.${key}.XXXXXX") || return 1
-  printf 'expires_at=%s\nlast_surfaced_epoch=%s\n' "$expires" "$now" > "$tmp" \
-    && mv -f "$tmp" "$dir/$key.state" || { rm -f "$tmp"; return 1; }
+  if ! printf 'expires_at=%s\nlast_surfaced_epoch=%s\n' "$expires" "$now" > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! mv -f "$tmp" "$dir/$key.state"; then
+    rm -f "$tmp"
+    return 1
+  fi
 }
 
 fm_credential_expiry_reminders_report() { # <config-dir> <state-dir> <mutable 0|1>
