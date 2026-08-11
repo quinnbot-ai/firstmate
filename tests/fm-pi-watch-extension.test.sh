@@ -441,8 +441,13 @@ writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await tool.execute("tool-call-hung-successor", {}, undefined, undefined, {});
-for (let i = 0; i < 500 && !prompt; i += 1) {
+const hungSuccessorPromptDeadlineMs = 15_000;
+const hungSuccessorPromptDeadline = Date.now() + hungSuccessorPromptDeadlineMs;
+while (!prompt && Date.now() < hungSuccessorPromptDeadline) {
   await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!prompt) {
+  throw new Error(`timed out after ${hungSuccessorPromptDeadlineMs}ms waiting for the hung-successor wake prompt`);
 }
 const rows = existsSync(process.env.FM_ARM_LOG)
   ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
@@ -457,7 +462,7 @@ if (stableRows.length !== 4) throw new Error(`single-flight recovery launched ${
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi must deliver the actionable wake after bounded hung-successor recovery"
+  [ "$status" -eq 0 ] || fail "Pi must deliver the actionable wake after bounded hung-successor recovery; captured child output: $out"
   [ -z "$out" ] || fail "Pi hung-successor test printed output: $out"
   pass "Pi hung successor falls back to one typed actionable wake"
 }
