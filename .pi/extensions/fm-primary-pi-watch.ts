@@ -56,6 +56,13 @@ type SessionGeneration = {
   seq: number;
 };
 
+type ChildLifecycleAdapter = {
+  spawnArm: (env: NodeJS.ProcessEnv) => ChildProcess;
+  waitForReadiness: (armChild: ChildProcess, timeoutMs: number) => Promise<boolean>;
+  retireArm: (armChild: ChildProcess | null, timeoutMs: number) => Promise<boolean>;
+  waitForRetry: (delayMs: number) => Promise<void>;
+};
+
 function refreshWatchToolShell(
   state: WatchToolShellState,
   theme: Theme,
@@ -103,6 +110,48 @@ let nextGenerationId = 0;
 let activeGeneration: SessionGeneration | null = null;
 const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
 const armClose = new WeakMap<ChildProcess, Promise<void>>();
+
+const productionChildLifecycle: ChildLifecycleAdapter = {
+  spawnArm(env) {
+    return spawn("bash", ["-lc", "config_dir=\"${FM_CONFIG_OVERRIDE:-$FM_HOME/config}\"; [ -f \"$config_dir/x-mode.env\" ] && . \"$config_dir/x-mode.env\"; exec \"$FM_WATCH_ARM_SCRIPT\" --restart"], {
+      cwd: fmRoot,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  },
+  waitForReadiness(armChild, timeoutMs) {
+    const readiness = armReadiness.get(armChild);
+    if (!readiness) return Promise.resolve(false);
+    return new Promise((resolveReady) => {
+      const timer = setTimeout(() => resolveReady(false), timeoutMs);
+      timer.unref();
+      void readiness.then((ready) => {
+        clearTimeout(timer);
+        resolveReady(ready);
+      });
+    });
+  },
+  retireArm(armChild, timeoutMs) {
+    if (!armChild) return Promise.resolve(true);
+    armChild.kill("SIGTERM");
+    const closed = armClose.get(armChild);
+    if (!closed) return Promise.resolve(false);
+    return new Promise((resolveRetired) => {
+      const timer = setTimeout(() => resolveRetired(false), timeoutMs);
+      timer.unref();
+      void closed.then(() => {
+        clearTimeout(timer);
+        resolveRetired(true);
+      });
+    });
+  },
+  waitForRetry(delayMs) {
+    return new Promise((resolveRetry) => {
+      const timer = setTimeout(resolveRetry, delayMs);
+      timer.unref();
+    });
+  },
+};
 
 function positiveInteger(name: string, fallback: number): number {
   const value = Number(process.env[name]);
@@ -217,7 +266,7 @@ const cleanupOnProcessExit = () => {
 };
 process.once("exit", cleanupOnProcessExit);
 
-export default function (pi: ExtensionAPI) {
+function installPiWatchExtension(pi: ExtensionAPI, childLifecycle: ChildLifecycleAdapter) {
   let generation = createGeneration();
   activateGeneration(generation);
 
@@ -257,38 +306,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   function waitForRetry(attempt: number): Promise<void> {
-    return new Promise((resolveRetry) => {
-      const timer = setTimeout(resolveRetry, retryDelay(attempt));
-      timer.unref();
-    });
-  }
-
-  function waitForReadiness(armChild: ChildProcess): Promise<boolean> {
-    const readiness = armReadiness.get(armChild);
-    if (!readiness) return Promise.resolve(false);
-    return new Promise((resolveReady) => {
-      const timer = setTimeout(() => resolveReady(false), armReadyTimeoutMs);
-      timer.unref();
-      void readiness.then((ready) => {
-        clearTimeout(timer);
-        resolveReady(ready);
-      });
-    });
-  }
-
-  async function retireArm(armChild: ChildProcess | null): Promise<boolean> {
-    if (!armChild) return true;
-    armChild.kill("SIGTERM");
-    const closed = armClose.get(armChild);
-    if (!closed) return false;
-    return new Promise((resolveRetired) => {
-      const timer = setTimeout(() => resolveRetired(false), armRetireTimeoutMs);
-      timer.unref();
-      void closed.then(() => {
-        clearTimeout(timer);
-        resolveRetired(true);
-      });
-    });
+    return childLifecycle.waitForRetry(retryDelay(attempt));
   }
 
   async function restoreAfterActionableClose(owner: SessionGeneration, predecessorArmPid: string): Promise<string> {
@@ -297,10 +315,10 @@ export default function (pi: ExtensionAPI) {
       if (!generationIsLive(owner)) return "";
       const replacement = startArm(owner, predecessorArmPid);
       const successorChild = owner.child;
-      if (replacement.ok && successorChild && await waitForReadiness(successorChild)) return "";
+      if (replacement.ok && successorChild && await childLifecycle.waitForReadiness(successorChild, armReadyTimeoutMs)) return "";
       if (replacement.ok) {
         failure = "watcher: FAILED - Pi extension could not verify a ready successor watcher";
-        if (!(await retireArm(successorChild))) {
+        if (!(await childLifecycle.retireArm(successorChild, armRetireTimeoutMs))) {
           return `${failure}\nwatcher: FAILED - Pi extension could not restore watcher continuity because the unready successor arm did not exit within ${armRetireTimeoutMs}ms`;
         }
       } else {
@@ -371,11 +389,7 @@ export default function (pi: ExtensionAPI) {
       FM_WATCH_ARM_SCRIPT: armScript,
       FM_WATCH_PREDECESSOR_ARM_PID: predecessorArmPid,
     };
-    const armChild = spawn("bash", ["-lc", "config_dir=\"${FM_CONFIG_OVERRIDE:-$FM_HOME/config}\"; [ -f \"$config_dir/x-mode.env\" ] && . \"$config_dir/x-mode.env\"; exec \"$FM_WATCH_ARM_SCRIPT\" --restart"], {
-      cwd: fmRoot,
-      env,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const armChild = childLifecycle.spawnArm(env);
     owner.child = armChild;
     let stdout = "";
     let stderr = "";
@@ -515,4 +529,14 @@ export default function (pi: ExtensionAPI) {
   });
 
   markLoaded();
+}
+
+// This is an internal construction seam for deterministic lifecycle regression tests.
+// Pi's default extension entry point always uses productionChildLifecycle.
+export function createPiWatchExtensionForTest(pi: ExtensionAPI, childLifecycle: ChildLifecycleAdapter): void {
+  installPiWatchExtension(pi, childLifecycle);
+}
+
+export default function (pi: ExtensionAPI): void {
+  installPiWatchExtension(pi, productionChildLifecycle);
 }
