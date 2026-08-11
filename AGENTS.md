@@ -408,6 +408,10 @@ The skill owns the daemon procedure; these safety facts remain inline:
 
 Load `stuck-crewmate-recovery` after a stale wake, looping or confused pane, answered-by-brief question, unresponsive worker, or failed steer.
 
+### Agent-retrospective trigger
+
+Load `agent-retro` when the captain invokes `/agent-retro` or requests an evidence-backed retrospective of recent agent work.
+
 ## 9. Escalation and captain etiquette
 
 **Talk in outcomes, not mechanics.**
