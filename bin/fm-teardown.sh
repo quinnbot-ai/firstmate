@@ -2245,7 +2245,8 @@ if [ "$BACKEND" = herdr ] && [ "$LEGACY_DETACHED_ENDPOINT" != 1 ]; then
   TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
 fi
 
-# Best-effort: drop the local task branch so the shared repo does not accumulate refs.
+# Detach the worktree before its return, but preserve its branch ref until the
+# return boundary has revalidated the worktree's landed state.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
@@ -2254,9 +2255,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ -d "$WT" ]; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     if [ "$branch" != "HEAD" ]; then
-      if git -C "$WT" checkout --detach -q 2>/dev/null; then
-        git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
-      fi
+      git -C "$WT" checkout --detach -q 2>/dev/null || exit 1
     fi
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
       "$WT/.opencode/plugins/fm-busy-state.js" \
@@ -2268,9 +2267,7 @@ elif [ "$LEGACY_DETACHED_RESUME" != 1 ] && [ -d "$WT" ] && [ "$KIND" != secondma
   if [ "$LEGACY_DETACHED_ENDPOINT" != 1 ]; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     if [ "$branch" != "HEAD" ]; then
-      if git -C "$WT" checkout --detach -q 2>/dev/null; then
-        git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
-      fi
+      git -C "$WT" checkout --detach -q 2>/dev/null || exit 1
     fi
     # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \

@@ -639,9 +639,10 @@ test_secondmate_teardown_requires_parent_binding() {
 }
 
 test_relay_disabled_unmarked_teardown_skips_public_path() {
-  local home tasks_log out rc
+  local home branch tasks_log out rc
   home=$(make_home teardown-disabled-unmarked relay-off)
   fm_git_init_commit "$home/projects/worktree"
+  branch=$(git -C "$home/projects/worktree" symbolic-ref --quiet --short HEAD)
   tasks_log="$home/tasks-axi.log"; : > "$tasks_log"
   printf 'manual\n' > "$home/config/backlog-backend"
   cat > "$home/fakebin/tasks-axi" <<'SH'
@@ -661,6 +662,8 @@ SH
     FM_CONFIG_OVERRIDE="$home/config" FAKE_TASKS_AXI_LOG="$tasks_log" \
     "$TEARDOWN" work-disabled 2>&1) || rc=$?
   [ "$rc" -eq 0 ] || fail "relay-disabled unmarked teardown must not refuse public-followup cleanup (rc=$rc): $out"
+  git -C "$home/projects/worktree" show-ref --verify --quiet "refs/heads/$branch" \
+    || fail "teardown must preserve the branch needed by its immediate return-boundary recheck"
   [ ! -s "$tasks_log" ] || fail "relay-disabled unmarked teardown must not invoke tasks-axi: $(tr '\n' ';' < "$tasks_log")"
   assert_not_contains "$out" "still owes a public reply" \
     "relay-disabled unmarked teardown must not run the public commitment guard"
