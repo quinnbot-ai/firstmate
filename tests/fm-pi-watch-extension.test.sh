@@ -406,16 +406,25 @@ test_pi_hung_successor_falls_back_to_typed_wake() {
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
-printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
-count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
-if [ "$count" -eq 1 ]; then
+if [ -f "$FM_ARM_LOG" ]; then
+  count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+else
+  count=0
+fi
+if [ "$count" -eq 0 ]; then
+  printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
   printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
   printf 'signal: synthetic wake\n'
   exit 0
 fi
-# The retriable branch needs a successor that is unready but exits immediately
-# when retireArm sends SIGTERM.
-exec sleep 86400
+# Publish a successor arm only after it can receive retireArm's SIGTERM.
+exec node --input-type=module <<'NODE'
+import { appendFileSync } from "node:fs";
+
+process.on("SIGTERM", () => process.exit(0));
+appendFileSync(process.env.FM_ARM_LOG, `arm=${process.pid}\n`);
+setInterval(() => {}, 60_000);
+NODE
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_PI_ARM_READY_TIMEOUT_MS=250 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
