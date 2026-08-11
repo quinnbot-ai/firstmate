@@ -14,31 +14,41 @@ make_case() {
   name=$1
   dir=$TMP_ROOT/$name
   mkdir -p "$dir/home/state" "$dir/fakebin"
-  cat > "$dir/fakebin/gh-axi" <<'SH'
+  cat > "$dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 set -eu
-printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+[ "${FM_GH_WRAPPER_DEPTH:-}" = 1 ] || {
+  printf '%s\n' 'gh did not receive the single fm-gh wrapper boundary' >&2
+  exit 70
+}
+printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 body=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --body-file) body=$2; shift 2; continue ;;
-    --body) printf '%s' "$2" > "$FM_TEST_GH_AXI_BODY"; shift 2; continue ;;
+    --body) printf '%s' "$2" > "$FM_TEST_GH_BODY"; shift 2; continue ;;
   esac
   shift
 done
-[ -z "$body" ] || cp "$body" "$FM_TEST_GH_AXI_BODY"
+[ -z "$body" ] || cp "$body" "$FM_TEST_GH_BODY"
 printf '%s\n' 'https://github.com/quinnbot-ai/firstmate/pull/42'
 SH
-  chmod +x "$dir/fakebin/gh-axi"
-  : > "$dir/gh-axi.log"
+  cat > "$dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'nested gh-axi wrapper path is forbidden' >&2
+exit 70
+SH
+  chmod +x "$dir/fakebin/gh" "$dir/fakebin/gh-axi"
+  : > "$dir/gh.log"
   printf '%s\n' "$dir"
 }
 
 run_create() {
   local dir=$1
   shift
-  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GH_AXI_BODY="$dir/body.md" \
+  env -u FM_GH_WRAPPER_DEPTH \
+    FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_BODY="$dir/body.md" \
     PATH="$dir/fakebin:$PATH" "$OWNER" "$@"
 }
 
@@ -58,10 +68,10 @@ EOF
     --tests $'- bin/fm-pr-create.test.sh\n- quoted argument: "safe"' >/dev/null \
     || fail "generated direct PR creation failed"
   body="$dir/body.md"
-  assert_present "$body" "generated direct PR body was not passed to gh-axi"
+  assert_present "$body" "generated direct PR body was not passed to gh"
   expected=$'## Problem\nThe direct PR path has no concise narrative.\n\n## Outcome\nThe direct PR path now generates one.\n\n## Tests\n- bin/fm-pr-create.test.sh\n- quoted argument: "safe"\n\n## Worker provenance\n- harness: codex\n- model: gpt-5.6-sol\n- effort: xhigh\n'
   [ "$(cat "$body")" = "${expected%$'\n'}" ] || fail "generated PR body did not preserve the required narrative order and quoting"
-  assert_grep 'pr create --repo quinnbot-ai/firstmate --title Narrative test --body-file ' "$dir/gh-axi.log" \
+  assert_grep 'pr create --repo quinnbot-ai/firstmate --title Narrative test --body-file ' "$dir/gh.log" \
     "generated direct PR did not use the explicit fork target"
   pass "fm-pr-create.sh: generated bodies are Problem, Outcome, Tests, then recorded provenance"
 }
@@ -115,7 +125,7 @@ test_custom_bodies_remain_untouched() {
   run_create "$dir" task-4 --repo quinnbot-ai/firstmate --title 'Custom body' --body-file "$custom" \
     --head 'fm/custom' --base main >/dev/null || fail "explicit custom body creation failed"
   cmp -s "$custom" "$dir/body.md" || fail "explicit custom PR body was changed"
-  grep -qxF "pr create --repo quinnbot-ai/firstmate --title Custom body --base main --head fm/custom --body-file $custom" "$dir/gh-axi.log" \
+  grep -qxF "pr create --repo quinnbot-ai/firstmate --title Custom body --base main --head fm/custom --body-file $custom" "$dir/gh.log" \
     || fail "custom direct PR did not preserve its explicit fork target and arguments"
   pass "fm-pr-create.sh: explicit custom PR bodies stay untouched"
 }
