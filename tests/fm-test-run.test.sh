@@ -90,6 +90,62 @@ test_family_selection() {
   pass "family selection returns a proper subset of the suite"
 }
 
+semantic_family_contract() {
+  local runner=$1 unclassified
+  if ! unclassified=$("$runner" --list --family unclassified); then
+    printf 'unclassified family query failed\n' >&2
+    return 1
+  fi
+  if [ -n "$unclassified" ]; then
+    printf 'committed tests fell into unclassified: %s\n' "$unclassified" >&2
+    return 1
+  fi
+}
+
+test_committed_tests_have_semantic_families() {
+  local tmp repo rc script family
+  semantic_family_contract "$RUNNER" \
+    || fail "semantic family contract rejected the committed suite"
+
+  while IFS='|' read -r script family; do
+    [ -n "$script" ] || continue
+    "$RUNNER" --list --family "$family" | grep -Fxq "tests/$script" \
+      || fail "committed test $script is not owned by expected family $family"
+  done <<'EOF'
+fm-busy-adapter-wiring.test.sh|pure-contract-unit
+fm-busy-state.test.sh|pure-contract-unit
+fm-claude-stop-autoarm-live-e2e.test.sh|live-harness-optin
+fm-claude-stop-autoarm.test.sh|watcher-wake-lock
+fm-credential-expiry-reminder.test.sh|session-bootstrap
+fm-gh-shim.test.sh|pr-forge
+fm-gitignore-config.test.sh|pure-contract-unit
+fm-link-intake.test.sh|pure-contract-unit
+fm-pending-reply.test.sh|secondmate
+fm-procevent.test.sh|watcher-wake-lock
+fm-public-followup.test.sh|pr-forge
+fm-workflow-scheduling.test.sh|pure-contract-unit
+EOF
+
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-family-contract.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+  printf '#!/usr/bin/env bash\n' >"$repo/tests/fm-unmapped-fixture.test.sh"
+  chmod +x "$repo/tests/fm-unmapped-fixture.test.sh"
+  git -C "$repo" add tests/fm-unmapped-fixture.test.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid \
+    commit -qm unmapped-fixture
+  set +e
+  semantic_family_contract "$repo/bin/fm-test-run.sh" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] \
+    || { rm -rf "$tmp"; fail "committed unmapped fixture passed the semantic family contract"; }
+  grep -Fq 'committed tests fell into unclassified: tests/fm-unmapped-fixture.test.sh' "$tmp/err" \
+    || { cat "$tmp/err"; rm -rf "$tmp"; fail "unmapped fixture failure was not actionable"; }
+  rm -rf "$tmp"
+  pass "every committed test has one semantic family"
+}
+
 test_single_script_selection() {
   local listed
   listed=$("$RUNNER" --list tests/fm-lint.test.sh)
@@ -136,6 +192,10 @@ init_changed_fixture_repo() {
     fm-afk-pi-herdr-return-e2e.test.sh \
     fm-backend.test.sh \
     fm-pr-merge.test.sh \
+    fm-credential-expiry-reminder.test.sh \
+    fm-gitignore-config.test.sh \
+    fm-pending-reply.test.sh \
+    fm-public-followup.test.sh \
     fm-pi-watch-extension.test.sh \
     fm-afk-return.test.sh \
     fm-bearings-snapshot.test.sh \
@@ -148,7 +208,11 @@ init_changed_fixture_repo() {
   : >"$repo/tests/lib.sh"
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
+  : >"$repo/bin/fm-credential-expiry-reminder-lib.sh"
+  : >"$repo/bin/fm-public-followup-lib.sh"
+  : >"$repo/bin/fm-send.sh"
   : >"$repo/bin/unmapped-source.sh"
+  : >"$repo/.gitignore"
   printf '# .claude/settings.json\n# .pi/extensions/fm-primary-turnend-guard.ts\n' \
     >>"$repo/tests/fm-cd-pretool-check.test.sh"
   printf '# .pi/extensions/fm-primary-pi-watch.ts\n' >>"$repo/tests/fm-pi-watch-extension.test.sh"
@@ -201,6 +265,36 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-pi-watch-extension.test.sh" "Pi source selects watcher coverage"
   git -C "$repo" add .agents .claude .pi
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm non-bin-source-change
+
+  printf '\n' >>"$repo/.gitignore"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-gitignore-config.test.sh" ".gitignore selects its contract coverage"
+  git -C "$repo" add .gitignore
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm gitignore-change
+
+  printf '\n' >>"$repo/bin/fm-credential-expiry-reminder-lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-credential-expiry-reminder.test.sh" \
+    "credential expiry source selects session bootstrap coverage"
+  git -C "$repo" add bin/fm-credential-expiry-reminder-lib.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm credential-expiry-change
+
+  printf '\n' >>"$repo/bin/fm-public-followup-lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-public-followup.test.sh" \
+    "public followup source selects PR forge coverage"
+  git -C "$repo" add bin/fm-public-followup-lib.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm public-followup-change
+
+  printf '\n' >>"$repo/bin/fm-send.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-backend.test.sh" "send source selects backend coverage"
+  assert_contains "$listed" "tests/fm-brief.test.sh" "send source selects pure contract coverage"
+  assert_contains "$listed" "tests/fm-pending-reply.test.sh" "send source selects secondmate coverage"
+  [ "$(printf '%s\n' "$listed" | LC_ALL=C sort | uniq -d)" = "" ] \
+    || fail "send source selected duplicate tests: $listed"
+  git -C "$repo" add bin/fm-send.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm send-change
 
   printf '\n' >>"$repo/src/unmapped.ts"
   set +e
@@ -1892,6 +1986,7 @@ SH
 
 test_list_all_exact_suite_coverage
 test_family_selection
+test_committed_tests_have_semantic_families
 test_single_script_selection
 test_changed_file_selection_is_conservative
 test_changed_dependency_selection_and_unmapped_failure
