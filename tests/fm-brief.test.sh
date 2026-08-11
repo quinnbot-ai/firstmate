@@ -341,10 +341,12 @@ test_direct_pr_brief_routes_narrative_to_its_single_owner() {
   brief="$home/data/brief-direct-narrative/brief.md"
   assert_grep 'fm-pr-create.sh' "$brief" \
     "direct-PR brief did not route generated narratives to their owner"
+  # shellcheck disable=SC2016 # Literal Markdown flags must remain unexpanded.
   assert_grep 'one concise one-line `--problem` sentence, one concise one-line `--outcome` sentence, and `--tests`' "$brief" \
     "direct-PR brief did not require Problem, Outcome, Tests order"
   assert_grep 'only adds worker provenance from recorded task metadata' "$brief" \
     "direct-PR brief did not constrain provenance to recorded metadata"
+  # shellcheck disable=SC2016 # Literal Markdown flags must remain unexpanded.
   assert_grep 'custom `--body` or `--body-file` remains unchanged' "$brief" \
     "direct-PR brief did not preserve explicit custom PR bodies"
   if grep -qx '## Problem' "$brief"; then

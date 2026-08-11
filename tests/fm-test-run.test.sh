@@ -121,6 +121,7 @@ fm-gh-shim.test.sh|pr-forge
 fm-gitignore-config.test.sh|pure-contract-unit
 fm-link-intake.test.sh|pure-contract-unit
 fm-pending-reply.test.sh|secondmate
+fm-pr-create.test.sh|pr-forge
 fm-procevent.test.sh|watcher-wake-lock
 fm-public-followup.test.sh|pr-forge
 fm-workflow-scheduling.test.sh|pure-contract-unit

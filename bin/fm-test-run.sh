@@ -524,7 +524,7 @@ family_for_basename() {
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
       ;;
-    fm-pr-check-security.test.sh|fm-pr-merge.test.sh|fm-test-inventory.test.sh|fm-review-diff.test.sh|\
+    fm-pr-check-security.test.sh|fm-pr-create.test.sh|fm-pr-merge.test.sh|fm-test-inventory.test.sh|fm-review-diff.test.sh|\
     fm-teardown.test.sh|fm-x-mode.test.sh|fm-gh-shim.test.sh|fm-public-followup.test.sh)
       printf '%s\n' pr-forge
       ;;
