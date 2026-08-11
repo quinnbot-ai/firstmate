@@ -458,7 +458,7 @@ journal_mark_interrupted_workers() {
 # unclassified so new tests are still runnable and visible in summaries.
 family_for_basename() {
   case "$1" in
-    fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|\
+    fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|fm-status-report.test.sh|\
     fm-brief.test.sh|fm-vendor-auth-probe.test.sh|\
     fm-calm-claude-adapter.test.sh|fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
@@ -1351,7 +1351,7 @@ families_for_changed_path() {
       # provisioning contract.
       printf '%s\n' native-backend-gated
       ;;
-    bin/fm-lint.sh|bin/fm-install-shellcheck.sh|\
+    bin/fm-lint.sh|bin/fm-install-shellcheck.sh|bin/fm-status-report.sh|\
     bin/fm-brief.sh|bin/fm-ensure-agents-md.sh|bin/fm-crew-state.sh|\
     bin/fm-decision-hold.sh|bin/fm-supervision*|bin/fm-transition-lib.sh|\
     bin/fm-tmux-lib.sh|bin/fm-marker-lib.sh|bin/fm-operational-input.sh|bin/fm-tasks-axi-lib.sh|\
