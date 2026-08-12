@@ -369,6 +369,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/secondmate-harness-runtime.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/link-intake.md",
       "audience": "maintainer-verification"
     },

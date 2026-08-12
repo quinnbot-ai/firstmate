@@ -60,6 +60,9 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-harness)
 export FM_BACKEND=tmux
+# Only the private fake sleep tool recognizes this test switch.
+# Production scripts neither read nor receive a new timing configuration.
+export FM_TEST_FAST_SEND_SLEEP=1
 
 # ===========================================================================
 # A) fm-harness.sh secondmate resolution + fallback (deterministic detect_own)
@@ -255,7 +258,7 @@ SH
 # B) propagate_inheritable_config unit behavior
 # ===========================================================================
 test_propagate_lib() {
-  local d src dest home m1 m2 outside stdout stderr guard_repo err_text
+  local d src dest home fakebin copy_log real_cp outside stdout stderr guard_repo err_text
   d="$TMP_ROOT/prop-lib"
   src="$d/src"
   home="$d/home1"
@@ -284,16 +287,26 @@ test_propagate_lib() {
   [ "$(cat "$dest/backend")" = tmux ] || fail "primary backend did not overwrite a divergent destination"
   [ -f "$dest/trace-context" ] || fail "trace-context not propagated by the default inheritable set"
 
-  # 2. idempotent: an unchanged re-run does not churn the mtime
-  m1=$(date -r "$dest/crew-harness" +%s 2>/dev/null || stat -c %Y "$dest/crew-harness")
-  sleep 1
+  # 2. idempotent: an unchanged re-run never invokes the copy primitive.
+  # This fixture is deterministic where an mtime-and-sleep assertion was not.
   stdout="$d/unchanged.out"
   stderr="$d/unchanged.err"
-  propagate_inheritable_config "$src" "$dest" >"$stdout" 2>"$stderr"
+  fakebin="$d/no-copy-fakebin"
+  copy_log="$d/unchanged-copy.log"
+  real_cp=$(command -v cp)
+  mkdir -p "$fakebin"
+  cat > "$fakebin/cp" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_TEST_COPY_LOG:?}"
+exec "${FM_TEST_REAL_CP:?}" "$@"
+SH
+  chmod +x "$fakebin/cp"
+  : > "$copy_log"
+  PATH="$fakebin:$BASE_PATH" FM_TEST_COPY_LOG="$copy_log" FM_TEST_REAL_CP="$real_cp" \
+    propagate_inheritable_config "$src" "$dest" >"$stdout" 2>"$stderr" || fail "unchanged propagation failed"
   [ ! -s "$stdout" ] || fail "unchanged propagation wrote to stdout"
   [ ! -s "$stderr" ] || fail "unchanged propagation wrote to stderr"
-  m2=$(date -r "$dest/crew-harness" +%s 2>/dev/null || stat -c %Y "$dest/crew-harness")
-  [ "$m1" = "$m2" ] || fail "idempotent re-run churned mtime ($m1 -> $m2)"
+  [ ! -s "$copy_log" ] || fail "unchanged propagation invoked cp"
 
   # 3. a changed source value converges downstream
   printf '{"default":{"harness":"claude"}}\n' > "$src/crew-dispatch.json"
@@ -963,6 +976,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  make_fake_send_sleep "$fakebin"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -988,6 +1002,28 @@ SH
   printf '%s\n' "$fakebin"
 }
 
+make_fake_send_sleep() {
+  local fakebin=$1 real_sleep
+  real_sleep=$(command -v sleep)
+  # Preserve submit waits as observable test events without imposing their
+  # wall-clock delay on this private fake toolchain.
+  cat > "$fakebin/sleep" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  0.3|0.4)
+    if [ "\${FM_TEST_FAST_SEND_SLEEP:-0}" = 1 ]; then
+      if [ -n "\${FM_FAKE_SLEEP_LOG:-}" ]; then
+        printf '%s\\n' "\${1:-}" >> "\$FM_FAKE_SLEEP_LOG"
+      fi
+      exit 0
+    fi
+    ;;
+esac
+exec "$real_sleep" "\$@"
+SH
+  chmod +x "$fakebin/sleep"
+}
+
 run_bootstrap() {
   local w=$1 fakebin log=${2:-}
   fakebin=$(make_fake_toolchain "$w")
@@ -1006,11 +1042,11 @@ run_config_push() {
   fakebin=$(make_fake_toolchain "$w")
   if [ -n "$log" ]; then
     PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
-      FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+      FM_SEND_SETTLE=0 FM_TEST_FAST_SEND_SLEEP=1 FM_FAKE_TMUX_LOG="$log" \
       "$ROOT/bin/fm-config-push.sh"
   else
     PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
-      FM_SEND_SETTLE=0 \
+      FM_SEND_SETTLE=0 FM_TEST_FAST_SEND_SLEEP=1 \
       "$ROOT/bin/fm-config-push.sh"
   fi
 }
@@ -1902,7 +1938,7 @@ SH
 }
 
 test_config_reread_serializes_concurrent_pushes() {
-  local w head fakebin marker entered log first_out second_out first_pid first_status second_status
+  local w head fakebin marker entered release second_contended log first_out second_out first_pid second_pid first_status second_status real_sleep attempts
   local first_instr second_instr first_line second_line
   w=$(new_world config-reread-serialized-pushes)
   head=$(git -C "$w/main" rev-parse HEAD)
@@ -1915,42 +1951,77 @@ test_config_reread_serializes_concurrent_pushes() {
   mv "$fakebin/tmux" "$fakebin/tmux.real"
   marker="$w/first-send.marker"
   entered="$w/first-send.entered"
+  release="$w/serialized.release"
+  second_contended="$w/second-lock-contended"
+  mkfifo "$release"
   log="$w/config-reread-serialized.tmux.log"
+  real_sleep=$(command -v sleep)
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
 case "\$*" in
   *send-keys*)
     if (set -o noclobber; : > "$marker") 2>/dev/null; then
       : > "$entered"
-      sleep 1
+      read -r _ < "$release"
     fi
     ;;
 esac
 exec "$fakebin/tmux.real" "\$@"
 SH
   chmod +x "$fakebin/tmux"
+  cat > "$fakebin/sleep" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  0.3|0.4) exit 0 ;;
+  0.1)
+    if [ -e "$marker" ] && (set -o noclobber; : > "$second_contended") 2>/dev/null; then
+      printf '%s\\n' release > "$release"
+      exit 0
+    fi
+    ;;
+esac
+exec "$real_sleep" "\$@"
+SH
+  chmod +x "$fakebin/sleep"
 
   first_out="$w/first-push.out"
   (
     PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
-      FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+      FM_SEND_SETTLE=0 FM_TEST_FAST_SEND_SLEEP=1 FM_FAKE_TMUX_LOG="$log" \
       "$ROOT/bin/fm-config-push.sh" > "$first_out" 2>&1
   ) &
   first_pid=$!
-  for _ in $(seq 1 100); do
-    [ -e "$entered" ] && break
-    sleep 0.02
+  attempts=0
+  while [ ! -e "$entered" ] && [ "$attempts" -lt 100000 ]; do
+    attempts=$((attempts + 1))
+    sleep 0
   done
-  [ -e "$entered" ] || fail "first config push did not reach pointer delivery"
+  if [ ! -e "$entered" ]; then
+    fail "first config push did not reach pointer delivery"
+  fi
   first_instr=$(reread_instruction_path "$w/sm") \
     || fail "first concurrent push did not publish its generation"
   printf 'two\n' > "$w/home/config/crew-harness"
   second_out="$w/second-push.out"
-  PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
-    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
-    "$ROOT/bin/fm-config-push.sh" > "$second_out" 2>&1
-  second_status=$?
+  (
+    PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+      FM_SEND_SETTLE=0 FM_TEST_FAST_SEND_SLEEP=1 FM_FAKE_TMUX_LOG="$log" \
+      "$ROOT/bin/fm-config-push.sh" > "$second_out" 2>&1
+  ) &
+  second_pid=$!
+  attempts=0
+  while [ ! -e "$second_contended" ] && [ "$attempts" -lt 100000 ]; do
+    attempts=$((attempts + 1))
+    sleep 0
+  done
+  if [ ! -e "$second_contended" ]; then
+    printf '%s\n' release > "$release"
+    wait "$first_pid" || true
+    wait "$second_pid" || true
+    fail "second config push did not contend on the inherited-config lock"
+  fi
   wait "$first_pid"; first_status=$?
+  wait "$second_pid"; second_status=$?
   expect_code 0 "$first_status" "first serialized config push failed"
   expect_code 0 "$second_status" "second serialized config push failed"
   second_instr=$(reread_instruction_path "$w/sm") \
@@ -1966,7 +2037,7 @@ SH
 }
 
 test_config_reread_full_retry_queue_drains_before_new_push() {
-  local w head retry_dir path n fakebin log out status pointer_count
+  local w head retry_dir path n fakebin log sleep_log out status pointer_count
   w=$(new_world config-reread-full-queue)
   head=$(git -C "$w/main" rev-parse HEAD)
   add_sm_worktree "$w" sm "$head"
@@ -1982,8 +2053,10 @@ test_config_reread_full_retry_queue_drains_before_new_push() {
   done
   fakebin=$(make_fake_toolchain "$w")
   log="$w/config-reread-full-queue.tmux.log"
+  sleep_log="$w/config-reread-full-queue.sleep.log"
+  : > "$sleep_log"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
-    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+    FM_SEND_SETTLE=0 FM_TEST_FAST_SEND_SLEEP=1 FM_FAKE_TMUX_LOG="$log" FM_FAKE_SLEEP_LOG="$sleep_log" \
     "$ROOT/bin/fm-config-push.sh" 2>&1); status=$?
   expect_code 0 "$status" "a full retry queue should drain before a new push"
   assert_contains "$out" "config-reread: sent" \
@@ -1994,6 +2067,10 @@ test_config_reread_full_retry_queue_drains_before_new_push() {
   pointer_count=$(grep -c 'CONFIG_REREAD:' "$log" 2>/dev/null || true)
   [ "$pointer_count" -ge 17 ] \
     || fail "full retry queue did not deliver all pending generations before the new one"
+  [ "$(grep -cx '0.3' "$sleep_log" || true)" -ge 17 ] \
+    || fail "full retry queue skipped pre-submit settle calls"
+  [ "$(grep -cx '0.4' "$sleep_log" || true)" -ge 17 ] \
+    || fail "full retry queue skipped post-submit settle calls"
   pass "B22 full config reread retry queues drain before new publication"
 }
 
