@@ -256,6 +256,121 @@ SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
 }
 
+# Report the canonical merged PR identity required by the detached-record
+# compatibility proof.  The merge SHA names the squash commit on origin/main,
+# not the task branch head, so the fixture models a deleted source branch.
+add_gh_pr_merged_squash() {
+  local case_dir=$1 merge=$2 target=${3:-main} url=${4:-https://github.com/example/repo/pull/7}
+  local head_name=${5:-fm/task-x1} head_oid=${6:-$LEGACY_SQUASH_HEAD}
+  local head_repository=${7:-example/repo} base_repository=${8:-example/repo}
+  local canonical_default=${9:-main} canonical_tip=${10:-}
+  local base_owner=${base_repository%%/*} base_name=${base_repository#*/}
+  if [ -z "$canonical_tip" ]; then
+    canonical_tip=$(git -C "$case_dir/project" rev-parse "refs/remotes/origin/$canonical_default")
+  fi
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+if [ -n "\${FM_TEST_GH_MUTATE_WORKTREE:-}" ] && [ "\${1:-} \${2:-}" = "pr view" ]; then
+  count=0
+  [ ! -f "\${FM_TEST_GH_CALL_COUNT}" ] || count=\$(cat "\${FM_TEST_GH_CALL_COUNT}")
+  count=\$(( count + 1 ))
+  printf '%s\n' "\$count" > "\${FM_TEST_GH_CALL_COUNT}"
+  if [ "\$count" -eq 2 ]; then
+    printf '%s\n' changed-during-retirement > "\${FM_TEST_GH_MUTATE_WORKTREE}/late-change.txt"
+  fi
+fi
+case "\${1:-} \${2:-}" in
+  "pr view")
+    case " \$* " in
+      *"state,mergeCommit,baseRefName,headRefName,headRefOid,headRepository,url"*)
+        printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' \
+          'MERGED' '$merge' '$target' '$head_name' '$head_oid' \
+          '$head_repository' '$url'
+        exit 0
+        ;;
+    esac
+    ;;
+  "api graphql")
+    case " \$* " in
+      *" owner=$base_owner "*" name=$base_name "*"defaultBranchRef{name target{oid}}"*)
+        printf '%s\\t%s\\t%s\\n' '$base_repository' '$canonical_default' '$canonical_tip'
+        exit 0
+        ;;
+    esac
+    ;;
+esac
+echo "error: pull request not found" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh"
+}
+
+# Land the complete candidate range as one fresh commit on main, then optionally
+# advance main through the same path.  The later change makes the historical
+# whole-tree merge proof conflict even though the earlier squash contains the
+# candidate exactly.
+land_candidate_as_squash() {
+  local case_dir=$1 candidate_base=$2 advance=${3:-0} tmp merge
+  tmp="$case_dir/_squash"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  git -C "$case_dir/wt" diff --binary --full-index --no-ext-diff --no-renames "$candidate_base" HEAD \
+    | git -C "$tmp" apply --index
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "squash candidate"
+  merge=$(git -C "$tmp" rev-parse HEAD)
+  if [ "$advance" = 1 ]; then
+    printf '%s\n' later-mainline > "$tmp/feature.txt"
+    git -C "$tmp" add -- feature.txt
+    git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "later mainline change"
+  fi
+  git -C "$tmp" push -q origin main
+  git -C "$case_dir/project" fetch -q origin main
+  rm -rf "$tmp"
+  printf '%s\n' "$merge"
+}
+
+add_treehouse_returning_worktree() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = return ]; then
+  shift
+  for arg in "$@"; do
+    case "$arg" in
+      --force) ;;
+      *) git -C "${FM_TEST_PROJECT:?}" worktree remove --force "$arg"; exit $? ;;
+    esac
+  done
+fi
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+LEGACY_SQUASH_CASE=
+LEGACY_SQUASH_BASE=
+LEGACY_SQUASH_HEAD=
+LEGACY_SQUASH_MERGE=
+setup_legacy_squash_case() {
+  local name=$1 advance=${2:-0}
+  LEGACY_SQUASH_CASE=$(make_case "$name")
+  LEGACY_SQUASH_CASE=$(CDPATH='' cd -- "$LEGACY_SQUASH_CASE" && pwd -P)
+  write_legacy_detached_meta "$LEGACY_SQUASH_CASE" no-mistakes
+  LEGACY_SQUASH_BASE=$(git -C "$LEGACY_SQUASH_CASE/wt" rev-parse HEAD)
+  wt_commit_file "$LEGACY_SQUASH_CASE" feature.txt alpha "candidate one"
+  wt_commit_file "$LEGACY_SQUASH_CASE" details.txt beta "candidate two"
+  wt_commit_file "$LEGACY_SQUASH_CASE" feature.txt gamma "candidate three"
+  wt_commit_file "$LEGACY_SQUASH_CASE" details.txt delta "candidate four"
+  wt_commit_file "$LEGACY_SQUASH_CASE" feature.txt omega "candidate five"
+  LEGACY_SQUASH_HEAD=$(git -C "$LEGACY_SQUASH_CASE/wt" rev-parse HEAD)
+  LEGACY_SQUASH_MERGE=$(land_candidate_as_squash "$LEGACY_SQUASH_CASE" "$LEGACY_SQUASH_BASE" "$advance")
+  git -C "$LEGACY_SQUASH_CASE/project" config \
+    "url.file://$LEGACY_SQUASH_CASE/origin.git.insteadOf" https://github.com/example/repo.git
+  git -C "$LEGACY_SQUASH_CASE/project" remote set-url origin https://github.com/example/repo.git
+  printf '%s\n' 'tasktmp=' 'pr=https://github.com/example/repo/pull/7' \
+    >> "$LEGACY_SQUASH_CASE/state/task-x1.meta"
+  add_gh_pr_merged_squash "$LEGACY_SQUASH_CASE" "$LEGACY_SQUASH_MERGE"
+}
+
 append_pr_meta_for_current_head() {
   local case_dir=$1 head
   head=$(git -C "$case_dir/wt" rev-parse HEAD)
@@ -735,6 +850,348 @@ test_legacy_detached_ambiguous_landing_refuses() {
   assert_grep "not on any remote and not landed" "$case_dir/stderr" \
     "legacy-detached-ambiguous-landing: stale PR proof did not fail closed"
   pass "legacy detached teardown rejects merged-PR evidence that does not contain the exact candidate"
+}
+
+test_legacy_detached_squash_equivalent_retirement_preserves_ref_and_archives_scratch() {
+  local case_dir ref rc merge_tree default_tree
+  setup_legacy_squash_case legacy-detached-squash-equivalent 1
+  case_dir=$LEGACY_SQUASH_CASE
+  ref="refs/heads/fm/task-x1"
+  mkdir -p "$case_dir/scratch"
+  printf '%s\n' keep-me > "$case_dir/scratch/receipt.txt"
+  sed -i.bak "s|^tasktmp=.*|tasktmp=$case_dir/scratch|" "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak"
+  git -C "$case_dir/project" config branch.fm/task-x1.remote origin
+  git -C "$case_dir/project" config branch.fm/task-x1.merge refs/heads/fm/task-x1
+  add_treehouse_returning_worktree "$case_dir"
+
+  default_tree=$(git -C "$case_dir/project" rev-parse "refs/remotes/origin/main^{tree}")
+  merge_tree=$(git -C "$case_dir/wt" merge-tree --write-tree refs/remotes/origin/main HEAD 2>/dev/null || true)
+  [ "$merge_tree" != "$default_tree" ] \
+    || fail "legacy-detached-squash-equivalent: fixture did not reproduce the historical whole-tree masking condition"
+
+  set +e
+  FM_TEST_PROJECT="$case_dir/project" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "legacy-detached-squash-equivalent: teardown should retire an exact squash candidate"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "legacy-detached-squash-equivalent: successful teardown retained metadata"
+  [ ! -d "$case_dir/wt" ] \
+    || fail "legacy-detached-squash-equivalent: returned worktree still exists"
+  expect_code "$LEGACY_SQUASH_HEAD" "$(git -C "$case_dir/project" rev-parse "$ref")" \
+    "legacy-detached-squash-equivalent: return deleted the task branch ref"
+  assert_present "$case_dir/state/retired/task-x1.scratch/receipt.txt" \
+    "legacy-detached-squash-equivalent: scratch was not archived"
+  assert_absent "$case_dir/scratch" \
+    "legacy-detached-squash-equivalent: scratch was not moved to the archive"
+  assert_grep "merge_commit=$LEGACY_SQUASH_MERGE" "$case_dir/state/retired/task-x1.$LEGACY_SQUASH_HEAD.teardown" \
+    "legacy-detached-squash-equivalent: audit note lacks the verified merge"
+  pass "detached metadata retires only after an exact squash proof, preserving refs and scratch"
+}
+
+test_legacy_detached_retirement_resumes_after_return_failure() {
+  local case_dir rc
+  setup_legacy_squash_case legacy-detached-resume
+  case_dir=$LEGACY_SQUASH_CASE
+  mkdir -p "$case_dir/scratch"
+  printf '%s\n' keep-me > "$case_dir/scratch/receipt.txt"
+  sed -i.bak "s|^tasktmp=.*|tasktmp=$case_dir/scratch|" "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    --force|return) ;;
+    *) git -C "${FM_TEST_PROJECT:?}" worktree remove --force "$arg"; exit 1 ;;
+  esac
+done
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  FM_TEST_PROJECT="$case_dir/project" run_teardown "$case_dir" > "$case_dir/first.stdout" 2> "$case_dir/first.stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "legacy-detached-resume: first return should report its post-removal failure"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "legacy-detached-resume: failed return discarded metadata"
+  assert_present "$case_dir/state/retired/task-x1.scratch/receipt.txt" \
+    "legacy-detached-resume: scratch was not archived before return"
+  assert_present "$case_dir/state/retired/task-x1.$LEGACY_SQUASH_HEAD.teardown" \
+    "legacy-detached-resume: retirement record was not durable before return"
+  [ ! -d "$case_dir/wt" ] || fail "legacy-detached-resume: fixture did not remove the worktree"
+
+  FM_TEST_PROJECT="$case_dir/project" run_teardown "$case_dir" > "$case_dir/second.stdout" 2> "$case_dir/second.stderr" \
+    || fail "legacy-detached-resume: retry did not finalize from its retirement record"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "legacy-detached-resume: retry retained metadata"
+  expect_code "$LEGACY_SQUASH_HEAD" "$(git -C "$case_dir/project" rev-parse refs/heads/fm/task-x1)" \
+    "legacy-detached-resume: retry changed the preserved branch"
+  pass "detached retirement journals and archives before return and resumes finalization"
+}
+
+test_legacy_detached_return_boundary_rechecks_external_changes() {
+  local case_dir rc
+  setup_legacy_squash_case legacy-detached-boundary-change
+  case_dir=$LEGACY_SQUASH_CASE
+  git -C "$case_dir/project" config status.showUntrackedFiles no
+  add_treehouse_returning_worktree "$case_dir"
+
+  set +e
+  FM_TEST_GH_MUTATE_WORKTREE="$case_dir/wt" FM_TEST_GH_CALL_COUNT="$case_dir/gh-count" \
+    FM_TEST_PROJECT="$case_dir/project" run_teardown "$case_dir" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "legacy-detached-boundary-change: teardown must refuse a late worktree change"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "legacy-detached-boundary-change: late change discarded metadata"
+  assert_present "$case_dir/wt/late-change.txt" \
+    "legacy-detached-boundary-change: fixture did not change the worktree during final proof"
+  assert_grep "boundary safety check failed" "$case_dir/stderr" \
+    "legacy-detached-boundary-change: return did not report its adjacent recheck"
+  pass "detached retirement revalidates identity and cleanliness before every return"
+}
+
+test_legacy_detached_diff_errors_refuse() {
+  local case_dir rc
+  setup_legacy_squash_case legacy-detached-diff-error
+  case_dir=$LEGACY_SQUASH_CASE
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ "$arg" = --binary ]; then
+    exit 128
+  fi
+done
+exec "${REAL_GIT_FOR_TEST:?}" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "legacy-detached-diff-error: teardown must refuse failed diff materialization"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "legacy-detached-diff-error: diff failure discarded metadata"
+  assert_grep "cannot materialize exact content" "$case_dir/stderr" \
+    "legacy-detached-diff-error: refusal did not identify failed exact-content materialization"
+  pass "detached squash proof refuses diff command errors"
+}
+
+test_legacy_detached_reordered_equivalent_content_allows() {
+  local case_dir rc
+  setup_legacy_squash_case legacy-detached-reordered-equivalent
+  case_dir=$LEGACY_SQUASH_CASE
+  # The five candidate commits alter the two files in a different order from the
+  # single landed commit.  The aggregate patch is nevertheless byte-identical.
+  add_treehouse_returning_worktree "$case_dir"
+
+  set +e
+  FM_TEST_PROJECT="$case_dir/project" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "legacy-detached-reordered-equivalent: exact aggregate content should retire"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "legacy-detached-reordered-equivalent: successful teardown retained metadata"
+  pass "detached squash proof supports reordered commits with equivalent aggregate content"
+}
+
+test_legacy_detached_squash_one_byte_and_partial_content_refuse() {
+  local case_dir rc tmp mismatched_merge
+  setup_legacy_squash_case legacy-detached-one-byte
+  case_dir=$LEGACY_SQUASH_CASE
+  tmp="$case_dir/_rewrite"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  printf '%s\n' one-byte-different > "$tmp/feature.txt"
+  git -C "$tmp" add -- feature.txt
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "one byte differs"
+  git -C "$tmp" push -q origin main
+  git -C "$case_dir/project" fetch -q origin main
+  rm -rf "$tmp"
+  mismatched_merge=$(git -C "$case_dir/project" rev-parse refs/remotes/origin/main)
+  add_gh_pr_merged_squash "$case_dir" "$mismatched_merge"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "legacy-detached-one-byte: teardown must refuse non-equivalent candidate content"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "legacy-detached-one-byte: teardown discarded metadata"
+  assert_grep "candidate content is not exactly" "$case_dir/stderr" \
+    "legacy-detached-one-byte: refusal did not name content mismatch"
+
+  setup_legacy_squash_case legacy-detached-partial
+  case_dir=$LEGACY_SQUASH_CASE
+  tmp="$case_dir/_partial"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  printf '%s\n' alpha > "$tmp/feature.txt"
+  git -C "$tmp" add -- feature.txt
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "partial candidate"
+  git -C "$tmp" push -q origin main
+  git -C "$case_dir/project" fetch -q origin main
+  rm -rf "$tmp"
+  mismatched_merge=$(git -C "$case_dir/project" rev-parse refs/remotes/origin/main)
+  add_gh_pr_merged_squash "$case_dir" "$mismatched_merge"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "legacy-detached-partial: teardown must refuse partially landed candidate content"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "legacy-detached-partial: teardown discarded metadata"
+  pass "detached squash proof refuses one-byte and partially landed candidates"
+}
+
+test_legacy_detached_squash_identity_and_target_refuse() {
+  local case_dir rc
+  setup_legacy_squash_case legacy-detached-fork-head
+  case_dir=$LEGACY_SQUASH_CASE
+  git -C "$case_dir/project" config --add \
+    "url.file://$case_dir/origin.git.insteadOf" https://github.com/example/fork.git
+  git -C "$case_dir/project" remote add fork https://github.com/example/fork.git
+  add_gh_pr_merged_squash "$case_dir" "$LEGACY_SQUASH_MERGE" main \
+    https://github.com/example/repo/pull/7 fm/task-x1 "$LEGACY_SQUASH_HEAD" example/fork
+  add_treehouse_returning_worktree "$case_dir"
+  set +e
+  FM_TEST_PROJECT="$case_dir/project" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "legacy-detached-fork-head: teardown should accept the bound fork PR head"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "legacy-detached-fork-head: successful teardown retained metadata"
+
+  setup_legacy_squash_case legacy-detached-missing-pr
+  case_dir=$LEGACY_SQUASH_CASE
+  sed -i.bak -e '/^pr=/d' "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "legacy-detached-missing-pr: teardown must refuse absent PR identity"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "legacy-detached-missing-pr: teardown discarded metadata"
+
+  setup_legacy_squash_case legacy-detached-mismatched-pr
+  case_dir=$LEGACY_SQUASH_CASE
+  add_gh_pr_merged_squash "$case_dir" "$LEGACY_SQUASH_MERGE" main https://github.com/example/other/pull/7
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "legacy-detached-mismatched-pr: teardown must refuse a different PR identity"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "legacy-detached-mismatched-pr: teardown discarded metadata"
+
+  setup_legacy_squash_case legacy-detached-target-drift
+  case_dir=$LEGACY_SQUASH_CASE
+  add_gh_pr_merged_squash "$case_dir" "$LEGACY_SQUASH_MERGE" release
+  git -C "$case_dir/project" update-ref refs/remotes/origin/release \
+    "$(git -C "$case_dir/project" rev-parse refs/remotes/origin/main)"
+  git -C "$case_dir/project" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/release
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "legacy-detached-target-drift: teardown must refuse target drift"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "legacy-detached-target-drift: teardown discarded metadata"
+
+  setup_legacy_squash_case legacy-detached-target-oid-drift
+  case_dir=$LEGACY_SQUASH_CASE
+  add_gh_pr_merged_squash "$case_dir" "$LEGACY_SQUASH_MERGE" main \
+    https://github.com/example/repo/pull/7 fm/task-x1 "$LEGACY_SQUASH_HEAD" \
+    example/repo example/repo main "$LEGACY_SQUASH_BASE"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "legacy-detached-target-oid-drift: teardown must refuse a locally substituted default tip"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "legacy-detached-target-oid-drift: teardown discarded metadata"
+
+  setup_legacy_squash_case legacy-detached-head-name-mismatch
+  case_dir=$LEGACY_SQUASH_CASE
+  add_gh_pr_merged_squash "$case_dir" "$LEGACY_SQUASH_MERGE" main \
+    https://github.com/example/repo/pull/7 fm/other-task
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "legacy-detached-head-name-mismatch: teardown must refuse a different PR head branch"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "legacy-detached-head-name-mismatch: teardown discarded metadata"
+
+  setup_legacy_squash_case legacy-detached-head-repository-mismatch
+  case_dir=$LEGACY_SQUASH_CASE
+  add_gh_pr_merged_squash "$case_dir" "$LEGACY_SQUASH_MERGE" main \
+    https://github.com/example/repo/pull/7 fm/task-x1 "$LEGACY_SQUASH_HEAD" example/fork
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "legacy-detached-head-repository-mismatch: teardown must refuse a different PR head repository"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "legacy-detached-head-repository-mismatch: teardown discarded metadata"
+
+  setup_legacy_squash_case legacy-detached-origin-repository-mismatch
+  case_dir=$LEGACY_SQUASH_CASE
+  git -C "$case_dir/project" remote set-url origin https://github.com/example/other.git
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "legacy-detached-origin-repository-mismatch: teardown must refuse a different source repository"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "legacy-detached-origin-repository-mismatch: teardown discarded metadata"
+
+  setup_legacy_squash_case legacy-detached-origin-repository-ambiguous
+  case_dir=$LEGACY_SQUASH_CASE
+  git -C "$case_dir/project" config --add remote.origin.url git@github.com:example/repo.git
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "legacy-detached-origin-repository-ambiguous: teardown must refuse ambiguous source identity"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "legacy-detached-origin-repository-ambiguous: teardown discarded metadata"
+  pass "detached squash proof binds fork heads, exact origins, and canonical defaults"
+}
+
+test_legacy_detached_squash_dirty_and_untracked_refuse() {
+  local case_dir rc
+  setup_legacy_squash_case legacy-detached-dirty
+  case_dir=$LEGACY_SQUASH_CASE
+  printf '%s\n' dirty >> "$case_dir/wt/feature.txt"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "legacy-detached-dirty: teardown must refuse dirty worktree"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "legacy-detached-dirty: teardown discarded metadata"
+
+  setup_legacy_squash_case legacy-detached-untracked
+  case_dir=$LEGACY_SQUASH_CASE
+  printf '%s\n' untracked > "$case_dir/wt/untracked.txt"
+  git -C "$case_dir/project" config status.showUntrackedFiles no
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "legacy-detached-untracked: teardown must refuse untracked worktree"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "legacy-detached-untracked: teardown discarded metadata"
+  pass "detached squash proof never accepts dirty or untracked worktrees"
 }
 
 test_malformed_legacy_detached_metadata_refuses() {
@@ -2075,6 +2532,14 @@ test_local_only_merged_to_local_main_allows
 test_landed_legacy_detached_inventory_allows_without_runtime_reuse
 test_legacy_detached_unlanded_work_refuses
 test_legacy_detached_ambiguous_landing_refuses
+test_legacy_detached_squash_equivalent_retirement_preserves_ref_and_archives_scratch
+test_legacy_detached_retirement_resumes_after_return_failure
+test_legacy_detached_return_boundary_rechecks_external_changes
+test_legacy_detached_diff_errors_refuse
+test_legacy_detached_reordered_equivalent_content_allows
+test_legacy_detached_squash_one_byte_and_partial_content_refuse
+test_legacy_detached_squash_identity_and_target_refuse
+test_legacy_detached_squash_dirty_and_untracked_refuse
 test_malformed_legacy_detached_metadata_refuses
 test_legacy_detached_contradictory_and_unsafe_candidates_refuse
 test_current_endpoint_metadata_behavior_is_unchanged
