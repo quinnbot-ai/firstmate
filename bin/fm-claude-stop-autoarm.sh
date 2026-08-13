@@ -124,12 +124,24 @@ fi
 # Claude runs one background process per firing with no dedupe. Exactly one
 # owner foregrounds the arm and translates its close; every other firing exits
 # 0 so one watcher cycle maps to at most one exit-2 rewake.
+if [ -n "${FM_TEST_AUTOARM_BARRIER_DIR:-}" ]; then
+  # Private concurrency-fixture seam: publish entry before the real claim so
+  # the owner can wait for its competing firing without a wall-clock sleeper.
+  : > "$FM_TEST_AUTOARM_BARRIER_DIR/entered.${BASHPID:-$$}" 2>/dev/null || true
+fi
 fm_lock_try_acquire "$OWNER_LOCK" || exit 0
 if ! fm_lock_set_role "$OWNER_LOCK" autoarm; then
   fm_lock_release "$OWNER_LOCK"
   exit 0
 fi
 trap 'fm_lock_release "$OWNER_LOCK"' EXIT
+
+if [ -n "${FM_TEST_AUTOARM_BARRIER_DIR:-}" ]; then
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    [ "$(find "$FM_TEST_AUTOARM_BARRIER_DIR" -name 'entered.*' -type f 2>/dev/null | wc -l | tr -d '[:space:]')" -ge 2 ] && break
+    sleep 0.01
+  done
+fi
 
 write_epoch() {  # <outcome>
   local outcome=$1 seq tmp

@@ -70,6 +70,7 @@ run_autoarm() {
   local dir=$1 rc=0
   printf '%s\n' '{"session_id":"sess-autoarm","stop_hook_active":false}' \
     | FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+        export FM_TEST_HARNESS_PID=$$
         printf "%s\n" "$$" > "$FM_HOME/state/.lock"
         "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
       ' 2>&1 || rc=$?
@@ -118,7 +119,6 @@ SH
       cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 echo "$$" >> "$FM_HOME/state/arm-ran"
-sleep 2
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'signal: task.status done: slow fixture\n'
 exit 0
@@ -223,13 +223,16 @@ test_reclaims_stale_session_lock_before_arming() {
 }
 
 test_inert_when_lock_held_by_other_harness() {
-  local dir other out status owner_after
+  local dir other out status owner_after hold
   dir=$(make_primary_dir "$TMP_ROOT/other-lock")
   : > "$dir/state/task.meta"
   write_arm_fixture "$dir" actionable
-  # The trailing no-op keeps the fake harness process alive instead of allowing
-  # bash to exec the final sleep into a non-harness process.
-  "$FAKE_CLAUDE" -c 'sleep 60; :' &
+  # Keep the fake harness itself alive on a private FIFO.
+  # A child sleep would survive killing the shell on macOS and leak a 60-second
+  # process into CI's process-group cleanup.
+  hold="$dir/state/harness-hold"
+  mkfifo "$hold"
+  "$FAKE_CLAUDE" -c 'read -r _' <> "$hold" &
   other=$!
   printf '%s\n' "$other" > "$dir/state/.lock"
   out=$(printf '%s\n' '{"session_id":"s"}' | FM_HOME="$dir" "$FAKE_CLAUDE" -c '"$FM_HOME/bin/fm-claude-stop-autoarm.sh"' 2>&1); status=$?
@@ -515,6 +518,8 @@ test_single_flight_admits_exactly_one_owner() {
   : > "$dir/state/task.meta"
   write_arm_fixture "$dir" slow-actionable
   FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+    export FM_TEST_AUTOARM_BARRIER_DIR="$FM_HOME/state/autoarm-barrier"
+    mkdir -p "$FM_TEST_AUTOARM_BARRIER_DIR"
     printf "%s\n" "$$" > "$FM_HOME/state/.lock"
     printf "%s\n" "{\"session_id\":\"s\"}" | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" >/dev/null 2>"$FM_HOME/state/err1" &
     p1=$!
