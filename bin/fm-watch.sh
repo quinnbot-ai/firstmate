@@ -623,11 +623,18 @@ mark_all_captain_relevant_surfaced() {
 # reason line: every supervision protocol drains the queue before handling a
 # wake, while the printed line is pattern-matched as `heartbeat($|:)` by the arm,
 # checkpoint, and Stop auto-arm layers, so it must stay exactly "heartbeat".
-# Fail-open by construction - anything other than a well-formed single refill
-# line leaves the payload byte-identical to what it was before this existed.
+# Operational refill probe failures fail open, but the graph-lint boundary is
+# intentionally loud: its diagnostic enters the durable heartbeat payload so a
+# supervisor cannot treat the known-unsafe graph as dispatchable work.
 heartbeat_payload() {
-  local line
-  line=$("$SCRIPT_DIR/fm-refill.sh" "$STATE" "$CONFIG" "$DATA/backlog.md" 2>/dev/null) || line=
+  local line rc
+  line=$("$SCRIPT_DIR/fm-refill.sh" "$STATE" "$CONFIG" "$DATA/backlog.md" 2>&1)
+  rc=$?
+  if [ "$rc" -eq 2 ]; then
+    line=$(printf '%s' "$line" | tr '\n' ' ' | tr -s ' ')
+    printf 'heartbeat backlog-graph-invalid: %s' "$line"
+    return
+  fi
   case "$line" in
     'refill: ready='*' live='*' ids='*' fingerprint='*) printf 'heartbeat %s' "$line" ;;
     *) printf 'heartbeat' ;;
@@ -637,6 +644,7 @@ heartbeat_payload() {
 heartbeat_refill_is_actionable() {
   local payload=$1
   case "$payload" in
+    'heartbeat backlog-graph-invalid: '*) return 0 ;;
     'heartbeat refill: '*) ;;
     *) return 1 ;;
   esac

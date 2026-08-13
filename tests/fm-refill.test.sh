@@ -5,8 +5,8 @@
 #
 # The behavioral contract under test: an emitted heartbeat tells the supervisor
 # how much capacity is live and which queued work was dispatchable, so refilling
-# a drained fleet is part of handling the wake; and the probe is fail-open, so a
-# home that cannot answer still gets its heartbeat unchanged.
+# a drained fleet is part of handling the wake. Operational probe failures fail
+# open, while a known-invalid dependency graph produces an actionable diagnostic.
 #
 # Everything here goes through the two executables. The probe cases drive
 # bin/fm-refill.sh with a real backlog and a real tasks-axi (the parse is only
@@ -340,6 +340,26 @@ test_refill_evidence_alone_fires_a_normal_heartbeat() {
   pass "refillable work alone fires a normal-mode heartbeat on the existing cadence"
 }
 
+test_invalid_graph_fires_a_diagnostic_heartbeat() {
+  local home out drain_out payload
+  home=$(make_home graph-invalid-wake)
+  printf '# Backlog\n## Queued\n- [ ] unsafe - Unsafe blocked-by: missing\n' > "$home/data/backlog.md"
+  fake_tasks_axi "$home" 0.2.5 ok
+  out="$home/watch.out"; drain_out="$home/drain.out"
+  run_heartbeat "$home" "$out" "" \
+    || fail "an invalid dependency graph did not emit a heartbeat wake"
+  grep -Fx "heartbeat" "$out" >/dev/null \
+    || fail "the invalid-graph heartbeat changed the printed reason: $(cat "$out")"
+  FM_STATE_OVERRIDE="$home/state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "draining the invalid-graph heartbeat failed"
+  payload=$(grep "$(printf '\theartbeat\t')" "$drain_out" | head -1)
+  case "$payload" in
+    *"heartbeat backlog-graph-invalid: BACKLOG GRAPH INVALID:"*"DANGLING: unsafe"*) ;;
+    *) fail "the invalid-graph heartbeat lost its diagnostic: got '$payload'" ;;
+  esac
+  pass "an invalid dependency graph becomes an actionable diagnostic heartbeat"
+}
+
 test_heartbeat_still_fires_when_the_probe_is_broken() {
   local home out drain_out payload
   home=$(make_home wake-probe-broken)
@@ -374,4 +394,5 @@ test_probe_is_bounded
 test_the_bound_holds_without_a_timeout_binary
 test_heartbeat_wake_carries_refill_evidence
 test_refill_evidence_alone_fires_a_normal_heartbeat
+test_invalid_graph_fires_a_diagnostic_heartbeat
 test_heartbeat_still_fires_when_the_probe_is_broken
