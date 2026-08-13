@@ -69,6 +69,31 @@ require_present(
   native_run_steps.any? { |run| run.include?("--family native-backend-gated") },
   "native backend gate scheduling"
 )
+behavior_jobs = %w[
+  tests-portable-parallel-1
+  tests-portable-parallel-2
+  tests-portable-serial
+  tests-herdr
+  tests-native-backends
+]
+behavior_jobs.each do |name|
+  job = ci.fetch("jobs").fetch(name)
+  receipt_run = job.fetch("steps").find { |step| step["run"]&.include?("--failure-receipt") }
+  require_present(receipt_run, "#{name} runner failure receipt")
+  receipt_env = receipt_run.fetch("env")
+  require_equal(receipt_env.fetch("FM_TEST_RECEIPT_WORKFLOW"), "${{ github.workflow }}", "#{name} receipt workflow identity")
+  require_equal(receipt_env.fetch("FM_TEST_RECEIPT_RUN_ID"), "${{ github.run_id }}", "#{name} receipt run identity")
+  require_present(receipt_env.fetch("FM_TEST_RECEIPT_JOB"), "#{name} receipt job identity")
+  upload = job.fetch("steps").find { |step| step["uses"] == "actions/upload-artifact@v4" && step.dig("with", "path").to_s.include?("fm-test-receipt-") }
+  require_present(upload, "#{name} failure receipt upload")
+  require_equal(upload.fetch("if"), "always()", "#{name} failure receipt upload always")
+end
+aggregate = ci.fetch("jobs").fetch("tests-timing-aggregate")
+aggregate_run = aggregate.fetch("steps").find { |step| step["run"]&.include?("--aggregate-failure-receipt") }
+require_present(aggregate_run, "aggregate failure receipt consumption")
+aggregate_upload = aggregate.fetch("steps").find { |step| step["uses"] == "actions/upload-artifact@v4" && step.dig("with", "path").to_s.include?("fm-test-failure-receipt-aggregate.json") }
+require_present(aggregate_upload, "aggregate failure receipt upload")
+require_equal(aggregate_upload.fetch("if"), "always()", "aggregate failure receipt upload always")
 
 macos_events = macos.fetch(trigger)
 require_equal(macos_events.keys.sort, %w[pull_request schedule], "macOS workflow events")
@@ -87,6 +112,8 @@ require_equal(macos_jobs.keys, ["macos-stock-bash"], "macOS job inventory")
 macos_job = macos_jobs.fetch("macos-stock-bash")
 require_equal(macos_job.fetch("runs-on"), "macos-latest", "macOS runner")
 require_equal(macos_job.fetch("steps")[1].fetch("shell"), "/bin/bash {0}", "macOS stock Bash shell")
+macos_runner_contract = macos_job.fetch("steps").find { |step| step["name"] == "Run focused runner contract with stock Bash" }.fetch("run")
+require_present(macos_runner_contract.include?("[ \"$runner_test_count\" -eq 44 ]"), "macOS focused runner assertion count")
 
 types = no_mistakes.fetch(trigger).fetch("pull_request").fetch("types")
 require_equal(types, %w[opened edited synchronize reopened], "no-mistakes lifecycle events")

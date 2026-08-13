@@ -406,6 +406,116 @@ assert "family" in doc["scripts"][0]
   pass "timing markers and JSON artifact are valid"
 }
 
+test_failure_receipts_are_bounded_and_typed() {
+  local tmp pass_fixture fail_fixture pass_receipt fail_receipt oversized rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-receipt.XXXXXX")
+  pass_fixture="$tmp/pass.test.sh"
+  fail_fixture="$tmp/fail.test.sh"
+  pass_receipt="$tmp/pass.json"
+  fail_receipt="$tmp/fail.json"
+  oversized="$tmp/oversized.json"
+  cat >"$pass_fixture" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat >"$fail_fixture" <<'SH'
+#!/usr/bin/env bash
+exit 7
+SH
+  chmod +x "$pass_fixture" "$fail_fixture"
+  FM_TEST_RECEIPT_WORKFLOW=CI FM_TEST_RECEIPT_RUN_ID=123 \
+    FM_TEST_RECEIPT_RUN_ATTEMPT=1 FM_TEST_RECEIPT_JOB=fixture \
+    FM_TEST_RECEIPT_LANE=green "$RUNNER" --failure-receipt "$pass_receipt" "$pass_fixture" \
+    >"$tmp/green.out" 2>"$tmp/green.err" \
+    || { rm -rf "$tmp"; fail "green receipt fixture should pass"; }
+  set +e
+  FM_TEST_RECEIPT_WORKFLOW=CI FM_TEST_RECEIPT_RUN_ID=123 \
+    FM_TEST_RECEIPT_RUN_ATTEMPT=1 FM_TEST_RECEIPT_JOB=fixture \
+    FM_TEST_RECEIPT_LANE=red "$RUNNER" --failure-receipt "$fail_receipt" "$fail_fixture" \
+    >"$tmp/red.out" 2>"$tmp/red.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "red receipt fixture should fail"; }
+  python3 - "$pass_receipt" "$fail_receipt" <<'PY' \
+    || { rm -rf "$tmp"; fail "failure receipt schema or typed output is wrong"; }
+import json
+import os
+import sys
+green, red = [json.load(open(path, encoding="utf-8")) for path in sys.argv[1:]]
+for receipt in (green, red):
+    assert receipt["schema_version"] == 1
+    assert receipt["kind"] == "lane"
+    assert receipt["size_cap_bytes"] == 32768
+    assert os.path.getsize(receipt_path := sys.argv[1 if receipt is green else 2]) <= receipt["size_cap_bytes"]
+    assert receipt["candidate_head"] and len(receipt["candidate_head"]) == 40
+    assert receipt["workflow"] == {"name": "CI", "run_id": "123", "attempt": "1"}
+assert green["status"] == "passed" and green["failure"] == {"kind": "none", "count": 0, "scripts": []}
+assert red["status"] == "failed" and red["failure"]["kind"] == "test-failure"
+assert red["failure"]["count"] == 1 and red["failure"]["scripts"][0]["path"].endswith("fail.test.sh")
+assert "stdout" not in red and "stderr" not in red and "environment" not in red
+PY
+  printf '{not json\n' >"$oversized"
+  set +e
+  "$RUNNER" --aggregate-failure-receipt "$tmp/aggregate.json" "$oversized" >"$tmp/malformed.out" 2>"$tmp/malformed.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "malformed receipt input must fail"; }
+  grep -Fq 'malformed failure receipt' "$tmp/malformed.err" \
+    || { rm -rf "$tmp"; fail "malformed receipt failure was not actionable"; }
+  python3 - "$oversized" <<'PY'
+from pathlib import Path
+Path(__import__("sys").argv[1]).write_bytes(b"x" * 32769)
+PY
+  set +e
+  "$RUNNER" --aggregate-failure-receipt "$tmp/aggregate.json" "$oversized" >"$tmp/cap.out" 2>"$tmp/cap.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "oversized receipt input must fail"; }
+  grep -Fq 'failure receipt exceeds size cap' "$tmp/cap.err" \
+    || { rm -rf "$tmp"; fail "size-cap failure was not actionable"; }
+  rm -rf "$tmp"
+  pass "failure receipts are bounded, typed, and reject malformed input"
+}
+
+test_aggregate_failure_receipts_consumes_lane_receipts() {
+  local tmp pass_fixture fail_fixture pass_receipt fail_receipt aggregate rc out
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-receipt-aggregate.XXXXXX")
+  pass_fixture="$tmp/pass.test.sh"
+  fail_fixture="$tmp/fail.test.sh"
+  pass_receipt="$tmp/pass.json"
+  fail_receipt="$tmp/fail.json"
+  aggregate="$tmp/aggregate.json"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$pass_fixture"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$fail_fixture"
+  chmod +x "$pass_fixture" "$fail_fixture"
+  FM_TEST_RECEIPT_WORKFLOW=CI FM_TEST_RECEIPT_RUN_ID=456 FM_TEST_RECEIPT_RUN_ATTEMPT=2 \
+    FM_TEST_RECEIPT_JOB=pass FM_TEST_RECEIPT_LANE=pass "$RUNNER" --failure-receipt "$pass_receipt" "$pass_fixture" \
+    >"$tmp/pass.out" 2>"$tmp/pass.err" || { rm -rf "$tmp"; fail "aggregate green lane setup failed"; }
+  set +e
+  FM_TEST_RECEIPT_WORKFLOW=CI FM_TEST_RECEIPT_RUN_ID=456 FM_TEST_RECEIPT_RUN_ATTEMPT=2 \
+    FM_TEST_RECEIPT_JOB=fail FM_TEST_RECEIPT_LANE=fail "$RUNNER" --failure-receipt "$fail_receipt" "$fail_fixture" \
+    >"$tmp/fail.out" 2>"$tmp/fail.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "aggregate red lane setup unexpectedly passed"; }
+  out=$("$RUNNER" --aggregate-failure-receipt "$aggregate" "$fail_receipt" "$pass_receipt") \
+    || { rm -rf "$tmp"; fail "aggregate receipt should consume valid lane receipts"; }
+  assert_contains "$out" 'FM_TEST_FAILURE_RECEIPT_AGGREGATE lanes=2 failed=1' "aggregate receipt output"
+  python3 - "$aggregate" <<'PY' \
+    || { rm -rf "$tmp"; fail "aggregate receipt shape is wrong"; }
+import json
+import os
+import sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+assert doc["schema_version"] == 1 and doc["kind"] == "aggregate"
+assert doc["status"] == "failed" and doc["failure"] == {"kind": "lane-failure", "count": 1}
+assert [lane["lane"] for lane in doc["lanes"]] == ["fail", "pass"]
+assert os.path.getsize(sys.argv[1]) <= doc["size_cap_bytes"] == 32768
+PY
+  rm -rf "$tmp"
+  pass "aggregate failure receipt consumes bounded lane receipts"
+}
+
 test_quoting_and_platform_temp_paths() {
   local tmp repo fixture json out
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-quoted.XXXXXX")
@@ -1994,6 +2104,8 @@ test_changed_dependency_selection_and_unmapped_failure
 test_empty_selection_emits_summary
 test_empty_selection_preserves_disabled_fast_path
 test_timing_markers_and_json
+test_failure_receipts_are_bounded_and_typed
+test_aggregate_failure_receipts_consumes_lane_receipts
 test_quoting_and_platform_temp_paths
 test_stock_bash_wrapper_pins_nested_runner
 test_parallel_child_can_signal_immediately
