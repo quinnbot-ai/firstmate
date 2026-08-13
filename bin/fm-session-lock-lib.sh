@@ -94,6 +94,16 @@ fm_harness_process_matches() {  # <comm> <args>
 # reported and the callers below decide what they need from it.
 fm_harness_ancestry_pids() {
   local pid=$$ comm args extending=0 printed=0
+  # Tests may provide the already-known fake harness pid to avoid paying for
+  # repeated ps walks in every fixture invocation.
+  # This is intentionally private to test fixtures and is never set by the
+  # production launch paths.
+  if [ -n "${FM_TEST_HARNESS_PID:-}" ]; then
+    case "$FM_TEST_HARNESS_PID" in
+      ''|*[!0-9]*) ;;
+      *) printf '%s\n' "$FM_TEST_HARNESS_PID"; return 0 ;;
+    esac
+  fi
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     args=$(ps -o args= -p "$pid" 2>/dev/null)
