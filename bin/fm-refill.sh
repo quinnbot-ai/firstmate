@@ -18,11 +18,15 @@
 # heartbeat wake) instead of a judgment call. The numbers are a wake-time
 # observation, exactly like every other wake payload, never current state.
 #
-# FAIL OPEN, ALWAYS. Every failure prints nothing and exits 0: a `manual`
-# backlog backend, a missing or incompatible tasks-axi, an unreadable backlog, a
-# probe that outruns FM_REFILL_TIMEOUT, or any unexpected error. The caller then
-# emits its heartbeat exactly as it would have without this script, so the probe
-# can never delay, suppress, or break a heartbeat.
+# A malformed dependency graph is the one exception to this probe's normal
+# fail-open posture. Before `tasks-axi ready` can become dispatch evidence, the
+# graph lint must pass. A cycle or dangling blocker exits 2 with its diagnostics
+# on stderr, so callers can surface the corruption instead of dispatching from a
+# frontier that is known to be unsafe. All operational probe failures still print
+# nothing and exit 0: a `manual` backlog backend, a missing or incompatible
+# tasks-axi, an unreadable backlog, a probe that outruns FM_REFILL_TIMEOUT, or an
+# unexpected error. The caller then emits its heartbeat exactly as it would have
+# without this script, so those failures cannot delay, suppress, or break it.
 #
 # Usage: fm-refill.sh <state-dir> <config-dir> <backlog-file>
 #        fm-refill.sh --actionable <refill-line>
@@ -96,7 +100,13 @@ if [ "${FM_REFILL_CHILD:-0}" != 1 ]; then
     fi
   }
 
-  RAW=$(run_bounded "$@" 2>/dev/null) || exit 0
+  RAW=$(run_bounded "$@" 2>&1)
+  RC=$?
+  if [ "$RC" -eq 2 ]; then
+    printf '%s\n' "$RAW" >&2
+    exit 2
+  fi
+  [ "$RC" -eq 0 ] || exit 0
   TAB=$(printf '\t')
   case "$RAW" in
     *"$TAB"*"$TAB"*) ;;
@@ -130,6 +140,11 @@ fi
 # guess from hand-parsed Markdown.
 fm_tasks_axi_backend_available "$CONFIG_DIR" || exit 0
 [ -f "$BACKLOG" ] || exit 0
+
+if ! LINT_OUTPUT=$("$SCRIPT_DIR/fm-backlog-graph-lint.py" "$BACKLOG"); then
+  printf '%s\n' "$LINT_OUTPUT" >&2
+  exit 2
+fi
 
 READY_OUT=$(tasks-axi ready --file "$BACKLOG" 2>/dev/null) || exit 0
 
