@@ -24,6 +24,9 @@
 #   fm-lint.sh --required-version      print the ShellCheck pin
 #   fm-lint.sh --list-files            print the canonical file set
 #   fm-lint.sh --help                  print this usage
+#
+# The skill-trigger advisory runs after ShellCheck and never changes this
+# command's exit status for its warnings.
 set -u
 
 REQUIRED_SHELLCHECK=0.11.0
@@ -355,6 +358,12 @@ while [ "$worker" -lt "$SHARD_COUNT" ]; do
   fi
   worker=$((worker + 1))
 done
+
+# Advisory only: skill descriptions are routing metadata, so findings are
+# visible in the canonical lint output without blocking unrelated lint work.
+if ! "$SELF_DIR/fm-skill-trigger-lint.sh"; then
+  printf 'fm-lint.sh: skill-trigger advisory refused an unsafe input; continuing.\n' >&2
+fi
 
 if [ -n "$TELEMETRY" ]; then
   TELEMETRY_END_EPOCH=$(date +%s)

@@ -426,6 +426,71 @@ SH
   pass "seeded dispatcher, adapter, production-owner, and test-local diagnostics preserve parity"
 }
 
+test_skill_trigger_advisory_is_warn_only_and_deterministic() {
+  local tmp root out1 out2 rc before after outside
+  tmp=$(fm_test_tmproot fm-skill-trigger)
+  root="$tmp/skills"
+  mkdir -p "$root/clean" "$root/dump" "$root/missing" "$root/one" "$root/two" "$root/malformed"
+  cat > "$root/clean/SKILL.md" <<'MD'
+---
+name: clean
+description: Use when reviewing invoices.
+---
+MD
+  cat > "$root/dump/SKILL.md" <<'MD'
+---
+name: dump
+description: >-
+  Use when reviewing receipts. Read the report first. Confirm every field.
+  Record the result. Never rewrite the source. Explain the final decision.
+---
+MD
+  cat > "$root/missing/SKILL.md" <<'MD'
+---
+name: missing
+description: Summarize invoice handling for operators.
+---
+MD
+  cat > "$root/one/SKILL.md" <<'MD'
+---
+name: one
+description: Use when reviewing invoice reports.
+---
+MD
+  cat > "$root/two/SKILL.md" <<'MD'
+---
+name: two
+description: Use when reviewing invoice audits.
+---
+MD
+  printf '%s\n' '---' 'name: malformed' 'description: Use when reviewing' > "$root/malformed/SKILL.md"
+
+  before=$(cksum "$root"/*/SKILL.md)
+  out1=$("$ROOT/bin/fm-skill-trigger-lint.sh" --root "$root") || fail "advisory warnings must return zero"
+  out2=$("$ROOT/bin/fm-skill-trigger-lint.sh" --root "$root") || fail "repeated advisory run must return zero"
+  [ "$out1" = "$out2" ] || fail "advisory output is not deterministic"
+  after=$(cksum "$root"/*/SKILL.md)
+  [ "$before" = "$after" ] || fail "advisory rewrote skill metadata"
+  assert_not_contains "$out1" "clean/SKILL.md" "clean concise trigger was incorrectly warned"
+  assert_contains "$out1" "dump/SKILL.md" "instruction-dump warning is missing"
+  assert_contains "$out1" "missing/SKILL.md" "missing-trigger warning is missing"
+  assert_contains "$out1" "overlapping adjacent trigger words" "adjacent overlap warning is missing"
+  assert_contains "$out1" "malformed/SKILL.md" "malformed-frontmatter warning is missing"
+  [ "$(printf '%s\n' "$out1" | sort)" = "$out1" ] || fail "advisory findings are not path/reason ordered"
+
+  outside="$tmp/outside"
+  mkdir -p "$outside"
+  ln -s "$outside" "$tmp/escaped-root"
+  rc=0
+  "$ROOT/bin/fm-skill-trigger-lint.sh" --root "$tmp/escaped-root" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 2 ] || fail "symlinked root was not refused"
+  ln -s "$outside" "$root/escaped"
+  rc=0
+  "$ROOT/bin/fm-skill-trigger-lint.sh" --root "$root" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 2 ] || fail "symlinked child was not refused"
+  pass "skill-trigger advisory covers clean, dump, missing, overlap, malformed, refusal, ordering, and warn-only behavior"
+}
+
 test_list_files_reports_the_shell_inventory
 test_pins_an_explicit_version
 test_installer_retries_transient_download_failure
@@ -436,3 +501,4 @@ test_clean_fixture_passes
 test_jobs_are_deterministic_and_complete
 test_worker_trees_stop_on_signal
 test_seeded_module_boundary_parity
+test_skill_trigger_advisory_is_warn_only_and_deterministic
