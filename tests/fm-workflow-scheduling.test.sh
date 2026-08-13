@@ -5,7 +5,8 @@
 # YAML contract rather than matching source text. It protects the cost boundary:
 # complete Ubuntu coverage remains on every PR, the only current macOS job uses
 # native path filtering plus a daily run, and no-mistakes records every lifecycle
-# event while failing only a marker-absent body edit.
+# event at the same head, accepting only an exact no-mistakes marker or a
+# GitHub-authenticated repository-owner same-repository maintenance delivery.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -97,8 +98,16 @@ require_present(
   "no-mistakes signature body input"
 )
 require_present(
-  check.fetch("steps").any? { |step| step.dig("env", "PR_ACTION") == "${{ github.event.action }}" },
-  "no-mistakes lifecycle action input"
+  check.fetch("steps").any? { |step| step.dig("env", "PR_AUTHOR_ASSOCIATION") == "${{ github.event.pull_request.author_association }}" },
+  "no-mistakes author-association input"
+)
+require_present(
+  check.fetch("steps").any? { |step| step.dig("env", "PR_HEAD_REPOSITORY") == "${{ github.event.pull_request.head.repo.full_name }}" },
+  "no-mistakes head-repository input"
+)
+require_present(
+  check.fetch("steps").any? { |step| step.dig("env", "REPOSITORY_OWNER") == "${{ github.repository_owner }}" },
+  "no-mistakes repository-owner input"
 )
 concurrency = no_mistakes.fetch("concurrency").fetch("group")
 require_present(concurrency.include?("github.event.action == 'opened'"), "no-mistakes opening isolation")
@@ -117,12 +126,13 @@ RUBY
 }
 
 run_no_mistakes_fixture() {
-  local action=$1 body=$2 expected_code=$3 expected_message=$4 expected_detail=${5:-} output code
-  output=$(PR_ACTION="$action" PR_BODY="$body" PR_AUTHOR=fixture PR_NUMBER=123 /bin/bash -s <<< "$(no_mistakes_step)" 2>&1)
+  local action=$1 body=$2 author=$3 association=$4 head_repository=$5 expected_code=$6 expected_message=$7 output code
+  output=$(PR_ACTION="$action" PR_BODY="$body" PR_AUTHOR="$author" PR_AUTHOR_ASSOCIATION="$association" \
+    PR_HEAD_REPOSITORY="$head_repository" PR_NUMBER=123 REPOSITORY='quinnbot-ai/firstmate' \
+    REPOSITORY_OWNER='quinnbot-ai' /bin/bash -s <<< "$(no_mistakes_step)" 2>&1)
   code=$?
   expect_code "$expected_code" "$code" "no-mistakes $action fixture"
   assert_contains "$output" "$expected_message" "no-mistakes $action fixture did not report expected result"
-  [ -z "$expected_detail" ] || assert_contains "$output" "$expected_detail" "no-mistakes $action fixture did not report lifecycle detail"
 }
 
 test_workflow_event_and_runner_contract() {
@@ -135,14 +145,22 @@ test_no_mistakes_lifecycle_fixtures() {
   marker='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
 
   for action in opened edited synchronize reopened; do
-    run_no_mistakes_fixture "$action" "$marker" 0 "Found no-mistakes signature"
+    run_no_mistakes_fixture "$action" "$marker" contributor CONTRIBUTOR fork-user/firstmate 0 "Found no-mistakes signature"
   done
 
-  for action in opened synchronize reopened; do
-    run_no_mistakes_fixture "$action" "" 0 "::notice::No no-mistakes signature" "during $action"
+  for action in opened edited synchronize reopened; do
+    # An upstream merge is a same-repository PR made by the repository owner.
+    run_no_mistakes_fixture "$action" 'merge upstream without a no-mistakes marker' quinnbot-ai OWNER quinnbot-ai/firstmate 0 "Repository-owner same-repository PR"
+    # Direct Firstmate maintenance uses the identical platform-attested path.
+    run_no_mistakes_fixture "$action" 'Firstmate manual delivery without a no-mistakes marker' quinnbot-ai OWNER quinnbot-ai/firstmate 0 "Repository-owner same-repository PR"
+    run_no_mistakes_fixture "$action" '' contributor CONTRIBUTOR fork-user/firstmate 1 "::error::This PR was not raised through no-mistakes."
   done
-  run_no_mistakes_fixture edited "" 1 "::error::This PR was not raised through no-mistakes."
-  pass "no-mistakes lifecycle fixtures preserve notices and meaningful body-edit enforcement"
+
+  # Spoofable branch/body intent cannot replace GitHub's OWNER association.
+  run_no_mistakes_fixture opened 'merge upstream' quinnbot-ai MEMBER quinnbot-ai/firstmate 1 "::error::This PR was not raised through no-mistakes."
+  # The marker remains a literal, exact compatibility contract.
+  run_no_mistakes_fixture opened 'Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes/)' contributor CONTRIBUTOR fork-user/firstmate 1 "::error::This PR was not raised through no-mistakes."
+  pass "no-mistakes lifecycle fixtures preserve strict provenance at every latest head"
 }
 
 test_workflow_event_and_runner_contract

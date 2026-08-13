@@ -3,8 +3,7 @@ run-name: "PR #${{ github.event.pull_request.number }} body compliance - ${{ git
 
 on:
   pull_request:
-    # Every lifecycle event creates the latest-head required check.
-    # Only an edit creates a body-compliance opportunity when the marker is absent.
+    # Every lifecycle event reaches the same provenance decision at its latest head.
     types: [opened, edited, synchronize, reopened]
     branches:
       - main
@@ -31,9 +30,12 @@ jobs:
       - name: Verify no-mistakes signature in PR body
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
-          PR_ACTION: ${{ github.event.action }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_AUTHOR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
         run: |
           set -eu
           marker='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
@@ -41,12 +43,15 @@ jobs:
             echo "Found no-mistakes signature in PR #${PR_NUMBER} body."
             exit 0
           fi
-          case "$PR_ACTION" in
-            opened|synchronize|reopened)
-              echo "::notice::No no-mistakes signature in PR #${PR_NUMBER} during ${PR_ACTION}; this lifecycle event did not create a body-compliance opportunity."
-              exit 0
-              ;;
-          esac
+          # Direct Firstmate maintenance and upstream-sync PRs are opened by the
+          # repository owner from this repository. These GitHub-generated fields
+          # are the only markerless exemption; title, branch, and body text cannot opt in.
+          if [ "$PR_AUTHOR" = "$REPOSITORY_OWNER" ] &&
+             [ "$PR_AUTHOR_ASSOCIATION" = 'OWNER' ] &&
+             [ "$PR_HEAD_REPOSITORY" = "$REPOSITORY" ]; then
+            echo "Repository-owner same-repository PR #${PR_NUMBER} is exempt from no-mistakes provenance."
+            exit 0
+          fi
           {
             echo "::error::This PR was not raised through no-mistakes."
             echo
