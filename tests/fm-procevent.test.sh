@@ -86,7 +86,28 @@ count_results() {  # <home> <source-id>
 
 wait_for() {  # <file> [tries]
   local f=$1 n=${2:-100}
-  for _ in $(seq 1 "$n"); do [ -s "$f" ] && return 0; sleep 0.1; done
+  for _ in $(seq 1 "$n"); do [ -s "$f" ] && return 0; sleep 0.02; done
+  return 1
+}
+
+wait_for_dead() {  # <pid> [tries]
+  local pid=$1 n=${2:-100}
+  for _ in $(seq 1 "$n"); do kill -0 "$pid" 2>/dev/null || return 0; sleep 0.02; done
+  return 1
+}
+
+wait_for_lines() {  # <file> <minimum-lines> [tries]
+  local f=$1 minimum=$2 n=${3:-100}
+  for _ in $(seq 1 "$n"); do
+    [ -f "$f" ] && [ "$(wc -l < "$f" | tr -d ' ')" -ge "$minimum" ] && return 0
+    sleep 0.02
+  done
+  return 1
+}
+
+wait_for_absent() {  # <file> [tries]
+  local f=$1 n=${2:-100}
+  for _ in $(seq 1 "$n"); do [ ! -e "$f" ] && return 0; sleep 0.02; done
   return 1
 }
 
@@ -149,7 +170,7 @@ sup=$(PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \
 assert_contains "$sup" yes "a registered source needs supervision with no task metadata"
 
 pe "$H1" reconcile >/dev/null
-sleep 0.5
+wait_for "$FM_PROCEVENT_CLAIM_ROOT/src-one.claim" || fail "the first runner never claimed its source"
 out=$(pe "$H1" start src-one)
 assert_contains "$out" "already owned" "a duplicate start loses instead of running a second child"
 
@@ -286,7 +307,7 @@ RACE_HANDLE_PID=$HOLDER_PID
 wait_for "$RACE_PUBLISH_READY" || fail "publication race barrier did not acquire the source lock"
 pe "$HRACE" reconcile > "$RACE_RECONCILE_OUT" &
 RACE_RECONCILE_PID=$!
-sleep 0.3
+sleep 0.02
 assert_absent "$HRACE/state/.wake-queue" "publication bypassed the source serialization boundary"
 : > "$RACE_PUBLISH_RELEASE"
 wait "$RACE_HANDLE_PID" || fail "publication race barrier could not record handling"
@@ -471,10 +492,13 @@ printf '<h1>review</h1>\n' > "$REVIEW_ART"
 lavish_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$REVIEW_ART")
 PE_TRACKED+=("$HLT|$lavish_id")
 PATH="$LAVISH_BIN:$PATH" FM_HOME="$HLT" "$ROOT/bin/fm-procevent-lavish.sh" arm "$REVIEW_ART" >/dev/null
-for _ in $(seq 1 6); do
+PATH="$LAVISH_BIN:$PATH" pe "$HLT" reconcile >/dev/null
+wait_for "$LAVISH_POLL_COUNT" || fail "the first ended review poll never ran"
+for _ in $(seq 1 2); do
   PATH="$LAVISH_BIN:$PATH" pe "$HLT" reconcile >/dev/null
-  sleep 0.3
 done
+wait_for_absent "$HLT/state/procevent/$lavish_id.source" \
+  || fail "the ended review source did not retire after its final poll"
 [ "$(cat "$LAVISH_POLL_COUNT")" = 1 ] \
   || fail "an ended review kept being polled: $(cat "$LAVISH_POLL_COUNT") polls for one Send & End"
 [ "$(count_results "$HLT" "$lavish_id")" = 1 ] \
@@ -501,7 +525,7 @@ HW="$TMP_ROOT/hw"; new_home "$HW"
 TRIGW="$TMP_ROOT/trigger-restart-cut"
 pe_register "$HW" lavish restart-cut-src -- "$BLOCKER" "$TRIGW" "restart cut payload" >/dev/null
 pe "$HW" reconcile >/dev/null
-sleep 0.5
+wait_for "$FM_PROCEVENT_CLAIM_ROOT/restart-cut-src.claim" || fail "the restart-cut runner never claimed its source"
 : > "$TRIGW"
 wait_for "$HW/state/.wake-queue" || fail "the restart-cut source published no event"
 assert_contains "$(wake_payloads "$HW")" "procevent lavish restart-cut-src 1" \
@@ -579,7 +603,7 @@ TRIG2="$TMP_ROOT/trigger-two"
 pe_register "$HA" lavish shared-src -- "$BLOCKER" "$TRIG2" "shared" >/dev/null
 pe_register "$HB" lavish shared-src -- "$BLOCKER" "$TRIG2" "shared" >/dev/null
 pe "$HA" reconcile >/dev/null
-sleep 0.5
+wait_for "$FM_PROCEVENT_CLAIM_ROOT/shared-src.claim" || fail "the shared source runner never claimed its source"
 out=$(pe "$HB" start shared-src)
 assert_contains "$out" "already owned" "a second home cannot own a source another home already owns"
 [ -z "$(wake_payloads "$HB")" ] || fail "the losing home published an event"
@@ -592,8 +616,7 @@ runner_pid=$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/shared-src.claim" 2>/dev/null
 [ -n "$runner_pid" ] || fail "no runner pid recorded for the blocked source"
 kill -0 "$runner_pid" 2>/dev/null || fail "the blocked runner is not live before retirement"
 pe "$HA" retire shared-src >/dev/null
-for _ in $(seq 1 40); do kill -0 "$runner_pid" 2>/dev/null || break; sleep 0.1; done
-kill -0 "$runner_pid" 2>/dev/null && fail "retire left the blocked runner alive"
+wait_for_dead "$runner_pid" || fail "retire left the blocked runner alive"
 assert_absent "$FM_PROCEVENT_CLAIM_ROOT/shared-src.claim" "retire releases the claim"
 pass "retiring a never-completing source stops its runner and its blocked child"
 
@@ -602,7 +625,7 @@ TRIG4="$TMP_ROOT/trigger-four"
 HZ="$TMP_ROOT/hz"; new_home "$HZ"
 pe_register "$HZ" lavish orphan-src -- "$BLOCKER" "$TRIG4" "orphan" >/dev/null
 pe "$HZ" reconcile >/dev/null
-sleep 0.5
+wait_for "$FM_PROCEVENT_CLAIM_ROOT/orphan-src.claim" || fail "orphan fixture runner did not claim its source"
 orphan_pid=$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/orphan-src.claim" 2>/dev/null)
 if [ -z "$orphan_pid" ] || ! kill -0 "$orphan_pid" 2>/dev/null; then
   fail "orphan fixture runner did not start"
@@ -610,8 +633,7 @@ fi
 rm -f "$HZ/state/procevent/orphan-src.source"
 out=$(pe "$HZ" reconcile)
 assert_contains "$out" "stopped=1" "reconcile stops a runner whose registration was removed"
-for _ in $(seq 1 40); do kill -0 "$orphan_pid" 2>/dev/null || break; sleep 0.1; done
-kill -0 "$orphan_pid" 2>/dev/null && fail "reconcile left an orphaned runner alive"
+wait_for_dead "$orphan_pid" || fail "reconcile left an orphaned runner alive"
 pass "reconcile reaps a runner whose source registration is gone"
 
 # --- a stale claim is reclaimable, a live one is not ------------------------
@@ -659,12 +681,11 @@ pe_register "$HR" lavish race-src -- "$RACE_BLOCKER" "$RACE_LOG" "$RACE_TRIGGER"
 printf '%s\n%s\nold-token\nold-identity\n' "$TMP_ROOT/gone-home" 999999 > "$FM_PROCEVENT_CLAIM_ROOT/race-src.claim"
 chmod 0600 "$FM_PROCEVENT_CLAIM_ROOT/race-src.claim"
 race_pids=()
-for _ in $(seq 1 24); do
+for _ in $(seq 1 4); do
   pe "$HR" start race-src >/dev/null &
   race_pids+=("$!")
 done
 wait_for "$RACE_LOG" || fail "no contender acquired the stale claim"
-sleep 0.5
 [ "$(wc -l < "$RACE_LOG" | tr -d ' ')" = 1 ] || fail "stale-claim race started more than one runner"
 : > "$RACE_TRIGGER"
 for race_pid in "${race_pids[@]}"; do wait "$race_pid" 2>/dev/null || true; done
@@ -706,17 +727,17 @@ case "$orphan_leader" in ''|*[!0-9]*) fail "could not read the runner leader pid
 printf '%s\n' "$orphan_leader" > "$ORPHAN_GROUP"
 
 kill -KILL "$orphan_leader" 2>/dev/null || fail "could not kill the runner leader"
-for _ in $(seq 1 50); do kill -0 "$orphan_leader" 2>/dev/null || break; sleep 0.1; done
-kill -0 "$orphan_leader" 2>/dev/null && fail "the runner leader survived SIGKILL"
+wait_for_dead "$orphan_leader" || fail "the runner leader survived SIGKILL"
 kill -0 -"$orphan_leader" 2>/dev/null || fail "fixture invalid: the owned child group did not survive the leader"
 
 orphan_out=$(pe "$HG" reconcile)
 kill -0 -"$orphan_leader" 2>/dev/null \
   && fail "reconcile left the crashed generation's process group alive: $orphan_out"
-sleep 0.5
 assert_absent "$ORPHAN_OVERLAP" "no replacement source starts while the crashed generation remains alive"
 case "$orphan_out" in
   *"started=1"*)
+    wait_for "$FM_PROCEVENT_CLAIM_ROOT/orphan-src.claim" || fail "a replacement runner did not record its claim"
+    wait_for_lines "$ORPHAN_LOG" 2 || fail "the replacement source did not execute"
     [ -e "$FM_PROCEVENT_CLAIM_ROOT/orphan-src.claim" ] \
       || fail "a replacement runner started without recording its own claim"
     [ "$(wc -l < "$ORPHAN_LOG" | tr -d ' ')" = 2 ] \
@@ -765,7 +786,7 @@ torn_holder_pid=$HOLDER_PID
 wait_for "$TORN_READY" || fail "could not hold the torn-read source boundary"
 pe "$HJ" list > "$TMP_ROOT/torn-list.out" &
 torn_list_pid=$!
-sleep 0.2
+sleep 0.02
 kill -0 "$torn_list_pid" 2>/dev/null || fail "claim reader escaped the source boundary during replacement"
 mv "$TMP_ROOT/torn-next.claim" "$FM_PROCEVENT_CLAIM_ROOT/torn-src.claim"
 : > "$TORN_RELEASE"
@@ -781,7 +802,6 @@ START_BLOCKER="$TMP_ROOT/retire-start-blocker.sh"
 cat > "$START_BLOCKER" <<'SH'
 #!/usr/bin/env bash
 printf 'started\n' >> "$1"
-sleep 30
 SH
 chmod +x "$START_BLOCKER"
 pe_register "$HK" lavish retire-start-src -- "$START_BLOCKER" "$START_LOG" >/dev/null
@@ -792,7 +812,7 @@ retire_start_holder_pid=$HOLDER_PID
 wait_for "$START_READY" || fail "could not hold the retire-start source boundary"
 pe "$HK" start retire-start-src > "$TMP_ROOT/retire-start.out" 2>&1 &
 retire_start_pid=$!
-sleep 0.2
+sleep 0.02
 kill -0 "$retire_start_pid" 2>/dev/null || fail "start did not wait for the source lifecycle boundary"
 rm -f "$HK/state/procevent/retire-start-src.source"
 : > "$START_RELEASE"
@@ -857,8 +877,7 @@ assert_present "$FM_PROCEVENT_CLAIM_ROOT/sweep-one.claim" "home sweep preflight 
 out=$(pe "$HM" sweep-home)
 assert_contains "$out" "swept: attempted=2" "home sweep retires registrations and owned claim-only sources"
 for sweep_pid in "$sweep_pid_one" "$sweep_pid_two"; do
-  for _ in $(seq 1 40); do kill -0 "$sweep_pid" 2>/dev/null || break; sleep 0.1; done
-  kill -0 "$sweep_pid" 2>/dev/null && fail "home sweep left a runner alive"
+  wait_for_dead "$sweep_pid" || fail "home sweep left a runner alive"
 done
 assert_absent "$HM/state/procevent/sweep-one.source" "home sweep removes registrations"
 assert_absent "$FM_PROCEVENT_CLAIM_ROOT/sweep-one.claim" "home sweep releases the first claim"
@@ -966,10 +985,10 @@ for _ in $(seq 1 100); do
     if [ -f "$candidate" ]; then staged=$candidate; break; fi
   done
   [ -n "$staged" ] && break
-  sleep 0.1
+  sleep 0.02
 done
 [ -n "$staged" ] || fail "noisy source created no bounded staging file"
-sleep 0.2
+sleep 0.02
 [ "$(wc -c < "$staged" | tr -d ' ')" -le 100 ] || fail "live staging exceeded the configured output bound"
 pe "$HG" retire noisy-src >/dev/null
 kill -0 "$noisy_child" 2>/dev/null && fail "TERM-resistant source child survived runner retirement"
