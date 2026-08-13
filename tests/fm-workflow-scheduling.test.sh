@@ -111,6 +111,8 @@ require_equal(macos_jobs.keys, ["macos-stock-bash"], "macOS job inventory")
 macos_job = macos_jobs.fetch("macos-stock-bash")
 require_equal(macos_job.fetch("runs-on"), "macos-latest", "macOS runner")
 require_equal(macos_job.fetch("steps")[1].fetch("shell"), "/bin/bash {0}", "macOS stock Bash shell")
+macos_runner_contract = macos_job.fetch("steps").find { |step| step["name"] == "Run focused runner contract with stock Bash" }.fetch("run")
+require_present(macos_runner_contract.include?("[ \"$runner_test_count\" -eq 44 ]"), "macOS focused runner assertion count")
 
 types = no_mistakes.fetch(trigger).fetch("pull_request").fetch("types")
 require_equal(types, %w[opened edited synchronize reopened], "no-mistakes lifecycle events")
