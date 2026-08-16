@@ -26,8 +26,10 @@
 #      branch whose head was rewritten or diverged must not be attributed.
 #      A run matches when its head equals the worktree HEAD, or the worktree HEAD
 #      is an ancestor of the run head (pipeline fix commits advanced the run on
-#      the same line of history). Local work that advanced past the run head, or
-#      diverged from it, invalidates attribution.
+#      the same line of history). When a pipeline owns its fixes in an isolated
+#      worktree, a complete `branch_sync` receipt can instead bind this clean
+#      worktree HEAD to that run's submitted head. Local work that advanced past
+#      the submitted/run head, or diverged from it, invalidates attribution.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -417,6 +419,88 @@ nm_liveness_stall_for_run() {  # <run-id>
   grep -F "nomistakes-liveness: stalled run=$run_id " "$marker" 2>/dev/null | tail -1 || true
 }
 
+# Some no-mistakes versions run pipeline fixes in an isolated Git worktree. Its
+# current run head is therefore intentionally absent from the crew worktree's
+# object database, so ancestry cannot establish the otherwise-valid binding.
+#
+# The command's branch_sync receipt is an explicit custody contract for that
+# case. Accept it only when it says the pipeline owns a clean crew worktree and
+# binds the exact local HEAD to the exact submitted head for this same run. The
+# current pipeline head must also match the top-level status head, preventing a
+# stale nested receipt from rescuing an unrelated run.
+nm_branch_sync_field() {  # <section> <key>
+  local section=$1 key=$2
+  printf '%s\n' "$RUN_OUT" | awk -v section="$section" -v key="$key" '
+    /^branch_sync:[[:space:]]*$/ { in_sync = 1; next }
+    in_sync && /^[^[:space:]][^:]*:/ { exit }
+    in_sync && section == "" && /^[[:space:]][[:space:]][^[:space:]][^:]*:/ {
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
+      if (index(line, key ":") == 1) {
+        sub(/^[^:]*:[[:space:]]*/, "", line)
+        print line
+        exit
+      }
+      next
+    }
+    in_sync && $0 ~ "^[[:space:]][[:space:]]" section ":[[:space:]]*$" {
+      in_section = 1
+      next
+    }
+    in_section && /^[[:space:]][[:space:]][^[:space:]][^:]*:/ { exit }
+    in_section {
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
+      if (index(line, key ":") == 1) {
+        sub(/^[^:]*:[[:space:]]*/, "", line)
+        print line
+        exit
+      }
+    }
+  '
+}
+
+nm_sha_matches() {  # <possibly-short-sha> <possibly-full-sha>
+  local first=$1 second=$2
+  [ -n "$first" ] && [ -n "$second" ] || return 1
+  [ "${#first}" -ge 7 ] && [ "${#second}" -ge 7 ] || return 1
+  case "$first:$second" in *[!0-9A-Fa-f:]* ) return 1 ;; esac
+  case "$first" in "$second"*) return 0 ;; esac
+  case "$second" in "$first"*) return 0 ;; esac
+  return 1
+}
+
+nm_pipeline_owned_run_matches_worktree() {
+  local run_id run_head local_full sync_state sync_changed sync_safety
+  local sync_local_branch sync_local_head sync_local_clean sync_pipeline_run
+  local sync_pipeline_status sync_submitted_head sync_current_head
+  run_id=$(strip_quotes "$(nm_field id)")
+  run_head=$(strip_quotes "$(nm_field head)")
+  [ -n "$run_id" ] && [ -n "$run_head" ] || return 1
+  local_full=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || return 1
+  sync_state=$(strip_quotes "$(nm_branch_sync_field '' state)")
+  sync_changed=$(strip_quotes "$(nm_branch_sync_field '' changed)")
+  sync_safety=$(strip_quotes "$(nm_branch_sync_field '' safety)")
+  sync_local_branch=$(strip_quotes "$(nm_branch_sync_field local branch)")
+  sync_local_head=$(strip_quotes "$(nm_branch_sync_field local head)")
+  sync_local_clean=$(strip_quotes "$(nm_branch_sync_field local clean)")
+  sync_pipeline_run=$(strip_quotes "$(nm_branch_sync_field pipeline run)")
+  sync_pipeline_status=$(strip_quotes "$(nm_branch_sync_field pipeline status)")
+  sync_submitted_head=$(strip_quotes "$(nm_branch_sync_field pipeline submitted_head)")
+  sync_current_head=$(strip_quotes "$(nm_branch_sync_field pipeline current_head)")
+  [ "$sync_state" = pipeline_owned ] || return 1
+  [ "$sync_changed" = false ] || return 1
+  [ "$sync_safety" = blocked_pipeline_owned ] || return 1
+  [ "$sync_local_branch" = "$CREW_BRANCH" ] || return 1
+  [ "$sync_local_clean" = true ] || return 1
+  [ "$sync_pipeline_run" = "$run_id" ] || return 1
+  [ "$sync_pipeline_status" = running ] || return 1
+  nm_sha_matches "$sync_local_head" "$local_full" || return 1
+  nm_sha_matches "$sync_submitted_head" "$local_full" || return 1
+  nm_sha_matches "$sync_current_head" "$run_head" || return 1
+  [ -z "$(git -C "$WT" status --porcelain --untracked-files=all 2>/dev/null)" ]
+}
+
 # Coarse runs-list rows are "<status> <branch> <short-sha> ...". 0 if the short
 # sha for this branch row matches the worktree head under the same rules as
 # nm_run_head_matches_worktree (equal, or local is ancestor of run tip).
@@ -445,7 +529,8 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
-    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
+    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] \
+      && { nm_run_head_matches_worktree || nm_pipeline_owned_run_matches_worktree; }; then
       HAVE_RUN=1
     else
       # The active-or-most-recent run is for another branch, or same branch with

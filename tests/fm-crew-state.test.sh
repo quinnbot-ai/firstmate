@@ -170,8 +170,10 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
+  FM_FAKE_PIPELINE_HEAD=""
+  FM_FAKE_SUBMITTED_HEAD=""
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
-  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
+  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS FM_FAKE_PIPELINE_HEAD FM_FAKE_SUBMITTED_HEAD
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -262,6 +264,39 @@ steps[3]{step,status,findings,duration_ms}:
   intent,completed,0,0
   review,fix_review,1,0
   test,pending,0,0
+EOF
+}
+
+# A v1.48 pipeline can advance its isolated gate worktree while the submitted
+# crew worktree remains at its clean pre-pipeline commit. The inaccessible
+# top-level head must still be attributable through the custody receipt.
+run_pipeline_owned_parked() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: running
+  awaiting_agent: parked 2m10s
+  head: "${FM_FAKE_PIPELINE_HEAD:-fedcba9876543210fedcba9876543210fedcba98}"
+  pr: ""
+  findings[1]{id,severity,file,line,action,description}:
+    r1,error,b.go,,ask-user,changes product behavior
+branch_sync:
+  state: pipeline_owned
+  changed: false
+  local:
+    branch: $1
+    head: ${FM_FAKE_RUN_HEAD}
+    clean: true
+  pipeline:
+    run: "01RUN"
+    status: running
+    submitted_head: ${FM_FAKE_SUBMITTED_HEAD:-$FM_FAKE_RUN_HEAD}
+    current_head: ${FM_FAKE_PIPELINE_HEAD:-fedcba9876543210fedcba9876543210fedcba98}
+  safety: blocked_pipeline_owned
+gate:
+  step: review
+  status: fix_review
 EOF
 }
 
@@ -455,6 +490,48 @@ test_gate_block_parked_not_superseded() {
   assert_contains "$out" "1 finding(s)" "gate block wait includes finding count"
   assert_not_contains "$out" "superseded" "gate block wait not flagged stale"
   pass "gate block parked run is not flagged superseded"
+}
+
+# Regression: no-mistakes v1.48 moved review fixes into a separate gate
+# worktree. Its current head is not resolvable from the crew worktree, but the
+# branch_sync receipt proves this clean local tip is the submitted tip for the
+# still-running pipeline-owned run.
+test_pipeline_owned_parked_with_isolated_head_is_current() {
+  reset_fakes
+  local d out
+  d=$(new_case pipeline-owned-parked)
+  make_repo_on_branch "$d/wt" fm/feat-isolated-review
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/isolated-review.meta" "window=fm:fm-isolated-review" "worktree=$d/wt" "kind=ship"
+  printf 'needs-decision: review gate\n' > "$d/state/isolated-review.status"
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned_parked fm/feat-isolated-review)"
+  out=$(run_crew_state "$d" isolated-review)
+  assert_contains "$out" "state: parked" "isolated pipeline review gate -> parked"
+  assert_contains "$out" "source: run-step" "isolated pipeline review gate -> run-step"
+  assert_contains "$out" "parked at review" "isolated pipeline review gate names the gate"
+  assert_not_contains "$out" "superseded" "matching parked log is not stale"
+  pass "pipeline-owned isolated review gate is current"
+}
+
+# Counterfactual: the same inaccessible run head without an exact submitted
+# head binding must remain unattributable, preserving reused-branch custody.
+test_pipeline_owned_bridge_refuses_mismatched_submitted_head() {
+  reset_fakes
+  local d out
+  d=$(new_case pipeline-owned-mismatched-submitted)
+  make_repo_on_branch "$d/wt" fm/feat-isolated-mismatch
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/isolated-mismatch.meta" "window=fm:fm-isolated-mismatch" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: current implementation continues\n' > "$d/state/isolated-mismatch.status"
+  FM_FAKE_SUBMITTED_HEAD=0123456789abcdef0123456789abcdef01234567
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned_parked fm/feat-isolated-mismatch)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" isolated-mismatch
+  out=$(run_crew_state "$d" isolated-mismatch)
+  assert_not_contains "$out" "source: run-step" "mismatched submitted head must not use run-step"
+  assert_contains "$out" "source: status-log" "mismatched submitted head falls back"
+  assert_contains "$out" "state: working" "current status log remains authoritative after mismatch"
+  pass "pipeline-owned bridge rejects mismatched submitted head"
 }
 
 test_ci_ready_done_log_beats_monitoring_run() {
@@ -1332,6 +1409,8 @@ test_stale_blocked_superseded
 test_genuine_parked_not_superseded
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
+test_pipeline_owned_parked_with_isolated_head_is_current
+test_pipeline_owned_bridge_refuses_mismatched_submitted_head
 test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
