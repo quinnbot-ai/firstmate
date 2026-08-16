@@ -736,10 +736,10 @@ execute_local() {
 }
 
 execute_github() {
-  local query payload raw_values pull_values confirm_raw_values confirm_values head base base_ref state draft merged strict admin_enforced recorded_pr recorded_head merge_output merge_values merge_result merge_sha head_repo head_ref encoded_ref
+  local query payload raw_values pull_values confirm_raw_values confirm_values head base stale_base base_ref state draft merged strict admin_enforced recorded_pr recorded_head merge_output merge_values merge_result merge_sha head_repo head_ref encoded_ref
   local confirm_head confirm_base confirm_base_ref confirm_state confirm_draft confirm_merged confirm_head_repo confirm_head_ref
   local protection_path protection_strict protection_admin
-  local post_base_output post_base commit_output commit_values commit_sha commit_parent_one commit_parent_two
+  local live_base_output live_base pre_base_output pre_base post_base_output post_base commit_output commit_values commit_sha commit_parent_one commit_parent_two
   local compare_output compare_values transition_status transition_ahead transition_behind transition_base transition_first transition_parent candidate_count
   local candidate_commits candidate_commit diff_status
   [ "$MODE" = no-mistakes ] || [ "$MODE" = direct-PR ] || die "task $ID is mode=$MODE, not a PR merge mode"
@@ -785,7 +785,7 @@ execute_github() {
   [ "$(printf '%s\n' "$raw_values" | sed -n '1p')" = unprotected ] \
     || die "GitHub response contained malformed or ambiguous pull request data"
   pull_values=$(printf '%s\n' "$raw_values" | sed -n '2,$p')
-  head=$(printf '%s\n' "$pull_values" | sed -n '1p'); base=$(printf '%s\n' "$pull_values" | sed -n '2p')
+  head=$(printf '%s\n' "$pull_values" | sed -n '1p'); stale_base=$(printf '%s\n' "$pull_values" | sed -n '2p')
   base_ref=$(printf '%s\n' "$pull_values" | sed -n '3p'); head_ref=$(printf '%s\n' "$pull_values" | sed -n '4p')
   state=$(printf '%s\n' "$pull_values" | sed -n '5p'); draft=$(printf '%s\n' "$pull_values" | sed -n '6p')
   merged=$(printf '%s\n' "$pull_values" | sed -n '7p'); head_repo=$(printf '%s\n' "$pull_values" | sed -n '8p')
@@ -800,6 +800,11 @@ execute_github() {
   [ -z "$recorded_head" ] || fm_pr_head_valid "$recorded_head" || die "task PR head metadata is invalid"
   [ -z "$recorded_head" ] || [ "$recorded_head" = "$head" ] || die "task PR head metadata does not match the current GitHub head"
   [ "$(git -C "$WORKTREE" rev-parse HEAD)" = "$head" ] || die "task worktree HEAD does not match the current GitHub PR head"
+  encoded_ref=$(urlencode_ref "$base_ref")
+  live_base_output=$(gh-axi api GET "/repos/$PR_OWNER/$PR_REPO/git/ref/heads/$encoded_ref" --jq '{sha: .object.sha, type: .object.type} | @base64') \
+    || die "cannot resolve the live GitHub base"
+  live_base=$(decode_github_merge_object "$live_base_output" ref) || die "GitHub returned malformed live base data"
+  base=$live_base
   git -C "$WORKTREE" cat-file -e "$base^{commit}" 2>/dev/null || git -C "$WORKTREE" fetch --quiet "https://github.com/$PR_OWNER/$PR_REPO.git" "$base"
   git -C "$WORKTREE" merge-base --is-ancestor "$base" "$head" || die "GitHub PR head does not contain the current base; update the branch and retry"
   "$SCRIPT_DIR/fm-test-inventory.sh" merge-check "$WORKTREE" "$head" "$base"
@@ -813,7 +818,7 @@ execute_github() {
   confirm_base_ref=$(printf '%s\n' "$confirm_values" | sed -n '3p'); confirm_head_ref=$(printf '%s\n' "$confirm_values" | sed -n '4p')
   confirm_state=$(printf '%s\n' "$confirm_values" | sed -n '5p'); confirm_draft=$(printf '%s\n' "$confirm_values" | sed -n '6p')
   confirm_merged=$(printf '%s\n' "$confirm_values" | sed -n '7p'); confirm_head_repo=$(printf '%s\n' "$confirm_values" | sed -n '8p')
-  [ "$confirm_head" = "$head" ] && [ "$confirm_base" = "$base" ] \
+  [ "$confirm_head" = "$head" ] && [ "$confirm_base" = "$stale_base" ] \
     && [ "$confirm_base_ref" = "$base_ref" ] && [ "$confirm_head_ref" = "$head_ref" ] \
     && [ "$confirm_head_repo" = "$head_repo" ] && [ "$confirm_state" = "$state" ] \
     && [ "$confirm_draft" = "$draft" ] && [ "$confirm_merged" = "$merged" ] \
@@ -840,6 +845,10 @@ $candidate_commits
 EOF
   fi
   require_repository_identity_unchanged
+  pre_base_output=$(gh-axi api GET "/repos/$PR_OWNER/$PR_REPO/git/ref/heads/$encoded_ref" --jq '{sha: .object.sha, type: .object.type} | @base64') \
+    || die "cannot recheck the live GitHub base"
+  pre_base=$(decode_github_merge_object "$pre_base_output" ref) || die "GitHub returned malformed live base data"
+  [ "$pre_base" = "$base" ] || die "live GitHub base changed during merge verification"
   merge_output=$(gh-axi api PUT "/repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER/merge" --field "sha=$head" --field "merge_method=$MERGE_METHOD" --jq '{merged: .merged, sha: .sha} | @base64') \
     || die "GitHub rejected the exact conditional merge"
   merge_values=$(decode_github_merge_object "$merge_output" result) || die "GitHub returned malformed merge confirmation data"

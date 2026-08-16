@@ -367,7 +367,13 @@ print(base64.b64encode(raw.encode()).decode() if " --jq " in f" {arguments} " el
 PY
         ;;
       */git/ref/heads/*)
-        python3 - "$FM_TEST_GH_MERGE_SHA" <<'PY'
+        ref_count=$(grep -c '^api GET /repos/example/repo/git/ref/heads/' "$FM_TEST_GH_AXI_LOG")
+        case "$ref_count" in
+          1) ref_sha=${FM_TEST_GH_LIVE_BASE:-$FM_TEST_GH_BASE} ;;
+          2) ref_sha=${FM_TEST_GH_LIVE_BASE_AFTER:-${FM_TEST_GH_LIVE_BASE:-$FM_TEST_GH_BASE}} ;;
+          *) ref_sha=$FM_TEST_GH_MERGE_SHA ;;
+        esac
+        python3 - "$ref_sha" <<'PY'
 import base64
 import json
 import sys
@@ -429,6 +435,8 @@ run_github_merge() {
     FM_TEST_GH_BASE_AFTER="${FM_TEST_GH_BASE_AFTER:-}" \
     FM_TEST_GH_PROTECTION="${FM_TEST_GH_PROTECTION:-protected}" \
     FM_TEST_GH_PROTECTION_AFTER="${FM_TEST_GH_PROTECTION_AFTER:-}" \
+    FM_TEST_GH_LIVE_BASE="${FM_TEST_GH_LIVE_BASE:-}" \
+    FM_TEST_GH_LIVE_BASE_AFTER="${FM_TEST_GH_LIVE_BASE_AFTER:-}" \
     FM_TEST_GH_BASE_AT_MUTATION="${FM_TEST_GH_BASE_AT_MUTATION:-}" \
     FM_TEST_GH_MERGE_SHA=9999999999999999999999999999999999999999 \
     FM_TEST_GH_MERGED="${FM_TEST_GH_MERGED:-true}" \
@@ -449,6 +457,8 @@ run_github_execute() {
     FM_TEST_GH_BASE_AFTER="${FM_TEST_GH_BASE_AFTER:-}" \
     FM_TEST_GH_PROTECTION="${FM_TEST_GH_PROTECTION:-protected}" \
     FM_TEST_GH_PROTECTION_AFTER="${FM_TEST_GH_PROTECTION_AFTER:-}" \
+    FM_TEST_GH_LIVE_BASE="${FM_TEST_GH_LIVE_BASE:-}" \
+    FM_TEST_GH_LIVE_BASE_AFTER="${FM_TEST_GH_LIVE_BASE_AFTER:-}" \
     FM_TEST_GH_BASE_AT_MUTATION="${FM_TEST_GH_BASE_AT_MUTATION:-}" \
     FM_TEST_GH_MERGE_SHA=9999999999999999999999999999999999999999 \
     FM_TEST_GH_MERGED="${FM_TEST_GH_MERGED:-true}" \
@@ -663,7 +673,9 @@ test_github_merge_uses_verified_exact_sha() {
     || fail "GitHub boundary did not condition the merge on the verified exact SHA"
   [ "$(grep -c '^api POST ' "$case_dir/gh-axi.log")" -eq 1 ] \
     || fail "protected GitHub merge changed the legacy request sequence"
-  pass "GitHub merge conditions its REST request on the verified candidate SHA"
+  ! grep -q '^api GET /repos/example/repo/git/ref/heads/' "$case_dir/gh-axi.log" \
+    || fail "protected GitHub merge unexpectedly used the unprotected live-base path"
+  pass "protected GitHub merge retains its request sequence and exact candidate SHA condition"
 }
 
 test_secondmate_cross_clone_github_merge_accepts_same_repository() {
@@ -1087,6 +1099,32 @@ test_unprotected_github_merge_uses_verified_exact_sha() {
   pass "GitHub merge sanctions a null protection rule without weakening the exact candidate mutation"
 }
 
+test_unprotected_github_merge_attributes_an_advanced_live_base() {
+  local values case_dir stale_base advanced_base candidate
+  values=$(make_case github-unprotected-advanced-live-base)
+  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+  stale_base=$(printf '%s\n' "$values" | sed -n '2p')
+  printf 'advanced base\n' > "$case_dir/project/advanced-base.txt"
+  git -C "$case_dir/project" add advanced-base.txt
+  git -C "$case_dir/project" commit -qm advanced-base
+  advanced_base=$(git -C "$case_dir/project" rev-parse main)
+  git -C "$case_dir/wt" rebase main >/dev/null
+  candidate=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/wt" merge-base --is-ancestor "$advanced_base" "$candidate" \
+    || fail "advanced-base fixture did not leave the live base in candidate ancestry"
+  fm_write_meta "$case_dir/state/task-x1.meta" "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" "kind=ship" "mode=no-mistakes"
+  add_github_mocks "$case_dir"
+  FM_TEST_GH_PROTECTION=null FM_TEST_GH_LIVE_BASE="$advanced_base" \
+    FM_TEST_GH_BASE_AT_MUTATION="$advanced_base" \
+    run_github_merge "$case_dir" "$candidate" "$candidate" "$stale_base" squash >"$case_dir/out" 2>"$case_dir/err" \
+    || fail "unprotected GitHub merge did not attribute an advanced live base: $(cat "$case_dir/err")"
+  [ "$(grep -c '^api GET /repos/example/repo/git/ref/heads/main ' "$case_dir/gh-axi.log")" -eq 3 ] \
+    || fail "unprotected merge did not resolve, recheck, and verify the live base ref"
+  grep -qxF "merged exact GitHub candidate $candidate into main at base $advanced_base" "$case_dir/out" \
+    || fail "unprotected merge attributed its success to the stale PR base"
+  pass "unprotected GitHub merge attributes an advanced live base instead of stale PR base data"
+}
+
 test_github_merge_bootstraps_inventory_from_exact_candidate() {
   local values case_dir base candidate out
   values=$(make_bootstrap_case github-bootstrap)
@@ -1228,6 +1266,34 @@ test_unprotected_github_merge_refuses_changed_remote_base() {
     || fail "GitHub base drift refusal did not identify the verification race"
   ! grep -q '^api PUT ' "$case_dir/gh-axi.log" || fail "changed GitHub base reached the merge API"
   pass "unprotected GitHub merge refuses remote base drift even when the new base remains an ancestor"
+}
+
+test_unprotected_github_merge_refuses_live_base_drift_at_mutation_boundary() {
+  local values case_dir base advanced_base candidate rc
+  values=$(make_case github-live-base-boundary-drift)
+  case_dir=$(printf '%s\n' "$values" | sed -n '1p')
+  base=$(printf '%s\n' "$values" | sed -n '2p')
+  printf 'advanced base\n' > "$case_dir/project/advanced-base.txt"
+  git -C "$case_dir/project" add advanced-base.txt
+  git -C "$case_dir/project" commit -qm advanced-base
+  advanced_base=$(git -C "$case_dir/project" rev-parse main)
+  git -C "$case_dir/wt" rebase main >/dev/null
+  candidate=$(git -C "$case_dir/wt" rev-parse HEAD)
+  fm_write_meta "$case_dir/state/task-x1.meta" "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" "kind=ship" "mode=no-mistakes"
+  add_github_mocks "$case_dir"
+  set +e
+  FM_TEST_GH_PROTECTION=null FM_TEST_GH_LIVE_BASE="$base" FM_TEST_GH_LIVE_BASE_AFTER="$advanced_base" \
+    run_github_merge "$case_dir" "$candidate" "$candidate" "$base" >"$case_dir/out" 2>"$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "live-base drift adjacent to mutation must refuse an unprotected merge"
+  git -C "$case_dir/wt" merge-base --is-ancestor "$advanced_base" "$candidate" \
+    || fail "live-base boundary fixture did not retain candidate ancestry"
+  grep -q 'live GitHub base changed during merge verification' "$case_dir/err" \
+    || fail "live-base boundary drift refusal was unclear"
+  ! grep -q '^api PUT ' "$case_dir/gh-axi.log" \
+    || fail "live-base drift adjacent to mutation reached the merge API"
+  pass "unprotected GitHub merge refuses live-base drift at the mutation boundary"
 }
 
 test_unprotected_github_merge_refuses_unattributed_mutation_base_drift() {
@@ -1466,6 +1532,7 @@ test_github_merge_capture_bounds_reentrant_gh
 test_merge_execute_bounds_inherited_lock_reentry
 test_merge_execute_reentry_without_lock_fails_typed
 test_unprotected_github_merge_uses_verified_exact_sha
+test_unprotected_github_merge_attributes_an_advanced_live_base
 test_github_merge_bootstraps_inventory_from_exact_candidate
 test_github_merge_bootstraps_testless_inventory_from_exact_candidate
 test_github_merge_bootstrap_refuses_absent_candidate_declaration
@@ -1476,6 +1543,7 @@ test_github_merge_bootstrap_refuses_malformed_or_ambiguous_declaration
 test_github_merge_existing_base_keeps_transition_verification
 test_github_merge_refuses_changed_remote_head
 test_unprotected_github_merge_refuses_changed_remote_base
+test_unprotected_github_merge_refuses_live_base_drift_at_mutation_boundary
 test_unprotected_github_merge_refuses_unattributed_mutation_base_drift
 test_unprotected_github_rebase_accepts_nonempty_candidate
 test_unprotected_github_rebase_refuses_empty_commit_masked_drift

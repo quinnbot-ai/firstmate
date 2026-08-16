@@ -19,7 +19,7 @@ A structured protection rule remains supported only when it contains exactly one
 A literal `branchProtectionRule: null` is the one sanctioned unprotected-repository path and does not synthesize strict or administrator values.
 Selecting that path emits an explicit diagnostic before proceeding.
 Missing, duplicate, non-null scalar, partial-object, or null-with-child protection data is malformed or ambiguous and fails closed.
-Both protection paths verify the requested canonical PR identity, current exact head and base OIDs, and candidate ancestry.
+Both protection paths verify the requested canonical PR identity, exact head, and candidate ancestry.
 The normal repository proof remains one shared Git common directory for the task worktree and project checkout.
 A PR task may instead use a pooled worktree from another clone only when the metadata project is either the active Firstmate home root for a project-less secondmate or one immediate child of that home's `projects/` directory for a provisioned project.
 No sibling of the home root, nested project path, or project from another home satisfies this ownership proof.
@@ -29,7 +29,7 @@ Missing, duplicate, unsupported-host, different-owner, different-repository, and
 Local-only landing still requires one shared Git common directory and never uses cross-clone equivalence.
 Immediately before a cross-clone GitHub mutation, the boundary revalidates the task metadata, active-home ownership, both Git common directories, both canonical origin identities, and the requested PR repository identity.
 This source-identity proof does not replace no-mistakes' separate canonical delivery-target selection, change which home supplies GitHub credentials, or relax exact-head and canonical PR checks.
-Immediately before an unprotected mutation, the boundary re-reads the PR and refuses any identity, head, base, state, or protection-data drift, then rechecks that the clean local worktree remains at the exact head.
+Immediately before an unprotected mutation, the boundary re-reads the PR and refuses any identity, head, state, or protection-data drift, resolves the live base repository ref rather than trusting the PR object's base OID, and rechecks both that ref and the clean local worktree at the exact head.
 The merge mutation is conditioned on that exact expected-head SHA, and both paths require GitHub to confirm that it merged the conditional request.
 GitHub's merge API exposes an expected-head precondition but no expected-base OID precondition.
 The unprotected response must also identify the resulting commit.
