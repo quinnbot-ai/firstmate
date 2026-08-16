@@ -92,6 +92,8 @@ bin/fm-test-run.sh --check-coverage
 `bin/fm-test-run.sh --check-coverage` verifies that both parallel lanes partition the proven-isolated set.
 It also verifies that the parallel lanes, portable serial lane, real-Herdr family, and native-backend-gated family are disjoint and cover every `tests/*.test.sh` script.
 It separately verifies that the portable serial CI shards are non-empty, disjoint, and together equal the portable serial lane.
+`bin/fm-test-run.sh --check-test-count --base <git-ref>` verifies that the candidate's `tests/*.test.sh` inventory is not smaller than the correct merge base.
+The CI coverage job fetches complete history and supplies GitHub's exact base SHA to this guard.
 
 ## Timing artifacts
 

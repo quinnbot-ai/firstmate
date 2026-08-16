@@ -34,8 +34,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - name: Prove complete regression partition
         run: bin/fm-test-run.sh --check-coverage
+      - name: Prove test count does not fall from the merge base
+        run: bin/fm-test-run.sh --check-test-count --base "${GITHUB_BASE_SHA:-origin/main}"
 
   # Two duration-balanced portable parallel shards of the Phase 2 proven-isolated
   # set only. Composition owner: bin/fm-test-run.sh (docs/fm-test-portable-shards.md).

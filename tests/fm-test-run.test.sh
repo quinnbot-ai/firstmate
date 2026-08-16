@@ -2,7 +2,7 @@
 # Contract tests for bin/fm-test-run.sh - the single owner of behavior suite
 # selection, portable lane composition, declarative runtime-gate evidence,
 # proven-isolated --jobs, timing markers, JSON artifacts, coverage guard, and
-# aggregate exit status.
+# aggregate exit status, and the merge-base test-count floor.
 #
 # These tests intentionally exercise the runner with fixtures, --list, and
 # focused scheduler checks, not the complete Firstmate suite.
@@ -153,6 +153,49 @@ test_single_script_selection() {
   [ "$listed" = "tests/fm-lint.test.sh" ] \
     || fail "single-script list expected tests/fm-lint.test.sh, got: $listed"
   pass "single-script selection lists exactly that path"
+}
+
+test_test_count_floor_passes_at_merge_base_count() {
+  local tmp repo base out
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-count-pass.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+  base=$(git -C "$repo" rev-parse HEAD)
+  rm "$repo/tests/fm-backend-orca.test.sh"
+  printf '#!/usr/bin/env bash\n' >"$repo/tests/fm-new-count.test.sh"
+  chmod +x "$repo/tests/fm-new-count.test.sh"
+  git -C "$repo" add tests
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid \
+    commit -qm equal-count
+  out=$(cd "$repo" && bin/fm-test-run.sh --check-test-count --base "$base") \
+    || { rm -rf "$tmp"; fail "equal test count should pass"; }
+  printf '%s\n' "$out" | grep -Fq 'FM_TEST_COUNT_FLOOR ok' \
+    || { rm -rf "$tmp"; fail "equal-count pass lacked typed evidence: $out"; }
+  rm -rf "$tmp"
+  pass "test-count floor passes when candidate count equals merge-base count"
+}
+
+test_test_count_floor_rejects_deleted_test() {
+  local tmp repo base out rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-count-fail.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+  base=$(git -C "$repo" rev-parse HEAD)
+  rm "$repo/tests/fm-backend-orca.test.sh"
+  git -C "$repo" add tests/fm-backend-orca.test.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid \
+    commit -qm delete-test
+  set +e
+  out=$(cd "$repo" && bin/fm-test-run.sh --check-test-count --base "$base" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "deleted test should fail the count floor"; }
+  printf '%s\n' "$out" | grep -Fq 'test-count guard: candidate test inventory fell' \
+    || { rm -rf "$tmp"; fail "deleted-test failure lacked count diagnostic: $out"; }
+  printf '%s\n' "$out" | grep -Fq 'tests/fm-backend-orca.test.sh' \
+    || { rm -rf "$tmp"; fail "deleted-test failure lacked deleted path: $out"; }
+  rm -rf "$tmp"
+  pass "test-count floor rejects a candidate that deletes a test"
 }
 
 test_changed_file_selection_is_conservative() {
@@ -1989,6 +2032,8 @@ test_list_all_exact_suite_coverage
 test_family_selection
 test_committed_tests_have_semantic_families
 test_single_script_selection
+test_test_count_floor_passes_at_merge_base_count
+test_test_count_floor_rejects_deleted_test
 test_changed_file_selection_is_conservative
 test_changed_dependency_selection_and_unmapped_failure
 test_empty_selection_emits_summary
