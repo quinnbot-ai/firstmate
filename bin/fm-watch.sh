@@ -88,6 +88,8 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-nomistakes-liveness-lib.sh
+. "$SCRIPT_DIR/fm-nomistakes-liveness-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -177,6 +179,42 @@ EVENT_CAP_FAIL_MAX=${FM_EVENT_CAP_FAIL_MAX:-3}
 _event_cap_key=""
 _event_cap_ok=0
 _event_cap_fails=0
+
+# Observe active no-mistakes reviewer/fixer progress at a bounded cadence.
+# A real stall becomes one actionable check wake with exact run/step/age proof.
+# This only reads the attributed run and its active-step log, then records a
+# home-private receipt; it never aborts, restarts, or otherwise controls the
+# shared daemon or any pipeline run.  Away mode owns triage, so it deliberately
+# does not create a competing normal-mode liveness wake.
+nomistakes_liveness_tick() {
+  local meta task last now observation key marker
+  afk_present && return 0
+  now=$(date +%s)
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    task=$(basename "$meta" .meta)
+    marker="$STATE/.nomistakes-liveness-polled-$task"
+    last=$(cat "$marker" 2>/dev/null || true)
+    case "$last" in ''|*[!0-9]*) last=0 ;; esac
+    [ $(( now - last )) -ge "$FM_NOMISTAKES_LIVENESS_INTERVAL" ] || continue
+    printf '%s' "$now" > "$marker"
+    observation=$(fm_nomistakes_liveness_observe "$task")
+    case "$observation" in
+      nomistakes-liveness:\ stalled\ *)
+        key=$(printf '%s' "$task" | tr '/:.' '___')
+        if [ "$(cat "$STATE/.nomistakes-liveness-surfaced-$key" 2>/dev/null || true)" != "$observation" ]; then
+          fm_wake_append check "no-mistakes-liveness:$task" "check: $observation" || exit 1
+          printf '%s' "$observation" > "$STATE/.nomistakes-liveness-surfaced-$key"
+          wake "check: $observation"
+        fi
+        ;;
+      nomistakes-liveness:\ active\ *)
+        key=$(printf '%s' "$task" | tr '/:.' '___')
+        rm -f "$STATE/.nomistakes-liveness-surfaced-$key"
+        ;;
+    esac
+  done
+}
 
 # afk_present: 0 while the away-mode flag exists. When set, the daemon wraps this
 # watcher and owns triage, so the watcher must behave one-shot (enqueue + exit on
@@ -960,6 +998,8 @@ EOF
       triage_log "absorbed benign $reason"
     fi
   fi
+
+  nomistakes_liveness_tick
 
   # Layer 1 backbone: pane staleness. Two consecutive identical hashes with no busy
   # signature means the crewmate finished, is waiting, or is wedged. Each distinct

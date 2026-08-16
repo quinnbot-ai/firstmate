@@ -406,6 +406,17 @@ nm_run_head_matches_worktree() {
   return 1
 }
 
+# A matching receipt is a Firstmate-owned terminal diagnosis, not a pipeline
+# control action.  fm-watch removes it when attributed reviewer output resumes.
+nm_liveness_stall_for_run() {  # <run-id>
+  local run_id=$1 marker key
+  [ -n "$run_id" ] || return 1
+  key=$(printf '%s' "$ID" | tr '/:.' '___')
+  marker="$STATE/.nomistakes-liveness-surfaced-$key"
+  [ -f "$marker" ] || return 1
+  grep -F "nomistakes-liveness: stalled run=$run_id " "$marker" 2>/dev/null | tail -1 || true
+}
+
 # Coarse runs-list rows are "<status> <branch> <short-sha> ...". 0 if the short
 # sha for this branch row matches the worktree head under the same rules as
 # nm_run_head_matches_worktree (equal, or local is ancestor of run tip).
@@ -550,6 +561,15 @@ if [ "$HAVE_RUN" = 1 ]; then
     fi
     if [ "$CI_LOG_STATE" != not-ready ]; then
       emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
+    fi
+  fi
+
+  if [ "$RUN_STATE" = working ] && [ "$RUN_SOURCE" = full ]; then
+    run_id=$(strip_quotes "$(nm_field id)")
+    liveness_stall=$(nm_liveness_stall_for_run "$run_id")
+    if [ -n "$liveness_stall" ]; then
+      RUN_STATE=blocked
+      RUN_DETAIL="no-mistakes liveness terminal: $liveness_stall"
     fi
   fi
 

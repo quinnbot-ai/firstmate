@@ -87,6 +87,19 @@ fi
 exit 1
 SH
   chmod +x "$fakebin/tmux"
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  axi)
+    case "${2:-}" in
+      status) cat "${FM_FAKE_NM_STATUS_FILE:?}" ;;
+      logs) cat "${FM_FAKE_NM_LOG_FILE:?}" ;;
+    esac
+    ;;
+esac
+SH
+  chmod +x "$fakebin/no-mistakes"
   make_fake_crew_state "$fakebin" >/dev/null
   printf '%s\n' "$dir"
 }
