@@ -358,6 +358,22 @@ test_active_run_is_authoritative() {
   pass "active run-step is authoritative"
 }
 
+test_liveness_stall_receipt_blocks_matching_active_run() {
+  reset_fakes
+  local d out
+  d=$(new_case liveness-terminal)
+  make_repo_on_branch "$d/wt" fm/liveness-terminal
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/liveness-terminal.meta" "window=fm:fm-liveness-terminal" "worktree=$d/wt" "kind=ship"
+  printf 'nomistakes-liveness: stalled run=01RUN step=review unchanged=1200s threshold=1200s\n' \
+    > "$d/state/.nomistakes-liveness-surfaced-liveness-terminal"
+  FM_FAKE_AXI_STATUS="$(run_running fm/liveness-terminal)"
+  out=$(run_crew_state "$d" liveness-terminal)
+  assert_contains "$out" "state: blocked" "matching liveness receipt makes the active run actionable"
+  assert_contains "$out" "no-mistakes liveness terminal" "liveness terminal preserves exact diagnostic source"
+  pass "matching reviewer stall receipt is terminal until reviewer progress clears it"
+}
+
 # (b) needs-decision log + a resumed (running/fixing) run = SUPERSEDED
 test_stale_needs_decision_superseded() {
   reset_fakes
@@ -1310,6 +1326,7 @@ test_missing_run_head_falls_back_to_current_state() {
 }
 
 test_active_run_is_authoritative
+test_liveness_stall_receipt_blocks_matching_active_run
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
 test_genuine_parked_not_superseded
