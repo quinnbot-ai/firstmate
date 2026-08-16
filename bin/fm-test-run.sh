@@ -22,6 +22,7 @@
 #   fm-test-run.sh --list-families
 #   fm-test-run.sh --list-lanes
 #   fm-test-run.sh --check-coverage
+#   fm-test-run.sh --check-test-count [--base <git-ref>]
 #
 # Aggregation (no suite execution):
 #   fm-test-run.sh --aggregate-json <out.json> <lane.json> [more lane.json...]
@@ -34,7 +35,8 @@
 #                   current-state records under the selected directory. Requires
 #                   python3 when enabled.
 #   --list          print selected script paths (one per line) and exit 0
-#   --base <ref>    with --changed, compare against this ref (default: origin/main)
+#   --base <ref>    with --changed or --check-test-count, compare against this ref
+#                   (default: origin/main)
 #   --exclude-family <name>
 #                   drop scripts whose primary family matches <name> after selection
 #                   (repeatable; portable CI lanes exclude the dedicated
@@ -92,6 +94,7 @@ LIST_ONLY=0
 LIST_FAMILIES=0
 LIST_LANES=0
 CHECK_COVERAGE=0
+CHECK_TEST_COUNT=0
 AGGREGATE_OUT=
 FAMILY=
 LANE=
@@ -1107,6 +1110,34 @@ run_coverage_guard() {
   return 0
 }
 
+test_count_at_revision() {
+  local revision=$1
+  git ls-tree -r --name-only "$revision" -- tests |
+    awk '{ parts = split($0, path, "/") } parts == 2 && path[1] == "tests" && path[2] ~ /\.test\.sh$/ { count += 1 } END { print count + 0 }'
+}
+
+run_test_count_guard() {
+  local candidate merge_base base_count candidate_count deleted
+  candidate=$(git rev-parse --verify 'HEAD^{commit}') || die "cannot resolve candidate HEAD"
+  merge_base=$(git merge-base "$candidate" "$BASE_REF") ||
+    die "cannot find merge base between candidate $candidate and base '$BASE_REF'"
+  base_count=$(test_count_at_revision "$merge_base")
+  candidate_count=$(test_count_at_revision "$candidate")
+  if [ "$candidate_count" -lt "$base_count" ]; then
+    log "test-count guard: candidate test inventory fell from $base_count to $candidate_count"
+    deleted=$(git diff --name-status "$merge_base" "$candidate" -- tests |
+      awk '$1 == "D" && index($2, "tests/") == 1 && $2 ~ /\.test\.sh$/ { print $2 }')
+    [ -z "$deleted" ] || {
+      log "deleted test files:"
+      printf '%s\n' "$deleted" >&2
+    }
+    return 1
+  fi
+  printf 'FM_TEST_COUNT_FLOOR ok merge_base=%s base=%s candidate=%s candidate_count=%s\n' \
+    "$merge_base" "$BASE_REF" "$candidate" "$candidate_count"
+  return 0
+}
+
 aggregate_timing_json() {
   local out=$1
   shift
@@ -1699,6 +1730,10 @@ while [ "$#" -gt 0 ]; do
       CHECK_COVERAGE=1
       shift
       ;;
+    --check-test-count)
+      CHECK_TEST_COUNT=1
+      shift
+      ;;
     --aggregate-json)
       [ "$#" -gt 1 ] || die "--aggregate-json requires an output path"
       AGGREGATE_OUT=$2
@@ -1773,7 +1808,21 @@ if [ "$LIST_LANES" -eq 1 ]; then
 fi
 
 if [ "$CHECK_COVERAGE" -eq 1 ]; then
-  run_coverage_guard
+  coverage_rc=0
+  run_coverage_guard || coverage_rc=$?
+else
+  coverage_rc=0
+fi
+
+if [ "$CHECK_TEST_COUNT" -eq 1 ]; then
+  test_count_rc=0
+  run_test_count_guard || test_count_rc=$?
+else
+  test_count_rc=0
+fi
+
+if [ "$CHECK_COVERAGE" -eq 1 ] || [ "$CHECK_TEST_COUNT" -eq 1 ]; then
+  [ "$coverage_rc" -eq 0 ] && [ "$test_count_rc" -eq 0 ]
   exit $?
 fi
 
