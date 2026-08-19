@@ -579,6 +579,194 @@ fm_backend_zellij_send_text_submit() {  # <target> <text> <retries> <enter-sleep
     "$target" "$retries" "$sleep_s" "$expected_label"
 }
 
+# --- agent lifecycle: nonce-bound exit receipts ------------------------------
+#
+# Zellij exposes no per-pane process id and no agent-process liveness signal,
+# so nothing readable from the session can prove that a launched harness agent
+# has STOPPED. Screen shape cannot close that gap either: the shared composer
+# classifier (bin/fm-composer-lib.sh) answers "is a composer drawn", and its
+# `unknown` deliberately covers both "no agent" and "a redraw this adapter
+# cannot read". Recovery needs a positive, forgeable-only-by-this-home proof.
+#
+# The exit receipt supplies it. Spawn arms a fresh 128-bit nonce in private
+# per-task state, then wraps the launch command so the pane's own shell writes
+# a receipt carrying that nonce and the harness's exit status the moment the
+# harness returns. Only a receipt whose nonce matches the CURRENT armed nonce
+# proves this launch exited, so a stale receipt from an earlier incarnation, a
+# reused pane id, or a recreated session never reads as proof.
+#
+# This is deliberately generic: it wraps whatever launch command the caller
+# built, for any harness, and reads nothing the harness renders.
+
+# fm_backend_zellij_lifecycle_paths: the nonce authority and exit receipt owned
+# by one task label. Prints the authority path then the receipt path.
+fm_backend_zellij_lifecycle_paths() {  # <expected-label>
+  local label=$1 id state
+  case "$label" in
+    fm-?*) id=${label#fm-} ;;
+    *) return 1 ;;
+  esac
+  case "$id" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+  state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
+  printf '%s\n%s\n' "$state/$id.zellij-lifecycle" "$state/$id.zellij-exited"
+}
+
+# A 32-hex-character nonce, or a refusal. Never falls back to a weaker source:
+# a predictable nonce would let a stale receipt masquerade as current proof.
+fm_backend_zellij_lifecycle_nonce() {
+  local nonce
+  nonce=$(LC_ALL=C od -An -v -tx1 -N 16 /dev/urandom 2>/dev/null | tr -d ' \n') || return 1
+  case "$nonce" in ''|*[!0-9a-f]*) return 1 ;; esac
+  [ "${#nonce}" -eq 32 ] || return 1
+  printf '%s' "$nonce"
+}
+
+# fm_backend_zellij_lifecycle_arm: publish a fresh nonce for <expected-label>
+# and drop any receipt left by a previous incarnation. Prints the nonce for the
+# caller to hand to fm_backend_zellij_wrap_launch. Called once per spawn,
+# BEFORE the launch command is sent.
+fm_backend_zellij_lifecycle_arm() {  # <expected-label>
+  local paths authority receipt nonce tmp
+  paths=$(fm_backend_zellij_lifecycle_paths "$1") || return 1
+  authority=${paths%%$'\n'*}
+  receipt=${paths#*$'\n'}
+  nonce=$(fm_backend_zellij_lifecycle_nonce) || return 1
+  tmp=$(umask 077; mktemp "$authority.tmp.XXXXXX") || return 1
+  if ! printf '%s\n' "$nonce" > "$tmp" || ! mv -f -- "$tmp" "$authority"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  rm -f -- "$receipt"
+  printf '%s' "$nonce"
+}
+
+# fm_backend_zellij_lifecycle_state: what the private lifecycle records say
+# about <expected-label>.
+#   absent  - never armed (a pre-lifecycle task, or cleared state).
+#   running - armed with no matching receipt yet.
+#   exited  - a receipt whose nonce matches the current armed nonce.
+#   unknown - the records exist but are malformed or contradictory.
+# Only `exited` is ever recovery proof; every other value stays inconclusive.
+fm_backend_zellij_lifecycle_state() {  # <expected-label>
+  local paths authority receipt expected nonce status extra
+  paths=$(fm_backend_zellij_lifecycle_paths "$1" 2>/dev/null) || { printf 'absent'; return 0; }
+  authority=${paths%%$'\n'*}
+  receipt=${paths#*$'\n'}
+  [ -f "$authority" ] || { printf 'absent'; return 0; }
+  IFS= read -r expected < "$authority" 2>/dev/null || { printf 'unknown'; return 0; }
+  case "$expected" in
+    *[!0-9a-f]*|'') printf 'unknown'; return 0 ;;
+  esac
+  [ "${#expected}" -eq 32 ] || { printf 'unknown'; return 0; }
+  [ -f "$receipt" ] || { printf 'running'; return 0; }
+  nonce='' status='' extra=''
+  IFS=' ' read -r nonce status extra < "$receipt" 2>/dev/null || { printf 'unknown'; return 0; }
+  if [ -n "$extra" ] || [ "$nonce" != "$expected" ]; then
+    printf 'unknown'
+    return 0
+  fi
+  case "$status" in ''|*[!0-9]*) printf 'unknown' ;; *) printf 'exited' ;; esac
+}
+
+# Single-quote <text> for the pane shell. Local to this adapter because the
+# wrapper below is the only thing here that composes shell source text.
+fm_backend_zellij_shell_quote() {  # <text>
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
+# fm_backend_zellij_wrap_launch: wrap <launch-command> so the pane's own shell
+# publishes the nonce-bound exit receipt when the harness returns. The wrapper
+# preserves the harness's exit status, re-reads the authority at exit time so a
+# task that has since been re-armed cannot overwrite the newer incarnation's
+# receipt, and writes through a temp file plus rename so a partially written
+# receipt is never readable. It renders nothing into the pane, so the shared
+# composer classifier keeps reading exactly what the harness drew.
+fm_backend_zellij_wrap_launch() {  # <expected-label> <launch-command> <nonce>
+  local paths authority receipt nonce=$3 authority_q receipt_q nonce_q
+  paths=$(fm_backend_zellij_lifecycle_paths "$1") || return 1
+  authority=${paths%%$'\n'*}
+  receipt=${paths#*$'\n'}
+  [ "$(cat "$authority" 2>/dev/null)" = "$nonce" ] || return 1
+  authority_q=$(fm_backend_zellij_shell_quote "$authority")
+  receipt_q=$(fm_backend_zellij_shell_quote "$receipt")
+  nonce_q=$(fm_backend_zellij_shell_quote "$nonce")
+  # shellcheck disable=SC2016 # The status expansion belongs to the pane shell.
+  printf '( %s ); fm_zellij_exit=$?; if [ "$(cat %s 2>/dev/null)" = %s ]; then fm_zellij_tmp=$(mktemp %s.tmp.XXXXXX 2>/dev/null) && (umask 077; printf "%%s %%s\\n" %s "$fm_zellij_exit" > "$fm_zellij_tmp") && mv -f -- "$fm_zellij_tmp" %s || { [ -z "${fm_zellij_tmp:-}" ] || rm -f -- "$fm_zellij_tmp"; }; fi; unset fm_zellij_exit fm_zellij_tmp' \
+    "$2" "$authority_q" "$nonce_q" "$receipt_q" "$nonce_q" "$receipt_q"
+}
+
+# fm_backend_zellij_agent_state: recovery-grade agent state for one recorded
+# endpoint. See bin/fm-backend.sh's fm_backend_agent_state for the shared
+# vocabulary. The recorded task label is required: without it neither the
+# endpoint's identity nor its exit receipt can be resolved, and an unprovable
+# read must never license a respawn.
+#
+# Identity is checked before any receipt is trusted, so a recreated session or
+# a reused pane id reads ambiguous rather than dead. `dead` therefore requires
+# BOTH a still-matching endpoint identity and a receipt bound to the current
+# launch nonce.
+fm_backend_zellij_agent_state() {  # <target> [expected-label]
+  local target=$1 expected_label=${2:-} session pane sessions panes tabs tab_id
+  local lifecycle scoped matches
+  fm_backend_zellij_parse_target "$target" || { printf 'unreadable'; return 0; }
+  session=$FM_BACKEND_ZELLIJ_SESSION
+  pane=$FM_BACKEND_ZELLIJ_PANE
+  case "$pane" in *[!0-9]*) printf 'unreadable'; return 0 ;; esac
+  case "$expected_label" in fm-?*) ;; *) printf 'unreadable'; return 0 ;; esac
+
+  # A failed session inventory is never `missing`: the CLI's own exit status is
+  # not a reliable "no such session" signal, so only a SUCCESSFUL listing that
+  # omits the recorded session proves it gone.
+  sessions=$(zellij list-sessions --short --no-formatting 2>/dev/null) \
+    || { printf 'unreadable'; return 0; }
+  printf '%s\n' "$sessions" | grep -qxF "$session" || { printf 'missing'; return 0; }
+
+  lifecycle=$(fm_backend_zellij_lifecycle_state "$expected_label")
+  [ "$lifecycle" != unknown ] || { printf 'ambiguous'; return 0; }
+
+  # zellij's CLI can exit 0 with empty or partial output, so the inventory's
+  # SHAPE is what separates "read it" from "could not read it".
+  panes=$(fm_backend_zellij_cli "$session" action list-panes --json 2>/dev/null)
+  printf '%s' "$panes" | jq -e 'type == "array" and all(.[]; type == "object" and (.id | type == "number") and (.tab_id | type == "number") and (.is_plugin | type == "boolean"))' >/dev/null 2>&1 \
+    || { printf 'unreadable'; return 0; }
+  matches=$(printf '%s' "$panes" | jq -r --argjson p "$pane" '[.[] | select(.id == $p and .is_plugin == false)] | length')
+
+  if [ "$matches" = 1 ]; then
+    tab_id=$(printf '%s' "$panes" | jq -r --argjson p "$pane" '.[] | select(.id == $p and .is_plugin == false) | .tab_id')
+    fm_backend_zellij_tab_matches_label "$session" "$tab_id" "$expected_label" \
+      || { printf 'ambiguous'; return 0; }
+    case "$lifecycle" in
+      exited) printf 'dead' ;;
+      running) printf 'alive' ;;
+      *) printf 'ambiguous' ;;
+    esac
+    return 0
+  fi
+  if [ "$matches" != 0 ]; then
+    printf 'ambiguous'
+    return 0
+  fi
+
+  # The recorded pane is gone. Closing a pane leaves its tab behind, so an
+  # absent pane alone is not proof the task endpoint is gone; only a tab
+  # listing with no tab carrying this task's title is authoritatively missing.
+  tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null)
+  printf '%s' "$tabs" | jq -e 'type == "array" and all(.[]; type == "object" and (.tab_id | type == "number") and (.name | type == "string"))' >/dev/null 2>&1 \
+    || { printf 'unreadable'; return 0; }
+  scoped=$(fm_backend_zellij_scoped_title "$expected_label")
+  matches=$(printf '%s' "$tabs" | jq -r --arg scoped "$scoped" --arg legacy "$expected_label" '[.[] | select(.name == $scoped or .name == $legacy)] | length')
+  if [ "$matches" = 0 ]; then
+    printf 'missing'
+    return 0
+  fi
+  case "$lifecycle" in
+    exited) printf 'dead' ;;
+    *) printf 'ambiguous' ;;
+  esac
+}
+
 # fm_backend_zellij_kill: remove the task's tab, best-effort (mirrors
 # tmux-kill-window's/herdr-pane-close's `|| true` contract). Verified: unlike
 # herdr, closing a zellij tab's only PANE does NOT close the tab itself (an

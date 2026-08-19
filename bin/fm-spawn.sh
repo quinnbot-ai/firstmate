@@ -2805,6 +2805,21 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
     LAUNCH="unset TRACEPARENT; $LAUNCH"
   fi
 fi
+# Zellij has no readable agent process, so the nonce-bound receipt this wrapper
+# publishes is the only proof recovery ever gets that the agent returned
+# (bin/backends/zellij.sh "agent lifecycle"). Arm and wrap the FINAL command,
+# on a fresh spawn and a relaunch alike: arming also discards the previous
+# incarnation's receipt, so a reused endpoint cannot inherit an older exit.
+if [ "$BACKEND" = zellij ]; then
+  if ! ZELLIJ_LIFECYCLE_NONCE=$(fm_backend_zellij_lifecycle_arm "$W"); then
+    echo "error: could not arm the zellij exit receipt for $W; refusing to launch an agent whose exit could never be proven" >&2
+    exit 1
+  fi
+  if ! LAUNCH=$(fm_backend_zellij_wrap_launch "$W" "$LAUNCH" "$ZELLIJ_LIFECYCLE_NONCE"); then
+    echo "error: could not wrap the zellij launch command for $W; refusing to launch an agent whose exit could never be proven" >&2
+    exit 1
+  fi
+fi
 sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3

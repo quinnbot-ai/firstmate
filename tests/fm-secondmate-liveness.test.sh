@@ -191,11 +191,14 @@ test_agent_state_dispatcher_and_compatibility() {
   [ "$out" = alive ] || fail "detailed dispatcher should route Herdr, got '$out'"
 
   out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state zellij sess:7' "$ROOT")
-  [ "$out" = unverified ] || fail "Zellij should remain unverified, got '$out'"
+  [ "$out" = unreadable ] || fail "Zellij with no recorded task label should be unreadable, got '$out'"
   out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive zellij sess:7' "$ROOT")
-  [ "$out" = unknown ] || fail "the compatibility dispatcher should map unverified to unknown, got '$out'"
+  [ "$out" = unknown ] || fail "the compatibility dispatcher should map unreadable to unknown, got '$out'"
 
-  pass "fm_backend_agent_state: routes tmux/Herdr and keeps Zellij unverified"
+  out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state orca sess:7' "$ROOT")
+  [ "$out" = unverified ] || fail "Orca should remain unverified, got '$out'"
+
+  pass "fm_backend_agent_state: routes tmux/Herdr/Zellij and keeps unclassified backends unverified"
 }
 
 # --- sweep level: bin/fm-bootstrap.sh's secondmate_liveness_sweep -----------
@@ -390,6 +393,133 @@ test_sweep_leaves_alive_secondmate_untouched() {
   pass "sweep: an already-live secondmate is untouched and distinguishable in verbose diagnostics"
 }
 
+# make_liveness_zellij <dir>: a controllable zellij stub for the sweep. It
+# reports one live session holding the recorded task's tab and pane, so the
+# only thing that varies between the cases below is the private exit receipt.
+make_liveness_zellij() {
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/zellij" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "${FM_ZELLIJ_CALL_LOG:?}"
+case "$*" in
+  --version) printf 'zellij 0.44.0\n' ;;
+  *list-sessions*) printf '%s\n' "${FM_TEST_ZELLIJ_SESSIONS-firstmate}" ;;
+  *"action list-panes"*) printf '%s\n' "${FM_TEST_ZELLIJ_PANES:?}" ;;
+  *"action list-tabs"*) printf '%s\n' "${FM_TEST_ZELLIJ_TABS:?}" ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/zellij"
+  printf '%s\n' "$fakebin"
+}
+
+# add_zellij_endpoint <w> <id>: point an existing secondmate meta at a zellij
+# endpoint and arm its lifecycle nonce, exactly as a spawn would. Echoes the nonce.
+add_zellij_endpoint() {  # <w> <id>
+  local w=$1 id=$2
+  {
+    printf 'backend=zellij\n'
+    printf 'zellij_session=firstmate\n'
+    printf 'zellij_tab_id=3\n'
+    printf 'zellij_pane_id=7\n'
+  } >> "$w/home/state/$id.meta"
+  FM_STATE_OVERRIDE="$w/home/state" FM_HOME="$w/home" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_lifecycle_arm "$1"' "$ROOT" "fm-$id"
+}
+
+# zellij_scoped_tabs <w> <id> <root>: the tab listing a live task tab produces,
+# using the same home tag bin/fm-backend-hometag-lib.sh derives for this home
+# and the code root the sweep under test resolves.
+zellij_scoped_tabs() {  # <w> <id> <root>
+  local w=$1 id=$2 root=$3 title
+  title=$(FM_HOME="$w/home" FM_ROOT_OVERRIDE="$root" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_scoped_title "$1"' "$ROOT" "fm-$id")
+  printf '[{"tab_id":3,"name":"%s"}]' "$title"
+}
+
+# make_zellij_spawn_stub <w>: a code root whose fm-spawn.sh only records that it
+# was asked to relaunch, so the sweep's decision is observed without launching
+# a real agent. Echoes the root.
+make_zellij_spawn_stub() {  # <w>
+  local w=$1 root="$1/root"
+  mkdir -p "$root/bin"
+  cat > "$root/bin/fm-spawn.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'RESPAWN %s\n' "$*" >> "${FM_ZELLIJ_CALL_LOG:?}"
+SH
+  chmod +x "$root/bin/fm-spawn.sh"
+  printf '%s\n' "$root"
+}
+
+run_bootstrap_zellij() {  # <fakebin> <home> <root> <call-log> [extra env...] -> stdout
+  local fb=$1 home=$2 root=$3 log=$4; shift 4
+  PATH="$fb:$BASE_PATH" TMUX='' FM_BACKEND=zellij FM_HOME="$home" \
+    FM_ROOT_OVERRIDE="$root" FM_ZELLIJ_CALL_LOG="$log" \
+    FM_TEST_ZELLIJ_PANES='[{"id":7,"tab_id":3,"is_plugin":false}]' \
+    env "$@" "$ROOT/bin/fm-bootstrap.sh" 2>&1
+}
+
+test_sweep_respawns_zellij_secondmate_with_a_proven_exit_receipt() {
+  local w fb zfb log out nonce root
+  w=$(new_world sweep-zellij-dead)
+  add_sm_home "$w" sm1 firstmate:7 codex
+  nonce=$(add_zellij_endpoint "$w" sm1) || fail "could not arm the zellij exit receipt"
+  # The launch wrapper published this when the agent returned.
+  printf '%s 0\n' "$nonce" > "$w/home/state/sm1.zellij-exited"
+  fb=$(make_toolchain "$w"); zfb=$(make_liveness_zellij "$w"); root=$(make_zellij_spawn_stub "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap_zellij "$zfb:$fb" "$w/home" "$root" "$log" \
+    FM_TEST_ZELLIJ_TABS="$(zellij_scoped_tabs "$w" sm1 "$root")")
+
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1:" \
+    "a successful zellij recovery should be handled silently"
+  assert_contains "$(cat "$log")" "RESPAWN sm1 --secondmate" \
+    "a zellij secondmate whose agent published a proven exit receipt must be relaunched"
+  pass "sweep: a zellij secondmate with a proven exit receipt is relaunched"
+}
+
+test_sweep_leaves_a_running_zellij_secondmate_untouched() {
+  local w fb zfb log out root
+  w=$(new_world sweep-zellij-alive)
+  add_sm_home "$w" sm1 firstmate:7 codex
+  add_zellij_endpoint "$w" sm1 >/dev/null || fail "could not arm the zellij exit receipt"
+  fb=$(make_toolchain "$w"); zfb=$(make_liveness_zellij "$w"); root=$(make_zellij_spawn_stub "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap_zellij "$zfb:$fb" "$w/home" "$root" "$log" \
+    FM_TEST_ZELLIJ_TABS="$(zellij_scoped_tabs "$w" sm1 "$root")" \
+    FM_BOOTSTRAP_VERBOSE_FACTS=1)
+
+  assert_contains "$out" "BOOTSTRAP_INFO: secondmate sm1 already live (backend=zellij)" \
+    "an armed zellij launch that has not returned must read as already live"
+  assert_not_contains "$(cat "$log")" "RESPAWN" \
+    "a running zellij secondmate must never be relaunched"
+  pass "sweep: a zellij secondmate whose launch has not returned is left alone"
+}
+
+test_sweep_never_acts_on_an_unproven_zellij_endpoint() {
+  local w fb zfb log out root
+  w=$(new_world sweep-zellij-unproven)
+  add_sm_home "$w" sm1 firstmate:7 codex
+  add_zellij_endpoint "$w" sm1 >/dev/null || fail "could not arm the zellij exit receipt"
+  # A receipt from some other incarnation is not proof of this one's exit.
+  printf '%032d 0\n' 0 > "$w/home/state/sm1.zellij-exited"
+  fb=$(make_toolchain "$w"); zfb=$(make_liveness_zellij "$w"); root=$(make_zellij_spawn_stub "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap_zellij "$zfb:$fb" "$w/home" "$root" "$log" \
+    FM_TEST_ZELLIJ_TABS="$(zellij_scoped_tabs "$w" sm1 "$root")")
+
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: skipped: existing endpoint has ambiguous agent process (backend=zellij)" \
+    "an unproven zellij endpoint must be reported, not recovered"
+  assert_not_contains "$(cat "$log")" "RESPAWN" \
+    "an unproven zellij endpoint must never be relaunched"
+  pass "sweep: an unproven zellij exit receipt never licenses a relaunch"
+}
+
 test_sweep_respawns_authoritatively_missing_pi_secondmate() {
   local w fb tmuxfb log out
   w=$(new_world sweep-missing-pi)
@@ -546,6 +676,9 @@ test_herdr_agent_state_preserves_husk_classifier
 test_agent_state_dispatcher_and_compatibility
 test_sweep_respawns_confirmed_dead_secondmate
 test_sweep_leaves_alive_secondmate_untouched
+test_sweep_respawns_zellij_secondmate_with_a_proven_exit_receipt
+test_sweep_leaves_a_running_zellij_secondmate_untouched
+test_sweep_never_acts_on_an_unproven_zellij_endpoint
 test_sweep_respawns_authoritatively_missing_pi_secondmate
 test_sweep_respawns_authoritatively_missing_pi_signed_secondmate
 test_sweep_never_acts_on_ambiguous_existing_process

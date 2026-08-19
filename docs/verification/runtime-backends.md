@@ -617,6 +617,13 @@ tests/fm-backend-zellij-smoke.test.sh
 
 The real lifecycle smoke proved spawn, metadata, nested-subshell worktree discovery, send, capture, unlanded-work refusal, approved local landing, exact tab cleanup, and session cleanup without retaining task-specific ids or branch names here.
 
+The exit-receipt lifecycle is covered by portable fake-CLI regressions in the two scripts above plus `tests/fm-secondmate-liveness.test.sh`.
+They execute the launch wrapper for real, proving it publishes a receipt carrying the armed nonce and the launch's own exit status while rendering nothing into the pane, and that a foreign nonce, a non-numeric status, unexpected trailing fields, or a malformed nonce authority never prove an exit.
+They then drive the recovery classifier across a live endpoint, a nonce-proven exit, a reused pane id, an absent session, an absent pane with an absent task tab, a proven and an unproven ghost tab, and empty or malformed pane and tab inventories, and drive the session-start secondmate liveness sweep end to end for the relaunch, leave-alone, and unproven-endpoint outcomes.
+No real Zellij session was changed for those regressions.
+
+The remaining live-verification gap is one isolated non-`firstmate` session on a supported Zellij release that runs a real harness through the wrapper, confirms the receipt after a normal exit and after an interrupt, and records what `list-sessions` returns when no session exists at all - the last is why a failed session inventory is reported unreadable rather than absent.
+
 ## Orca
 
 Real readiness was verified against `/usr/local/bin/orca` with `/Applications/Orca.app` bundle version 1.4.116.

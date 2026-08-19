@@ -850,6 +850,8 @@ test_teardown_passes_recorded_tab_id_to_zellij_kill() {
     "decision_keys="
   printf '[]\n' > "$dir/responses/1.out"
   printf '[{"tab_id":3,"name":"fm-zghost"}]\n' > "$dir/responses/2.out"
+  printf '%032d\n' 1 > "$state/zghost.zellij-lifecycle"
+  printf '%032d 0\n' 1 > "$state/zghost.zellij-exited"
   fb=$(make_zellij_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" FM_ZELLIJ_SESSION_LIST="firstmate" \
@@ -862,7 +864,9 @@ test_teardown_passes_recorded_tab_id_to_zellij_kill() {
     "fm-teardown did not pass a verified recorded zellij_tab_id through to kill"
   assert_not_contains "$(cat "$dir/log")" $'\x1f''close-pane' \
     "fm-teardown should close the recorded tab id instead of falling back to close-pane"
-  pass "fm-teardown.sh: passes recorded zellij_tab_id with the expected task label"
+  [ ! -e "$state/zghost.zellij-lifecycle" ] && [ ! -e "$state/zghost.zellij-exited" ] \
+    || fail "fm-teardown left the task's zellij exit-receipt records behind"
+  pass "fm-teardown.sh: passes recorded zellij_tab_id with the expected task label and clears its exit receipt"
 }
 
 test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag() {
@@ -1183,6 +1187,218 @@ test_composer_state_dead_pane_is_unknown() {
   pass "fm_backend_zellij_composer_state: a dead pane (empty dumps) reads unknown, never a confirmation"
 }
 
+# --- agent lifecycle: nonce-bound exit receipts -------------------------------
+
+# zellij_arm: arm a lifecycle nonce for <label> under <dir>/state and echo it.
+zellij_arm() {  # <dir> <label>
+  local dir=$1 label=$2
+  mkdir -p "$dir/state"
+  FM_STATE_OVERRIDE="$dir/state" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_lifecycle_arm "$1"' "$ROOT" "$label"
+}
+
+zellij_lifecycle_state() {  # <dir> <label>
+  local dir=$1 label=$2
+  FM_STATE_OVERRIDE="$dir/state" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_lifecycle_state "$1"' "$ROOT" "$label"
+}
+
+# zellij_agent_state: run the recovery classifier against the fake CLI.
+zellij_agent_state() {  # <dir> <fakebin> <session-list> <target> [label]
+  local dir=$1 fb=$2 sessions=$3 target=$4 label=${5:-}
+  PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="$sessions" FM_STATE_OVERRIDE="$dir/state" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_agent_state "$1" "$2"' \
+    "$ROOT" "$target" "$label"
+}
+
+test_lifecycle_wrap_publishes_nonce_bound_receipt() {
+  local dir nonce command out receipt
+  dir="$TMP_ROOT/lifecycle-wrap"; mkdir -p "$dir/state"
+  nonce=$(zellij_arm "$dir" fm-fixture) || fail "could not arm the lifecycle nonce"
+  [ "$(zellij_lifecycle_state "$dir" fm-fixture)" = running ] \
+    || fail "an armed task with no receipt must read running"
+  command=$(FM_STATE_OVERRIDE="$dir/state" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_wrap_launch fm-fixture "printf pane-output; exit 3" "$1"' \
+    "$ROOT" "$nonce") || fail "could not wrap the launch command"
+
+  out=$(bash -c "$command")
+
+  [ "$out" = pane-output ] \
+    || fail "the wrapper must not render anything of its own into the pane, got '$out'"
+  receipt="$dir/state/fixture.zellij-exited"
+  [ -f "$receipt" ] || fail "the wrapper must publish an exit receipt when the agent returns"
+  [ "$(cat "$receipt")" = "$nonce 3" ] \
+    || fail "the receipt must carry the armed nonce and the agent's exit status, got '$(cat "$receipt")'"
+  [ "$(zellij_lifecycle_state "$dir" fm-fixture)" = exited ] \
+    || fail "a nonce-matched receipt must read exited"
+  pass "zellij exit receipts: the launch wrapper publishes a nonce-bound receipt and renders nothing"
+}
+
+test_lifecycle_state_refuses_unproven_records() {
+  local dir nonce
+  dir="$TMP_ROOT/lifecycle-records"; mkdir -p "$dir/state"
+  [ "$(zellij_lifecycle_state "$dir" fm-fixture)" = absent ] \
+    || fail "a never-armed task must read absent"
+  nonce=$(zellij_arm "$dir" fm-fixture) || fail "could not arm the lifecycle nonce"
+
+  printf '%032d 0\n' 0 > "$dir/state/fixture.zellij-exited"
+  [ "$(zellij_lifecycle_state "$dir" fm-fixture)" = unknown ] \
+    || fail "a receipt from a different nonce must never prove an exit"
+  printf '%s not-a-status\n' "$nonce" > "$dir/state/fixture.zellij-exited"
+  [ "$(zellij_lifecycle_state "$dir" fm-fixture)" = unknown ] \
+    || fail "a receipt with a non-numeric status must not prove an exit"
+  printf '%s 0 extra\n' "$nonce" > "$dir/state/fixture.zellij-exited"
+  [ "$(zellij_lifecycle_state "$dir" fm-fixture)" = unknown ] \
+    || fail "a receipt with unexpected trailing fields must not prove an exit"
+  printf 'not-a-nonce\n' > "$dir/state/fixture.zellij-lifecycle"
+  [ "$(zellij_lifecycle_state "$dir" fm-fixture)" = unknown ] \
+    || fail "a malformed nonce authority must read unknown"
+  pass "zellij exit receipts: a foreign, malformed, or over-long receipt never proves an exit"
+}
+
+test_lifecycle_arm_drops_the_previous_incarnation_receipt() {
+  local dir nonce stale_command
+  dir="$TMP_ROOT/lifecycle-rearm"; mkdir -p "$dir/state"
+  nonce=$(zellij_arm "$dir" fm-fixture) || fail "could not arm the lifecycle nonce"
+  stale_command=$(FM_STATE_OVERRIDE="$dir/state" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_wrap_launch fm-fixture ":" "$1"' \
+    "$ROOT" "$nonce") || fail "could not wrap the first incarnation's launch"
+  printf '%s 0\n' "$nonce" > "$dir/state/fixture.zellij-exited"
+  [ "$(zellij_lifecycle_state "$dir" fm-fixture)" = exited ] || fail "fixture receipt should read exited"
+
+  nonce=$(zellij_arm "$dir" fm-fixture) || fail "could not re-arm the lifecycle nonce"
+
+  [ ! -f "$dir/state/fixture.zellij-exited" ] \
+    || fail "re-arming must drop the previous incarnation's receipt"
+  [ "$(zellij_lifecycle_state "$dir" fm-fixture)" = running ] \
+    || fail "a freshly re-armed task must read running, not the old exit"
+
+  # The superseded incarnation's own shell can still return at any time; it must
+  # not report the NEW launch as exited.
+  bash -c "$stale_command"
+  [ ! -f "$dir/state/fixture.zellij-exited" ] \
+    || fail "a superseded launch must not publish a receipt over the current incarnation"
+  [ "$(zellij_lifecycle_state "$dir" fm-fixture)" = running ] \
+    || fail "the current incarnation must still read running after the old launch returns"
+
+  FM_STATE_OVERRIDE="$dir/state" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_wrap_launch fm-fixture ":" deadbeef' "$ROOT" \
+    >/dev/null 2>&1 \
+    && fail "wrapping must refuse a nonce that is not the currently armed one"
+  pass "zellij exit receipts: re-arming supersedes the previous incarnation's receipt and wrapper"
+}
+
+test_agent_state_alive_while_armed_launch_has_not_returned() {
+  local dir fb out
+  dir="$TMP_ROOT/agent-alive"; mkdir -p "$dir/responses" "$dir/state"
+  zellij_arm "$dir" fm-fixture >/dev/null || fail "could not arm the lifecycle nonce"
+  zellij_pane_response "$dir" 1 7 3
+  zellij_tab_response "$dir" 2 3 "$(zellij_expected_scoped_title fm-fixture)"
+  fb=$(make_zellij_fakebin "$dir")
+
+  out=$(zellij_agent_state "$dir" "$fb" firstmate firstmate:7 fm-fixture)
+
+  [ "$out" = alive ] || fail "an armed launch that has not returned must read alive, got '$out'"
+  pass "fm_backend_zellij_agent_state: an armed launch with a matching endpoint reads alive"
+}
+
+test_agent_state_dead_only_on_nonce_proven_receipt() {
+  local dir fb nonce out
+  dir="$TMP_ROOT/agent-dead"; mkdir -p "$dir/responses" "$dir/state"
+  nonce=$(zellij_arm "$dir" fm-fixture) || fail "could not arm the lifecycle nonce"
+  printf '%s 0\n' "$nonce" > "$dir/state/fixture.zellij-exited"
+  zellij_pane_response "$dir" 1 7 3
+  zellij_tab_response "$dir" 2 3 "$(zellij_expected_scoped_title fm-fixture)"
+  fb=$(make_zellij_fakebin "$dir")
+
+  out=$(zellij_agent_state "$dir" "$fb" firstmate firstmate:7 fm-fixture)
+
+  [ "$out" = dead ] || fail "a nonce-proven receipt on the recorded endpoint must read dead, got '$out'"
+  pass "fm_backend_zellij_agent_state: a nonce-proven receipt on the recorded endpoint reads dead"
+}
+
+test_agent_state_refuses_a_receipt_on_a_reused_pane_id() {
+  local dir fb nonce out
+  dir="$TMP_ROOT/agent-reused-pane"; mkdir -p "$dir/responses" "$dir/state"
+  nonce=$(zellij_arm "$dir" fm-fixture) || fail "could not arm the lifecycle nonce"
+  printf '%s 0\n' "$nonce" > "$dir/state/fixture.zellij-exited"
+  zellij_pane_response "$dir" 1 7 3
+  zellij_tab_response "$dir" 2 3 someone-elses-tab
+  fb=$(make_zellij_fakebin "$dir")
+
+  out=$(zellij_agent_state "$dir" "$fb" firstmate firstmate:7 fm-fixture)
+
+  [ "$out" = ambiguous ] \
+    || fail "a receipt must not be trusted when the pane now belongs to another tab, got '$out'"
+  pass "fm_backend_zellij_agent_state: identity is checked before any receipt is trusted"
+}
+
+test_agent_state_missing_only_when_the_task_endpoint_is_proven_gone() {
+  local dir fb nonce out
+  dir="$TMP_ROOT/agent-missing"; mkdir -p "$dir/responses" "$dir/state"
+  nonce=$(zellij_arm "$dir" fm-fixture) || fail "could not arm the lifecycle nonce"
+  fb=$(make_zellij_fakebin "$dir")
+
+  out=$(zellij_agent_state "$dir" "$fb" "" firstmate:7 fm-fixture)
+  [ "$out" = missing ] || fail "a successful listing without the recorded session must read missing, got '$out'"
+
+  rm -f "$dir/responses/.count"
+  printf '[]\n' > "$dir/responses/1.out"
+  printf '[{"tab_id":9,"name":"unrelated"}]\n' > "$dir/responses/2.out"
+  out=$(zellij_agent_state "$dir" "$fb" firstmate firstmate:7 fm-fixture)
+  [ "$out" = missing ] || fail "an absent pane AND an absent task tab must read missing, got '$out'"
+
+  # An empty tab left behind by a closed pane is NOT an absent endpoint.
+  rm -f "$dir/responses/.count"
+  printf '[]\n' > "$dir/responses/1.out"
+  zellij_tab_response "$dir" 2 3 "$(zellij_expected_scoped_title fm-fixture)"
+  out=$(zellij_agent_state "$dir" "$fb" firstmate firstmate:7 fm-fixture)
+  [ "$out" = ambiguous ] || fail "an unproven ghost tab must stay inconclusive, got '$out'"
+
+  rm -f "$dir/responses/.count"
+  printf '%s 0\n' "$nonce" > "$dir/state/fixture.zellij-exited"
+  printf '[]\n' > "$dir/responses/1.out"
+  zellij_tab_response "$dir" 2 3 "$(zellij_expected_scoped_title fm-fixture)"
+  out=$(zellij_agent_state "$dir" "$fb" firstmate firstmate:7 fm-fixture)
+  [ "$out" = dead ] || fail "a nonce-proven ghost tab must read dead so cleanup can close it, got '$out'"
+  pass "fm_backend_zellij_agent_state: only a proven-absent task endpoint is missing"
+}
+
+test_agent_state_never_guesses_from_an_unreadable_surface() {
+  local dir fb out
+  dir="$TMP_ROOT/agent-unreadable"; mkdir -p "$dir/responses" "$dir/state"
+  zellij_arm "$dir" fm-fixture >/dev/null || fail "could not arm the lifecycle nonce"
+  fb=$(make_zellij_fakebin "$dir")
+
+  out=$(zellij_agent_state "$dir" "$fb" firstmate firstmate:7)
+  [ "$out" = unreadable ] || fail "no recorded task label must read unreadable, got '$out'"
+
+  rm -f "$dir/responses/.count"
+  : > "$dir/responses/1.out"
+  out=$(zellij_agent_state "$dir" "$fb" firstmate firstmate:7 fm-fixture)
+  [ "$out" = unreadable ] || fail "an empty pane inventory must read unreadable, got '$out'"
+
+  rm -f "$dir/responses/.count"
+  printf 'not json\n' > "$dir/responses/1.out"
+  out=$(zellij_agent_state "$dir" "$fb" firstmate firstmate:7 fm-fixture)
+  [ "$out" = unreadable ] || fail "a malformed pane inventory must read unreadable, got '$out'"
+
+  rm -f "$dir/responses/.count"
+  printf '[]\n' > "$dir/responses/1.out"
+  printf 'not json\n' > "$dir/responses/2.out"
+  out=$(zellij_agent_state "$dir" "$fb" firstmate firstmate:7 fm-fixture)
+  [ "$out" = unreadable ] || fail "a malformed tab inventory must read unreadable, got '$out'"
+
+  rm -f "$dir/responses/.count"
+  printf 'not-a-nonce\n' > "$dir/state/fixture.zellij-lifecycle"
+  zellij_pane_response "$dir" 1 7 3
+  zellij_tab_response "$dir" 2 3 "$(zellij_expected_scoped_title fm-fixture)"
+  out=$(zellij_agent_state "$dir" "$fb" firstmate firstmate:7 fm-fixture)
+  [ "$out" = ambiguous ] || fail "malformed lifecycle records must read ambiguous, got '$out'"
+  pass "fm_backend_zellij_agent_state: an unreadable or malformed surface never licenses recovery"
+}
+
 test_send_text_submit_send_failed_when_session_absent() {
   local dir fb out
   dir="$TMP_ROOT/submit-no-session"; mkdir -p "$dir/responses"
@@ -1353,6 +1569,14 @@ test_send_text_submit_preserves_agent_glyph_within_wrapped_content
 test_send_text_submit_rejects_stale_composer_above_live_shell
 test_composer_state_reads_styled_dump
 test_composer_state_dead_pane_is_unknown
+test_lifecycle_wrap_publishes_nonce_bound_receipt
+test_lifecycle_state_refuses_unproven_records
+test_lifecycle_arm_drops_the_previous_incarnation_receipt
+test_agent_state_alive_while_armed_launch_has_not_returned
+test_agent_state_dead_only_on_nonce_proven_receipt
+test_agent_state_refuses_a_receipt_on_a_reused_pane_id
+test_agent_state_missing_only_when_the_task_endpoint_is_proven_gone
+test_agent_state_never_guesses_from_an_unreadable_surface
 test_send_text_submit_send_failed_when_session_absent
 test_send_text_submit_send_failed_when_pane_absent
 test_scripts_route_explicit_target_through_meta_backend

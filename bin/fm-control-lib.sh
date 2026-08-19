@@ -182,11 +182,14 @@ fm_control_backend_supports_key() {  # <backend> <key>
   return 1
 }
 
-# Whether <backend> has a recovery-grade agent-state classifier. Only tmux and
-# herdr implement fm_backend_agent_state; zellij, orca, and cmux report
-# `unverified`, so no reading of theirs can prove an agent stopped. The control
-# plane refuses a stop-proving verb there instead of reporting an unprovable
-# transition as success.
+# Whether <backend>'s stop-proving verbs are cleared for the control plane.
+# Orca and cmux report `unverified` from fm_backend_agent_state, so no reading
+# of theirs can prove an agent stopped. Zellij does classify - its spawn
+# wrapper's nonce-bound exit receipt proves `dead` - but its interrupt and exit
+# mechanics have not been verified against a real harness in a real session,
+# and this gate is about driving a transition, not only observing one. The
+# control plane refuses a stop-proving verb on every backend below instead of
+# reporting an unprovable transition as success.
 fm_control_backend_state_verified() {  # <backend>
   case "${1-}" in
     tmux|herdr) return 0 ;;

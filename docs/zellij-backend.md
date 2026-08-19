@@ -90,13 +90,30 @@ Closing a pane leaves an empty tab.
 Cleanup resolves and verifies the owning tab, then uses `close-tab-by-id` so both the task pane and tab disappear.
 Real test cleanup uses only an isolated non-`firstmate` session and the guard in `tests/zellij-test-safety.sh`; it never calls all-session deletion commands.
 
+## Agent exit receipts
+
+Zellij exposes no per-pane process id and no agent-process liveness signal, so nothing readable from the session can prove that a launched agent has stopped.
+Screen shape cannot close that gap either: the shared composer classifier answers whether a composer is drawn, and its `unknown` covers both an absent agent and a redraw the adapter cannot read.
+Spawn therefore arms a fresh random nonce in private per-task state and wraps the launch command so the pane's own shell writes a receipt carrying that nonce and the agent's exit status the moment the agent returns.
+The wrapper preserves the agent's exit status, re-reads the nonce at exit time so a re-armed task cannot be overwritten by an older incarnation, publishes the receipt through a temp file and rename, and renders nothing into the pane.
+Only a receipt matching the current armed nonce proves the agent exited.
+
+Recovery reads that receipt through `fm_backend_zellij_agent_state` in [`bin/backends/zellij.sh`](../bin/backends/zellij.sh), which answers the shared recovery vocabulary owned by [`bin/fm-backend.sh`](../bin/fm-backend.sh).
+It requires the recorded task label and confirms the endpoint's current identity before trusting any receipt, so a recreated session, a reused pane id, or a duplicate legacy title stays inconclusive instead of licensing a respawn.
+An absent recorded task tab is authoritatively missing and may be respawned.
+A failed session, pane, or tab inventory is never treated as absence.
+
 ## Active limits
 
 - Zellij is experimental and explicit-only.
 - All homes share one session and tab bar; scoped titles prevent cross-home identity collisions but do not create per-home visual containers.
 - There is no native busy or push-event signal, so supervision uses capture/hash polling for screen changes and each harness adapter's semantic lifecycle for worker state.
   Grok alone retains its isolated rendered-tail fallback.
-- There is no verified agent-process liveness signal, so a dead Zellij secondmate is reported inconclusive rather than auto-respawned.
+- There is no native agent-process liveness signal.
+  Recovery accepts only the nonce-bound exit receipt as proof that an agent stopped, and leaves every other uncertain observation untouched.
+  A task launched before exit receipts shipped has no armed nonce and stays inconclusive until it is respawned.
+- A Zellij server that is entirely down reports an unreadable inventory rather than an absent session, because the client's empty-inventory response has not been verified against a supported release.
+- The control plane's stop-proving verbs (`bin/fm-control.sh interrupt|exit|relaunch`) remain refused on Zellij: driving a transition needs verified interrupt and exit mechanics, not only the ability to observe one.
 - New-tab focus restoration has a narrow visible race.
 - CLI exit status is not meaningful; a target can still disappear after structural readiness checks.
 - Worktree cwd discovery requires the spawn-time marker probe.

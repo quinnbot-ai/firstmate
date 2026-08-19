@@ -881,16 +881,22 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 #   unverified - this backend has no recovery classifier.
 # Only `dead` and `missing` license recovery. The tmux adapter requires a
 # successful session inventory and returns `missing` only when it omits the
-# exact window; the Herdr adapter reuses its husk
-# classifier. Zellij remains unverified because its secondmate ghost-tab and
-# agent-process recovery path has not been empirically validated. Orca and cmux
-# do not support secondmate spawns.
-fm_backend_agent_state() {  # <backend> <target>
-  local backend=$1 target=$2
+# exact window; the Herdr adapter reuses its husk classifier. Zellij has no
+# readable agent process at all, so it proves `dead` only from the nonce-bound
+# exit receipt its spawn wrapper publishes, and needs the recorded task label
+# to resolve both that receipt and the endpoint's identity - without the label
+# it reads `unreadable` rather than guessing. Orca and cmux do not support
+# secondmate spawns.
+#
+# <expected-label> is the recorded `fm-<task-id>` label. Adapters that do not
+# need it ignore it, so a caller with no label in hand may still omit it.
+fm_backend_agent_state() {  # <backend> <target> [expected-label]
+  local backend=$1 target=$2 expected_label=${3:-}
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }
   case "$backend" in
     tmux) fm_backend_tmux_agent_state "$target" ;;
     herdr) fm_backend_herdr_agent_state "$target" ;;
+    zellij) fm_backend_zellij_agent_state "$target" "$expected_label" ;;
     *) printf 'unverified' ;;
   esac
 }
@@ -898,8 +904,8 @@ fm_backend_agent_state() {  # <backend> <target>
 # Backward-compatible three-state view for existing callers. An
 # authoritatively missing endpoint is confidently not a live agent, while every
 # ambiguous, unreadable, or unverified result stays unknown.
-fm_backend_agent_alive() {  # <backend> <target>
-  case "$(fm_backend_agent_state "$1" "$2")" in
+fm_backend_agent_alive() {  # <backend> <target> [expected-label]
+  case "$(fm_backend_agent_state "$1" "$2" "${3:-}")" in
     alive) printf 'alive' ;;
     dead|missing) printf 'dead' ;;
     *) printf 'unknown' ;;
