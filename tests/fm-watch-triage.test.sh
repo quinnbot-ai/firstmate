@@ -2090,6 +2090,203 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   pass "AFK changed paused panes hand off plain stale identities for daemon-owned pause triage"
 }
 
+
+# --- a long-lived hold must back off, and neither surface path may bypass the
+#     cadence or reset its clock ---------------------------------------------
+# A declared external-wait pause or captain hold is anchored on its own status
+# file mtime, which by design never moves while the hold stands. With a flat
+# window that makes the age term permanently true, so a hold that is parked for
+# days re-notifies on a fixed floor forever. The required gap between rechecks
+# therefore grows with the hold's own age (half of it), bounded below by the base
+# window and above by PAUSE_RESURFACE_MAX_SECS, so the cadence stays finite and a
+# forgotten hold still cannot rot invisibly.
+test_paused_hold_resurface_backs_off_as_the_hold_ages() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid now rf wakes
+  dir=$(make_case paused-hold-backoff); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
+  window="test:fm-held"
+  printf 'idle bare shell, hold standing\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held.meta"
+  printf 'paused: holding for the upstream release\n' > "$statusf"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  rf="$state/.paused-resurfaced-$key"
+  pane_hash=$(hash_text "idle bare shell, hold standing")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$state/.paused-$key"
+  now=$(date +%s)
+  # A hold declared 1000s ago: past the 100s base window many times over, so the
+  # age term alone can never withhold a recheck again.
+  set_mtime $(( now - 1000 )) "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+
+  # Rechecked 200s ago: clear of the base window, but well inside the gap a
+  # 1000s-old hold has earned. The hold must stay absorbed.
+  set_mtime $(( now - 200 )) "$rf"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=100 FM_PAUSE_RESURFACE_MAX_SECS=100000 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "an aged hold re-notified on the base window instead of its backed-off gap: $(cat "$out")"
+  fi
+  reap "$pid"
+  [ ! -s "$state/.wake-queue" ] || fail "an aged hold queued a recheck inside its backed-off gap"
+  [ "$(file_mtime "$rf")" -eq $(( now - 200 )) ] || fail "an absorbed poll moved the recheck clock"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional absorbed-phase stop"
+
+  # Past that earned gap the hold MUST still surface: the cadence is longer, never
+  # infinite, so a forgotten hold cannot rot invisibly.
+  set_mtime $(( now - 600 )) "$rf"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=100 FM_PAUSE_RESURFACE_MAX_SECS=100000 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "an aged hold never re-surfaced past its backed-off gap"
+  grep -F "awaiting external" "$out" >/dev/null || fail "the backed-off recheck was not labeled a declared-hold recheck: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a backed-off recheck was mislabeled a possible wedge"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the backed-off recheck"
+
+  # The ceiling caps the growth: a hold parked for 100000s still rechecks once its
+  # gap clears PAUSE_RESURFACE_MAX_SECS, not once it clears half its own age.
+  now=$(date +%s)
+  set_mtime $(( now - 100000 )) "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  set_mtime $(( now - 1200 )) "$rf"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=100 FM_PAUSE_RESURFACE_MAX_SECS=1000 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "the re-surface ceiling did not bound a very old hold's cadence"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
+  [ "$wakes" -ge 1 ] || fail "the ceiling-bounded recheck was not queued"
+  pass "a long-lived declared hold rechecks on a gap that grows with its age, bounded by the re-surface ceiling"
+}
+
+# The immediate-surface path handles a stale pane whose state this poll could not
+# confirm. A pane under a declared hold reaches it whenever the backend read is
+# merely ambiguous (an idle agent that is neither confidently alive nor dead), so
+# without the same cadence guard every pane redraw re-notifies AND re-stamps the
+# recheck clock the bounded path depends on. First sight must still surface
+# promptly; a redraw inside the window must not.
+test_paused_hold_surface_path_cannot_bypass_or_reset_the_cadence() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid rf stamped wakes
+  dir=$(make_case paused-hold-surface-path); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/gate.status"
+  window="test:fm-gate"
+  printf 'idle hold, first sight\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/gate.meta"
+  printf 'paused: holding at an external gate\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-gate_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  rf="$state/.paused-resurfaced-$key"
+  pane_hash=$(hash_text "idle hold, first sight")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  # First sight of an unconfirmable hold surfaces immediately, exactly as before.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: unknown · source: none · pane unreadable' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=600 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "an unconfirmable hold did not surface on first sight"
+  grep -F "stale: $window" "$out" >/dev/null || fail "first sight of an unconfirmable hold printed no stale wake"
+  [ -e "$rf" ] || fail "the immediate surface did not record the recheck clock"
+  stamped=$(file_mtime "$rf")
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first-sight surface"
+
+  # A redraw inside the window presents a NEW stale hash, driving the same
+  # immediate-surface path again. It must be absorbed, and must leave the clock
+  # alone so the bounded path's own cadence is not reset to now.
+  set_mtime $(( stamped - 60 )) "$rf"
+  stamped=$(file_mtime "$rf")
+  printf 'idle hold, redrawn footer\n' > "$capture_file"
+  pane_hash=$(hash_text "idle hold, redrawn footer")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: unknown · source: none · pane unreadable' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=600 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a redraw inside the recheck window re-notified a standing hold: $(cat "$out")"
+  fi
+  reap "$pid"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
+  [ "$wakes" -eq 0 ] || fail "a redraw inside the recheck window queued $wakes extra rechecks"
+  [ "$(file_mtime "$rf")" -eq "$stamped" ] || fail "the immediate-surface path reset the recheck clock inside the window"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "the absorbed redraw did not advance the stale suppressor"
+  [ ! -e "$state/.stale-since-$key" ] || fail "an absorbed hold started the wedge timer"
+  pass "an unconfirmable hold surfaces once, then redraws inside the window neither re-notify nor reset the recheck clock"
+}
+
+# The cadence guard above is scoped to a STANDING hold only. A pane that has
+# resumed - its last status is ordinary progress again - must escalate on the
+# unchanged wedge schedule even while a recheck marker left over from its earlier
+# hold is still fresh. This is the hard boundary: quieting confirmed idle holds
+# must never delay a pane that is actually stuck.
+test_resumed_pane_wedge_escalation_survives_a_stale_pause_marker() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid now
+  dir=$(make_case resumed-after-hold); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/wedged.status"
+  window="test:fm-wedged"
+  printf 'frozen pane after the hold cleared\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/wedged.meta"
+  printf 'paused: holding for the upstream release\nworking: hold cleared, resuming the fix\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-wedged_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "frozen pane after the hold cleared")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  now=$(date +%s)
+  # A recheck marker from the hold that just ended, freshly stamped.
+  : > "$state/.paused-resurfaced-$key"
+  set_mtime "$now" "$state/.paused-resurfaced-$key"
+
+  # First sight: no running pipeline, no busy pane, no standing hold. This must
+  # surface immediately, on the unchanged not-provably-working schedule.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: unknown · source: none · no run' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=99999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a resumed, not-provably-working pane was silenced by a leftover hold marker"
+  grep -Fx "stale: $window" "$out" >/dev/null \
+    || fail "a resumed pane did not surface with its plain stale identity: $(cat "$out")"
+  [ ! -e "$state/.paused-$key" ] || fail "a resumed pane retained hold tracking"
+  [ ! -e "$state/.paused-resurfaced-$key" ] || fail "a resumed pane retained the hold recheck clock"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the resumed-pane surface"
+
+  # And the wedge timer still owns the unchanged hash: past the wedge threshold it
+  # escalates as a possible wedge, on the same schedule as before this change.
+  printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: unknown · source: none · no run' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=99999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a wedged pane stopped escalating past the wedge threshold"
+  grep -F "possible wedge" "$out" >/dev/null \
+    || fail "a wedged pane lost its possible-wedge escalation: $(cat "$out")"
+  pass "a resumed pane still surfaces immediately and still wedge-escalates on the unchanged schedule"
+}
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
@@ -2120,6 +2317,9 @@ test_busy_pane_default_turn_age_bound_is_3600s
 test_busy_declared_pause_is_rechecked_not_wedge_escalated
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
+test_paused_hold_resurface_backs_off_as_the_hold_ages
+test_paused_hold_surface_path_cannot_bypass_or_reset_the_cadence
+test_resumed_pane_wedge_escalation_survives_a_stale_pause_marker
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
