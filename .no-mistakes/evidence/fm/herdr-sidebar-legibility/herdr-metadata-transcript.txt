@@ -1,0 +1,14 @@
+$ herdr pane get <pane> --session fm-lab-sidebarvis-55922  # one per spawned worker
+{"pane_id":"w1:p2","display_agent":"🔧 crew content-engine","tokens":{"fm_glyph":"🔧","fm_home":"firstmate","fm_role":"crew","fm_scope":"content-engine","fm_task":"quota-fix-k3"}}
+{"pane_id":"w2:p2","display_agent":"🔭 scout epstein-search","tokens":{"fm_glyph":"🔭","fm_home":"firstmate","fm_role":"scout","fm_scope":"epstein-search","fm_task":"docket-scan-q2"}}
+{"pane_id":"w3:p2","display_agent":"⚓ secondmate trading","tokens":{"fm_glyph":"⚓","fm_home":"2ndmate-trading","fm_role":"secondmate","fm_scope":"trading","fm_task":"trading"}}
+
+$ herdr workspace list --session fm-lab-sidebarvis-55922
+{"label":"firstmate","tokens":{"fm_glyph":"🏠","fm_home":"firstmate","fm_role":"home","fm_scope":"firstmate"}}
+{"label":"└ docket-scan-q2 · p:evAWg8CkrfBD-SWXKTQE-w","tokens":{"fm_glyph":"🔭","fm_home":"firstmate","fm_role":"scout","fm_scope":"epstein-search"}}
+{"label":"2ndmate-trading","tokens":{"fm_glyph":"🏠","fm_home":"2ndmate-trading","fm_role":"home","fm_scope":"trading"}}
+
+$ herdr tab list --session fm-lab-sidebarvis-55922   # tab labels must stay exactly fm-<id>
+fm-docket-scan-q2
+fm-quota-fix-k3
+fm-trading
