@@ -172,6 +172,33 @@ Valid cleanup removed only the exact task-bound target and left the control wind
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
+### Worktree-acquisition failure reporting
+
+Spawn-time worktree acquisition was verified on 2026-08-19 with tmux 3.6b on macOS arm64, on a private socket in an isolated lab, against a stand-in `treehouse` on `PATH` whose behavior each case controls.
+The stand-in is what makes the failure reproducible; the pane, the shell, the typed line, and the capture path are all real.
+
+```sh
+tmux -L "$socket" -f /dev/null new-session -d -s firstmate -c "$project" /bin/sh
+# case 1: acquisition refuses    -> stand-in prints to stderr and exits 128
+# case 2: acquisition is slow    -> stand-in prints one line and sleeps
+# case 3: acquisition succeeds   -> stand-in moves the pane into a real worktree
+bin/fm-spawn.sh "$id" "$project" --backend tmux --mode direct-PR --yolo off
+```
+
+Observed output, one line per case, with the spawn's own elapsed time:
+
+```text
+error: treehouse get failed with exit status 128; no worktree was acquired for task <id> and no agent was launched; inspect window firstmate:fm-<id>
+  worktree acquisition said: Error: all 16 worktrees are in use or dirty
+error: treehouse get did not enter a worktree within 3s and never reported a failure; this is a timeout, not an acquisition failure - acquisition is still running, or the pane never moved; inspect window firstmate:fm-<id>
+  worktree acquisition said: acquiring a fresh pool slot...
+spawned <id> harness=codex kind=ship mode=direct-PR yolo=off window=firstmate:fm-<id> worktree=<worktree>
+```
+
+The refusal was reported in 2s against 62s for the same case on the previous behavior, which ended in a generic timeout naming neither the exit status nor the message.
+`FM_SPAWN_WORKTREE_POLLS` bounded the timeout case; the shipped default remains 60 one-second polls.
+The portable regression for all three cases is `tests/fm-spawn-acquire-failure.test.sh`, whose fake terminal executes the typed line in a real shell rather than reproducing it.
+
 ## Composer classification matrix
 
 The shared composer classifier (`bin/fm-composer-lib.sh`, `fm_composer_classify_screen`) owns every composer shape fleet-wide; each backend contributes only a capture and a capability descriptor.

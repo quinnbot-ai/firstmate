@@ -134,10 +134,25 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
-#   Before a fresh ship or scout worker starts, its clean task worktree fetches
-#   origin, resolves the current remote default branch, and resets to its tip.
-#   An unreachable origin, unresolved default branch, or non-clean worktree
-#   refuses the spawn rather than risking a PR based on stale history.
+#   A ship or scout spawn acquires its worktree by typing `treehouse get` into
+#   the worker's own shell, so the acquisition's exit status is not directly
+#   observable here. The typed line carries an `|| printf` failure marker that
+#   only ever runs when acquisition returns non-zero, leaving the success path
+#   unchanged; the settle loop reads that marker plus the tool's own visible
+#   output, so a genuine refusal is reported immediately with its exit status
+#   and message instead of being hidden behind the settle timeout. A timeout is
+#   reported as a timeout and says explicitly that acquisition never reported a
+#   failure. FM_SPAWN_WORKTREE_POLLS and FM_SPAWN_WORKTREE_POLL_INTERVAL
+#   override the default 60 one-second settle polls; the bound covers a slow
+#   but successful acquisition, not a refusal, which no longer waits it out.
+#   Before a fresh ship or scout worker starts, its clean task worktree is reset
+#   to the tip of the default branch its project actually tracks: a project with
+#   an origin fetches origin, resolves the current remote default branch, and
+#   resets to that; a project with NO remote at all is a supported spawn target
+#   and resets to its own local default branch (main, then master) with no
+#   network access. An unreachable origin, unresolved default branch, missing
+#   local default branch, or non-clean worktree refuses the spawn rather than
+#   risking a PR based on stale history.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -1727,24 +1742,43 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
+# Reset a pooled worktree to the tip of the default branch its project actually
+# tracks. A project WITH an origin refreshes from the fetched remote branch. A
+# project with NO remote is a first-class spawn target rather than an error: it
+# refreshes from its own local default branch, without touching the network and
+# without a message that reads like an unreachable server. That keeps a
+# self-referential origin - the usual workaround for making a local-only
+# repository poolable - a convenience rather than a load-bearing requirement.
 freshen_spawn_worktree_base() {  # <worktree>
   local worktree=$1 default target expected actual status
-  if ! git -C "$worktree" fetch --quiet origin; then
-    echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  fi
-  if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
-    echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  fi
-  default=$(default_branch "$worktree") || {
-    echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  }
-  target="origin/$default"
-  if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
-    echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
+  if git -C "$worktree" remote get-url origin >/dev/null 2>&1; then
+    if ! git -C "$worktree" fetch --quiet origin; then
+      echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+    if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
+      echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+    default=$(default_branch "$worktree") || {
+      echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    }
+    target="origin/$default"
+    if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
+      echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+  else
+    default=$(default_branch "$worktree") || {
+      echo "error: pooled worktree '$worktree' belongs to a repository with no 'origin' remote and no local 'main' or 'master' branch; nothing to refresh from - this is the repository's shape, not an unreachable remote" >&2
+      return 1
+    }
+    target="refs/heads/$default"
+    if ! git -C "$worktree" show-ref --verify --quiet "$target"; then
+      echo "error: pooled worktree '$worktree' belongs to a repository with no 'origin' remote and no local branch '$default'; nothing to refresh from - this is the repository's shape, not an unreachable remote" >&2
+      return 1
+    fi
   fi
   expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
     echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
@@ -2140,6 +2174,50 @@ kimi_capture() {
   fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
 }
 
+# Worktree-acquisition legibility. `treehouse get` is typed into the worker's
+# own shell rather than run from here, so its exit status and stderr never reach
+# this script directly - on success it becomes the long-lived subshell the agent
+# works in. What this script CAN read is what that shell shows: the marker the
+# typed line prints when acquisition returns non-zero, and the tool's own output
+# already on the pane. Together they turn a silent wait into an exit status plus
+# the tool's own words.
+ACQUIRE_FAIL_MARKER='fm-acquire-failed'
+
+acquire_pane_capture() {
+  fm_backend_capture "$BACKEND" "$WT_TARGET" 60 "$W" 2>/dev/null || true
+}
+
+# The exit status acquisition reported, or empty while it has not failed. The
+# pane also echoes the typed command, which carries the literal `rc=%s`, so only
+# an expanded numeric status matches.
+acquire_failure_status() {  # <pane-capture>
+  printf '%s\n' "$1" \
+    | sed -n "s/.*$ACQUIRE_FAIL_MARKER rc=\\([0-9][0-9]*\\).*/\\1/p" \
+    | tail -n 1
+}
+
+# The last few non-empty lines the pane shows before it reported a failure,
+# minus the marker line and the echoed command containing it - in practice the
+# acquisition tool's own message, without the shell prompt that follows it. With
+# no marker on the pane (the timeout case) this is simply the pane's last lines.
+acquire_visible_tail() {  # <pane-capture>
+  printf '%s\n' "$1" \
+    | sed -n "/$ACQUIRE_FAIL_MARKER rc=[0-9]/q;p" \
+    | grep -v "$ACQUIRE_FAIL_MARKER" \
+    | sed -e 's/[[:space:]]*$//' -e '/^[[:space:]]*$/d' \
+    | tail -n 5
+}
+
+report_acquire_output() {  # <pane-capture>
+  local visible
+  visible=$(acquire_visible_tail "$1")
+  if [ -n "$visible" ]; then
+    printf '%s\n' "$visible" | sed 's/^/  worktree acquisition said: /' >&2
+  else
+    echo "  worktree acquisition printed nothing readable in window $T" >&2
+  fi
+}
+
 # Kimi launch-readiness and delivery route their composer-emptiness half
 # through the shared classifier (bin/fm-composer-lib.sh via
 # fm_backend_composer_state), the same owner every steer and injection guard
@@ -2212,7 +2290,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  # The `|| printf` half runs ONLY when acquisition returns non-zero, so the
+  # success path is byte-for-byte what it always was, while a refusal announces
+  # itself with its real exit status instead of being inferred from a pane that
+  # merely never moved.
+  spawn_send_text_line "$WT_TARGET" "treehouse get || printf '$ACQUIRE_FAIL_MARKER rc=%s\\n' \"\$?\""
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -2234,8 +2316,20 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # a mismatch just becomes the new candidate rather than resetting the wait, so a
   # pane that is already settled by the first real read only costs the one existing
   # inter-poll sleep as confirmation, not a whole extra cycle on top.
+  #
+  # The bound stays 60 one-second polls. It never was the cause of a refusal,
+  # and now that a refusal reports itself the moment acquisition returns, the
+  # bound only covers an acquisition that is still working - a fresh pool slot
+  # being created or reset on a large repository - or a pane that has not
+  # settled yet. Shortening it would turn slow successes into false failures;
+  # lengthening it would only delay a timeout that no longer hides a real error.
+  # The overrides exist so the timeout path itself stays cheaply testable.
+  acquire_polls=${FM_SPAWN_WORKTREE_POLLS:-60}
+  acquire_interval=${FM_SPAWN_WORKTREE_POLL_INTERVAL:-1}
   candidate=""
-  for _ in $(seq 1 60); do
+  acquire_pane=""
+  acquire_rc=""
+  for _ in $(seq 1 "$acquire_polls"); do
     p=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$p" ]; then
       p_real=$(real_path_or_raw "$p")
@@ -2251,10 +2345,23 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     else
       candidate=""
     fi
-    sleep 1
+    acquire_pane=$(acquire_pane_capture)
+    acquire_rc=$(acquire_failure_status "$acquire_pane")
+    [ -z "$acquire_rc" ] || break
+    sleep "$acquire_interval"
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    if [ -z "$acquire_rc" ]; then
+      acquire_pane=$(acquire_pane_capture)
+      acquire_rc=$(acquire_failure_status "$acquire_pane")
+    fi
+    if [ -n "$acquire_rc" ]; then
+      echo "error: treehouse get failed with exit status $acquire_rc; no worktree was acquired for task $ID and no agent was launched; inspect window $T" >&2
+    else
+      acquire_bound=$(awk -v n="$acquire_polls" -v i="$acquire_interval" 'BEGIN { printf "%g", n * i }')
+      echo "error: treehouse get did not enter a worktree within ${acquire_bound}s and never reported a failure; this is a timeout, not an acquisition failure - acquisition is still running, or the pane never moved; inspect window $T" >&2
+    fi
+    report_acquire_output "$acquire_pane"
     exit 1
   fi
 
