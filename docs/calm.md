@@ -1,7 +1,10 @@
-# Pi Calm mode
+# Calm mode
 
-Calm is a Pi-only conversation presentation toggle.
-It is off by default, and the last `/calm` choice persists for the effective Firstmate home across Pi session starts and resumes.
+Calm is a home-local conversation presentation toggle for Pi and Claude Code.
+It is off by default, and the last `/calm` choice persists for the effective Firstmate home across that harness's session starts and resumes.
+Each harness applies it only as far as its own supported presentation surface reaches, so the Pi and Claude sections below are separate contracts over one shared preference.
+
+## Pi
 
 While Calm is active and an agent run is under way, Calm hides Pi's built-in `Working...` row and shows a small two-row animated boat in its place, and no separate Calm status row is added.
 The water fills the usable width in standard ANSI blue and the complete boat is standard ANSI yellow.
@@ -31,7 +34,7 @@ Pi's supported presentation API does not expose a global transcript filter.
 Expanded reasoning and its reserved spacing, built-in tool images, user-bash rows, skill and summary rows, generic status notices, and arbitrary custom-tool or extension rows remain visible.
 These are supported-API boundaries rather than hidden-content failures.
 
-## Pi compatibility
+### Pi compatibility
 
 Calm has no numeric Pi version minimum or maximum and never refuses Pi solely because its version is newer than a previously verified version.
 The collapsed-thinking and operational-user-row presentation adapters probe the exact Pi API seam they patch when Calm loads.
@@ -46,7 +49,7 @@ Pi provides no ownership check early enough for that load-time path, and the fir
 If the other extension wins, a session-start console diagnostic names the tool and winning extension; if Calm wins, Pi does not expose the losing registration, so the other extension's override is unavailable and cannot be named.
 
 [`calm-mode-feasibility.md`](calm-mode-feasibility.md) owns the version-scoped renderer taxonomy, built-in override constraints, and empirical evidence.
-[`configuration.md`](configuration.md#pi-calm-preference-configcalm) owns the persisted preference file and resolution rules.
+[`configuration.md`](configuration.md#calm-preference-configcalm) owns the persisted preference file and resolution rules.
 `.pi/extensions/lib/fm-calm-visibility.ts` owns the visibility policy, `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter, and `.pi/extensions/lib/fm-calm-working-ship.ts` owns the animated working presentation.
 
 Regression entry points:
@@ -55,4 +58,23 @@ Regression entry points:
 tests/fm-calm-pi-extension.test.sh
 tests/fm-pi-primary-types.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
+```
+
+## Claude Code
+
+Claude Code exposes no supported project transcript renderer, so Calm changes Claude's response presentation rather than its terminal rows.
+While Calm is active, Claude's tracked session-start adapter asks Claude to keep captain-facing updates outcome-first, concise, and free of incidental progress narration while preserving every operational instruction, safety boundary, and technical fact that matters.
+While Calm is inactive, the same adapter states that explicitly, so a resumed or compacted transcript that still contains an earlier Calm-active instruction is superseded rather than silently obeyed.
+The project-native `/calm` command toggles the effective home preference through [`bin/fm-calm.sh`](../bin/fm-calm.sh) and applies the matching presentation for the rest of the current session.
+
+Calm's Claude adapter is registered as its own `SessionStart` grouping in the tracked `.claude/settings.json`, separate from the session-start digest registration owned by [`sessionstart-nudge.md`](sessionstart-nudge.md), so neither can disturb the other's ordering, timeout, or source routing.
+It is inert outside a genuine primary home: a linked task worktree, a no-mistakes gate agent, and a Grok session that loads Claude-compatible settings all get nothing.
+Calm does not change Claude's tools, permissions, task execution, model context, session storage, or transcript beyond the ordinary `/calm` confirmation.
+
+`.claude/commands/calm.md` owns the native command prompt, `bin/fm-claude-calm-nudge.sh` owns persisted-preference delivery at session open, and [`configuration.md`](configuration.md#calm-preference-configcalm) owns the preference file itself.
+
+Regression entry points:
+
+```sh
+tests/fm-calm-claude-adapter.test.sh
 ```

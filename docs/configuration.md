@@ -24,13 +24,14 @@ Wake, watcher, away-mode, and Relay-specific state mechanics remain with their n
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
-## Pi Calm preference (config/calm)
+## Calm preference (config/calm)
 
-The Pi Calm extension stores the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root derived from the extension path, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.
-The values it writes are `on` and `off`, each followed by one newline; an absent, unreadable, or unrecognized value defaults to off.
+Calm stores the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.
+The Pi Calm extension and [`bin/fm-calm.sh`](../bin/fm-calm.sh), the shell reader and writer every other harness adapter uses, share that one file and resolution order.
+The values they write are `on` and `off`, each followed by one newline; an absent, unreadable, or unrecognized value defaults to off.
 `max` is the legacy value written by a removed third presentation level whose behavior is now ordinary Calm, and it is still read as `on`, so a home upgraded from it keeps Calm on rather than dropping to off.
 The `/calm` command replaces the file atomically before changing live presentation, so a failed write leaves the current choice unchanged rather than claiming persistence.
-The extension reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons.
+Pi reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons, and Claude reloads it through its own separate `SessionStart` registration on every session open.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)

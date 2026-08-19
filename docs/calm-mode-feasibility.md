@@ -1,6 +1,6 @@
 # Calm-mode harness feasibility
 
-This document owns the version-scoped feasibility evidence, Pi transcript taxonomy, and supported-API boundaries for Firstmate calm mode.
+This document owns the version-scoped feasibility evidence, Pi transcript taxonomy, Claude presentation boundary, and supported-API boundaries for Firstmate calm mode.
 [`calm.md`](calm.md) owns the current user-facing `/calm` usage and limitation contract.
 
 ## Required extension surface
@@ -182,7 +182,7 @@ Compaction and retry loaders remain stock because Pi exposes no supported replac
 `bin/fm-operational-input.sh` owns current cross-language operational-input construction and parsing, while the thin Pi adapter lives at `.pi/extensions/lib/fm-operational-input.ts`.
 Only `genuine-user-prompt`, `genuine-agent-response`, and `working-status` are policy-visible.
 Every other audited class is policy-hidden when Pi exposes a supported presentation boundary, but semantic input is never transformed to enforce that preference.
-The home-local persistence schema is owned by [`docs/configuration.md`](configuration.md#pi-calm-preference-configcalm).
+The home-local persistence schema is owned by [`docs/configuration.md`](configuration.md#calm-preference-configcalm).
 
 Current session-start, watcher, turn-end guard, away supervisor, and launch-brief inputs retain their versioned U+2063 static envelopes.
 The established leading `[fm-from-firstmate]` plus U+2063 routing carrier remains current so running secondmate charters remain compatible.
@@ -248,7 +248,7 @@ grok 0.2.106 (bde89716f679)
 
 | Harness | Conclusion | Evidence |
 | --- | --- | --- |
-| Claude Code 2.1.218 | Not feasible through the inspected supported project surface. | Project hooks can observe lifecycle and tool events, while the plugin CLI packages supported components; neither inspected surface exposes a transcript-row renderer or transcript-wide redraw API. |
+| Claude Code (2.1.218 inspected, 2.1.235 reverified) | Feasible for response presentation only. | Project `SessionStart` hooks supply persisted-preference context and project custom commands provide `/calm`, while neither inspected surface exposes a transcript-row renderer or transcript-wide redraw API. |
 | Codex CLI 0.144.6 | Not feasible through the inspected supported project surface. | The tracked hooks expose session, pre-tool, and stop handling, while the plugin and feature inventories expose no TUI tool-row renderer or transcript redraw control. |
 | OpenCode 1.17.18 | Not feasible without violating the preservation boundary. | Plugins expose events and tool execution hooks, not a built-in transcript-row renderer; same-name tool replacement changes execution rather than presentation alone. |
 | Pi (verified 0.81.1 through 0.82.0) | Partially feasible with two API-probed exported-class adapters. | Public APIs control working visibility, collapsed labels, known tool slots, custom entries, and expansion redraws; exported assistant and interactive-mode classes provide the collapsed-thinking and operational-user layout boundaries, gated on the exact method's presence rather than a version number, while generic user, tool, and status filtering remains unavailable. |
@@ -258,7 +258,8 @@ These conclusions are deliberately limited to the named versions and supported s
 They do not claim that a harness can never add the missing renderer API.
 For the duplicate-turn fix and the latest presentation change, the launch templates for Claude, Codex, OpenCode, Pi, and Grok and the watcher, turn-end, session-start, away-supervisor, and from-firstmate producers were re-inspected.
 The canonical encoder and every non-Pi delivery path remain unchanged, and the tmux, Herdr, Zellij, Orca, and cmux runtime surfaces continue to transport the same input selected by the harness adapter.
-Only Pi's Calm presentation implementation changed; every producer and non-Pi transport remains unchanged.
+Pi's transcript implementation and Claude's response-presentation adapter are the only Calm integrations.
+Every canonical input producer and every non-Pi transport remains unchanged.
 
 ## Regression coverage
 
@@ -270,6 +271,8 @@ It asserts one persisted and rendered captain answer, exact user-role operationa
 Quoted current markers, ASCII-only labels, ordinary text before a marker, unrelated U+2063 placement, and image-bearing input remain visible in component and native transcript checks.
 `tests/fm-pi-primary-live-e2e.test.sh` also proves the working ship replaces the built-in `Working...` row while Calm is active on the credentialed provider path, and that it clears when the run settles, before continuing its ordinary watcher lifecycle.
 `tests/fm-pi-primary-types.test.sh` performs strict no-emit TypeScript checking against the installed Pi declarations, currently package version 0.81.1.
+`tests/fm-calm-claude-adapter.test.sh` exercises the shared preference command and the Claude session-start adapter across absent, unrecognized, legacy, on, off, gate-agent, and linked-worktree cases, and proves one Claude session open runs the session-start digest registration and the separate Calm registration exactly once each.
+`tests/fm-turnend-guard.test.sh` separately pins that the Calm entry, like every other tracked Claude entry with no Grok counterpart to fall back to, stays inert under both Grok hook environments.
 
 The relevant commands are:
 
@@ -277,6 +280,7 @@ The relevant commands are:
 tests/fm-calm-pi-extension.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 tests/fm-pi-primary-types.test.sh
+tests/fm-calm-claude-adapter.test.sh
 ```
 
 ## 2026-07-23 verification record
@@ -500,3 +504,33 @@ FM_TEST_SUMMARY total=46 failed=0 skipped_gate=16 duration_ms=279390
 FM_TEST_SUMMARY_FAMILY family=live-harness-optin count=16 duration_ms=431 failed=0
 FM_TEST_SUMMARY_FAMILY family=pure-contract-unit count=30 duration_ms=277700 failed=0
 ```
+
+## 2026-08-19 Claude Calm adapter verification
+
+Claude Code 2.1.235 was verified in an isolated disposable fixture with its own `FM_HOME`, a stub session-start digest hook, and the real tracked `.claude/settings.json` registrations.
+With the persisted preference on, one real session open delivered both hook outputs separately: the digest registration's own output and the Calm adapter's active-state line.
+Setting the preference to off and opening another session delivered the inactive line, which states that it supersedes any earlier Calm-active instruction still in the transcript.
+The project `/calm` command toggled a fixture preference from off to on through Claude's supported command preprocessing and Claude confirmed Calm was active for the session, so the command needs no additional tool declaration to run its preference toggle.
+No transcript row, tool, or session-storage behavior changed in either direction, which is the boundary the conclusions table above records for this harness.
+
+```text
+$ claude --version
+2.1.235 (Claude Code)
+
+$ tests/fm-calm-claude-adapter.test.sh
+ok - fm-calm: reads default off, honors the legacy value, persists exact bytes, and rejects invalid input
+ok - Claude Calm nudge follows the persisted preference and stays silent outside a genuine primary home
+ok - the Claude Calm adapter is a separate SessionStart grouping and leaves the session-start digest registration intact
+
+$ tests/fm-turnend-guard.test.sh
+ok - tracked .claude/settings.json entries: 6 inert under grok, the documented subagent exception still armed, all live under Claude
+
+$ bin/fm-lint.sh
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint-workflows.sh: actionlint 1.7.12 (pinned 1.7.12)
+fm-lint-workflows.sh: 3 workflow files valid
+
+$ bin/fm-doc-audience-check.sh
+fm-doc-audience-check: ok surfaces=70 local_links=258
+```
+

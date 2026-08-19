@@ -185,6 +185,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".claude/commands/calm.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "AGENTS.md",
       "audience": "agent-runtime"
     },
