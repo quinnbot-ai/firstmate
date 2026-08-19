@@ -786,6 +786,12 @@ printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 # shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
 FM_WATCH_DELIVERY_PID=$WATCHER_PID
 FM_WATCH_DELIVERY_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null || true)
+# In-cycle progress counter and writer. Bounded, best-effort, one small file:
+# observability must never be able to stall a healthy cycle.
+WATCH_CYCLE=0
+watch_progress() {
+  fm_watcher_progress_write "$STATE" "$WATCHER_PID" "$WATCH_CYCLE" "$1"
+}
 printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
@@ -833,13 +839,37 @@ while :; do
   # no-ops because the lock pid is not ours, so the survivor's lock is untouched.
   # This makes any duplicate self-resolve within one poll instead of persisting
   # and doubling every wake.
-  if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" != "$WATCHER_PID" ]; then
+  successor_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+  if [ "$successor_pid" != "$WATCHER_PID" ]; then
+    # Standing down for a VERIFIED successor is a benign close, but without a
+    # durable record it is byte-identical to a cycle that delivered nothing, so
+    # the arm that owns this child reports "cycle ended without an actionable
+    # reason" whenever it also misses that successor inside its bounded
+    # confirmation window - which is what a loaded machine produces. Publish the
+    # typed record ONLY when the new holder really is a live, identity-matched
+    # watcher for this home: a lock taken by anything else must keep failing
+    # loudly, because then nothing is left supervising.
+    if fm_pid_alive "$successor_pid" \
+      && fm_watcher_lock_matches_pid "$STATE" "$WATCH_PATH" "$successor_pid" "$FM_HOME"; then
+      watch_delivery_publish "watcher: stood down for verified successor pid $successor_pid holding this home lock"
+    fi
     exit 0
   fi
 
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
+
+  # The beacon above only advances at the TOP of a cycle, so a cycle whose BODY
+  # legitimately runs longer than grace - a serial per-task check sweep, the
+  # signal-grace linger, and a fleet heartbeat scan, all slower on a loaded
+  # machine - looks exactly like an absent watcher to anything reading the beacon
+  # alone. The progress record below advances at each phase boundary inside the
+  # body, which is what lets a reader tell a slow live cycle from a dead one
+  # without loosening the beacon's own grace (bin/fm-wake-lib.sh,
+  # fm_watcher_presence).
+  WATCH_CYCLE=$(( WATCH_CYCLE + 1 ))
+  watch_progress cycle-start
 
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated
   # parent reports, observe backend busy/idle turn completion, send one recovery
@@ -886,6 +916,10 @@ while :; do
     rejected_checks=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
+      # Per check, not per sweep: with several tasks registered this loop is the
+      # longest in-cycle stall, and it is exactly where a live watcher must stay
+      # distinguishable from a dead one.
+      watch_progress checks
       is_pr_poll=0
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
@@ -948,9 +982,11 @@ while :; do
   # hook land seconds apart, and reporting them as separate actionable wakes
   # costs a full firstmate turn each. The re-scan also picks up a newer
   # signature for an already-pending file (last write wins below).
+  watch_progress signals
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
+    watch_progress signal-grace
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
     files=""
     while IFS=$(printf '\t') read -r sf sig f; do
@@ -1172,6 +1208,7 @@ EOF
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive
   # no-change heartbeat (idle fleet) up to HEARTBEAT_MAX, and resets on any
   # surfaced non-heartbeat wake.
+  watch_progress heartbeat
   streak=$(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0)
   [ "$streak" -gt 12 ] && streak=12
   hb=$(( HEARTBEAT * (1 << streak) ))
@@ -1203,5 +1240,6 @@ EOF
 
   # Terminal wait: a bounded native-event wait for push-capable homes (herdr),
   # else the blind poll sleep. See event_wait_or_sleep.
+  watch_progress wait
   event_wait_or_sleep
 done

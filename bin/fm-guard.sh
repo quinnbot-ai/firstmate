@@ -18,10 +18,15 @@
 # while that live Pi session provably owns continuity; any held but unhealthy
 # lock is down; under every
 # persistent-watcher harness a live identity-matched watcher with a fresh beacon
-# is required. The banner names the true failing condition (a missing live
-# watcher process vs a genuinely stale beacon). The full banner is emitted once
-# per distinct down-episode in this FM_HOME (keyed to the failing condition, not
-# the beacon mtime, which a healthy between-turns watcher advances every poll);
+# is required. The banner names the condition that ACTUALLY failed - an unheld
+# lock, a dead recorded holder, a foreign holder, an unreadable beacon, or a
+# genuinely stale one - and quotes only the evidence that established it, because
+# one hardcoded reason line eventually contradicts itself (blaming a stale beacon
+# while printing a fresh beacon age). A watcher that is live, identity-matched,
+# and still advancing its in-cycle progress record, but whose beacon slipped past
+# grace, is reported as running behind rather than down. The full banner is
+# emitted once per distinct down-episode in this FM_HOME (keyed to the failing
+# condition, not the beacon mtime, which a healthy watcher advances every poll);
 # later guarded commands in the same episode print a one-line reminder instead.
 # Episode state lives only under state/.guard-watcher-stale-banner (volatile,
 # bounded). Independent alarms (queued wakes, worktree tangle) are never
@@ -159,6 +164,29 @@ beacon_desc=$FM_SUP_BEACON_DESC
 fm_watcher_supervision_verdict "$STATE" "$WATCH" "$GRACE" "$FM_HOME" "$FM_ROOT"
 watcher_healthy=$FM_WATCHER_VERDICT_OK
 watcher_down_reason=$FM_WATCHER_VERDICT_REASON
+watcher_down_cause=$FM_WATCHER_VERDICT_CAUSE
+watcher_late=$FM_WATCHER_VERDICT_LATE
+watcher_lock_pid=$FM_WATCHER_VERDICT_PID
+
+# One clause naming the condition that ACTUALLY failed, with the evidence that
+# established it. Every branch reports only what it measured: a lock-side failure
+# never quotes the beacon as the cause, and an unread beacon is never called old.
+watcher_cause_clause() {
+  case "$watcher_down_cause" in
+    no-lock-holder)
+      printf 'no live watcher process holds this home lock (last beat: %s)' "$beacon_desc" ;;
+    dead-lock-holder)
+      printf 'the recorded watcher process (pid %s) is gone (last beat: %s)' \
+        "${watcher_lock_pid:-unknown}" "$beacon_desc" ;;
+    lock-mismatch)
+      printf 'this home lock is held by pid %s, which is not this home watcher (last beat: %s)' \
+        "${watcher_lock_pid:-unknown}" "$beacon_desc" ;;
+    beacon-unreadable)
+      printf 'the watcher liveness beacon exists but its age could not be read, so supervision cannot be confirmed either way' ;;
+    *)
+      printf 'no watcher has a fresh beacon (last beat: %s, grace %ss)' "$beacon_desc" "$GRACE" ;;
+  esac
+}
 if [ "$needed" = false ]; then
   # Leave the unhealthy state (nothing riding on the watcher): clear so a later
   # work or X-mode need + stale combination is a fresh episode even if the
@@ -173,7 +201,7 @@ fi
 # bordered banner FIRST so it reads as an alarm, not a buried stderr line. Later
 # calls in the same episode get a one-line reminder only.
 if [ "$watcher_healthy" = false ]; then
-  episode_key=$(fm_guard_stale_episode_key "$watcher_down_reason")
+  episode_key=$(fm_guard_stale_episode_key "${watcher_down_cause:-$watcher_down_reason}")
   episode_key=${episode_key%$'\n'}
   print_full_banner=0
   if [ "$READ_ONLY" -eq 1 ]; then
@@ -198,7 +226,9 @@ if [ "$watcher_healthy" = false ]; then
     {
       printf '●%s\n' "$rule"
       printf '●  WATCHER DOWN - SUPERVISION IS OFF\n'
-      if [ "$watcher_down_reason" = no-watcher ]; then
+      if [ -n "$watcher_down_cause" ]; then
+        watcher_cause=$(watcher_cause_clause)
+      elif [ "$watcher_down_reason" = no-watcher ]; then
         watcher_cause=$(printf 'no live watcher process holds this home lock (last beat: %s)' "$beacon_desc")
       else
         watcher_cause=$(printf 'no watcher has a fresh beacon (last beat: %s, grace %ss)' "$beacon_desc" "$GRACE")
@@ -222,6 +252,22 @@ if [ "$watcher_healthy" = false ]; then
   else
     printf 'WARNING: watcher still down (same stale episode; last beat: %s, grace %ss) - full banner already printed this episode.\n' \
       "$beacon_desc" "$GRACE" >&2
+  fi
+elif [ "$watcher_late" = true ]; then
+  # Supervision is PRESENT but running a cycle longer than grace: the lock names a
+  # live, identity-matched watcher that is still advancing its in-cycle progress
+  # record. That is degraded, not off, so it must not raise the watcher-down
+  # alarm - the flap this distinction exists to stop. Say it once per late
+  # episode so the slowness is still visible without becoming noise.
+  episode_key=$(fm_guard_stale_episode_key "late:${watcher_lock_pid:-unknown}")
+  episode_key=${episode_key%$'\n'}
+  if [ "$READ_ONLY" -eq 1 ]; then
+    fm_guard_stale_banner_seen "$STATE" "$episode_key" \
+      || printf 'NOTE: supervision is running behind (watcher pid %s is live and advancing, cycle %s, last beat %s, grace %ss) - no repair needed.\n' \
+        "${watcher_lock_pid:-unknown}" "${FM_WATCHER_VERDICT_CYCLE:-unknown}" "$beacon_desc" "$GRACE" >&2
+  elif fm_guard_claim_stale_banner "$STATE" "$episode_key"; then
+    printf 'NOTE: supervision is running behind (watcher pid %s is live and advancing, cycle %s, last beat %s, grace %ss) - no repair needed.\n' \
+      "${watcher_lock_pid:-unknown}" "${FM_WATCHER_VERDICT_CYCLE:-unknown}" "$beacon_desc" "$GRACE" >&2
   fi
 else
   # Healthy again while work is still in flight: end the episode so a later

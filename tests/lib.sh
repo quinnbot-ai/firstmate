@@ -304,3 +304,23 @@ assert_absent() {
 assert_present() {
   [ -e "$1" ] || fail "$2"
 }
+
+# fm_test_set_mtime <epoch-seconds> <path>: set <path>'s mtime, portably.
+# BSD touch takes the stamp from date -r, GNU from date -d.
+fm_test_set_mtime() {
+  local epoch=$1 path=$2 stamp
+  if stamp=$(date -r "$epoch" +%Y%m%d%H%M.%S 2>/dev/null); then
+    touch -t "$stamp" "$path"
+  else
+    stamp=$(date -d "@$epoch" +%Y%m%d%H%M.%S)
+    touch -t "$stamp" "$path"
+  fi
+}
+
+# fm_test_age_file <seconds-ago> <path>: make <path> look exactly that old.
+# Prefer this over a fixed far-past stamp whenever the age itself is what the
+# case is testing, so a bounded window cannot be crossed by accident.
+fm_test_age_file() {
+  local seconds=$1 path=$2
+  fm_test_set_mtime "$(( $(date +%s) - seconds ))" "$path"
+}

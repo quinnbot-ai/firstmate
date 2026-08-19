@@ -397,6 +397,142 @@ test_persistent_no_watcher_banner_names_missing_process() {
   pass "fm-guard stale banner: persistent no-watcher banner names the true reason"
 }
 
+# --- the banner must report the condition it actually measured ----------------
+#
+# The failing conditions are checked in a fixed order and the check stops at the
+# first one, so a banner that always prints the last condition eventually
+# contradicts its own evidence: "no watcher has a fresh beacon (last beat: 41s
+# ago, grace 300s)" is not a diagnosis, it is a misattribution wearing one.
+
+# Record a watcher lock for <pid> whose identity may be deliberately wrong.
+record_watcher_lock() {  # <dir> <pid> [identity-override]
+  local dir=$1 pid=$2 override=${3:-} home identity
+  home=$(case_home "$dir")
+  if [ -n "$override" ]; then
+    identity=$override
+  else
+    identity=$(FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_pid_identity "$2"' \
+      _ "$ROOT/bin/fm-wake-lib.sh" "$pid") || return 1
+  fi
+  mkdir -p "$home/state/.watch.lock"
+  printf '%s\n' "$pid" > "$home/state/.watch.lock/pid"
+  printf '%s\n' "$home" > "$home/state/.watch.lock/fm-home"
+  printf '%s\n' "$ROOT/bin/fm-watch.sh" > "$home/state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$home/state/.watch.lock/pid-identity"
+}
+
+# A persistent-model guard run with a real grace and late ceiling, so a beacon
+# aged past grace is a genuine decision rather than a value the case pins away.
+run_guard_case_graced() {  # <dir> <grace> <late-multiplier>
+  local dir=$1 grace=$2 multiplier=$3
+  FM_ROOT_OVERRIDE="$(case_root "$dir")" \
+    FM_HOME="$(case_home "$dir")" \
+    FM_GUARD_GRACE="$grace" \
+    FM_WATCHER_LATE_MULTIPLIER="$multiplier" \
+    FM_SUPERVISION_MODEL=persistent \
+    "$ROOT/bin/fm-guard.sh" 2>&1
+}
+
+test_dead_recorded_holder_banner_names_the_dead_process() {
+  local dir out dead
+  dir=$(make_guard_case dead-holder-reason)
+  touch "$(case_home "$dir")/state/.last-watcher-beat"
+  sleep 300 &
+  dead=$!
+  record_watcher_lock "$dir" "$dead" || fail "could not record the watcher lock"
+  kill -KILL "$dead" 2>/dev/null || true
+  wait "$dead" 2>/dev/null || true
+  out=$(run_guard_case "$dir")
+  assert_contains "$out" "the recorded watcher process (pid $dead) is gone" \
+    "banner must name the dead recorded watcher process"
+  assert_not_contains "$out" "no watcher has a fresh beacon" \
+    "a dead recorded holder must not be reported as a stale beacon"
+  pass "fm-guard stale banner: a dead recorded holder is named as such"
+}
+
+test_foreign_lock_holder_banner_names_the_mismatch() {
+  local dir out live
+  dir=$(make_guard_case foreign-holder-reason)
+  touch "$(case_home "$dir")/state/.last-watcher-beat"
+  sleep 300 &
+  live=$!
+  record_watcher_lock "$dir" "$live" "not-this-home-watcher-identity" \
+    || fail "could not record the watcher lock"
+  out=$(run_guard_case "$dir")
+  assert_contains "$out" "held by pid $live, which is not this home watcher" \
+    "banner must name the foreign lock holder"
+  assert_not_contains "$out" "no watcher has a fresh beacon" \
+    "a foreign lock holder must not be reported as a stale beacon"
+  kill -TERM "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "fm-guard stale banner: a foreign lock holder is named as such"
+}
+
+test_banner_never_blames_a_beacon_it_read_as_fresh() {
+  # The whole class, stated once: whenever the banner prints a beacon age that is
+  # inside grace, it must not simultaneously claim no watcher has a fresh beacon.
+  local dir out
+  for dir in "$(make_guard_case contradiction-unheld)" "$(make_guard_case contradiction-empty-lock)"; do
+    touch "$(case_home "$dir")/state/.last-watcher-beat"
+    out=$(run_guard_case "$dir")
+    if printf '%s' "$out" | grep -q 'last beat: [0-9]*s ago' \
+      && printf '%s' "$out" | grep -q 'no watcher has a fresh beacon'; then
+      fail "banner blamed a stale beacon while printing a fresh beacon age: $out"
+    fi
+    mkdir -p "$(case_home "$dir")/state/.watch.lock"
+    : > "$(case_home "$dir")/state/.watch.lock/pid"
+  done
+  pass "fm-guard stale banner: a beacon read as fresh is never reported as stale"
+}
+
+test_slow_but_advancing_watcher_is_not_reported_down() {
+  local dir home out live
+  dir=$(make_guard_case slow-cycle)
+  home=$(case_home "$dir")
+  sleep 300 &
+  live=$!
+  record_watcher_lock "$dir" "$live" || fail "could not record the watcher lock"
+  fm_test_age_file 100 "$home/state/.last-watcher-beat"
+  printf 'pid=%s cycle=42 phase=checks\n' "$live" > "$home/state/.watch-progress"
+
+  # Live, identity-matched, still advancing, inside the ceiling: running behind,
+  # not off. Reporting this as WATCHER DOWN is the flap.
+  out=$(run_guard_case_graced "$dir" 5 100)
+  assert_not_contains "$out" "WATCHER DOWN - SUPERVISION IS OFF" \
+    "a live, still-advancing watcher must not be reported as down"
+  assert_contains "$out" "supervision is running behind" \
+    "a slow live cycle must still be visible as slow"
+  assert_contains "$out" "cycle 42" \
+    "the running-behind note must carry the cycle evidence it measured"
+
+  # SAFETY - the same beacon, once the cycle stops advancing, is a real lapse.
+  fm_test_age_file 100 "$home/state/.watch-progress"
+  rm -f "$home/state/.guard-watcher-stale-banner"
+  out=$(run_guard_case_graced "$dir" 5 100)
+  assert_contains "$out" "WATCHER DOWN - SUPERVISION IS OFF" \
+    "a watcher that stopped advancing must still raise the alarm"
+
+  # SAFETY - and so is the same still-advancing cycle once the beacon passes the
+  # bounded ceiling, so the tolerance cannot grow without limit.
+  printf 'pid=%s cycle=43 phase=checks\n' "$live" > "$home/state/.watch-progress"
+  rm -f "$home/state/.guard-watcher-stale-banner"
+  out=$(run_guard_case_graced "$dir" 5 3)
+  assert_contains "$out" "WATCHER DOWN - SUPERVISION IS OFF" \
+    "a beacon past the late ceiling must still raise the alarm"
+
+  # SAFETY - a fresh progress record must never speak for an absent watcher.
+  rm -rf "$home/state/.watch.lock"
+  printf 'pid=%s cycle=44 phase=checks\n' "$live" > "$home/state/.watch-progress"
+  rm -f "$home/state/.guard-watcher-stale-banner"
+  out=$(run_guard_case_graced "$dir" 5 100)
+  assert_contains "$out" "WATCHER DOWN - SUPERVISION IS OFF" \
+    "an absent watcher with a fresh progress record must still raise the alarm"
+
+  kill -TERM "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "fm-guard stale banner: a slow live cycle is not down, an absent or wedged one still is"
+}
+
 test_persistent_no_watcher_episode_survives_beacon_touch() {
   local dir home out1 out2
   dir=$(make_guard_case persistent-no-watcher-episode)
@@ -465,7 +601,7 @@ test_extension_handoff_with_empty_lock_is_healthy() {
 # Extension ownership tolerates only a released lock. Every non-empty recorded
 # pid means the lock is held, so any strict watcher-health failure stays loud.
 test_extension_held_unhealthy_locks_stay_alarm() {
-  local dir home out session_pid holder_pid case_name
+  local dir home out session_pid holder_pid dead_pid case_name expected
   for case_name in dead-pid malformed-pid wrong-home wrong-path identity-mismatch; do
     dir=$(make_guard_case "extension-held-$case_name")
     home=$(case_home "$dir")
@@ -474,6 +610,7 @@ test_extension_held_unhealthy_locks_stay_alarm() {
     record_pi_extension_session "$dir" "$session_pid" \
       || fail "could not record the Pi extension session for $case_name"
     holder_pid=
+    dead_pid=
     case "$case_name" in
       malformed-pid)
         mkdir -p "$home/state/.watch.lock"
@@ -488,6 +625,7 @@ test_extension_held_unhealthy_locks_stay_alarm() {
           dead-pid)
             kill "$holder_pid" 2>/dev/null || true
             wait "$holder_pid" 2>/dev/null || true
+            dead_pid=$holder_pid
             holder_pid=
             ;;
           wrong-home)
@@ -510,8 +648,17 @@ test_extension_held_unhealthy_locks_stay_alarm() {
     wait "$session_pid" 2>/dev/null || true
     [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
       || fail "an extension-owned held lock with $case_name must alarm: $out"
-    assert_contains "$out" "no live watcher process holds this home lock" \
-      "a held unhealthy lock with $case_name must report no-watcher"
+    # Loud is not enough: each held-but-unhealthy lock fails for its own reason,
+    # and the banner must say which one rather than one blanket sentence.
+    case "$case_name" in
+      dead-pid) expected="the recorded watcher process (pid $dead_pid) is gone" ;;
+      malformed-pid) expected="no live watcher process holds this home lock" ;;
+      *) expected="which is not this home watcher" ;;
+    esac
+    assert_contains "$out" "$expected" \
+      "a held unhealthy lock with $case_name must report its own failing condition"
+    assert_not_contains "$out" "no watcher has a fresh beacon" \
+      "a held unhealthy lock with $case_name must not be blamed on the fresh beacon"
   done
   pass "fm-guard stale banner: held unhealthy extension locks stay loud"
 }
@@ -697,6 +844,10 @@ test_autoarm_stale_beacon_alarms_with_correct_reason
 test_autoarm_stale_episode_is_stable
 test_persistent_no_watcher_banner_names_missing_process
 test_persistent_no_watcher_episode_survives_beacon_touch
+test_dead_recorded_holder_banner_names_the_dead_process
+test_foreign_lock_holder_banner_names_the_mismatch
+test_banner_never_blames_a_beacon_it_read_as_fresh
+test_slow_but_advancing_watcher_is_not_reported_down
 test_fresh_beacon_without_live_watcher_stays_alarm
 test_x_mode_without_live_watcher_stays_alarm
 test_healthy_recovery_rearms_next_stale_episode

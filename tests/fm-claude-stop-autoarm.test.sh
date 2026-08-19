@@ -438,6 +438,47 @@ test_post_alarm_actionable_close_is_suppressed() {
   pass "auto-arm: post-alarm actionable outcomes cannot continue or reset failure state"
 }
 
+# The same benign close, but with a watcher whose beacon slipped past grace while
+# it worked through a long cycle. Under load that is the ordinary case, not a
+# failure, and treating it as one produced a spurious auto-arm failure notice.
+# The paired safety case below keeps the genuinely-stopped watcher loud.
+test_benign_cycle_end_with_slow_but_live_watcher_is_silent() {
+  local dir out status pid identity slow_outcome wedged_out wedged_status
+  dir=$(make_primary_dir "$TMP_ROOT/benign-slow-live")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" benign-live
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || fail "could not identify the slow live watcher"
+  record_watcher_lock "$dir" "$pid" "$identity"
+  fm_test_age_file 100 "$dir/state/.last-watcher-beat"
+  printf 'pid=%s cycle=11 phase=checks\n' "$pid" > "$dir/state/.watch-progress"
+  export FM_GUARD_GRACE=5 FM_WATCHER_LATE_MULTIPLIER=100
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  slow_outcome=$(epoch_outcome "$dir")
+
+  # SAFETY - the same beacon once the cycle stops advancing: nothing proves
+  # supervision is still running, so the failure notice must come back.
+  fm_test_age_file 100 "$dir/state/.watch-progress"
+  rm -f "$dir/state/.claude-autoarm-failure-notified" "$dir/state/.claude-autoarm-failure-alarmed"
+  wedged_out=$(run_autoarm "$dir" 2>/dev/null); wedged_status=$?
+  unset FM_GUARD_GRACE FM_WATCHER_LATE_MULTIPLIER
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+
+  expect_code 0 "$status" "a failed-looking cycle with a live, still-advancing watcher must be benign"
+  [ -z "$out" ] || fail "a slow but live cycle produced an operator notice: $out"
+  [ "$slow_outcome" = clean ] \
+    || fail "a slow but live cycle must record outcome=clean, got: $slow_outcome"
+
+  expect_code 2 "$wedged_status" "a watcher that stopped advancing must not be treated as benign"
+  assert_contains "$wedged_out" "auto-arm FAILED" \
+    "a watcher that stopped advancing must still raise the auto-arm failure"
+  assert_contains "$wedged_out" "no longer advancing" \
+    "the auto-arm failure must name the condition it measured"
+  pass "auto-arm: a slow but live cycle is benign while a stopped one still fails loudly"
+}
+
 test_benign_cycle_end_with_live_watcher_is_silent() {
   local dir out out2 status status2 pid identity
   dir=$(make_primary_dir "$TMP_ROOT/benign-live")
@@ -592,6 +633,7 @@ test_failed_cycles_notify_once_and_keep_retrying
 test_unverified_clean_close_exhausts_retries
 test_post_alarm_actionable_close_is_suppressed
 test_benign_cycle_end_with_live_watcher_is_silent
+test_benign_cycle_end_with_slow_but_live_watcher_is_silent
 test_positive_recovery_budget_contention_preserves_episode
 test_arms_for_x_mode_poll_need_without_inflight
 test_single_flight_admits_exactly_one_owner

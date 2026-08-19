@@ -59,10 +59,12 @@ An acknowledged episode does not freeze the generation, because the next downtim
 
 `bin/fm-watch-arm.sh` never returns a clean empty success.
 An actionable child output returns that reason normally.
-A zero/empty child return rechecks the home lock and beacon, attaches to a verified healthy successor when one exists, or resolves the close against the watcher's bounded terminal-delivery ledger.
+A zero/empty child return rechecks the home lock and beacon, attaches to a verified present successor when one exists, or resolves the close against the watcher's bounded terminal-delivery ledger.
+"Present" is `fm_watcher_presence` in `bin/fm-wake-lib.sh`: a live identity-matched holder that is either beating inside grace or still advancing its in-cycle progress record inside a bounded ceiling above it, so a watcher running a slow cycle is attached to rather than replaced.
 An attached arm follows verified identity-matched successors and resolves the same way when that chain ends without one, because it holds no handle on the watcher's stdout and cannot read the reason line itself.
 Before releasing its singleton lock after printing an actionable reason, the watcher records that reason with its PID and process identity in `state/.watch-deliveries.log`.
 A matching PID and identity lets an attached arm report the delivered reason and exit zero even after its durable wake was handled and acknowledged, while an unrelated queue producer or a recycled PID cannot satisfy the match.
+A watcher that stands down because another process took the singleton lock records that stand-down the same way, but only after verifying the new holder really is a live identity-matched watcher for this home; a lock taken by anything else leaves no record.
 Only a cycle with no matching delivery record emits `watcher: FAILED - cycle ended without an actionable reason` and exits nonzero.
 
 The arm layer appends one tab-separated record per observed cycle to `state/.watch-cycle-exits.log`.
@@ -71,7 +73,8 @@ The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYC
 `state/.watch-triage.log` remains only the watcher's bounded absorbed-wake debug log and carries no lifecycle semantics.
 
 The default 300-second grace is unchanged.
-Only the watcher process touches `state/.last-watcher-beat`; no helper process can make a wedged watcher appear healthy.
+Only the watcher process touches `state/.last-watcher-beat` or writes `state/.watch-progress`, and the progress record counts only when it names the current lock holder, so no helper process and no record left by a previous watcher can make a wedged or absent watcher appear healthy.
+The progress record is written at each phase boundary inside a cycle - cycle start, per state check, signal scan, signal grace, heartbeat, and the terminal wait - because the beacon advances only at the top of a cycle and a cycle body can legitimately outlast grace on a loaded machine.
 
 ## Regression coverage
 

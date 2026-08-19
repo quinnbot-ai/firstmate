@@ -32,9 +32,10 @@
 #     rewake banner to stderr and exits 2, which wakes Claude even while idle
 #     ("Stop hook feedback"). A close that reports no actionable reason is
 #     benign when a live identity-matched watcher still has a fresh beacon.
-#   - Failure handling: a typed failure is rechecked against the same live,
-#     fresh watcher predicate and retried a bounded number of times in this
-#     hook. Only an exhausted failure with no verified watcher emits one
+#   - Failure handling: a typed failure is rechecked against the same present-
+#     watcher predicate (live and identity-matched, beating within grace or still
+#     advancing through a longer cycle) and retried a bounded number of times in
+#     this hook. Only an exhausted failure with no verified watcher emits one
 #     last-resort notice per failure episode; later consecutive failures still
 #     exit 2 to guarantee the next Stop-owned retry without repeating notice,
 #     until the synchronous guard has consumed its attended fail-open.
@@ -156,6 +157,22 @@ write_epoch() {  # <outcome>
   rm -f "$tmp" 2>/dev/null || true
 }
 
+# One short clause naming what the last presence check actually established, so
+# the failure notice carries evidence instead of a fixed sentence that may not
+# describe this failure at all.
+autoarm_failure_evidence() {
+  local reason=${FM_WATCHER_PRESENCE_REASON:-unknown} pid=${FM_WATCHER_PRESENCE_PID:-} age=${FM_WATCHER_PRESENCE_BEACON_AGE:-}
+  case "$reason" in
+    no-lock-holder) printf 'no watcher process holds this home lock' ;;
+    dead-lock-holder) printf 'the recorded watcher process (pid %s) is gone' "${pid:-unknown}" ;;
+    lock-mismatch) printf 'this home lock is held by pid %s, which is not this home watcher' "${pid:-unknown}" ;;
+    no-beacon) printf 'no watcher has ever recorded a liveness beat' ;;
+    beacon-unreadable) printf 'the liveness beacon age could not be read' ;;
+    stale-beacon) printf 'watcher pid %s last beat %ss ago and is no longer advancing' "${pid:-unknown}" "${age:-unknown}" ;;
+    *) printf 'watcher presence could not be established' ;;
+  esac
+}
+
 write_epoch arming
 
 # X mode cadence: source the generated config so an X instance polls at its
@@ -198,8 +215,12 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
   [ "$ACTIONABLE" -eq 1 ] && break
 
   # A non-actionable close is benign when another verified watcher already owns
-  # this home and is still beating within the shared grace window.
-  if fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"; then
+  # this home and is still beating within the shared grace window - or is still
+  # demonstrably working through a cycle longer than that window. Treating the
+  # second case as a failure is what turned a loaded machine's slow cycle into a
+  # spurious auto-arm failure and relaunch; fm_watcher_presence keeps the absent,
+  # dead, foreign, and wedged cases failing exactly as before.
+  if fm_watcher_presence "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"; then
     HEALTHY=1
     break
   fi
@@ -253,7 +274,8 @@ fi
 if [ ! -e "$FAILURE_NOTICE" ]; then
   write_epoch failed
   {
-    printf 'firstmate watcher auto-arm FAILED - the Stop-owned automatic supervision mechanism is broken after %s bounded attempts, and no live watcher with a fresh beacon was verified.\n' "$attempt"
+    printf 'firstmate watcher auto-arm FAILED - the Stop-owned automatic supervision mechanism is broken after %s bounded attempts, and no live watcher was verified (%s).\n' \
+      "$attempt" "$(autoarm_failure_evidence)"
     [ -n "$OUT" ] && grep -E '^(watcher:|signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
     printf 'Do not launch a manual background arm from this notice; investigate the automatic Stop hook and watcher startup before ending blind.\n'
   } >&2

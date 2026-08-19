@@ -64,18 +64,80 @@ fm_pid_identity() {
   printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
 }
 
-fm_path_mtime() {
-  if [ "$_FM_UNAME" = Darwin ]; then
-    stat -f %m "$1" 2>/dev/null
-  else
-    stat -c %Y "$1" 2>/dev/null
-  fi
+# Which stat(1) dialect this host answers with, seeded from the cached uname and
+# then corrected by the first successful read. The seed is a preference, never a
+# verdict: probing both dialects is what keeps a single failed uname from pinning
+# every later read to the wrong one. That failure mode is not hypothetical - a
+# uname fork can fail on a loaded machine, and the old Darwin-or-GNU branch then
+# ran "stat -c" on macOS, so every mtime read in that process failed and reported
+# a perfectly fresh liveness beacon as ancient.
+_FM_STAT_MTIME_DIALECT=gnu
+[ "$_FM_UNAME" = Darwin ] && _FM_STAT_MTIME_DIALECT=bsd
+
+_fm_stat_mtime_try() {
+  local dialect=$1 path=$2 out
+  case "$dialect" in
+    bsd) out=$(stat -f %m "$path" 2>/dev/null) || return 1 ;;
+    *) out=$(stat -c %Y "$path" 2>/dev/null) || return 1 ;;
+  esac
+  case "$out" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$out"
 }
 
-fm_path_age() {
+# fm_path_mtime <path>
+# Print <path>'s mtime in epoch seconds, or return 1 when it cannot be read.
+# Never prints a fabricated value: an unreadable path is the caller's problem to
+# report honestly.
+fm_path_mtime() {
+  local path=$1 other out
+  if out=$(_fm_stat_mtime_try "$_FM_STAT_MTIME_DIALECT" "$path"); then
+    printf '%s\n' "$out"
+    return 0
+  fi
+  other=bsd
+  [ "$_FM_STAT_MTIME_DIALECT" = bsd ] && other=gnu
+  if out=$(_fm_stat_mtime_try "$other" "$path"); then
+    # The seed was wrong for this host; remember what actually answers so the
+    # rest of this process reads the beacon on the first try.
+    _FM_STAT_MTIME_DIALECT=$other
+    printf '%s\n' "$out"
+    return 0
+  fi
+  return 1
+}
+
+# fm_path_age_measure <path>
+# Set FM_PATH_AGE to <path>'s age in seconds and return 0, or return 1 with
+# FM_PATH_AGE_MEASURED=false when the mtime cannot be read. Callers that must
+# distinguish "this file is old" from "this age could not be measured" use this
+# instead of fm_path_age, whose printed sentinel cannot carry that difference.
+FM_PATH_AGE=
+FM_PATH_AGE_MEASURED=false
+fm_path_age_measure() {
   local path=$1 m
-  m=$(fm_path_mtime "$path") || { echo 999999; return; }
-  echo $(( $(date +%s) - m ))
+  FM_PATH_AGE=
+  FM_PATH_AGE_MEASURED=false
+  m=$(fm_path_mtime "$path") || return 1
+  FM_PATH_AGE=$(( $(date +%s) - m ))
+  # shellcheck disable=SC2034 # Read by callers after the function returns.
+  FM_PATH_AGE_MEASURED=true
+  return 0
+}
+
+# fm_path_age <path>
+# Print the age in seconds, or the 999999 sentinel when it cannot be measured.
+# Kept for callers that only log or compare an age; anything that decides whether
+# supervision is present must use fm_path_age_measure instead, because "could not
+# measure" and "very old" are different findings and only one of them is a lapse.
+fm_path_age() {
+  local path=$1
+  if fm_path_age_measure "$path"; then
+    printf '%s\n' "$FM_PATH_AGE"
+  else
+    printf '999999\n'
+  fi
 }
 
 # fm_watcher_lock_unheld <state>
@@ -107,20 +169,63 @@ fm_watcher_lock_matches_pid() {
   FM_WATCHER_MATCHED_IDENTITY=$lock_identity
 }
 
+# fm_watcher_healthy publishes WHICH of its ordered conditions failed, because a
+# caller that reports one hardcoded cause for every failure will eventually print
+# a self-contradictory line - "no watcher has a fresh beacon (last beat: 41s ago,
+# grace 300s)" when the beacon was never the problem. FM_WATCHER_HEALTHY_REASON
+# is one of:
+#   ok                 a live, identity-matched holder with a fresh beacon
+#   no-lock-holder     the lock records no pid at all
+#   dead-lock-holder   the recorded pid is not running
+#   lock-mismatch      a live pid holds the lock but it is not this home's watcher
+#   no-beacon          no beacon file exists at all (no watcher has ever beat)
+#   beacon-unreadable  a beacon exists but its age could not be measured; that is
+#                      a failure to observe, never evidence that it is old
+#   stale-beacon       the holder is live and matched, the beacon is past grace
+# FM_WATCHER_HEALTHY_LOCK_PID and FM_WATCHER_HEALTHY_BEACON_AGE carry whatever
+# evidence was actually established, and are empty where nothing was measured.
 FM_WATCHER_HEALTHY_PID=
 FM_WATCHER_HEALTHY_IDENTITY=
+FM_WATCHER_HEALTHY_REASON=
+FM_WATCHER_HEALTHY_LOCK_PID=
+FM_WATCHER_HEALTHY_BEACON_AGE=
 fm_watcher_healthy() {
-  local state=$1 watch_path=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME} lockdir beat pid identity age
+  local state=$1 watch_path=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME} lockdir beat pid identity
   FM_WATCHER_HEALTHY_PID=
   FM_WATCHER_HEALTHY_IDENTITY=
+  FM_WATCHER_HEALTHY_REASON=
+  FM_WATCHER_HEALTHY_LOCK_PID=
+  FM_WATCHER_HEALTHY_BEACON_AGE=
   lockdir="$state/.watch.lock"
   beat="$state/.last-watcher-beat"
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  fm_pid_alive "$pid" || return 1
-  fm_watcher_lock_matches_pid "$state" "$watch_path" "$pid" "$home" || return 1
+  FM_WATCHER_HEALTHY_LOCK_PID=$pid
+  case "$pid" in
+    ''|*[!0-9]*) FM_WATCHER_HEALTHY_REASON='no-lock-holder'; return 1 ;;
+  esac
+  if ! fm_pid_alive "$pid"; then
+    FM_WATCHER_HEALTHY_REASON='dead-lock-holder'
+    return 1
+  fi
+  if ! fm_watcher_lock_matches_pid "$state" "$watch_path" "$pid" "$home"; then
+    FM_WATCHER_HEALTHY_REASON='lock-mismatch'
+    return 1
+  fi
   identity=$FM_WATCHER_MATCHED_IDENTITY
-  age=$(fm_path_age "$beat")
-  [ "$age" -lt "$grace" ] || return 1
+  if [ ! -e "$beat" ]; then
+    FM_WATCHER_HEALTHY_REASON='no-beacon'
+    return 1
+  fi
+  if ! fm_path_age_measure "$beat"; then
+    FM_WATCHER_HEALTHY_REASON='beacon-unreadable'
+    return 1
+  fi
+  FM_WATCHER_HEALTHY_BEACON_AGE=$FM_PATH_AGE
+  if [ "$FM_PATH_AGE" -ge "$grace" ]; then
+    FM_WATCHER_HEALTHY_REASON='stale-beacon'
+    return 1
+  fi
+  FM_WATCHER_HEALTHY_REASON=ok
   # shellcheck disable=SC2034 # Read by callers after fm_watcher_healthy returns.
   FM_WATCHER_HEALTHY_PID=$pid
   # shellcheck disable=SC2034 # Read by callers after fm_watcher_healthy returns.
@@ -128,15 +233,134 @@ fm_watcher_healthy() {
   return 0
 }
 
-# fm_watcher_healthy above is the PID-STRICT primitive: true only when a live,
-# identity-matched watcher PROCESS holds this home's lock with a fresh beacon. The
-# arm layer (bin/fm-watch-arm.sh, bin/fm-claude-stop-autoarm.sh) needs exactly
-# that - it decides whether to start, attach to, or replace a real watcher
-# process, so a leftover beacon must never satisfy it. bin/fm-turnend-guard.sh
-# also keeps this strict check because it fires at the turn boundary where the
-# auto-arm brings a fresh watcher up. The pull warning (bin/fm-guard.sh) fires
-# mid-turn, where the auto-arm model runs no watcher at all, so it wants a
-# different, model-aware question:
+# In-cycle progress record (state/.watch-progress), written by bin/fm-watch.sh at
+# each phase boundary of a supervision cycle. The liveness beacon only advances
+# at the TOP of a cycle, so a cycle whose body genuinely takes longer than grace -
+# a serial check sweep, a signal-grace linger, and a fleet heartbeat scan on a
+# loaded machine - is indistinguishable from an absent watcher by beacon age
+# alone. The progress record is what separates them: it advances inside the body.
+# Format is one line, "pid=<n> cycle=<n> phase=<name>"; the record's own mtime is
+# the authoritative age, so a stopped clock or a torn write cannot age it.
+fm_watcher_progress_path() {
+  printf '%s/.watch-progress\n' "$1"
+}
+
+# fm_watcher_progress_write <state> <pid> <cycle> <phase>
+# Best-effort: an observability write must never stall a healthy cycle.
+fm_watcher_progress_write() {
+  local state=$1 pid=$2 cycle=$3 phase=$4 path
+  path=$(fm_watcher_progress_path "$state")
+  printf 'pid=%s cycle=%s phase=%s\n' "$pid" "$cycle" "$phase" > "$path" 2>/dev/null || true
+}
+
+# fm_watcher_progress_read <state>
+# Set FM_WATCHER_PROGRESS_PID/CYCLE/PHASE/AGE and return 0, or return 1 when the
+# record is absent, unreadable, or does not name a pid.
+FM_WATCHER_PROGRESS_PID=
+FM_WATCHER_PROGRESS_CYCLE=
+FM_WATCHER_PROGRESS_PHASE=
+FM_WATCHER_PROGRESS_AGE=
+fm_watcher_progress_read() {
+  local state=$1 path line field
+  FM_WATCHER_PROGRESS_PID=
+  FM_WATCHER_PROGRESS_CYCLE=
+  FM_WATCHER_PROGRESS_PHASE=
+  FM_WATCHER_PROGRESS_AGE=
+  path=$(fm_watcher_progress_path "$state")
+  [ -f "$path" ] || return 1
+  fm_path_age_measure "$path" || return 1
+  FM_WATCHER_PROGRESS_AGE=$FM_PATH_AGE
+  line=$(sed -n '1p' "$path" 2>/dev/null) || return 1
+  # shellcheck disable=SC2034 # FM_WATCHER_PROGRESS_PHASE is read by callers.
+  for field in $line; do
+    case "$field" in
+      pid=*) FM_WATCHER_PROGRESS_PID=${field#pid=} ;;
+      cycle=*) FM_WATCHER_PROGRESS_CYCLE=${field#cycle=} ;;
+      phase=*) FM_WATCHER_PROGRESS_PHASE=${field#phase=} ;;
+    esac
+  done
+  case "$FM_WATCHER_PROGRESS_PID" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  return 0
+}
+
+# How far past grace a demonstrably live and demonstrably progressing watcher may
+# fall behind on its beacon before it is treated as down anyway. This is a
+# ceiling, not a new grace: nothing below it is tolerated without independent
+# proof of both liveness and forward progress.
+FM_WATCHER_LATE_MULTIPLIER=${FM_WATCHER_LATE_MULTIPLIER:-3}
+case "$FM_WATCHER_LATE_MULTIPLIER" in
+  ''|*[!0-9]*|0|1) FM_WATCHER_LATE_MULTIPLIER=3 ;;
+esac
+
+# fm_watcher_presence <state> <watch-path> [grace] [home]
+# The single owner of "is a watcher process actually there right now", for
+# callers that must not mistake a slow cycle for an absent one. Sets:
+#   FM_WATCHER_PRESENCE         healthy | late | down
+#   FM_WATCHER_PRESENCE_REASON  the fm_watcher_healthy vocabulary above
+#   FM_WATCHER_PRESENCE_PID / _IDENTITY / _BEACON_AGE / _PROGRESS_AGE / _CYCLE
+# Returns 0 for healthy or late, 1 for down.
+#
+# "late" requires ALL THREE, and each one independently rules out the failure it
+# is there to catch:
+#   1. the lock names a LIVE, identity-matched process for this home and this
+#      watcher path - an absent, dead, or foreign holder can never be late;
+#   2. that same process wrote a progress record within grace - a live but WEDGED
+#      watcher stops advancing and is therefore never late, only down;
+#   3. the beacon is still inside grace * FM_WATCHER_LATE_MULTIPLIER - an absolute
+#      ceiling, so tolerance cannot grow without bound.
+fm_watcher_presence() {
+  local state=$1 watch_path=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME}
+  local ceiling
+  FM_WATCHER_PRESENCE=down
+  FM_WATCHER_PRESENCE_REASON=
+  FM_WATCHER_PRESENCE_PID=
+  # shellcheck disable=SC2034 # Read by callers after the function returns.
+  FM_WATCHER_PRESENCE_IDENTITY=
+  FM_WATCHER_PRESENCE_BEACON_AGE=
+  FM_WATCHER_PRESENCE_PROGRESS_AGE=
+  FM_WATCHER_PRESENCE_CYCLE=
+  if fm_watcher_healthy "$state" "$watch_path" "$grace" "$home"; then
+    FM_WATCHER_PRESENCE=healthy
+    FM_WATCHER_PRESENCE_REASON=ok
+    FM_WATCHER_PRESENCE_PID=$FM_WATCHER_HEALTHY_PID
+    # shellcheck disable=SC2034 # Read by callers after the function returns.
+    FM_WATCHER_PRESENCE_IDENTITY=$FM_WATCHER_HEALTHY_IDENTITY
+    FM_WATCHER_PRESENCE_BEACON_AGE=$FM_WATCHER_HEALTHY_BEACON_AGE
+    return 0
+  fi
+  FM_WATCHER_PRESENCE_REASON=$FM_WATCHER_HEALTHY_REASON
+  FM_WATCHER_PRESENCE_PID=$FM_WATCHER_HEALTHY_LOCK_PID
+  # shellcheck disable=SC2034 # Read by callers after the function returns.
+  FM_WATCHER_PRESENCE_BEACON_AGE=$FM_WATCHER_HEALTHY_BEACON_AGE
+  # Only a stale beacon can be lateness: every other reason means the health
+  # check stopped before it ever established a live, identity-matched holder.
+  [ "$FM_WATCHER_HEALTHY_REASON" = stale-beacon ] || return 1
+  ceiling=$(( grace * FM_WATCHER_LATE_MULTIPLIER ))
+  [ "$FM_WATCHER_HEALTHY_BEACON_AGE" -lt "$ceiling" ] || return 1
+  fm_watcher_progress_read "$state" || return 1
+  FM_WATCHER_PRESENCE_PROGRESS_AGE=$FM_WATCHER_PROGRESS_AGE
+  FM_WATCHER_PRESENCE_CYCLE=$FM_WATCHER_PROGRESS_CYCLE
+  [ "$FM_WATCHER_PROGRESS_PID" = "$FM_WATCHER_HEALTHY_LOCK_PID" ] || return 1
+  [ "$FM_WATCHER_PROGRESS_AGE" -lt "$grace" ] || return 1
+  # The identity match above is what established this holder, so reuse it rather
+  # than re-reading the lock and risking a different answer.
+  # shellcheck disable=SC2034 # Read by callers after the function returns.
+  FM_WATCHER_PRESENCE_IDENTITY=$FM_WATCHER_MATCHED_IDENTITY
+  FM_WATCHER_PRESENCE=late
+  return 0
+}
+
+# fm_watcher_healthy is the strictest primitive: true only when a live,
+# identity-matched watcher PROCESS holds this home's lock with a beacon inside
+# grace. fm_watcher_presence above builds on it for every caller that must decide
+# whether a real watcher process is THERE - the arm layer (bin/fm-watch-arm.sh,
+# bin/fm-claude-stop-autoarm.sh) and both turn-end guards, which start, attach to,
+# replace, or block on a real process, so a leftover beacon must never satisfy
+# them and a slow cycle must never be mistaken for an absent one. The pull warning
+# (bin/fm-guard.sh) fires mid-turn, where the auto-arm model runs no watcher at
+# all, so it wants a different, model-aware question:
 
 # fm_supervision_model
 # Print the supervision model of this home's PRIMARY harness:
@@ -230,12 +454,23 @@ fm_pi_extension_owns_supervision() {
 # Model-aware "is supervision healthy right now" verdict for the pull warning
 # guard (bin/fm-guard.sh), NOT the arm layer or the turn-end guard. Sets:
 #   FM_WATCHER_VERDICT_OK      true when supervision is healthy for this model
-#   FM_WATCHER_VERDICT_REASON  when not ok, the true failing condition:
+#   FM_WATCHER_VERDICT_REASON  when not ok, the coarse failing condition:
 #                              no-watcher   - a live watcher process is the real
 #                                             signal for this model but none holds
 #                                             the lock (the beacon is still fresh)
 #                              stale-beacon - the beacon is stale beyond grace or
 #                                             absent (a genuine supervision lapse)
+#   FM_WATCHER_VERDICT_CAUSE   the specific fm_watcher_healthy reason behind it
+#                              (no-lock-holder, dead-lock-holder, lock-mismatch,
+#                              no-beacon, beacon-unreadable, stale-beacon), so a
+#                              banner can name what actually failed, rather than
+#                              blaming one hardcoded condition for all of them
+#   FM_WATCHER_VERDICT_LATE    true when supervision is present but running a slow
+#                              cycle (fm_watcher_presence "late"): degraded, not
+#                              off, and never an alarm
+#   FM_WATCHER_VERDICT_PID / _BEACON_AGE / _PROGRESS_AGE / _CYCLE
+#                              the evidence behind the verdict, empty where the
+#                              check stopped before establishing it
 # autoarm: a fresh beacon within grace is healthy even with no live watcher,
 # because the watcher only runs between turns; only a stale beacon is a lapse.
 # extension: a live identity-matched watcher is the ordinary healthy state, but a
@@ -248,39 +483,113 @@ fm_pi_extension_owns_supervision() {
 # extension never restores still alarms once the beacon passes grace.
 # persistent: require a live identity-matched watcher with a fresh beacon
 # (fm_watcher_healthy); a fresh leftover beacon with no live watcher is still down.
+# Under every model a "late" presence - a live, identity-matched, still-advancing
+# watcher whose beacon slipped past grace inside the bounded ceiling - is degraded
+# rather than off, so it never raises the watcher-down alarm.
 # shellcheck disable=SC2034 # Read by callers after the function returns.
 FM_WATCHER_VERDICT_OK=false
 # shellcheck disable=SC2034 # Read by callers after the function returns.
-FM_WATCHER_VERDICT_REASON=stale-beacon
+FM_WATCHER_VERDICT_REASON='stale-beacon'
+# shellcheck disable=SC2034 # Read by callers after the function returns.
+FM_WATCHER_VERDICT_CAUSE=
+# shellcheck disable=SC2034 # Read by callers after the function returns.
+FM_WATCHER_VERDICT_LATE=false
+# shellcheck disable=SC2034 # Read by callers after the function returns.
+FM_WATCHER_VERDICT_PID=
+# shellcheck disable=SC2034 # Read by callers after the function returns.
+FM_WATCHER_VERDICT_BEACON_AGE=
+# shellcheck disable=SC2034 # Read by callers after the function returns.
+FM_WATCHER_VERDICT_PROGRESS_AGE=
+# shellcheck disable=SC2034 # Read by callers after the function returns.
+FM_WATCHER_VERDICT_CYCLE=
 fm_watcher_supervision_verdict() {
   local state=$1 watch=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME}
   local root=${5:-$FM_ROOT}
-  local beat age fresh=false model
+  local beat fresh=false measured=false model
   FM_WATCHER_VERDICT_OK=false
-  FM_WATCHER_VERDICT_REASON=stale-beacon
+  FM_WATCHER_VERDICT_REASON='stale-beacon'
+  FM_WATCHER_VERDICT_CAUSE=
+  FM_WATCHER_VERDICT_LATE=false
+  FM_WATCHER_VERDICT_PID=
+  FM_WATCHER_VERDICT_BEACON_AGE=
+  FM_WATCHER_VERDICT_PROGRESS_AGE=
+  FM_WATCHER_VERDICT_CYCLE=
   beat="$state/.last-watcher-beat"
-  age=$(fm_path_age "$beat")
-  case "$age" in
-    ''|*[!0-9]*) ;;
-    *) [ "$age" -lt "$grace" ] && fresh=true ;;
-  esac
+  if fm_path_age_measure "$beat"; then
+    measured=true
+    # shellcheck disable=SC2034 # Read by callers after the function returns.
+    FM_WATCHER_VERDICT_BEACON_AGE=$FM_PATH_AGE
+    [ "$FM_PATH_AGE" -lt "$grace" ] && fresh=true
+  fi
   model=$(fm_supervision_model)
+  # An unmeasurable beacon is a measurement failure, not evidence of age. Say so
+  # rather than reporting a stale beacon nobody actually read; an absent beacon
+  # stays its own separate finding.
+  if [ "$measured" != true ]; then
+    if [ -e "$beat" ]; then
+      FM_WATCHER_VERDICT_CAUSE='beacon-unreadable'
+    else
+      FM_WATCHER_VERDICT_CAUSE='no-beacon'
+    fi
+  fi
   if [ "$model" = autoarm ]; then
-    [ "$fresh" = true ] && FM_WATCHER_VERDICT_OK=true
+    if [ "$fresh" = true ]; then
+      FM_WATCHER_VERDICT_OK=true
+      return 0
+    fi
+    # No live watcher is expected mid-turn under this model, so the beacon is the
+    # only signal and the beacon condition stays the reported cause - never the
+    # absent lock holder, which is the healthy mid-turn state here. The one
+    # exception is a between-turns watcher that is still there and still
+    # advancing, just running a cycle longer than grace.
+    if fm_watcher_presence "$state" "$watch" "$grace" "$home" \
+      && [ "$FM_WATCHER_PRESENCE" = late ]; then
+      FM_WATCHER_VERDICT_OK=true
+      FM_WATCHER_VERDICT_LATE=true
+      FM_WATCHER_VERDICT_PID=$FM_WATCHER_PRESENCE_PID
+      FM_WATCHER_VERDICT_PROGRESS_AGE=$FM_WATCHER_PRESENCE_PROGRESS_AGE
+      FM_WATCHER_VERDICT_CYCLE=$FM_WATCHER_PRESENCE_CYCLE
+      return 0
+    fi
+    [ "$measured" = true ] && FM_WATCHER_VERDICT_CAUSE='stale-beacon'
     return 0
   fi
-  if fm_watcher_healthy "$state" "$watch" "$grace" "$home"; then
+  if fm_watcher_presence "$state" "$watch" "$grace" "$home"; then
     # shellcheck disable=SC2034 # Read by callers after the function returns.
     FM_WATCHER_VERDICT_OK=true
-  elif [ "$fresh" = true ]; then
+    FM_WATCHER_VERDICT_PID=$FM_WATCHER_PRESENCE_PID
+    if [ "$FM_WATCHER_PRESENCE" = late ]; then
+      # shellcheck disable=SC2034 # Read by callers after the function returns.
+      FM_WATCHER_VERDICT_LATE=true
+      # shellcheck disable=SC2034 # Read by callers after the function returns.
+      FM_WATCHER_VERDICT_PROGRESS_AGE=$FM_WATCHER_PRESENCE_PROGRESS_AGE
+      # shellcheck disable=SC2034 # Read by callers after the function returns.
+      FM_WATCHER_VERDICT_CYCLE=$FM_WATCHER_PRESENCE_CYCLE
+    fi
+    return 0
+  fi
+  # Which cause is DECISIVE depends on the beacon. A beacon that is not fresh is
+  # a lapse under every model on its own, so the beacon condition is what to
+  # report. A beacon that IS fresh cannot be the reason anything failed, so the
+  # cause must be lock-side - reporting the beacon there is exactly the
+  # self-contradicting banner this attribution exists to prevent.
+  if [ "$fresh" = true ]; then
+    FM_WATCHER_VERDICT_CAUSE=$FM_WATCHER_PRESENCE_REASON
+    FM_WATCHER_VERDICT_PID=$FM_WATCHER_PRESENCE_PID
     if [ "$model" = extension ] && fm_watcher_lock_unheld "$state" \
       && fm_pi_extension_owns_supervision "$state" "$root"; then
       # shellcheck disable=SC2034 # Read by callers after the function returns.
       FM_WATCHER_VERDICT_OK=true
+      # shellcheck disable=SC2034 # Read by callers after the function returns.
+      FM_WATCHER_VERDICT_CAUSE=
+      # shellcheck disable=SC2034 # Read by callers after the function returns.
+      FM_WATCHER_VERDICT_PID=
     else
       # shellcheck disable=SC2034 # Read by callers after the function returns.
-      FM_WATCHER_VERDICT_REASON=no-watcher
+      FM_WATCHER_VERDICT_REASON='no-watcher'
     fi
+  elif [ "$measured" = true ]; then
+    FM_WATCHER_VERDICT_CAUSE='stale-beacon'
   fi
   return 0
 }

@@ -21,21 +21,29 @@
 # pre-execution seatbelt, not a substitute for the verification here.
 #
 # This script forks the watcher as a tracked child, then VERIFIES the outcome
-# before it settles in. It confirms a watcher process is genuinely alive AND the
-# liveness beacon (state/.last-watcher-beat) is fresh within FM_GUARD_GRACE (the
-# single source of truth, shared with fm-watch.sh and fm-guard.sh), and prints
+# before it settles in. It confirms a watcher process is genuinely alive AND
+# either beating within FM_GUARD_GRACE (state/.last-watcher-beat, the single
+# source of truth shared with fm-watch.sh and fm-guard.sh) or still advancing
+# through a long cycle (state/.watch-progress, bounded by that same grace and by
+# a hard ceiling above it - fm_watcher_presence in bin/fm-wake-lib.sh). It prints
 # exactly one unambiguous status line:
 #   watcher: started pid=<N> (beacon fresh)              - it launched one and confirmed it
 #   watcher: attached pid=<N> (beacon <age>s)            - a live+fresh successor holds the lock;
 #                                                          this arm attaches and follows it
+#   watcher: attached pid=<N> (beacon <age>s, cycle <n> still advancing)
+#                                                        - the same live, identity-matched watcher
+#                                                          is running a cycle longer than
+#                                                          FM_GUARD_GRACE and is still advancing;
+#                                                          slow is not absent, so this attaches
+#                                                          instead of declaring a failure
 #   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
 #   watcher: FAILED - cycle ended without an actionable reason
 #                                                        - a clean cycle ended with no wake and no
 #                                                          verified healthy successor
-# It NEVER reports started/attached/healthy off a stale beacon or a dead/reused pid: a
-# stale-beacon or dead-pid holder either self-heals (the fresh child steals the
-# dead lock per the singleton self-eviction/steal path and is confirmed) or this
-# returns the FAILED line. On started it waits the child and propagates the wake
+# It NEVER reports started/attached/healthy off a dead or reused pid, off a lock
+# it does not own, or off a watcher that has stopped advancing: such a holder
+# either self-heals (the fresh child steals the dead lock per the singleton
+# self-eviction/steal path and is confirmed) or this returns the FAILED line. On started it waits the child and propagates the wake
 # reason; on attached it stays live across identity-matched successors. A cycle
 # that ends with no reason line and no healthy successor is resolved against the
 # watcher's identity-bound delivery record: a matching record reports that wake
@@ -233,25 +241,40 @@ clear_stale_recorded_watcher_lock() {
   fm_recovery_transition "$STATE/.watcher-down" clear-stale-lock "$WATCH_LOCK" downtime
 }
 
-# A watcher is "healthy" iff the lock names a live process that is genuinely THIS
-# home's watcher (the identity match guards against a recycled/reused pid) AND the
-# liveness beacon is fresh within GRACE. Sets HEALTHY_PID on success. This is the
-# single honesty gate: a dead pid, a reused pid, or a stale beacon all fail it, so
-# this script can never report a watcher that is not really there.
+# A watcher is PRESENT iff the lock names a live process that is genuinely THIS
+# home's watcher (the identity match guards against a recycled/reused pid) and it
+# is either beating within GRACE ("healthy") or demonstrably still working
+# through a long cycle ("late": the same live identity-matched process is still
+# advancing its in-cycle progress record, and the beacon has not passed the
+# bounded ceiling). fm_watcher_presence in bin/fm-wake-lib.sh owns that contract.
+#
+# Accepting "late" is what stops this script from declaring a failure - and
+# relaunching - against a watcher that is right there and running. It does not
+# weaken the honesty gate: an unheld lock, a dead recorded pid, a reused pid, a
+# foreign holder, an unreadable beacon, and a live-but-wedged watcher that
+# stopped advancing all still fail, so this script still can never report a
+# watcher that is not really there.
 HEALTHY_PID=
 HEALTHY_IDENTITY=
+HEALTHY_STATE=
 healthy_watcher() {
   HEALTHY_PID=
   HEALTHY_IDENTITY=
-  fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" || return 1
-  HEALTHY_PID=$FM_WATCHER_HEALTHY_PID
-  HEALTHY_IDENTITY=$FM_WATCHER_HEALTHY_IDENTITY
+  HEALTHY_STATE=
+  fm_watcher_presence "$STATE" "$WATCH" "$GRACE" "$FM_HOME" || return 1
+  HEALTHY_PID=$FM_WATCHER_PRESENCE_PID
+  HEALTHY_IDENTITY=$FM_WATCHER_PRESENCE_IDENTITY
+  HEALTHY_STATE=$FM_WATCHER_PRESENCE
 }
 
 report_attached() {
   local age
   age=$(fm_path_age "$BEAT")
-  echo "watcher: attached pid=$HEALTHY_PID (beacon ${age}s)"
+  if [ "$HEALTHY_STATE" = late ]; then
+    echo "watcher: attached pid=$HEALTHY_PID (beacon ${age}s, cycle ${FM_WATCHER_PRESENCE_CYCLE:-unknown} still advancing)"
+  else
+    echo "watcher: attached pid=$HEALTHY_PID (beacon ${age}s)"
+  fi
 }
 
 # Give a successor the same bounded confirmation window used for a fresh child.
@@ -558,10 +581,12 @@ while :; do
         exit 1
       fi
       cycle_mark_predecessor_successor "started:$child"
+      started_beacon=fresh
+      [ "$HEALTHY_STATE" = late ] && started_beacon="late but advancing"
       if [ -n "$handling_generation" ]; then
-        echo "watcher: started pid=$child (beacon fresh) recovery-generation=$handling_generation"
+        echo "watcher: started pid=$child (beacon $started_beacon) recovery-generation=$handling_generation"
       else
-        echo "watcher: started pid=$child (beacon fresh)"
+        echo "watcher: started pid=$child (beacon $started_beacon)"
       fi
       wait "$child"
       rc=$?

@@ -938,6 +938,185 @@ test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
   pass "SIGSTOP distinguishes live PID from stale beacon and termination records the exit class"
 }
 
+# --- beacon measurement, failure attribution, and slow-vs-absent presence ------
+#
+# These cover one class of bug: a supervision check that REPORTS a condition it
+# did not measure. The library must (a) read a beacon age on this host even when
+# the platform probe it prefers is unavailable, (b) say which of its ordered
+# conditions actually failed, and (c) separate a watcher that is running slowly
+# from one that is not there. Every relaxation in (c) is paired below with the
+# absent, dead, foreign, and wedged cases that must still be reported as down.
+
+# Record a live, identity-matched watcher lock for <pid> in <dir>'s state.
+lock_records_live_watcher() {  # <dir> <pid>
+  local dir=$1 pid=$2 state identity
+  state="$dir/state"
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid") || return 1
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$pid" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+}
+
+# Print fm_watcher_healthy's published failing condition for <dir>.
+healthy_reason() {  # <dir> [grace]
+  local dir=$1 grace=${2:-300}
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1"
+    fm_watcher_healthy "$2" "$3" "$5" "$4" && { printf ok; exit 0; }
+    printf "%s" "$FM_WATCHER_HEALTHY_REASON"
+  ' _ "$LIB" "$dir/state" "$WATCH" "$dir" "$grace"
+}
+
+# Print fm_watcher_presence's verdict for <dir> as "<presence> <reason>".
+presence_verdict() {  # <dir> <grace> [late-multiplier]
+  local dir=$1 grace=$2 multiplier=${3:-3}
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_WATCHER_LATE_MULTIPLIER="$multiplier" bash -c '
+    . "$1"
+    fm_watcher_presence "$2" "$3" "$5" "$4" >/dev/null
+    printf "%s %s" "$FM_WATCHER_PRESENCE" "$FM_WATCHER_PRESENCE_REASON"
+  ' _ "$LIB" "$dir/state" "$WATCH" "$dir" "$grace"
+}
+
+test_beacon_age_survives_a_failed_platform_probe() {
+  # The library picks its stat dialect from one cached uname. When that single
+  # call fails - a fork failure on a loaded machine is enough - the old code
+  # committed to the wrong dialect for the life of the process, every mtime read
+  # failed, and a fresh beacon was reported through the unmeasurable sentinel as
+  # though it were ancient. The age must survive that, on this host, either way.
+  local dir state age_default age_broken
+  dir=$(make_case beacon-probe-fallback)
+  state="$dir/state"
+  touch "$state/.last-watcher-beat"
+  age_default=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_path_age "$2"' _ "$LIB" "$state/.last-watcher-beat")
+  age_broken=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; _FM_UNAME=unknown; fm_path_age "$2"' _ "$LIB" "$state/.last-watcher-beat")
+  [ "$age_default" -lt 60 ] \
+    || fail "a beacon just touched was not measured as fresh (got ${age_default}s)"
+  [ "$age_broken" -lt 60 ] \
+    || fail "a failed platform probe fabricated a stale beacon age (got ${age_broken}s)"
+  # An unreadable path must still be reported as unmeasurable, not as an age.
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_path_age_measure "$2"' _ "$LIB" "$state/no-such-beacon" \
+    && fail "an absent beacon was reported as a measured age"
+  pass "beacon age is measurable on this host even when the platform probe fails"
+}
+
+test_watcher_health_publishes_the_condition_that_failed() {
+  local dir state live reason
+  dir=$(make_case healthy-reasons)
+  state="$dir/state"
+
+  reason=$(healthy_reason "$dir")
+  [ "$reason" = no-lock-holder ] \
+    || fail "an unheld lock was reported as '$reason', not no-lock-holder"
+
+  mkdir -p "$state/.watch.lock"
+  sleep 300 &
+  live=$!
+  lock_records_live_watcher "$dir" "$live" || fail "could not record a live watcher lock"
+  kill -KILL "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  reason=$(healthy_reason "$dir")
+  [ "$reason" = dead-lock-holder ] \
+    || fail "a dead recorded holder was reported as '$reason', not dead-lock-holder"
+
+  sleep 300 &
+  live=$!
+  lock_records_live_watcher "$dir" "$live" || fail "could not record a live watcher lock"
+  printf '%s\n' "not-this-home-watcher-identity" > "$state/.watch.lock/pid-identity"
+  reason=$(healthy_reason "$dir")
+  [ "$reason" = lock-mismatch ] \
+    || fail "a foreign lock holder was reported as '$reason', not lock-mismatch"
+
+  lock_records_live_watcher "$dir" "$live" || fail "could not restore the live watcher lock"
+  reason=$(healthy_reason "$dir")
+  [ "$reason" = no-beacon ] \
+    || fail "an absent beacon was reported as '$reason', not no-beacon"
+
+  touch -t 200001010000 "$state/.last-watcher-beat"
+  reason=$(healthy_reason "$dir")
+  [ "$reason" = stale-beacon ] \
+    || fail "an old beacon was reported as '$reason', not stale-beacon"
+
+  touch "$state/.last-watcher-beat"
+  reason=$(healthy_reason "$dir")
+  [ "$reason" = ok ] \
+    || fail "a live matched watcher with a fresh beacon was reported as '$reason'"
+
+  kill -TERM "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "watcher health names the condition that failed instead of one fixed reason"
+}
+
+test_presence_accepts_a_slow_cycle_and_still_reports_an_absent_watcher() {
+  local dir state live verdict
+  dir=$(make_case presence-slow-vs-absent)
+  state="$dir/state"
+  sleep 300 &
+  live=$!
+  lock_records_live_watcher "$dir" "$live" || fail "could not record a live watcher lock"
+  # A cycle running well past grace but nowhere near a plausible ceiling.
+  fm_test_age_file 100 "$state/.last-watcher-beat"
+  printf 'pid=%s cycle=7 phase=checks\n' "$live" > "$state/.watch-progress"
+
+  # Live, identity-matched, still advancing, beacon inside the ceiling: slow, not
+  # absent. This is the case the whole relaxation exists for.
+  verdict=$(presence_verdict "$dir" 5 100)
+  [ "$verdict" = "late stale-beacon" ] \
+    || fail "a live, advancing watcher with a late beacon was judged '$verdict'"
+
+  # SAFETY 1 - the beacon passed the bounded ceiling: tolerance does not grow.
+  verdict=$(presence_verdict "$dir" 5 3)
+  [ "$verdict" = "down stale-beacon" ] \
+    || fail "a beacon past the late ceiling was judged '$verdict', not down"
+
+  # SAFETY 2 - live but WEDGED: the process is there, the cycle stopped
+  # advancing, so there is no proof supervision is still running.
+  fm_test_age_file 100 "$state/.watch-progress"
+  verdict=$(presence_verdict "$dir" 5 100)
+  [ "$verdict" = "down stale-beacon" ] \
+    || fail "a live but no-longer-advancing watcher was judged '$verdict', not down"
+
+  # SAFETY 3 - a progress record must not vouch for a watcher that is not there.
+  printf 'pid=%s cycle=8 phase=checks\n' "$live" > "$state/.watch-progress"
+  kill -KILL "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  verdict=$(presence_verdict "$dir" 5 100)
+  [ "$verdict" = "down dead-lock-holder" ] \
+    || fail "a dead watcher with a fresh progress record was judged '$verdict', not down"
+
+  # SAFETY 4 - and neither may it vouch for a home with no watcher lock at all.
+  rm -rf "$state/.watch.lock"
+  verdict=$(presence_verdict "$dir" 5 100)
+  [ "$verdict" = "down no-lock-holder" ] \
+    || fail "an absent watcher with a fresh progress record was judged '$verdict', not down"
+
+  pass "presence tolerates a slow live cycle and still reports absent, dead, and wedged watchers"
+}
+
+test_presence_rejects_a_progress_record_from_another_process() {
+  # A progress record naming a DIFFERENT pid than the lock holder proves nothing
+  # about the holder, so it must not buy the holder any tolerance. Without this,
+  # a record left by the previous watcher would keep vouching for its successor.
+  local dir state live other verdict
+  dir=$(make_case presence-foreign-progress)
+  state="$dir/state"
+  sleep 300 &
+  live=$!
+  sleep 300 &
+  other=$!
+  lock_records_live_watcher "$dir" "$live" || fail "could not record a live watcher lock"
+  fm_test_age_file 100 "$state/.last-watcher-beat"
+  printf 'pid=%s cycle=3 phase=checks\n' "$other" > "$state/.watch-progress"
+  verdict=$(presence_verdict "$dir" 5 100)
+  [ "$verdict" = "down stale-beacon" ] \
+    || fail "another process's progress record vouched for the lock holder: '$verdict'"
+  kill -TERM "$live" "$other" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
+  pass "presence ignores a progress record written by a different process"
+}
+
 test_pid_identity_is_locale_invariant() {
   # The portable fallback records its process identity under one locale, then
   # arm/guard/turn-end re-read it under the machine's ambient locale. ps's lstart
@@ -1127,3 +1306,7 @@ test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified
+test_beacon_age_survives_a_failed_platform_probe
+test_watcher_health_publishes_the_condition_that_failed
+test_presence_accepts_a_slow_cycle_and_still_reports_an_absent_watcher
+test_presence_rejects_a_progress_record_from_another_process

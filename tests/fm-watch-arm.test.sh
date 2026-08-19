@@ -155,6 +155,124 @@ start_rearm_arm() {  # <home> <state> <fakebin> <arm-out> [predecessor-arm-pid]
   return 0
 }
 
+# A real watcher whose cycle body is slow: it holds the lock and is advancing,
+# but its liveness beacon - written only at the TOP of a cycle - has slipped past
+# the grace window. The arm must attach to that watcher rather than declare a
+# failure and take over, because the process it would be replacing is right there
+# and working. The paired safety case keeps a watcher that has stopped advancing
+# a failure exactly as before.
+test_arm_attaches_to_a_slow_but_live_watcher() {
+  local dir state fakebin out armout i
+  dir=$(make_case slow-live-cycle)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/arm.out"
+
+  # A long poll keeps the real watcher parked in its terminal wait, so the beacon
+  # age this case sets is the age the arm actually reads.
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=600 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  SEED_PID=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$SEED_PID" ] \
+      && [ -s "$state/.watch-progress" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$SEED_PID" ] \
+    || fail "the slow-cycle watcher did not take the lock"
+  grep -q "pid=$SEED_PID" "$state/.watch-progress" \
+    || fail "the running watcher did not publish an in-cycle progress record"
+
+  fm_test_age_file 100 "$state/.last-watcher-beat"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 \
+    FM_ARM_CONFIRM_TIMEOUT=1 FM_GUARD_GRACE=5 FM_WATCHER_LATE_MULTIPLIER=100 \
+    "$WATCH_ARM" > "$armout" &
+  ARM_PID=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    grep -qF "watcher: attached pid=$SEED_PID" "$armout" 2>/dev/null && break
+    grep -qF 'watcher: FAILED' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$SEED_PID" "$armout" \
+    || fail "the arm did not attach to a live, still-advancing watcher: $(cat "$armout")"
+  grep -qF 'still advancing' "$armout" \
+    || fail "the arm attached without recording that the cycle was late but advancing: $(cat "$armout")"
+  ! grep -qF 'watcher: FAILED' "$armout" \
+    || fail "the arm reported a live, still-advancing watcher as a failure: $(cat "$armout")"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$SEED_PID" ] \
+    || fail "the arm replaced a watcher that was still running"
+
+  kill -TERM "$ARM_PID" 2>/dev/null || true
+  wait_for_exit "$ARM_PID" 60
+  # KILL, not TERM: this watcher is deliberately parked in a long poll sleep, and
+  # bash defers a trap until the foreground command it is running returns, so a
+  # TERM here would not be acted on until that sleep elapsed.
+  kill -KILL "$SEED_PID" 2>/dev/null || true
+  wait_for_exit "$SEED_PID" 60
+
+  pass "watch-arm: a slow but live watcher is attached to, not replaced or failed"
+}
+
+# The safety counterpart, on its own untouched state: a leftover progress record
+# naming a watcher that is no longer there must buy nothing. The arm must bring
+# up its own watcher rather than attach to a process that has gone.
+test_arm_does_not_attach_on_a_leftover_progress_record() {
+  local dir state fakebin out armout dead_pid i
+  dir=$(make_case leftover-progress-record)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/arm.out"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=600 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  SEED_PID=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$SEED_PID" ] \
+      && [ -s "$state/.watch-progress" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$state/.watch-progress" ] || fail "the watcher never published a progress record"
+  dead_pid=$SEED_PID
+  # KILL for the same reason as above: the parked poll sleep defers any trap.
+  kill -KILL "$SEED_PID" 2>/dev/null || true
+  wait_for_exit "$SEED_PID" 60
+  # Its own record survives it, now naming a process that is gone.
+  printf 'pid=%s cycle=99 phase=checks\n' "$dead_pid" > "$state/.watch-progress"
+  fm_test_age_file 100 "$state/.last-watcher-beat"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=600 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 \
+    FM_ARM_CONFIRM_TIMEOUT=10 FM_GUARD_GRACE=5 FM_WATCHER_LATE_MULTIPLIER=100 \
+    "$WATCH_ARM" > "$armout" &
+  ARM_PID=$!
+  i=0
+  while [ "$i" -lt 300 ]; do
+    grep -qE '^watcher: (started|attached|FAILED)' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  ! grep -qF "attached pid=$dead_pid" "$armout" \
+    || fail "the arm attached to a departed watcher on the strength of its leftover record: $(cat "$armout")"
+  # Any honest close is acceptable here - it may start its own watcher, fail
+  # loudly, or immediately surface the wake the departed watcher's recovery state
+  # left behind. What it may never do is silently attach to a watcher that is
+  # gone, which the assertion above pins.
+  [ -s "$armout" ] \
+    || fail "the arm closed silently with no live watcher: $(cat "$armout")"
+  kill -TERM "$ARM_PID" 2>/dev/null || true
+  wait_for_exit "$ARM_PID" 60
+  kill -KILL "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" 2>/dev/null || true
+  pass "watch-arm: a leftover progress record never stands in for a watcher that is gone"
+}
+
 test_attached_arm_reports_the_delivered_wake() {
   local dir state fakebin out armout status
   dir=$(make_case attached-delivered-wake)
@@ -797,6 +915,8 @@ test_downtime_marker_does_not_follow_symlink() {
   pass "watch-arm: downtime marker publication does not follow symlinks"
 }
 
+test_arm_attaches_to_a_slow_but_live_watcher
+test_arm_does_not_attach_on_a_leftover_progress_record
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver

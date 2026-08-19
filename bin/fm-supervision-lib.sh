@@ -6,19 +6,30 @@
 # work (a state/<id>.meta exists) or an X-mode relay poll
 # (state/x-watch.check.sh), and whether its watcher has a fresh liveness beacon
 # (state/.last-watcher-beat, touched every poll cycle, within the grace window).
-# bin/fm-turnend-guard.sh uses the PID-strict fm_watcher_healthy from
+# bin/fm-turnend-guard.sh uses the process-strict fm_watcher_presence from
 # bin/fm-wake-lib.sh for its block decision. bin/fm-guard.sh uses the model-aware
 # fm_watcher_supervision_verdict (also in bin/fm-wake-lib.sh), which owns what a
 # live watcher process means per supervision model. The status fields here retain
 # the beacon-age details used in their messages.
 
-# Portable mtime; Linux stat lacks -f, macOS stat lacks -c.
+# Portable mtime; Linux stat lacks -f, macOS stat lacks -c. bin/fm-wake-lib.sh
+# owns the hardened probe, so prefer it whenever it has been sourced. The local
+# fallback still tries BOTH dialects rather than deciding from uname alone: a
+# uname that fails once (fork pressure on a loaded machine) must not silently
+# turn every beacon read into an unreadable one, which is how a fresh beacon
+# ended up reported as missing.
 fm_sup_stat_mtime() {
-  if [ "$(uname)" = Darwin ]; then
-    stat -f %m "$1" 2>/dev/null
-  else
-    stat -c %Y "$1" 2>/dev/null
+  local out
+  if command -v fm_path_mtime >/dev/null 2>&1; then
+    fm_path_mtime "$1"
+    return $?
   fi
+  out=$(stat -f %m "$1" 2>/dev/null) || out=
+  [ -n "$out" ] || out=$(stat -c %Y "$1" 2>/dev/null) || out=
+  case "$out" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$out"
 }
 
 # fm_supervision_status <state-dir> [grace-seconds]

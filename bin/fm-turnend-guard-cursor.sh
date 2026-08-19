@@ -326,7 +326,7 @@ while [ "$attempt" -lt "$ARM_ATTEMPTS" ]; do
 
   # A non-actionable close is benign when another verified watcher already owns
   # this home and is still beating inside the shared grace window.
-  if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
+  if fm_watcher_presence "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
     HEALTHY=1
     break
   fi

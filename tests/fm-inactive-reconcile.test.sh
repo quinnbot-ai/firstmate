@@ -11,13 +11,7 @@ WATCH="$ROOT/bin/fm-watch.sh"
 TMP_ROOT=$(fm_test_tmproot fm-inactive-reconcile)
 
 set_mtime() { # <epoch> <path>
-  local epoch=$1 path=$2 stamp
-  if stamp=$(date -r "$epoch" +%Y%m%d%H%M.%S 2>/dev/null); then
-    touch -t "$stamp" "$path"
-  else
-    stamp=$(date -d "@$epoch" +%Y%m%d%H%M.%S)
-    touch -t "$stamp" "$path"
-  fi
+  fm_test_set_mtime "$1" "$2"
 }
 
 age() { # <path>...
