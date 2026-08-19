@@ -2705,6 +2705,56 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
 fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
+# Herdr renders its Spaces and Agents sidebar from row templates fed by
+# display-only pane and workspace metadata, so tell it what this worker IS -
+# a persistent secondmate, an ordinary crewmate, or a scout, and the domain or
+# project it belongs to. The adapter owns the reporting contract and every
+# safety boundary (bin/backends/herdr.sh "sidebar legibility"); the facts are
+# resolved here because only the spawn knows the task's kind and project.
+# Reported AFTER the endpoint record is published so a report can never sit
+# between a live pane and its durable identity, and best-effort throughout: a
+# sidebar row is presentation, never a reason to fail a spawn.
+if [ "$BACKEND" = herdr ]; then
+  SIDEBAR_ROLE=$(fm_backend_herdr_sidebar_role "$KIND")
+  # The home whose label this worker's entry belongs under is the secondmate's
+  # own home for a --secondmate launch and this process's own home otherwise -
+  # the same rule the workspace label itself resolves by.
+  SIDEBAR_HOME_DIR=$FM_HOME
+  [ "$KIND" = secondmate ] && SIDEBAR_HOME_DIR=$PROJ_ABS
+  SIDEBAR_HOME_LABEL=$(FM_HOME="$SIDEBAR_HOME_DIR" fm_backend_herdr_workspace_label)
+  # Scope is the fact that separates one entry from another: a secondmate's
+  # domain, or the project a crewmate or scout is working.
+  if [ "$KIND" = secondmate ]; then
+    SIDEBAR_SCOPE=${SIDEBAR_HOME_LABEL#2ndmate-}
+    [ "$SIDEBAR_SCOPE" = "$SIDEBAR_HOME_LABEL" ] && SIDEBAR_SCOPE=$(basename "$PROJ_ABS")
+  else
+    SIDEBAR_SCOPE=$(basename "$PROJ_ABS")
+  fi
+  fm_backend_herdr_sidebar_report_pane "$HERDR_SES" "$HERDR_PANE_ID" \
+    "$SIDEBAR_ROLE" "$SIDEBAR_SCOPE" "$ID" "$SIDEBAR_HOME_LABEL"
+  # The Space is reported only on a fresh spawn, where HERDR_PROJECTED records
+  # what this spawn actually did: 1 means a projected space holding exactly
+  # this one task, which carries the task's own role, and 0 means the shared
+  # per-home container, which is a home and says so. A relaunch adopts the
+  # recorded endpoint rather than creating one, so it re-badges the worker
+  # above to refresh facts that can change while the endpoint stays the same
+  # (docs/herdr-backend.md "Sidebar legibility") and skips the Space report;
+  # that is lossless because reported tokens persist per key until overwritten
+  # (docs/verification/runtime-backends.md "Sidebar legibility metadata").
+  if [ "$RELAUNCH" -ne 1 ]; then
+    SIDEBAR_WORKSPACE_ROLE=home
+    [ "${HERDR_PROJECTED:-0}" = 1 ] && SIDEBAR_WORKSPACE_ROLE=$SIDEBAR_ROLE
+    # A shared per-home space's scope is the home's own domain, never any one
+    # task's project, so it stays stable as tasks spawn into it; a projected
+    # one-task space keeps its task's own scope.
+    SIDEBAR_WORKSPACE_SCOPE=$SIDEBAR_SCOPE
+    [ "$SIDEBAR_WORKSPACE_ROLE" = home ] \
+      && SIDEBAR_WORKSPACE_SCOPE=$(fm_backend_herdr_sidebar_home_scope "$SIDEBAR_HOME_LABEL")
+    fm_backend_herdr_sidebar_report_workspace "$HERDR_SES" "$HERDR_WORKSPACE_ID" \
+      "$SIDEBAR_WORKSPACE_ROLE" "$SIDEBAR_WORKSPACE_SCOPE" "$SIDEBAR_HOME_LABEL"
+  fi
+fi
+
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
