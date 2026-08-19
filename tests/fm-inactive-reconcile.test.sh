@@ -10,14 +10,10 @@ DRAIN="$ROOT/bin/fm-wake-drain.sh"
 WATCH="$ROOT/bin/fm-watch.sh"
 TMP_ROOT=$(fm_test_tmproot fm-inactive-reconcile)
 
-set_mtime() { # <epoch> <path>
-  fm_test_set_mtime "$1" "$2"
-}
-
 age() { # <path>...
   local path now
   now=$(( $(date +%s) - 120 ))
-  for path in "$@"; do set_mtime "$now" "$path"; done
+  for path in "$@"; do fm_test_set_mtime "$now" "$path"; done
 }
 
 make_tools() { # <world>
