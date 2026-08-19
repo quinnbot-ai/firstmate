@@ -1836,6 +1836,98 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
   pass "heartbeat backstop fail-safe surfaces a captain-relevant status the per-wake path missed"
 }
 
+# A no-mistakes reviewer/fixer keeps an active run-step after its agent stops
+# producing output, and every other triage layer reads that as healthy work. The
+# watcher owns a bounded receipt over the attributed structural state plus the
+# active review-step log tail, so only a sustained no-progress interval becomes
+# one actionable wake - and it never issues a lifecycle command.
+test_nomistakes_reviewer_stall_is_actionable_without_control() {
+  local dir state fakebin out capture_file window pid wt head
+  dir=$(make_case nomistakes-stall); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  capture_file="$dir/pane.txt"; window="test:fm-nm-stall"; wt="$dir/wt"
+  mkdir -p "$wt"
+  git -C "$wt" init -q
+  git -C "$wt" -c user.name=fmtest -c user.email=fmtest@example.invalid commit -q --allow-empty -m init
+  git -C "$wt" checkout -q -b fm/nm-stall
+  head=$(git -C "$wt" rev-parse HEAD)
+  printf 'window=%s\nkind=ship\nworktree=%s\n' "$window" "$wt" > "$state/nm-stall.meta"
+  printf 'quiet reviewer pane\n' > "$capture_file"
+  cat > "$dir/status.toon" <<EOF
+run:
+  id: "01STALL"
+  branch: fm/nm-stall
+  status: fixing
+  head: "$head"
+  steps[2]{step,status,findings,duration_ms}:
+    review,fixing,1,1
+    test,pending,0,0
+EOF
+  printf 'reviewing changes...\ncodex started pid=1\n' > "$dir/review.log"
+  export FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing)'
+  export FM_FAKE_NM_STATUS_FILE="$dir/status.toon" FM_FAKE_NM_LOG_FILE="$dir/review.log"
+  export FM_NM_LIVENESS_INTERVAL=0 FM_NM_STALL_SECS=1 FM_STALE_ESCALATE_SECS=999
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 60 || fail "watcher did not make an unchanged active reviewer actionable"
+  grep -F 'nm-liveness: stalled run=01STALL step=review' "$out" >/dev/null \
+    || fail "reviewer stall wake omitted exact run and step evidence: $(cat "$out")"
+  grep -E 'no-mistakes (axi (abort|run)|restart|stop)' "$out" >/dev/null \
+    && fail "stall diagnostic attempted pipeline control"
+  [ -e "$state/.nm-liveness-surfaced-nm-stall" ] \
+    || fail "stall receipt was not recorded, so the same stall would re-wake every poll"
+  unset FM_FAKE_NM_STATUS_FILE FM_FAKE_NM_LOG_FILE FM_NM_LIVENESS_INTERVAL FM_NM_STALL_SECS
+  pass "an unchanged attributed reviewer becomes a bounded actionable diagnostic without pipeline control"
+}
+
+# The counterpart safety property: a slow but working reviewer must never be
+# reported as stalled. New review-log evidence resets the receipt's clock, so the
+# watcher keeps absorbing.
+test_nomistakes_reviewer_progress_resets_stall_receipt() {
+  local dir state fakebin out capture_file window pid wt head i
+  dir=$(make_case nomistakes-progress); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  capture_file="$dir/pane.txt"; window="test:fm-nm-progress"; wt="$dir/wt"
+  mkdir -p "$wt"
+  git -C "$wt" init -q
+  git -C "$wt" -c user.name=fmtest -c user.email=fmtest@example.invalid commit -q --allow-empty -m init
+  git -C "$wt" checkout -q -b fm/nm-progress
+  head=$(git -C "$wt" rev-parse HEAD)
+  printf 'window=%s\nkind=ship\nworktree=%s\n' "$window" "$wt" > "$state/nm-progress.meta"
+  printf 'quiet reviewer pane\n' > "$capture_file"
+  cat > "$dir/status.toon" <<EOF
+run:
+  id: "01PROGRESS"
+  branch: fm/nm-progress
+  status: running
+  head: "$head"
+  steps[2]{step,status,findings,duration_ms}:
+    review,running,0,1
+    test,pending,0,0
+EOF
+  printf 'reviewing changes...\n' > "$dir/review.log"
+  export FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  export FM_FAKE_NM_STATUS_FILE="$dir/status.toon" FM_FAKE_NM_LOG_FILE="$dir/review.log"
+  export FM_NM_LIVENESS_INTERVAL=0 FM_NM_STALL_SECS=1 FM_STALE_ESCALATE_SECS=999
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  i=0
+  while [ "$i" -lt 60 ] && [ ! -s "$state/.nm-liveness-nm-progress" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$state/.nm-liveness-nm-progress" ] || { reap "$pid"; fail "reviewer progress fixture never published its initial receipt"; }
+  printf 'review evidence advanced\n' >> "$dir/review.log"
+  if ! wait_live "$pid" 20; then
+    reap "$pid"
+    fail "a progressing reviewer was misclassified as stalled: $(cat "$out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "progressing reviewer enqueued a diagnostic wake"; }
+  reap "$pid"
+  unset FM_FAKE_NM_STATUS_FILE FM_FAKE_NM_LOG_FILE FM_NM_LIVENESS_INTERVAL FM_NM_STALL_SECS
+  pass "active-step log progress resets the reviewer stall receipt"
+}
+
 # --- beacon stays fresh while absorbing -------------------------------------
 
 test_beacon_stays_fresh_while_absorbing() {
@@ -1971,6 +2063,8 @@ test_procevent_surface_crash_boundaries
 test_procevent_marker_failure_exits_and_replays
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
+test_nomistakes_reviewer_stall_is_actionable_without_control
+test_nomistakes_reviewer_progress_resets_stall_receipt
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale

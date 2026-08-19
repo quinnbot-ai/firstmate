@@ -170,8 +170,12 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
+  FM_FAKE_PIPELINE_HEAD=""
+  FM_FAKE_SUBMITTED_HEAD=""
+  FM_FAKE_RECEIPT_RUN=""
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
+  export FM_FAKE_PIPELINE_HEAD FM_FAKE_SUBMITTED_HEAD FM_FAKE_RECEIPT_RUN
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -262,6 +266,40 @@ steps[3]{step,status,findings,duration_ms}:
   intent,completed,0,0
   review,fix_review,1,0
   test,pending,0,0
+EOF
+}
+
+# A pipeline that owns its gate fixes in an ISOLATED worktree advances a head
+# this crew worktree cannot resolve, while the crew worktree stays at its clean
+# submitted commit. The branch_sync custody receipt is the only evidence that
+# binds the two, so this fixture is what the strict-attribution cases drive.
+run_pipeline_owned_parked() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: running
+  awaiting_agent: parked 2m10s
+  head: "${FM_FAKE_PIPELINE_HEAD:-fedcba9876543210fedcba9876543210fedcba98}"
+  pr: ""
+  findings[1]{id,severity,file,line,action,description}:
+    r1,error,b.go,,ask-user,changes product behavior
+branch_sync:
+  state: pipeline_owned
+  changed: false
+  local:
+    branch: $1
+    head: ${FM_FAKE_RUN_HEAD}
+    clean: true
+  pipeline:
+    run: "${FM_FAKE_RECEIPT_RUN:-01RUN}"
+    status: running
+    submitted_head: ${FM_FAKE_SUBMITTED_HEAD:-$FM_FAKE_RUN_HEAD}
+    current_head: ${FM_FAKE_PIPELINE_HEAD:-fedcba9876543210fedcba9876543210fedcba98}
+  safety: blocked_pipeline_owned
+gate:
+  step: review
+  status: fix_review
 EOF
 }
 
@@ -358,6 +396,43 @@ test_active_run_is_authoritative() {
   pass "active run-step is authoritative"
 }
 
+# An active run-step proves custody, not progress. Once the watcher has surfaced
+# a stall for THIS run, "validating" is the wrong answer: report the diagnosis.
+test_liveness_stall_receipt_blocks_matching_active_run() {
+  reset_fakes
+  local d out
+  d=$(new_case liveness-terminal)
+  make_repo_on_branch "$d/wt" fm/liveness-terminal
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/liveness-terminal.meta" "window=fm:fm-liveness-terminal" "worktree=$d/wt" "kind=ship"
+  printf 'nm-liveness: stalled run=01RUN step=review unchanged=1200s threshold=1200s\n' \
+    > "$d/state/.nm-liveness-surfaced-liveness-terminal"
+  FM_FAKE_AXI_STATUS="$(run_running fm/liveness-terminal)"
+  out=$(run_crew_state "$d" liveness-terminal)
+  assert_contains "$out" "state: blocked" "matching stall receipt makes the active run actionable"
+  assert_contains "$out" "no-mistakes review stalled" "the diagnosis names its own source"
+  assert_contains "$out" "unchanged=1200s" "the exact stall evidence survives into the detail"
+  pass "a surfaced reviewer stall is reported instead of a reassuring active run"
+}
+
+# The receipt is bound to one run id: a stall surfaced for an earlier run must
+# never be reported against the run that replaced it.
+test_liveness_stall_receipt_ignored_for_other_run() {
+  reset_fakes
+  local d out
+  d=$(new_case liveness-other-run)
+  make_repo_on_branch "$d/wt" fm/liveness-other-run
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/liveness-other-run.meta" "window=fm:fm-liveness-other-run" "worktree=$d/wt" "kind=ship"
+  printf 'nm-liveness: stalled run=09OLD step=review unchanged=1200s threshold=1200s\n' \
+    > "$d/state/.nm-liveness-surfaced-liveness-other-run"
+  FM_FAKE_AXI_STATUS="$(run_running fm/liveness-other-run)"
+  out=$(run_crew_state "$d" liveness-other-run)
+  assert_contains "$out" "state: working" "a stall for another run does not block this one"
+  assert_not_contains "$out" "review stalled" "no stall diagnosis leaks across runs"
+  pass "a stall receipt for a superseded run is ignored"
+}
+
 # (b) needs-decision log + a resumed (running/fixing) run = SUPERSEDED
 test_stale_needs_decision_superseded() {
   reset_fakes
@@ -439,6 +514,91 @@ test_gate_block_parked_not_superseded() {
   assert_contains "$out" "1 finding(s)" "gate block wait includes finding count"
   assert_not_contains "$out" "superseded" "gate block wait not flagged stale"
   pass "gate block parked run is not flagged superseded"
+}
+
+# Regression: when the pipeline owns its fixes in a separate worktree, the run's
+# CURRENT head is not resolvable here at all, so ancestry cannot decide. Without
+# the custody receipt the crew fell off the authoritative run-step path entirely
+# and a live review gate went unreported.
+test_pipeline_owned_parked_with_isolated_head_is_current() {
+  reset_fakes
+  local d out
+  d=$(new_case pipeline-owned-parked)
+  make_repo_on_branch "$d/wt" fm/feat-isolated-review
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/isolated-review.meta" "window=fm:fm-isolated-review" "worktree=$d/wt" "kind=ship"
+  printf 'needs-decision: review gate\n' > "$d/state/isolated-review.status"
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned_parked fm/feat-isolated-review)"
+  out=$(run_crew_state "$d" isolated-review)
+  assert_contains "$out" "state: parked" "isolated pipeline review gate -> parked"
+  assert_contains "$out" "source: run-step" "isolated pipeline review gate -> run-step"
+  assert_contains "$out" "parked at review" "isolated pipeline review gate names the gate"
+  assert_not_contains "$out" "superseded" "matching parked log is not stale"
+  pass "pipeline-owned isolated review gate is current"
+}
+
+# Counterfactual: the same unresolvable run head without an exact submitted-head
+# binding stays unattributable, so a reused branch's older run can never be
+# rescued by a receipt that does not name this exact code.
+test_pipeline_owned_bridge_refuses_mismatched_submitted_head() {
+  reset_fakes
+  local d out
+  d=$(new_case pipeline-owned-mismatched-submitted)
+  make_repo_on_branch "$d/wt" fm/feat-isolated-mismatch
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/isolated-mismatch.meta" "window=fm:fm-isolated-mismatch" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: current implementation continues\n' > "$d/state/isolated-mismatch.status"
+  FM_FAKE_SUBMITTED_HEAD=0123456789abcdef0123456789abcdef01234567
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned_parked fm/feat-isolated-mismatch)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" isolated-mismatch
+  out=$(run_crew_state "$d" isolated-mismatch)
+  assert_not_contains "$out" "source: run-step" "mismatched submitted head must not use run-step"
+  assert_contains "$out" "source: status-log" "mismatched submitted head falls back"
+  assert_contains "$out" "state: working" "current status log remains authoritative after mismatch"
+  pass "pipeline-owned bridge rejects mismatched submitted head"
+}
+
+# Counterfactual: a receipt whose nested pipeline block names a DIFFERENT run is
+# stale evidence from an earlier pipeline and must not rescue the run reported at
+# the top level.
+test_pipeline_owned_bridge_refuses_foreign_run_receipt() {
+  reset_fakes
+  local d out
+  d=$(new_case pipeline-owned-foreign-run)
+  make_repo_on_branch "$d/wt" fm/feat-isolated-foreign
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/isolated-foreign.meta" "window=fm:fm-isolated-foreign" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: current implementation continues\n' > "$d/state/isolated-foreign.status"
+  FM_FAKE_RECEIPT_RUN=09OTHER
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned_parked fm/feat-isolated-foreign)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" isolated-foreign
+  out=$(run_crew_state "$d" isolated-foreign)
+  assert_not_contains "$out" "source: run-step" "a receipt for another run must not attribute"
+  assert_contains "$out" "state: working" "current status log remains authoritative"
+  pass "pipeline-owned bridge rejects a receipt naming another run"
+}
+
+# Counterfactual: `clean: true` is a claim, not proof. A worktree git itself
+# reports dirty has local work the pipeline never received, so the binding is
+# refused even though every declared field agrees.
+test_pipeline_owned_bridge_refuses_dirty_worktree() {
+  reset_fakes
+  local d out
+  d=$(new_case pipeline-owned-dirty)
+  make_repo_on_branch "$d/wt" fm/feat-isolated-dirty
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/isolated-dirty.meta" "window=fm:fm-isolated-dirty" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: current implementation continues\n' > "$d/state/isolated-dirty.status"
+  FM_FAKE_AXI_STATUS="$(run_pipeline_owned_parked fm/feat-isolated-dirty)"
+  printf 'uncommitted local work\n' > "$d/wt/scratch.txt"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" isolated-dirty
+  out=$(run_crew_state "$d" isolated-dirty)
+  assert_not_contains "$out" "source: run-step" "a dirty worktree must not be attributed by receipt"
+  assert_contains "$out" "state: working" "current status log remains authoritative"
+  pass "pipeline-owned bridge rejects a dirty worktree that claims to be clean"
 }
 
 test_ci_ready_done_log_beats_monitoring_run() {
@@ -1409,11 +1569,17 @@ test_missing_run_head_falls_back_to_current_state() {
 }
 
 test_active_run_is_authoritative
+test_liveness_stall_receipt_blocks_matching_active_run
+test_liveness_stall_receipt_ignored_for_other_run
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
 test_genuine_parked_not_superseded
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
+test_pipeline_owned_parked_with_isolated_head_is_current
+test_pipeline_owned_bridge_refuses_mismatched_submitted_head
+test_pipeline_owned_bridge_refuses_foreign_run_receipt
+test_pipeline_owned_bridge_refuses_dirty_worktree
 test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done

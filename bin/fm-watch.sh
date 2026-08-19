@@ -88,6 +88,10 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# Read-only reviewer/fixer progress observation. Sourcing it has no side effects
+# and never touches no-mistakes; nomistakes_liveness_tick below drives it.
+# shellcheck source=bin/fm-nm-liveness-lib.sh
+. "$SCRIPT_DIR/fm-nm-liveness-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -185,6 +189,46 @@ _event_cap_fails=0
 # every wake) and let the daemon classify - never absorb here, or the daemon's
 # digest/injection layer would never see the wake.
 afk_present() { [ -e "$STATE/.afk" ]; }
+
+# Observe every ship task's attributed no-mistakes reviewer at a bounded cadence.
+# An active run-step proves custody, not progress, so a reviewer that stopped
+# producing output otherwise reads as healthily validating forever and is
+# absorbed by every other triage layer.
+#
+# bin/fm-nm-liveness-lib.sh owns the observation and its receipt; this only reads
+# the verdict, enqueues ONE actionable check wake per distinct stall, and clears
+# the surfacing marker as soon as review progress resumes. It never aborts,
+# restarts, or otherwise controls a run, the shared no-mistakes daemon, or the
+# worker - the diagnosis goes to firstmate, which decides. Away mode owns its own
+# triage, so no competing normal-mode wake is created while the flag is set.
+nomistakes_liveness_tick() {
+  local meta task last now observation marker
+  afk_present && return 0
+  now=$(date +%s)
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    task=$(basename "$meta" .meta)
+    marker="$STATE/.nm-liveness-polled-$(fm_nm_liveness_key "$task")"
+    last=$(cat "$marker" 2>/dev/null || true)
+    case "$last" in ''|*[!0-9]*) last=0 ;; esac
+    [ $(( now - last )) -ge "$FM_NM_LIVENESS_INTERVAL" ] || continue
+    printf '%s' "$now" > "$marker"
+    observation=$(fm_nm_liveness_observe "$STATE" "$task")
+    marker=$(fm_nm_liveness_surfaced_marker "$STATE" "$task")
+    case "$observation" in
+      'nm-liveness: stalled '*)
+        if [ "$(cat "$marker" 2>/dev/null || true)" != "$observation" ]; then
+          fm_wake_append check "nm-liveness:$task" "check: $task: $observation" || exit 1
+          printf '%s' "$observation" > "$marker"
+          wake "check: $task: $observation"
+        fi
+        ;;
+      'nm-liveness: active '*)
+        rm -f "$marker"
+        ;;
+    esac
+  done
+}
 
 hash_pane() {
   if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi
@@ -999,6 +1043,8 @@ EOF
       triage_log "absorbed benign $reason"
     fi
   fi
+
+  nomistakes_liveness_tick
 
   # Layer 1 backbone: pane staleness. Two consecutive identical hashes with no busy
   # signature means the crewmate finished, is waiting, or is wedged. Each distinct

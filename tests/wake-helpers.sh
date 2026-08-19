@@ -81,6 +81,24 @@ fi
 exit 1
 SH
   chmod +x "$fakebin/tmux"
+  # The watcher's reviewer-liveness observation calls the real no-mistakes
+  # command surface (`axi status`, `axi logs`). This fake serves both from
+  # files a test controls, so a case can advance the review log tail and pin
+  # the progress-vs-stall decision without a pipeline.
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  axi)
+    case "${2:-}" in
+      status) [ -n "${FM_FAKE_NM_STATUS_FILE:-}" ] && cat "$FM_FAKE_NM_STATUS_FILE" ;;
+      logs) [ -n "${FM_FAKE_NM_LOG_FILE:-}" ] && cat "$FM_FAKE_NM_LOG_FILE" ;;
+    esac
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/no-mistakes"
   make_fake_crew_state "$fakebin" >/dev/null
   printf '%s\n' "$dir"
 }

@@ -34,7 +34,11 @@
 #      A run matches when its head equals the worktree HEAD, or the worktree HEAD
 #      is an ancestor of the run head (pipeline fix commits advanced the run on
 #      the same line of history). Local work that advanced past the run head, or
-#      diverged from it, invalidates attribution.
+#      diverged from it, invalidates attribution. When a pipeline instead owns
+#      its gate fixes in an ISOLATED worktree, its current head is unreachable
+#      here and ancestry cannot decide at all; only then may a complete
+#      branch_sync custody receipt bind this clean worktree HEAD to that run's
+#      submitted head. bin/fm-nm-run-lib.sh owns both rules.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -42,6 +46,9 @@
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
 #      green, so a green PR is never silently read as still-validating.
+#      An attributed run that bin/fm-watch.sh has observed making no review
+#      progress for the whole configured bound reports blocked with that exact
+#      diagnostic instead of working, until reviewer progress clears it.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -73,6 +80,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-nm-liveness-lib.sh
+. "$SCRIPT_DIR/fm-nm-liveness-lib.sh"
 
 ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
@@ -414,18 +423,21 @@ nm_runs_status_for_branch() {  # <branch>
 # scratch worktree); with no branch there is no run to attribute to this crew.
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 
-# 0 if the active axi-status run's head field matches this worktree's code
-# identity. Branch match is a precondition (caller). Rule owned by
-# fm_nm_head_matches_worktree in bin/fm-nm-run-lib.sh.
-nm_run_head_matches_worktree() {
-  local run_head
+# 0 if the active axi-status run belongs to this worktree, by code-identity
+# ancestry or by its branch_sync custody receipt. Branch match is a precondition
+# (caller). Both rules are owned by fm_nm_run_matches_worktree in
+# bin/fm-nm-run-lib.sh.
+nm_run_matches_worktree() {
+  local run_id run_head
+  run_id=$(strip_quotes "$(nm_field id)")
   run_head=$(strip_quotes "$(nm_field head)")
-  fm_nm_head_matches_worktree "$WT" "$run_head"
+  fm_nm_run_matches_worktree "$WT" "$CREW_BRANCH" "$run_id" "$run_head" "$RUN_OUT"
 }
 
-# Coarse runs-list rows are "<status> <branch> <short-sha> ...". 0 if the short
-# sha for this branch row matches the worktree head under the same rules as
-# nm_run_head_matches_worktree (equal, or local is ancestor of run tip).
+# Coarse runs-list rows are "<status> <branch> <short-sha> ...". A coarse row
+# carries no run object, so only the ancestry rule can apply: 0 if the short sha
+# for this branch row matches the worktree head (equal, or local is an ancestor
+# of the run tip).
 nm_coarse_head_matches_worktree() {  # <short-sha>
   fm_nm_head_matches_worktree "$WT" "$1"
 }
@@ -443,7 +455,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
-    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
+    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_matches_worktree; then
       HAVE_RUN=1
     else
       # The active-or-most-recent run is for another branch, or same branch with
@@ -559,6 +571,20 @@ if [ "$HAVE_RUN" = 1 ]; then
     fi
     if [ "$CI_LOG_STATE" != not-ready ]; then
       emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
+    fi
+  fi
+
+  # An active run-step proves custody, not progress. When bin/fm-watch.sh has
+  # already surfaced a stall for THIS exact run (bin/fm-nm-liveness-lib.sh owns
+  # both the observation and the marker), report that diagnosis instead of a
+  # reassuring "validating": the run is structurally alive with a reviewer that
+  # stopped producing output. The watcher removes the marker as soon as review
+  # progress resumes, so this reverts on its own.
+  if [ "$RUN_STATE" = working ] && [ "$RUN_SOURCE" = full ]; then
+    liveness_run_id=$(strip_quotes "$(nm_field id)")
+    if liveness_stall=$(fm_nm_liveness_stall_for_run "$STATE" "$ID" "$liveness_run_id"); then
+      RUN_STATE=blocked
+      RUN_DETAIL="no-mistakes review stalled: $liveness_stall"
     fi
   fi
 

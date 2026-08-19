@@ -2048,6 +2048,77 @@ land_shippable_commit() {
   git -C "$case_dir/project" fetch -q origin
 }
 
+# A pipeline that owns its gate fixes in an ISOLATED worktree parks on a head
+# this worktree cannot resolve. The branch_sync custody receipt is the only
+# evidence binding that run to this task, and bin/fm-nm-run-lib.sh is the single
+# owner of when it may be trusted.
+pipeline_owned_parked_axi_status_toon() {  # <branch> <local-head> <pipeline-head> [receipt-run-id]
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: running
+  awaiting_agent: parked 2m10s
+  head: "$3"
+  pr: ""
+  findings: none
+branch_sync:
+  state: pipeline_owned
+  changed: false
+  local:
+    branch: $1
+    head: $2
+    clean: true
+  pipeline:
+    run: "${4:-01RUN}"
+    status: running
+    submitted_head: $2
+    current_head: $3
+  safety: blocked_pipeline_owned
+gate: review
+EOF
+}
+
+# An isolated pipeline-owned gate is exactly the run teardown must not orphan:
+# the worker about to be removed is the one that would answer it.
+test_pipeline_owned_parked_run_is_aborted_before_teardown() {
+  local case_dir rc head
+  case_dir=$(make_case pipeline-owned-run-abort)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(pipeline_owned_parked_axi_status_toon fm/task-x1 "$head" fedcba9876543210fedcba9876543210fedcba98)" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "pipeline-owned-run-abort: teardown should still succeed"
+  assert_grep "abort --run 01RUN" "$case_dir/nm-abort.log" \
+    "pipeline-owned-run-abort: a custody-bound parked run was left orphaned"
+  pass "a parked run bound only by its custody receipt is aborted, not orphaned"
+}
+
+# Counterfactual: a receipt naming another run is stale evidence, so this run is
+# not attributed and teardown must leave it completely alone.
+test_pipeline_owned_foreign_receipt_leaves_run_alone() {
+  local case_dir rc head
+  case_dir=$(make_case pipeline-owned-foreign-receipt)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(pipeline_owned_parked_axi_status_toon fm/task-x1 "$head" fedcba9876543210fedcba9876543210fedcba98 09OTHER)" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "pipeline-owned-foreign-receipt: teardown should still succeed"
+  assert_absent "$case_dir/nm-abort.log" \
+    "pipeline-owned-foreign-receipt: teardown aborted a run it does not own"
+  pass "a custody receipt naming another run never authorizes an abort"
+}
+
 test_parked_own_run_is_aborted_before_teardown() {
   local case_dir rc head
   case_dir=$(make_case parked-run-abort)
@@ -2633,6 +2704,8 @@ test_persistent_index_lock_exhausts_retries_and_refuses_loudly
 test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
 test_parked_own_run_is_aborted_before_teardown
+test_pipeline_owned_parked_run_is_aborted_before_teardown
+test_pipeline_owned_foreign_receipt_leaves_run_alone
 test_parked_own_run_refuses_when_abort_is_unconfirmed
 test_mismatched_run_after_abort_refuses_unconfirmed
 test_empty_status_after_abort_refuses_unconfirmed
