@@ -32,6 +32,10 @@
 # Optional quiet telemetry writes one bounded TSV snapshot of content and source
 # graph identity, wall/CPU/RSS, shard load, and competing ShellCheck processes.
 #
+# The default path also prints bin/fm-skill-trigger-lint.sh's advisory findings
+# about skill routing descriptions. Those findings never change this command's
+# exit status, so imperfect skill triggers cannot fail a lint or a gate.
+#
 # Usage:
 #   fm-lint.sh                         lint the context-selected file set (see above)
 #   fm-lint.sh <path>...               lint explicit roots with the same config
@@ -100,7 +104,7 @@ if [ "${1:-}" = "--required-version" ]; then
 fi
 
 fm_lint_usage() {
-  sed -n '2,42{s/^# \{0,1\}//;p;}' "$SELF"
+  sed -n '2,46{s/^# \{0,1\}//;p;}' "$SELF"
 }
 
 # Default no-args lint also validates GitHub workflows. Explicit paths stay a
@@ -108,6 +112,15 @@ fm_lint_usage() {
 fm_lint_run_workflows() {
   [ "$EXPLICIT_PATHS" -eq 0 ] || return 0
   "$SELF_DIR/fm-lint-workflows.sh"
+}
+
+# Advisory only: skill descriptions are routing metadata, not a build gate, so
+# findings print with the canonical lint output and this never returns nonzero.
+fm_lint_run_skill_advisory() {
+  [ "$EXPLICIT_PATHS" -eq 0 ] || return 0
+  "$SELF_DIR/fm-skill-trigger-lint.sh" \
+    || printf 'fm-lint.sh: skill-trigger advisory refused an unsafe input; continuing.\n' >&2
+  return 0
 }
 
 JOBS=${FM_LINT_JOBS:-2}
@@ -252,6 +265,7 @@ if [ "$CHANGED_MODE" -eq 1 ] && [ "$ROOT_COUNT" -eq 0 ]; then
   printf 'fm-lint.sh: no changed lint targets\n'
   overall_rc=0
   fm_lint_run_workflows || overall_rc=$?
+  fm_lint_run_skill_advisory
   exit "$overall_rc"
 fi
 
@@ -557,5 +571,6 @@ if [ "$overall_rc" -eq 0 ]; then
 else
   fm_lint_run_workflows || true
 fi
+fm_lint_run_skill_advisory
 
 exit "$overall_rc"

@@ -18,6 +18,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 LINT="$ROOT/bin/fm-lint.sh"
+ADVISORY="$ROOT/bin/fm-skill-trigger-lint.sh"
 INSTALLER="$ROOT/bin/fm-install-shellcheck.sh"
 # The pinned version, read from the single source (the one owner itself).
 REQUIRED=$("$LINT" --required-version)
@@ -858,6 +859,149 @@ SH
   pass "seeded dispatcher, adapter, production-owner, and test-local diagnostics preserve parity"
 }
 
+# fm_lint_advisory_root <tmp> <exit-code>: a code root whose bin/ is the real
+# firstmate bin/ except for the skill-trigger advisory, which is replaced by a
+# stand-in that records that it ran, prints one line, and exits <exit-code>.
+# The advisory's own findings are owned by its dedicated test below; this
+# stand-in isolates what fm-lint.sh does with an advisory result.
+fm_lint_advisory_root() {
+  local tmp=$1 code=$2 root f
+  root="$tmp/root"
+  mkdir -p "$root/bin"
+  for f in "$ROOT"/bin/*.sh; do
+    ln -s "$f" "$root/bin/$(basename "$f")"
+  done
+  ln -s "$ROOT/.github" "$root/.github"
+  rm -f "$root/bin/fm-skill-trigger-lint.sh"
+  cat > "$root/bin/fm-skill-trigger-lint.sh" <<SH
+#!/usr/bin/env bash
+set -u
+printf 'ran\n' >> "$tmp/advisory-ran"
+printf 'skill-trigger-warning: fixture/SKILL.md:3: missing trigger wording; evidence: fixture\n'
+exit $code
+SH
+  chmod +x "$root/bin/fm-skill-trigger-lint.sh"
+  printf '%s\n' "$root"
+}
+
+test_skill_trigger_advisory_is_warn_only_and_deterministic() {
+  local tmp root out1 out2 rc before after outside
+  tmp=$(fm_test_tmproot fm-skill-trigger)
+  root="$tmp/skills"
+  mkdir -p "$root/clean" "$root/dump" "$root/missing" "$root/quoted" "$root/one" "$root/two" "$root/malformed"
+  cat > "$root/clean/SKILL.md" <<'MD'
+---
+name: clean
+description: Use when reviewing invoices.
+---
+MD
+  cat > "$root/dump/SKILL.md" <<'MD'
+---
+name: dump
+description: >-
+  Use when reviewing receipts. Read the report first. Confirm every field.
+  Record the result. Never rewrite the source. Explain the final decision.
+metadata:
+  internal: true
+---
+MD
+  cat > "$root/missing/SKILL.md" <<'MD'
+---
+name: missing
+description: Summarize invoice handling for operators.
+---
+MD
+  cat > "$root/quoted/SKILL.md" <<'MD'
+---
+name: quoted
+description: "Summarize ledger handling for operators."
+---
+MD
+  cat > "$root/one/SKILL.md" <<'MD'
+---
+name: one
+description: Use when reviewing invoice reports for shipping vendors.
+---
+MD
+  cat > "$root/two/SKILL.md" <<'MD'
+---
+name: two
+description: Use when reviewing invoice audits for shipping vendors.
+---
+MD
+  printf '%s\n' '---' 'name: malformed' 'description: Use when reviewing' > "$root/malformed/SKILL.md"
+
+  before=$(cksum "$root"/*/SKILL.md)
+  out1=$("$ADVISORY" --root "$root") || fail "advisory warnings must exit 0"
+  out2=$("$ADVISORY" --root "$root") || fail "repeated advisory run must exit 0"
+  [ "$out1" = "$out2" ] || fail "advisory output is not deterministic"
+  after=$(cksum "$root"/*/SKILL.md)
+  [ "$before" = "$after" ] || fail "advisory rewrote skill metadata"
+  assert_not_contains "$out1" "clean/SKILL.md" "a concise trigger-led description was warned"
+  assert_contains "$out1" "dump/SKILL.md:3: instruction dump in frontmatter" "instruction-dump warning is missing"
+  assert_contains "$out1" "missing/SKILL.md:3: missing trigger wording" "missing-trigger warning is missing"
+  assert_contains "$out1" "one/SKILL.md:3: overlapping adjacent trigger words" "adjacent overlap warning is missing"
+  assert_contains "$out1" "two/SKILL.md:3: overlapping adjacent trigger words" "overlap warning names only one side"
+  assert_contains "$out1" "malformed/SKILL.md:1: malformed frontmatter" "malformed-frontmatter warning is missing"
+  assert_contains "$out1" "quoted/SKILL.md:3: missing trigger wording; evidence: Summarize ledger" \
+    "a quoted description was not unwrapped before reporting"
+  [ "$(printf '%s\n' "$out1" | LC_ALL=C sort)" = "$out1" ] || fail "advisory findings are not path ordered"
+
+  outside="$tmp/outside"
+  mkdir -p "$outside"
+  ln -s "$outside" "$tmp/escaped-root"
+  rc=0
+  "$ADVISORY" --root "$tmp/escaped-root" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 2 ] || fail "symlinked root was not refused, got $rc"
+  ln -s "$outside" "$root/escaped"
+  rc=0
+  "$ADVISORY" --root "$root" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 2 ] || fail "symlinked child was not refused, got $rc"
+  pass "the skill-trigger advisory covers clean, dump, missing, overlap, malformed, refusal, ordering, and warn-only behavior"
+}
+
+test_skill_trigger_findings_never_change_the_lint_exit_status() {
+  local tmp fakebin diff_file root out rc clean
+  tmp=$(fm_test_tmproot fm-lint-advisory)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_git "$fakebin"
+  diff_file="$tmp/diff.nul"
+  : > "$diff_file"
+
+  # An advisory with findings: its warnings reach the canonical lint output and
+  # the lint still exits 0, so imperfect skill triggers cannot fail a gate.
+  root=$(fm_lint_advisory_root "$tmp" 0)
+  rc=0
+  out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_TEST_GIT_BRANCH=feature \
+    FM_TEST_GIT_DIFF_FILE="$diff_file" "$root/bin/fm-lint.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "skill-trigger findings changed the lint exit status, got $rc"$'\n'"$out"
+  assert_contains "$out" "skill-trigger-warning:" "the lint did not print the advisory findings"
+  [ -f "$tmp/advisory-ran" ] || fail "the default lint path never ran the advisory"
+
+  # A refusing advisory is reported and still leaves the lint exit status alone.
+  rm -rf "$root" "$tmp/advisory-ran"
+  root=$(fm_lint_advisory_root "$tmp" 2)
+  rc=0
+  out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_TEST_GIT_BRANCH=feature \
+    FM_TEST_GIT_DIFF_FILE="$diff_file" "$root/bin/fm-lint.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a refusing advisory changed the lint exit status, got $rc"$'\n'"$out"
+  assert_contains "$out" "skill-trigger advisory refused" "the refusing advisory was not reported"
+
+  # Explicit paths stay a ShellCheck-only override, so the advisory never runs.
+  rm -rf "$tmp/advisory-ran"
+  clean="$tmp/clean.sh"
+  cat > "$clean" <<'SH'
+#!/usr/bin/env bash
+set -eu
+printf '%s\n' "clean"
+SH
+  rc=0
+  out=$(PATH="$fakebin:$PATH" "$root/bin/fm-lint.sh" "$clean" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "explicit-path lint of a clean file failed, got $rc"$'\n'"$out"
+  [ ! -f "$tmp/advisory-ran" ] || fail "an explicit-path lint ran the advisory"
+  pass "skill-trigger findings and refusals print without changing fm-lint.sh's exit status"
+}
+
 test_list_files_reports_the_shell_inventory
 test_pins_an_explicit_version
 test_installer_retries_transient_download_failure
@@ -879,3 +1023,5 @@ test_main_branch_forces_full_lint
 test_explicit_path_bypasses_changed_logic
 test_zero_changed_files_exits_clean
 test_list_files_respects_changed_mode
+test_skill_trigger_advisory_is_warn_only_and_deterministic
+test_skill_trigger_findings_never_change_the_lint_exit_status
