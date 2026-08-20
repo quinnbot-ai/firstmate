@@ -63,6 +63,9 @@ if ! git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BRANCH"; then
 fi
 
 before=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
+# Native Git owns recovery from a refused fast-forward. Do not restore the
+# earlier value of $DEFAULT here: another actor may have advanced this checkout
+# after Git observed it, and Firstmate has no ownership to overwrite that work.
 git -C "$PROJ" merge --ff-only "$BRANCH" >/dev/null
 after=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
 echo "merged $BRANCH into local $DEFAULT ($before -> $after) in $PROJ"
