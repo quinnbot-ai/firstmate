@@ -330,6 +330,19 @@ The update is fast-forward only: dirty, diverged, offline, and off-default targe
 Local homes share the guarded fast-forward helper, while remote updates delegate the same safety decision to the configured host through the generic transport.
 The mechanics are owned by the `/updatefirstmate` skill and firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) (self-update).
 
+## Fork distribution carries remain fast-forwardable
+
+When a maintained distribution fork has local carries and its upstream default branch advances, its default branch must remain a descendant of both the prior fork default and the current upstream default.
+That invariant lets a home already following either line fast-forward to the distribution head, while a new home gets both lines by cloning the distribution fork normally.
+Reconcile a divergence with a normal pull request whose source is based on the current upstream default and whose target is the distribution fork default.
+Merge that pull request with a merge commit, never squash or rebase, because only the merge commit keeps both prior histories as ancestors without force-pushing a shared branch.
+Before opening it, name every carry commit and prove it is reachable from the fork default; after the merge, prove that each carry, the prior fork tip, and the current upstream tip are ancestors of the new fork default.
+Treat a merge conflict as a review stop rather than changing the shared branch's history; re-land an individual carry as a fresh reviewed change only when that conflict requires it.
+Each installed home must follow the chosen distribution fork through its `origin` remote before routine self-updates can advance it, and new homes get that remote automatically by cloning the fork rather than the upstream repository.
+Migrate an existing home only after the fork invariant is proven, with its worktree clean and its current head an ancestor of the distribution head, so the remote change is followed by an ordinary guarded fast-forward.
+If an executable shim points into a pinned carry worktree, first establish the replacement source in a new home at the reconciled fork head and verify its installer there.
+Retarget that shim with a dedicated ownership-checked, atomic relocation step, verify the new target and PATH precedence, and only then retire the pinned worktree in a separate operation.
+
 ## Restart-proof
 
 Fleet state lives in each task's session-provider backend (tmux by hard default, herdr or cmux when selected or auto-detected, zellij/orca when explicitly selected), no-mistakes run records, status event logs, local markdown under `data/` including `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`, and persistent secondmate homes.
