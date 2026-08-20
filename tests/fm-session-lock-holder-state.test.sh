@@ -39,7 +39,7 @@ trap cleanup_children EXIT
 # off the caller's stdout for the same structural reason.
 LIVE_PID=
 start_live_process() {
-  sleep 600 >/dev/null 2>&1 </dev/null &
+  sleep 600 >/dev/null 2>&1 &
   LIVE_PID=$!
   CHILDREN+=("$LIVE_PID")
 }
@@ -224,8 +224,8 @@ test_elapsed_seconds_parses_every_ps_etime_shape() {
   local got expected shape
   while IFS='|' read -r shape expected; do
     [ -n "$shape" ] || continue
-    got=$(PATH="$TMP_ROOT/etime-bin:$PATH" \
-      bash -c '. "$0"; FM_TEST_ETIME="$1" fm_process_elapsed_seconds 4242' "$LIB" "$shape")
+    got=$(PATH="$TMP_ROOT/etime-bin:$PATH" FM_TEST_ETIME="$shape" \
+      bash -c '. "$0"; fm_process_elapsed_seconds 4242' "$LIB")
     [ "$got" = "$expected" ] \
       || fail "ps etime '$shape' parsed to '$got', expected $expected"
   done <<'CASES'
