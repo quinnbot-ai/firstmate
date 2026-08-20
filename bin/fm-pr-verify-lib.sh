@@ -44,6 +44,21 @@
 # a caller, so a verdict always describes the commit that is actually about to
 # merge.
 #
+# THE CONFLICT READ HAS TWO CONSUMERS, and this lib owns both. The merge gate
+# names a conflict as the cause of an absent check set. bin/fm-pr-check.sh names
+# it the moment a pull request is recorded and its merge poll is armed, which is
+# when firstmate starts waiting: the merge gate cannot help there, because it
+# only speaks when someone tries to merge, and the whole cost of PR #148 was
+# accrued in the hours BEFORE anyone did. A conflict is worth saying at arming
+# time and an absent check set is not, because a check set that has not appeared
+# yet is the normal state seconds after a push and corrects itself, while a
+# conflict never does.
+#
+# THE REMEDY IS PART OF THE MESSAGE. Both consumers name it, because the obvious
+# way to clear a conflict - rebase and force-push - rewrites a published branch,
+# and firstmate's own rules forbid that. Naming the conflict without naming the
+# safe fix invites the unsafe one.
+#
 # No side effects on source. set -u / set -e safe.
 
 # Exit status bin/fm-pr-merge.sh uses for this refusal, distinct from its usage
@@ -101,6 +116,31 @@ fm_pr_verify_count() {
   esac
 }
 
+# The one statement of what a conflict does to CI, and the one statement of how
+# to clear it safely. Both are single-owner strings rather than inline text so
+# the merge refusal and the arming advisory can never drift apart.
+FM_PR_CONFLICT_CAUSE='the branch conflicts with its base, so GitHub cannot build the merge commit that pull_request workflows run against and will never schedule them until the conflict is resolved'
+FM_PR_CONFLICT_REMEDY='merge the base branch into the pull request branch to clear it - never rebase and force-push a published branch'
+
+# fm_pr_branch_conflicted: succeed only when GitHub reports this pull request's
+# mergeable_state as exactly `dirty`. Sets, and never leaves stale:
+#   FM_PR_CONFLICT_DETAIL  the cause and the remedy as one plain-language line
+# Every other answer returns 1 with an empty detail, deliberately: mergeable_state
+# is computed asynchronously and reads `unknown` for the first moments of a pull
+# request's life, so anything but an explicit `dirty` is "no conflict to report"
+# rather than a conflict this could not see. Both callers treat it that way - the
+# merge gate has already refused on its own evidence by the time it asks, and the
+# arming advisory is advisory.
+fm_pr_branch_conflicted() {  # <owner> <repo> <pr-number>
+  local owner=$1 repo=$2 number=$3 state
+  FM_PR_CONFLICT_DETAIL=
+  state=$(fm_pr_verify_api "/repos/$owner/$repo/pulls/$number" '.mergeable_state') || return 1
+  [ "$state" = dirty ] || return 1
+  # shellcheck disable=SC2034 # Read by this lib's callers.
+  FM_PR_CONFLICT_DETAIL="$FM_PR_CONFLICT_CAUSE; $FM_PR_CONFLICT_REMEDY"
+  return 0
+}
+
 # fm_pr_check_set_verdict: decide whether a pull request's current head carries
 # any check set. Sets, and never leaves stale:
 #   FM_PR_VERIFY_VERDICT  verified | unverified | unreadable
@@ -110,7 +150,7 @@ fm_pr_verify_count() {
 # Returns 0 for `verified` and 1 otherwise, so a caller may branch on either the
 # status or the verdict.
 fm_pr_check_set_verdict() {  # <owner> <repo> <pr-number>
-  local owner=$1 repo=$2 number=$3 head runs statuses mergeable
+  local owner=$1 repo=$2 number=$3 head runs statuses
   # shellcheck disable=SC2034 # All three are read by this lib's callers.
   FM_PR_VERIFY_VERDICT=unreadable
   FM_PR_VERIFY_DETAIL='the check set could not be read'
@@ -144,9 +184,8 @@ fm_pr_check_set_verdict() {  # <owner> <repo> <pr-number>
   FM_PR_VERIFY_DETAIL="head $head reports no check runs and no commit statuses, so nothing has tested this pull request"
   # A conflicted pull request is the cause this gate was built for, and it is
   # the one an operator can act on immediately, so name it when it applies.
-  mergeable=$(fm_pr_verify_api "/repos/$owner/$repo/pulls/$number" '.mergeable_state') || mergeable=
-  if [ "$mergeable" = dirty ]; then
-    FM_PR_VERIFY_DETAIL="$FM_PR_VERIFY_DETAIL; the branch conflicts with its base, so GitHub cannot build the merge commit that pull_request workflows run against and will never schedule them until the conflict is resolved"
+  if fm_pr_branch_conflicted "$owner" "$repo" "$number"; then
+    FM_PR_VERIFY_DETAIL="$FM_PR_VERIFY_DETAIL; $FM_PR_CONFLICT_DETAIL"
   fi
   return 1
 }
