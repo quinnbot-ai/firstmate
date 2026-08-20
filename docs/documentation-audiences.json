@@ -269,6 +269,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/fm-test-worker-lifetime-proposal.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/gitlab-merge-watch.md",
       "audience": "maintainer-verification"
     },
