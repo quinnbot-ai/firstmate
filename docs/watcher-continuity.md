@@ -55,6 +55,12 @@ A concurrently appended wake has a higher sequence, remains queued, and keeps th
 Consequently, an empty-queue downtime publication during handling can be retired by the outstanding acknowledgement without a dedicated recovery turn.
 An acknowledged episode does not freeze the generation, because the next downtime after it opens an episode of its own.
 
+The drain reports the acknowledgement's outcome in its output, not in its exit status.
+A consumed acknowledgement prints `WAKE_ACK_OK` naming the sequence and generation it retired, and every refusal prints why nothing was acknowledged, so the absence of that receipt is what means the wakes are still queued.
+The exit status alone cannot carry that fact, because a supervisor almost always reads it through a chain of its own: a pipeline whose reader closed early, a `&&` whose earlier stage failed, or a reconstructed command the drain rejected before doing anything.
+For the same reason the printed `WAKE_ACK_REQUIRED` command is run on its own and verbatim; rebuilding it from a captured variable re-quotes its four arguments into one and is refused.
+A presentation whose reader closes the stream early is incomplete, so the drain prints no acknowledgement boundary for it, leaves the presentation cursor where it was, and keeps every record queued for the next standalone drain.
+
 ## Arm-layer cycle contract
 
 `bin/fm-watch-arm.sh` never returns a clean empty success.

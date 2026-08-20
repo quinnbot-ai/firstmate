@@ -5,6 +5,12 @@
 #
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
+#
+# Exit status is not the acknowledgement receipt, because a supervisor reads
+# this script's status through whatever it chained around the call. Success
+# therefore prints its own WAKE_ACK_OK line, every refusal prints why nothing
+# was acknowledged, and both go to stderr beside WAKE_ACK_REQUIRED so the same
+# stream carries the instruction and its outcome.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,19 +32,31 @@ ACK_THROUGH=
 ACK_GENERATION=
 ACK_FINGERPRINTS=
 ACK_NOTICE_FINGERPRINTS=
+PRESENTATION_BROKEN=false
+
+# Refuse a malformed acknowledgement with its cause AND its consequence. The
+# rejected call is usually a rebuilt one - the printed command re-quoted through
+# a variable, retyped, or chained - so the refusal names that shape and states
+# that nothing was consumed, which is the fact a supervisor otherwise has to
+# infer from the exit status alone.
+ack_refuse() { # <cause>
+  printf 'wake drain: %s\n' "$1" >&2
+  printf 'wake drain: nothing was acknowledged and every queued wake stays durable; re-run bin/fm-wake-drain.sh on its own and run the WAKE_ACK_REQUIRED command it prints verbatim, rather than rebuilding it from a captured variable or chaining it behind another command\n' >&2
+  exit 2
+}
 
 case "${1:-}" in
   '') ;;
   --ack-through)
     ACK_THROUGH=${2:-}
-    case "$ACK_THROUGH" in ''|*[!0-9]*) echo "wake drain: invalid acknowledgement sequence" >&2; exit 2 ;; esac
+    case "$ACK_THROUGH" in ''|*[!0-9]*) ack_refuse "invalid acknowledgement sequence" ;; esac
     [ "${3:-}" = --recovery-generation ] \
-      || { echo "wake drain: acknowledgement requires its recovery generation" >&2; exit 2; }
+      || ack_refuse "acknowledgement requires its recovery generation"
     ACK_GENERATION=${4:-}
-    case "$ACK_GENERATION" in ''|*[!A-Za-z0-9._-]*) echo "wake drain: invalid recovery generation" >&2; exit 2 ;; esac
-    [ "$#" -eq 4 ] || { echo "wake drain: unexpected acknowledgement arguments" >&2; exit 2; }
+    case "$ACK_GENERATION" in ''|*[!A-Za-z0-9._-]*) ack_refuse "invalid recovery generation" ;; esac
+    [ "$#" -eq 4 ] || ack_refuse "unexpected acknowledgement arguments"
     ;;
-  *) echo "usage: fm-wake-drain.sh [--ack-through SEQUENCE --recovery-generation GENERATION]" >&2; exit 2 ;;
+  *) ack_refuse "unrecognized argument; usage: fm-wake-drain.sh [--ack-through SEQUENCE --recovery-generation GENERATION]" ;;
 esac
 
 # Defense in depth for the supervision chain: this script runs at the top of
@@ -224,7 +242,7 @@ if [ -n "$ACK_THROUGH" ]; then
   DRAIN_LOCK_HELD=false
   if ! acknowledge_inactive_outcomes acknowledge "$ACK_FINGERPRINTS" \
     || ! acknowledge_inactive_outcomes acknowledge-notice "$ACK_NOTICE_FINGERPRINTS"; then
-    echo "wake drain: inactive outcome receipt could not be recorded safely" >&2
+    echo "wake drain: inactive outcome receipt could not be recorded safely; nothing was acknowledged and every queued wake stays durable" >&2
     exit 1
   fi
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
@@ -253,12 +271,18 @@ if [ -n "$ACK_THROUGH" ]; then
     fi
   fi
   if ! _fm_atomic_replace "$DRAIN_TMP" "$FM_WAKE_QUEUE"; then
-    echo "wake drain: acknowledged wakes could not be consumed safely" >&2
+    echo "wake drain: acknowledged wakes could not be consumed safely; no WAKE_ACK_OK receipt was printed, so treat them as still queued" >&2
     exit 1
   fi
   DRAIN_TMP=
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
+  # Positive receipt for a consumed acknowledgement. Every other outcome of this
+  # path is a refusal that prints its own cause, so the presence of this line -
+  # not the exit status a caller may have chained around - is what tells a
+  # supervisor the wakes are gone and must not be acknowledged again.
+  printf 'WAKE_ACK_OK: acknowledged wakes through %s for recovery generation %s\n' \
+    "$ACK_THROUGH" "$ACK_GENERATION" >&2
   if [ "$RECOVERY_ACK_MOVED" = true ]; then
     printf 'wake drain: acknowledged wakes through %s, but a newer recovery episode is pending; re-run bin/fm-wake-drain.sh and use the new WAKE_ACK_REQUIRED command\n' \
       "$ACK_THROUGH" >&2
@@ -283,9 +307,10 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   esac
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
-  (print_status_presentation) || true
+  (trap '' PIPE; print_status_presentation) || true
   if [ "$RECOVERY_ACK_REQUIRED" = true ]; then
     printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation %s\n' "${RECOVERY_MARKER_TOKEN##*:}" >&2
+    printf 'WAKE_ACK_REQUIRED: run that command on its own and verbatim; it reports success by printing WAKE_ACK_OK, so no receipt means nothing was acknowledged\n' >&2
   fi
   assert_watcher_liveness
   exit 0
@@ -322,7 +347,15 @@ case "${FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT:-0}" in
   *) sleep "$FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT" ;;
 esac
 if [ -n "$RAW_ROWS" ]; then
-  printf '%s\n' "$RAW_ROWS" || exit "$?"
+  # A reader that stops early - a `| grep -q`, a `| head`, a consumer that dies -
+  # closes this stream mid-presentation. Left to SIGPIPE that kills the drain
+  # where it stands: the queue lock is never released, the acknowledgement
+  # boundary below is never printed, and the caller sees only a bare 141 it has
+  # to attribute to some command in its own chain. Take the write error instead,
+  # so the record rows stay the only thing lost and the refusal below can say so.
+  trap '' PIPE
+  printf '%s\n' "$RAW_ROWS" 2>/dev/null || PRESENTATION_BROKEN=true
+  trap - PIPE
 fi
 fm_recovery_marker_snapshot "$RECOVERY_MARKER" || exit 1
 RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
@@ -332,9 +365,26 @@ case "$RECOVERY_MARKER_TOKEN" in
 esac
 fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 DRAIN_LOCK_HELD=false
+# Withhold the acknowledgement boundary when the presentation was cut short:
+# acknowledging it would consume records this turn never showed anyone. Skipping
+# the status sections for the same reason keeps their presentation cursor from
+# advancing past lines nobody read.
+if [ "$PRESENTATION_BROKEN" = true ]; then
+  printf 'wake drain: the wake records could not be fully written to their reader, so this presentation is incomplete and no acknowledgement boundary was printed; nothing was consumed, so re-run bin/fm-wake-drain.sh on its own, without a pipe, to present them again\n' >&2
+  assert_watcher_liveness
+  exit 1
+fi
 printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through %s --recovery-generation %s\n' \
   "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" >&2
+# Deliberate one-line reinforcement at the exact point of the mistake: this is
+# where a supervisor reads the command, and both known misreadings - judging the
+# acknowledgement by a chained exit status, and rebuilding the command out of a
+# captured variable - happen between reading this line and running it.
+printf 'WAKE_ACK_REQUIRED: run that command on its own and verbatim; it reports success by printing WAKE_ACK_OK, so no receipt means nothing was acknowledged\n' >&2
 
-(print_status_presentation "$RAW_ROWS") || true
+# Ignore SIGPIPE for the same reason the record write does: a reader that stops
+# during the status sections must not kill this shell holding the presentation
+# lock. Scoped to the subshell, so nothing else inherits the ignore.
+(trap '' PIPE; print_status_presentation "$RAW_ROWS") || true
 assert_watcher_liveness
 exit 0
