@@ -34,6 +34,11 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Hermetic spawn tests that exercise unrelated behavior opt out of the Claude
+# credential integration.  Credential-specific tests clear this and install a
+# structural profile plus a fake Keychain instead.
+export FM_TEST_BYPASS_CLAUDE_CREDENTIAL_GUARD=1
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
