@@ -36,6 +36,21 @@ Below-floor is rare: bootstrap enforces `FM_QUOTA_AXI_MIN` and normally reports 
 `--json` is a defensive belt, not a habit; never reach for it because it feels more complete.
 Read `quota-axi auth --json` only when a candidate's credential surface is in question.
 
+### Claude crew profile measurement
+
+The default Claude row belongs to the seat profile and is never evidence for a Claude crewmate or scout.
+For every `harness=claude` crewmate candidate, run `bin/fm-crew-claude-quota.sh` in addition to the one seat snapshot.
+The wrapper uses only `config/crew-claude-profile`, isolates quota-axi's provider cache, and prints no account, path, credential, or raw producer data.
+It is the one exception to the normal one-snapshot rule because it measures a different credential profile, not a second view of the seat.
+
+- `status=healthy headroom_percent=<n>` is a fresh crew measurement.
+- `status=exhausted headroom_percent=0` is a fresh measured zero, not an unknown result.
+- `status=absent` is concrete evidence that the configured crew profile cannot authenticate and blocks that Claude crew candidate.
+- `status=unmeasurable` is uncertainty, not exhaustion and not seat evidence; keep the candidate eligible with that uncertainty disclosed.
+
+The wrapper intentionally does not manufacture crew `spendPriority` or runway, so never quote the seat row's values as the crew candidate's values.
+Rank an otherwise-eligible unmeasurable Claude candidate only under the existing unknown-value rules.
+
 For each candidate, preserve explicit `harness`, `model`, and `provider`; `harness-adapters` owns identity, and model/provider never infer harness.
 
 ## Three gates, then spendPriority
