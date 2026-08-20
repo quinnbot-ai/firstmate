@@ -220,6 +220,10 @@ fleet_sync_relay_filtered_output() {
     case "$line" in
       *': skipped: local-only project') ;;
       *': skipped: no origin remote') ;;
+      # A clean detached HEAD that a tag or branch still holds is a deliberate
+      # park, not drift: nothing is unreferenced and nothing needs a decision, so
+      # relaying it every bootstrap would only teach readers to skim FLEET_SYNC.
+      *': skipped: parked on a preserved line'*) ;;
       *': skipped:'*) echo "FLEET_SYNC: $line" ;;
       *': STUCK:'*) echo "FLEET_SYNC: $line" ;;
       *': recovered:'*) echo "FLEET_SYNC: $line" ;;
