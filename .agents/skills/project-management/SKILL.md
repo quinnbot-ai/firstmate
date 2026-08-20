@@ -57,7 +57,8 @@ Default it off for every project and every posture, and enable it only on the ca
 Confirm the source URL, local project name, delivery posture, and autonomy posture, stating the resolved default for each rather than asking the captain to invent one.
 Clone into `projects/<name>` and add the registry entry only after the destination is known to be unused.
 A `no-mistakes` or `no-mistakes-prod-only` project must have an `origin` remote and must complete the initialization procedure below, because a conditional policy's product-facing work runs the pipeline while its internal-only work still takes the direct PR.
-A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
+A `direct-PR` project needs a remote its workers can push to but skips no-mistakes initialization.
+When that remote is not `origin`, as in a fork-based checkout, pass it to `bin/fm-brief.sh --push-remote` so each brief names the target instead of letting the worker fall back to `origin`.
 A `local-only` project may have no remote and skips no-mistakes initialization.
 
 ## Create a project
