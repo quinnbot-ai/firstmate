@@ -134,6 +134,8 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   A direct-PR ship spawn warns when its brief names no "Push target: " remote,
+#   because the worker would otherwise fall back to git's default of origin.
 #   A fresh ship or scout spawn writes a private current-task binding in that
 #   worktree's Git metadata before it publishes state/<id>.meta. A relaunch
 #   verifies the binding and refuses if a pooled worktree was reassigned, rather
@@ -1778,6 +1780,8 @@ delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task
 # fm-brief.sh records a ship brief's mode as a fixed "Delivery contract: mode=<mode>"
 # line. A spawn that disagrees would launch a worker whose instructions and whose
 # recorded task delivery differ, which is the exact drift this contract prevents.
+# A direct-PR brief additionally has to name its push target, because git's default
+# is origin and origin is the upstream in a fork-based checkout.
 if [ "$KIND" = ship ]; then
   PROJ_NAME=$(basename "$PROJ_ABS")
   BRIEF_MODE=$(sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
@@ -1786,6 +1790,15 @@ if [ "$KIND" = ship ]; then
   elif [ "$BRIEF_MODE" != "$MODE" ]; then
     echo "error: delivery mismatch for $ID: the brief says mode=$BRIEF_MODE but this spawn passed --mode $MODE; correct the flag or re-scaffold the brief so the worker's instructions and the task record agree" >&2
     exit 1
+  fi
+  # direct-PR is the only mode whose worker pushes, and git's own default target
+  # is origin - the upstream in a fork-based checkout, which denies the push and
+  # reads to the worker like a permissions wall. fm-brief.sh names the target on a
+  # fixed "Push target: " line; a brief without one predates that contract or lost
+  # it to a hand edit. Warn rather than refuse: an unnamed target still succeeds
+  # wherever origin is writable, so a refusal here would be its own false wall.
+  if [ "$MODE" = direct-PR ] && ! grep -q '^Push target: ' "$BRIEF"; then
+    echo "warning: $BRIEF names no push target, so its worker falls back to origin - which is the upstream in a fork-based checkout; name the remote in the brief, or re-scaffold with bin/fm-brief.sh --mode direct-PR (adding --push-remote <name> when the clone cannot be inspected)" >&2
   fi
   # The registry holds the captain's standing posture, so dropping below it is
   # allowed (a current explicit captain instruction wins) but never silent. An
