@@ -131,13 +131,30 @@ fm_remote_job_path_append_resolved_dir() { # <directory>
 }
 
 fm_remote_job_append_glob_dirs() { # <glob whose matches are directories>
-  local pattern=$1 directory
+  local pattern=$1 directory candidate i j
+  # Bash 3 treats an empty array as unset under set -u, so retain one private
+  # sentinel and start sorting at the first real match.
+  local -a directories=('')
   while IFS= read -r directory; do
+    directories+=("$directory")
+  done < <(compgen -G "$pattern" || true)
+  # Filesystem enumeration order is not a PATH contract.
+  # Keep this in Bash because worker startup cannot rely on a tool that may not
+  # be present in its deliberately constrained inherited PATH.
+  local LC_ALL=C
+  for ((i = 2; i < ${#directories[@]}; i++)); do
+    candidate=${directories[i]}
+    j=$((i - 1))
+    while [ "$j" -ge 0 ] && [[ "${directories[j]}" > "$candidate" ]]; do
+      directories[j + 1]=${directories[j]}
+      j=$((j - 1))
+    done
+    directories[j + 1]=$candidate
+  done
+  for ((i = 1; i < ${#directories[@]}; i++)); do
+    directory=${directories[i]}
     fm_remote_job_path_append_if_dir "$directory"
-  # Filesystem enumeration order is not a PATH contract. Sort matches so the
-  # child environment is identical across the entrypoint, worker, and a later
-  # doctor run on the same account.
-  done < <(compgen -G "$pattern" | LC_ALL=C sort || true)
+  done
 }
 
 fm_remote_job_nvm_default_selector() { # <account-home>

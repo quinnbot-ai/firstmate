@@ -79,7 +79,13 @@ cat > "$RUNTIME_BIN/perl" <<'SH'
 printf 'invoked\n' >> "$FM_FAKE_PERL_LOG"
 exit 127
 SH
-chmod +x "$RUNTIME_BIN/perl"
+cat > "$RUNTIME_BIN/sort" <<'SH'
+#!/bin/bash
+# The remote worker inherits only the operator's constrained PATH.
+# Its startup must not depend on a separately installed sort executable.
+exit 127
+SH
+chmod +x "$RUNTIME_BIN/perl" "$RUNTIME_BIN/sort"
 
 git -C "$REMOTE_ROOT" init -q -b main
 git -C "$REMOTE_ROOT" config user.email test@example.com
@@ -151,6 +157,19 @@ case ":$FM_REMOTE_JOB_OPERATOR_PATH:" in
 esac
 printf '20\n' > "$NVM_ROOT/alias/default"
 pass "operator PATH honors nvm defaults with a deterministic fallback"
+
+ASDF_A="$ACCOUNT_HOME/.asdf/installs/node/a/bin"
+ASDF_Z="$ACCOUNT_HOME/.asdf/installs/node/z/bin"
+mkdir -p "$ASDF_Z" "$ASDF_A"
+ORIGINAL_PATH=$PATH
+PATH="$RUNTIME_BIN:$PATH"
+fm_remote_job_compose_operator_path "$ACCOUNT_HOME" >/dev/null
+PATH=$ORIGINAL_PATH
+case ":$FM_REMOTE_JOB_OPERATOR_PATH:" in
+  *":$ASDF_A:$ASDF_Z:"*) ;;
+  *) fail "the composed PATH needs an external sort executable to order glob matches" ;;
+esac
+pass "operator PATH orders glob matches without an external sort executable"
 
 NIX_PROFILE="$ACCOUNT_HOME/.nix-profile"
 NIX_BIN="$TMP_ROOT/nix-profile-bin"
