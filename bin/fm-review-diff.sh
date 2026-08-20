@@ -145,14 +145,21 @@ fi
 git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "error: base $BASE does not exist in $WT" >&2; exit 1; }
 git -C "$WT" rev-parse --verify --quiet "$COMPARE_REF^{commit}" >/dev/null || { echo "error: compare ref $COMPARE_REF does not resolve in $WT" >&2; exit 1; }
 
+# A review diff is evidence, so it must use Git's canonical renderer. An
+# ambient GIT_EXTERNAL_DIFF or diff.external can replace the patch with a
+# local presentation that hides the actual added and removed lines.
+review_diff() {
+  git -C "$WT" -c diff.external= -c core.pager=cat diff --no-ext-diff "$@"
+}
+
 echo "diff base: $BASE"
-if git -C "$WT" diff --quiet "$BASE...$COMPARE_REF" --; then
+if review_diff --quiet "$BASE...$COMPARE_REF" --; then
   echo "no changes vs $BASE"
   exit 0
 fi
 
-git -C "$WT" diff --stat "$BASE...$COMPARE_REF" --
+review_diff --stat "$BASE...$COMPARE_REF" --
 if ! "$STAT_ONLY"; then
   echo
-  git -C "$WT" diff "$BASE...$COMPARE_REF" --
+  review_diff "$BASE...$COMPARE_REF" --
 fi

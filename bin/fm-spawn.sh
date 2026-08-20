@@ -818,7 +818,12 @@ spawn_herdr_presentation_order_lock_acquire() {
   lock_path=$(fm_backend_herdr_presentation_session_lock_path "$session") || return 1
   HERDR_PRESENTATION_ORDER_LOCK="$lock_path"
   attempt=0
-  while [ "$attempt" -lt 50 ]; do
+  # Recovery must serialize with another cross-home reclaim that is already
+  # safely holding this session lock. Five seconds can expire while Herdr is
+  # replacing one exact husk on a loaded machine, turning a valid concurrent
+  # recovery into a spurious hard refusal. Keep the wait bounded, but long
+  # enough to cover that verified critical section.
+  while [ "$attempt" -lt 300 ]; do
     if fm_lock_try_acquire "$HERDR_PRESENTATION_ORDER_LOCK"; then
       HERDR_PRESENTATION_ORDER_LOCK_HELD=1
       return 0
