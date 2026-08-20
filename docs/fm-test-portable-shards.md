@@ -91,6 +91,9 @@ bin/fm-test-run.sh --check-coverage
 `bin/fm-test-run.sh --check-coverage` verifies that both parallel lanes partition the proven-isolated set.
 It also verifies that the parallel lanes, portable serial lane, and real-Herdr family are disjoint and cover every `tests/*.test.sh` script.
 It separately verifies that the portable serial CI shards are non-empty, disjoint, and together equal the portable serial lane.
+`bin/fm-test-run.sh --check-test-count --base <git-ref>` verifies that the candidate's direct `tests/*.test.sh` inventory is not smaller than its merge base.
+An unavailable merge base is a hard failure rather than a skipped or passing guard.
+The coverage job fetches complete history and supplies the pull request's exact base SHA, or the pushed commit itself outside pull requests.
 
 ## Timing artifacts
 

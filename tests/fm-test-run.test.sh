@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Contract tests for bin/fm-test-run.sh - the single owner of behavior suite
 # selection, portable lane composition, proven-isolated --jobs, timing markers,
-# JSON artifacts, coverage guard, and aggregate exit status.
+# JSON artifacts, coverage guard, aggregate exit status, and merge-base
+# test-count floor.
 #
 # These tests intentionally exercise the runner with fixtures, --list, and
 # focused scheduler checks, not the complete Firstmate suite.
@@ -64,6 +65,86 @@ test_single_script_selection() {
   [ "$listed" = "tests/fm-lint.test.sh" ] \
     || fail "single-script list expected tests/fm-lint.test.sh, got: $listed"
   pass "single-script selection lists exactly that path"
+}
+
+test_test_count_floor_rejects_dropped_inventory() {
+  local tmp repo base out rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-count-drop.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+  base=$(git -C "$repo" rev-parse HEAD)
+  rm "$repo/tests/fm-backend-orca.test.sh"
+  git -C "$repo" add tests/fm-backend-orca.test.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid \
+    commit -qm drop-test
+  set +e
+  out=$(cd "$repo" && bin/fm-test-run.sh --check-test-count --base "$base" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "dropped test inventory should fail the floor"; }
+  printf '%s\n' "$out" | grep -Fq 'test-count floor: candidate has' \
+    || { rm -rf "$tmp"; fail "dropped inventory lacked count diagnostic: $out"; }
+  printf '%s\n' "$out" | grep -Fq 'shortfall=1' \
+    || { rm -rf "$tmp"; fail "dropped inventory lacked shortfall: $out"; }
+  printf '%s\n' "$out" | grep -Fq 'tests/fm-backend-orca.test.sh' \
+    || { rm -rf "$tmp"; fail "dropped inventory lacked deleted test path: $out"; }
+  rm -rf "$tmp"
+  pass "test-count floor rejects an inventory below its merge base"
+}
+
+test_test_count_floor_accepts_matching_inventory() {
+  local tmp repo base out
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-count-match.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+  base=$(git -C "$repo" rev-parse HEAD)
+  rm "$repo/tests/fm-backend-orca.test.sh"
+  printf '#!/usr/bin/env bash\n' >"$repo/tests/fm-replacement.test.sh"
+  chmod +x "$repo/tests/fm-replacement.test.sh"
+  git -C "$repo" add tests
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid \
+    commit -qm match-test-count
+  out=$(cd "$repo" && bin/fm-test-run.sh --check-test-count --base "$base") \
+    || { rm -rf "$tmp"; fail "matching test inventory should pass"; }
+  printf '%s\n' "$out" | grep -Fq 'FM_TEST_COUNT_FLOOR ok' \
+    || { rm -rf "$tmp"; fail "matching inventory lacked success evidence: $out"; }
+  rm -rf "$tmp"
+  pass "test-count floor accepts an inventory equal to its merge base"
+}
+
+test_test_count_floor_accepts_increased_inventory() {
+  local tmp repo base out
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-count-increase.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+  base=$(git -C "$repo" rev-parse HEAD)
+  printf '#!/usr/bin/env bash\n' >"$repo/tests/fm-added.test.sh"
+  chmod +x "$repo/tests/fm-added.test.sh"
+  git -C "$repo" add tests/fm-added.test.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid \
+    commit -qm add-test
+  out=$(cd "$repo" && bin/fm-test-run.sh --check-test-count --base "$base") \
+    || { rm -rf "$tmp"; fail "increased test inventory should pass"; }
+  printf '%s\n' "$out" | grep -Fq 'FM_TEST_COUNT_FLOOR ok' \
+    || { rm -rf "$tmp"; fail "increased inventory lacked success evidence: $out"; }
+  rm -rf "$tmp"
+  pass "test-count floor accepts an inventory above its merge base"
+}
+
+test_test_count_floor_refuses_unavailable_merge_base() {
+  local tmp repo out rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-count-no-base.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+  set +e
+  out=$(cd "$repo" && bin/fm-test-run.sh --check-test-count --base refs/heads/missing-base 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || { rm -rf "$tmp"; fail "unavailable merge base must exit 2, got $rc"; }
+  printf '%s\n' "$out" | grep -Fq "cannot find merge base" \
+    || { rm -rf "$tmp"; fail "unavailable merge base lacked hard failure: $out"; }
+  rm -rf "$tmp"
+  pass "test-count floor fails closed when its merge base is unavailable"
 }
 
 test_changed_file_selection_is_conservative() {
@@ -706,6 +787,10 @@ assert len(doc["scripts"])==3
 test_list_all_exact_suite_coverage
 test_family_selection
 test_single_script_selection
+test_test_count_floor_rejects_dropped_inventory
+test_test_count_floor_accepts_matching_inventory
+test_test_count_floor_accepts_increased_inventory
+test_test_count_floor_refuses_unavailable_merge_base
 test_changed_file_selection_is_conservative
 test_changed_dependency_selection_and_unmapped_failure
 test_empty_selection_emits_summary
