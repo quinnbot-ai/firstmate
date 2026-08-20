@@ -19,10 +19,17 @@
 #   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
 #
 # Logic, in order:
-#   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
-#      recording remote_host= is a remote secondmate: its worktree and endpoint
-#      live on that host, so the local worktree and pane reads are skipped and
-#      the remote host is asked for the endpoint's recovery-grade state
+#   1. Resolve worktree + backend target + kind from state/<id>.meta. A local
+#      ship or scout record that declares worktree_binding=fm-worktree-binding.v1
+#      must prove its private current-task binding before any worktree read.
+#      A missing, unreadable, or mismatched declared binding is unknown/none
+#      rather than a plausible verdict about another recycled lane. Legacy
+#      records remain readable unless a current marker positively proves that
+#      their path has been reassigned. Persistent secondmate homes never use
+#      reusable-task bindings.
+#      A meta recording remote_host= is a remote secondmate: its worktree and
+#      endpoint live on that host, so the local worktree and pane reads are
+#      skipped and the remote host is asked for the endpoint's recovery-grade state
 #      (fm-on.sh + fm-remote-secondmate-control.sh state). alive falls through
 #      to the routed status log; dead/missing report the remote verdict; an
 #      unreachable or unreadable remote reports unknown-remote, never a false
@@ -50,9 +57,10 @@
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
 #      `resolved` never become current state or detail.
-#   5. Missing meta or torn-down worktree: report unknown · none. If no run is
-#      attributed to this crew, a dead endpoint also reports unknown · none rather
-#      than trusting a stale status log.
+#   5. Missing meta, torn-down worktree, or unverifiable declared local task
+#      binding: report unknown · none. If no run is attributed to this crew, a
+#      dead endpoint also reports unknown · none rather than trusting a stale
+#      status log.
 #
 # Read-only and side-effect free. Always exits 0 on a successful read regardless
 # of state; exit 2 only on a usage error (no id).
@@ -73,6 +81,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-worktree-binding-lib.sh
+. "$SCRIPT_DIR/fm-worktree-binding-lib.sh"
 
 ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
@@ -109,6 +119,7 @@ WT=$(meta_value worktree)
 KIND=$(meta_value kind)
 HARNESS=$(meta_value harness)
 REMOTE_HOST=$(meta_value remote_host)
+BINDING_SCHEMA=$(meta_value worktree_binding)
 [ -n "$KIND" ] || KIND=ship
 
 # A torn-down (or never-created) worktree has no current state to read. A
@@ -116,6 +127,20 @@ REMOTE_HOST=$(meta_value remote_host)
 # probe proves nothing for it - the remote arm below reads the true source.
 if [ -z "$REMOTE_HOST" ] && { [ -z "$WT" ] || [ ! -d "$WT" ]; }; then
   emit unknown none "worktree gone (torn down?)"
+fi
+if [ -z "$REMOTE_HOST" ] && [ "$KIND" != secondmate ]; then
+  if [ -n "$BINDING_SCHEMA" ] && [ "$BINDING_SCHEMA" != fm-worktree-binding.v1 ]; then
+    emit unknown none "worktree binding unverifiable: unsupported metadata binding for $WT"
+  fi
+  if [ "$BINDING_SCHEMA" = fm-worktree-binding.v1 ]; then
+    if ! fm_worktree_binding_matches "$WT" "$ID"; then
+      emit unknown none "$(fm_worktree_binding_detail)"
+    fi
+  elif fm_worktree_binding_read "$WT"; then
+    if [ "$FM_WORKTREE_BINDING_TASK_ID" != "$ID" ]; then
+      emit unknown none "worktree binding mismatch: meta task $ID but worktree is bound to $FM_WORKTREE_BINDING_TASK_ID"
+    fi
+  fi
 fi
 
 # --- status log ------------------------------------------------------------
