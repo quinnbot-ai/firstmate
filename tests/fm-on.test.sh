@@ -189,18 +189,25 @@ pass "the fixed entrypoint runs every command in the worker's explicit environme
 # The child PATH is the entrypoint's own composition, so it is asserted on the
 # PATH a real child receives rather than on the script that builds it. The
 # expectation is rebuilt here from the documented contract - fixed head, the
-# package-manager directories that exist on this host, fixed tail - so a host
-# with nix, homebrew, or neither exercises both the include and omit directions.
+# package-manager directories that exist on this host in the entrypoint's
+# deterministic Bash glob traversal, fixed tail - so a host with nix, homebrew, or neither
+# exercises both the include and omit directions.
 ACCOUNT_HOME=$(unset HOME; CDPATH='' cd ~ && pwd -P)
 ACCOUNT_USER=$(id -un)
 MANAGER_DIRS=(
   "$ACCOUNT_HOME/.asdf/shims"
-  "$ACCOUNT_HOME"/.asdf/installs/*/*/bin
   "$ACCOUNT_HOME/.local/share/mise/shims"
   "$ACCOUNT_HOME/.mise/shims"
-  "$ACCOUNT_HOME"/.local/share/mise/installs/*/*/bin
-  "$ACCOUNT_HOME"/.mise/installs/*/*/bin
 )
+append_manager_glob_dirs() {
+  local pattern=$1 candidate
+  while IFS= read -r candidate; do
+    MANAGER_DIRS+=("$candidate")
+  done < <(compgen -G "$pattern" | LC_ALL=C sort || true)
+}
+append_manager_glob_dirs "$ACCOUNT_HOME/.asdf/installs/*/*/bin"
+append_manager_glob_dirs "$ACCOUNT_HOME/.local/share/mise/installs/*/*/bin"
+append_manager_glob_dirs "$ACCOUNT_HOME/.mise/installs/*/*/bin"
 OPTIONAL_DIRS=(
   "$ACCOUNT_HOME/.nix-profile/bin"
   "/etc/profiles/per-user/$ACCOUNT_USER/bin"

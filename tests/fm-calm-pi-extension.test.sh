@@ -1650,7 +1650,6 @@ import { encodeFirstmateOperationalInput } from "./.pi/extensions/lib/fm-operati
 let phase: "idle" | "captain" | "monitor" = "idle";
 let label = "";
 let adjacent = false;
-let latestInputRole: "user" | "custom" | undefined;
 
 const EXACT_WATCHER_INPUT =
   "\u2063FIRSTMATE_OP: v1 watcher: FIRSTMATE WATCHER WAKE: signal: /home/fixture/github/kunchenguid/firstmate/state/oss-triage-t4.status\n\n" +
@@ -1678,9 +1677,6 @@ function contentText(content: unknown): string {
 
 export default function (pi: ExtensionAPI): void {
   pi.on("message_start", (event) => {
-    if (event.message.role === "user" || event.message.role === "custom") {
-      latestInputRole = event.message.role;
-    }
     if (event.message.role !== "assistant" || phase !== "captain") return;
     phase = "monitor";
     pi.sendUserMessage(monitorInput("ONE"), { deliverAs: "followUp" });
@@ -1708,13 +1704,21 @@ export default function (pi: ExtensionAPI): void {
         .filter((message) => message.role === "user")
         .map((message) => contentText(message.content))
         .join("\n");
-      const responseText = latestInputRole === "custom"
-        ? `CAPTAIN_ANSWER_${label}`
-        : allUserText.includes(monitorInput("ONE"))
-          ? adjacent && allUserText.includes(monitorInput("TWO"))
-            ? `MONITOR_HANDLED_${label}_ONE_TWO`
-            : `MONITOR_HANDLED_${label}_ONE`
-          : `CAPTAIN_ANSWER_${label}`;
+      // Classify this model turn from its context, not from a shared
+      // message_start role. Follow-up delivery can emit the next user event
+      // before this provider is asked to stream, which made the old mutable
+      // role marker race and occasionally render a second captain answer.
+      const latestUserText = context.messages
+        .filter((message) => message.role === "user")
+        .map((message) => contentText(message.content))
+        .at(-1);
+      const handlingMonitor = latestUserText === monitorInput("ONE") ||
+        latestUserText === monitorInput("TWO");
+      const responseText = handlingMonitor
+        ? adjacent && allUserText.includes(monitorInput("TWO"))
+          ? `MONITOR_HANDLED_${label}_ONE_TWO`
+          : `MONITOR_HANDLED_${label}_ONE`
+        : `CAPTAIN_ANSWER_${label}`;
       const output: AssistantMessage = {
         role: "assistant",
         content: [],

@@ -169,8 +169,30 @@ test_unreachable_pr_head_falls_back_with_warning() {
   pass "fm-review-diff falls back to local branch with a warning when PR head is unreachable"
 }
 
+test_external_diff_cannot_replace_review_evidence() {
+  local case_dir out driver
+  case_dir=$(make_case external-diff)
+  stale_and_pr_commits "$case_dir"
+  write_task_meta "$case_dir"
+  driver="$case_dir/external-diff"
+  cat > "$driver" <<'SH'
+#!/usr/bin/env bash
+printf 'EXTERNAL_DIFF_WAS_USED\n'
+SH
+  chmod +x "$driver"
+
+  out=$(GIT_EXTERNAL_DIFF="$driver" run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+stale-local' \
+    "external-diff: canonical patch should remain visible under an ambient external diff"
+  assert_not_contains "$out" 'EXTERNAL_DIFF_WAS_USED' \
+    "external-diff: review evidence must not be replaced by an external renderer"
+  pass "fm-review-diff ignores ambient external diff renderers"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
+test_external_diff_cannot_replace_review_evidence
