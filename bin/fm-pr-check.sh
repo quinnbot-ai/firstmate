@@ -5,6 +5,25 @@
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
 # including a merge request on a self-hosted GitLab instance.
+#
+# CONFLICT ADVISORY. Arming the poll is the moment firstmate starts waiting on a
+# pull request, so it is the moment a conflict has to be said out loud: a
+# conflicted branch has no merge ref, GitHub therefore never schedules its
+# pull_request workflows, and the pull request waits forever while presenting as
+# ordinary. bin/fm-pr-verify-lib.sh owns that read and the remedy it prints. The
+# advisory is ADVISORY - it goes to stderr after the poll is armed, it never
+# changes the exit status, and an unreadable or unavailable answer is silent -
+# because arming the poll is the guarantee this script owes and a diagnostic
+# must not be able to cost it.
+#
+# It is NOT suppressed when bin/fm-pr-merge.sh calls this script, even though
+# that path's own refusal can carry the same explanation. That refusal only
+# fires when the check set is ALSO absent, and the common conflicted pull
+# request is one that collected its checks and went conflicted later when the
+# base advanced - verified 2026-08-20 against quinnbot-ai/firstmate, where all
+# seven conflicted open pull requests carried 13 or 14 check runs. Suppressing
+# here would leave exactly that majority case with nothing to explain why the
+# merge is about to be rejected.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -17,6 +36,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-pr-verify-lib.sh
+. "$SCRIPT_DIR/fm-pr-verify-lib.sh"
 
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2
@@ -33,6 +54,10 @@ PROVIDER=$FM_PR_PROVIDER
 HOST=$FM_PR_HOST
 PROJECT_PATH=$FM_PR_PATH
 NUMBER=$FM_PR_NUMBER
+# Captured with the rest of the parse rather than read at the advisory below,
+# so no later helper that reuses the FM_PR_ namespace can redirect the lookup.
+PR_OWNER=${FM_PR_OWNER:-}
+PR_REPO=${FM_PR_REPO:-}
 
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
@@ -135,3 +160,10 @@ fm_pr_poll_publish_prepared || {
   exit 1
 }
 printf 'armed: state/%s.check.sh\n' "$ID"
+
+# Last, and never load-bearing: the poll is already armed and the exit status is
+# already earned by this point.
+if [ "$PROVIDER" = github ] && command -v gh-axi >/dev/null 2>&1 \
+  && fm_pr_branch_conflicted "$PR_OWNER" "$PR_REPO" "$NUMBER"; then
+  echo "warning: $URL is conflicted, so no CI will run on it and it cannot be merged: $FM_PR_CONFLICT_DETAIL" >&2
+fi
