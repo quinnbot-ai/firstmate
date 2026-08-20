@@ -72,12 +72,20 @@ The verdict for 148 names the conflict as the cause; 154 reported 13 check runs 
 
 ## Why the gate does not adjudicate red
 
-This repository carries a check that fails by design on every direct-PR task: `PR must be raised via no-mistakes`.
-On 2026-08-20 head `b553350e` reported 13 check runs of which three concluded `failure`, and pull requests in that state are merged deliberately.
-A gate that refused red here would block every direct-PR merge, so the check-set gate answers only presence, and `AGENTS.md` section 7 keeps owning the red judgment.
+The check-set gate answers only "does this head carry a check set at all", because red versus green is a different state that is already visible to whoever is merging, and `AGENTS.md` section 7's "never merge a red PR" rule keeps owning that judgment.
+
+That division of labour was originally forced rather than chosen.
+Until 2026-08-20 this repository carried a check that failed by design on every direct-PR delivery: `PR must be raised via no-mistakes` accepted only the signature the no-mistakes pipeline writes, which a direct-PR delivery legitimately never has.
+On 2026-08-20 head `b553350e` reported 13 check runs of which three concluded `failure`, and pull requests in that state were merged deliberately; PR #152 merged with that check red twice and every other check green.
+A gate that refused red would have blocked every direct-PR merge.
+
+That permanent false red is retired.
+`bin/fm-pr-body-compliance.sh` now accepts either the pipeline signature or a maintainer-declared bypass, so a red `PR must be raised via no-mistakes` again means an undeclared pipeline bypass rather than routine correct work.
+No check in this repository is expected to be red on a healthy delivery, and a red one is a stop-and-read result rather than a documented exception to skim past.
 
 ## Regression coverage
 
 `tests/fm-pr-merge.test.sh` covers the merge refusal for an absent check set, the same refusal for an unreadable one, and the explicit `--allow-unverified` override.
 `tests/fm-crew-state.test.sh` covers the `unverified` classification, including the case where the worker's own status line claims checks are green while the CI log reports none.
-Both suites run under `bin/fm-test-run.sh`.
+`tests/fm-pr-body-compliance.test.sh` covers the delivery-path compliance verdict that retired the permanent false red, including the refusal of an undeclared bypass by a maintainer and of a declaration by an author without write access.
+All three suites run under `bin/fm-test-run.sh`.

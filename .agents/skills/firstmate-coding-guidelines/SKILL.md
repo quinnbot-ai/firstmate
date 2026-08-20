@@ -73,6 +73,19 @@ Briefs for tasks that touch firstmate's own tracked material should tell the cre
 Firstmate adds this skill's load instruction to firstmate-repo briefs by hand instead.
 `CONTRIBUTING.md`'s "Development" section carries the same instruction as a durable reminder.
 
+## Declaring a direct-PR delivery on this repo
+
+This repo's `Require no-mistakes` check reads the PR body for the delivery path that raised the pull request.
+A `direct-PR` delivery does not run the pipeline, so its PR body must carry one declaration line or the check is red:
+
+```
+no-mistakes-bypass: direct-PR - <why this delivery bypassed the pipeline>
+```
+
+`CONTRIBUTING.md` owns the contract and `bin/fm-pr-body-compliance.sh` owns the verdict.
+Write the declaration into the body when opening the PR rather than waiting for the red check.
+The declaration is not a formality to satisfy a check: it is the record that a delivery skipped the pipeline, and it only counts because GitHub reports the author as a maintainer, so never hand-write the pipeline's own signature to go green instead.
+
 ## Compatibility and enforcement
 
 Before changing shared tracked behavior, review every affected supported primary harness and runtime backend rather than checking only the adapters active in the current fleet.
