@@ -35,6 +35,10 @@
 #      is an ancestor of the run head (pipeline fix commits advanced the run on
 #      the same line of history). Local work that advanced past the run head, or
 #      diverged from it, invalidates attribution.
+#      A failed or cancelled result also must have the exact head of the
+#      current matching `no-mistakes runs` row before it resolves terminal.
+#      A different current head makes that result historical; an unavailable
+#      current row leaves the failure surfaced, because unknown must not hide it.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -381,10 +385,10 @@ nm_ci_checks_state() {
 # spaces (verified: no quoting, so splitting on the first two whitespace runs
 # is exact) - but branch + coarse status is exactly what this predicate needs:
 # is a run for THIS branch active right now. Echoes the first (most recent)
-# matching row's status word (running/completed/cancelled/failed), or empty
-# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
-nm_runs_status_for_branch() {  # <branch>
-  local branch=$1 out row st rest br sha
+# matching row's status and head as "<status>|<head>", or empty when the
+# branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
+nm_current_run_for_branch() {  # <branch>
+  local branch=$1 out row st rest br sha descendant_candidate=''
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
@@ -403,11 +407,24 @@ nm_runs_status_for_branch() {  # <branch>
       if ! nm_coarse_head_matches_worktree "$sha"; then
         continue
       fi
-      printf '%s' "$st"
-      return 0
+      # Prefer an exact current tip even if a newer list row is a pipeline-fix
+      # descendant, because a terminal result needs a precise lane-head fence.
+      if fm_nm_heads_equal "$WT" HEAD "$sha"; then
+        printf '%s|%s' "$st" "$sha"
+        return 0
+      fi
+      [ -n "$descendant_candidate" ] || descendant_candidate="$st|$sha"
     fi
   done <<< "$out"
+  [ -z "$descendant_candidate" ] || printf '%s' "$descendant_candidate"
   return 0
+}
+
+nm_runs_status_for_branch() {  # <branch>
+  local current
+  current=$(nm_current_run_for_branch "$1")
+  [ -n "$current" ] || return 0
+  printf '%s' "${current%%|*}"
 }
 
 # CREW_BRANCH is empty at detached HEAD (a just-spawned crew, or a scout's
@@ -460,6 +477,29 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       fi
     fi
   fi
+fi
+
+# Apply the header's terminal current-head fence before consuming a failed
+# full-status result.
+if [ "$HAVE_RUN" = 1 ] && [ "$RUN_SOURCE" = full ]; then
+  run_status=$(strip_quotes "$(nm_field status)")
+  run_outcome=$(strip_quotes "$(nm_field outcome)")
+  case "$run_outcome:$run_status" in
+    failed:*|cancelled:*|*:failed|*:cancelled)
+      current_run=$(nm_current_run_for_branch "$CREW_BRANCH")
+      if [ -n "$current_run" ]; then
+        current_status=${current_run%%|*}
+        current_head=${current_run#*|}
+        failed_head=$(strip_quotes "$(nm_field head)")
+        if ! fm_nm_heads_equal "$WT" "$failed_head" "$current_head"; then
+          # A separately observed current head supersedes this failed result.
+          # Read its coarse state rather than reusing the older run's details.
+          RUN_SOURCE=coarse
+          COARSE_STATUS=$current_status
+        fi
+      fi
+      ;;
+  esac
 fi
 
 # --- run-step authoritative path -------------------------------------------

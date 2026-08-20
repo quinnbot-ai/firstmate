@@ -34,6 +34,15 @@ make_tools() { # <world>
 #!/usr/bin/env bash
 printf 'state: %s · source: fake\n' "${FM_FAKE_CREW_STATE:-unknown}"
 SH
+  cat > "$fake/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  axi)
+    [ "${2:-}" = status ] && printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"
+    ;;
+  runs) printf '%s\n' "${FM_FAKE_RUNS_LIST:-}" ;;
+esac
+SH
   cat > "$fake/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
@@ -104,6 +113,55 @@ run_reconcile() { # <home> [--startup]
     FM_FORGE_LOG="$WORLD/forge.log" "$RECON" scan ${option:+"$option"}
 }
 
+# Drive the production current-state resolver against the fixture's real git
+# worktree and fake no-mistakes endpoint, rather than the canned state helper.
+run_real_reconcile() { # <home> [--startup]
+  local home=$1 option=${2:-}
+  PATH="$WORLD/fakebin:$PATH" FM_ROOT_OVERRIDE="$WORLD/root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_INACTIVE_RECONCILE_SECS=60 FM_INACTIVE_CREW_STATE_BIN="$ROOT/bin/fm-crew-state.sh" \
+    FM_FORGE_LOG="$WORLD/forge.log" "$RECON" scan ${option:+"$option"}
+}
+
+write_ship_child() { # <home> <id> <status> <current|superseded>
+  local home=$1 id=$2 status=$3 position=$4 wt branch
+  wt="$home/projects/$id"
+  branch="fm/$id"
+  mkdir -p "$wt"
+  git -C "$wt" init -q
+  git -C "$wt" config user.name fmtest
+  git -C "$wt" config user.email fmtest@example.invalid
+  git -C "$wt" commit -q --allow-empty -m base
+  git -C "$wt" checkout -q -b "$branch"
+  CURRENT_HEAD=$(git -C "$wt" rev-parse HEAD)
+  git -C "$wt" commit -q --allow-empty -m failed-run
+  FAILED_HEAD=$(git -C "$wt" rev-parse HEAD)
+  if [ "$position" = superseded ]; then
+    git -C "$wt" reset -q --hard "$CURRENT_HEAD"
+  else
+    CURRENT_HEAD=$FAILED_HEAD
+  fi
+  CURRENT_SHORT=$(git -C "$wt" rev-parse --short=7 HEAD)
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$wt" "project=alpha" \
+    'harness=codex' 'kind=ship' 'mode=no-mistakes' 'yolo=off' \
+    "spawn_gen=s${BASHPID:-$$}.$RANDOM"
+  printf '%s\n' "$status" > "$home/state/$id.status"
+  : > "$home/state/$id.turn-ended"
+  age "$home/state/$id.meta" "$home/state/$id.status" "$home/state/$id.turn-ended"
+}
+
+failed_run_status() { # <branch> <head>
+  cat <<EOF
+run:
+  id: "01FAILED"
+  branch: $1
+  status: completed
+  head: "$2"
+outcome: failed
+EOF
+}
+
 wake_count() { # <home> <key prefix>
   grep -c "$2" "$1/state/.wake-queue" 2>/dev/null || true
 }
@@ -137,6 +195,61 @@ test_main_direct_terminal_presentation_receipt() {
   FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$DRAIN" --ack-through "$seq" --recovery-generation "$generation"
   [ "$(outcome_count "$MAIN" presented)" = 1 ] || fail "acknowledged presentation did not receive its own receipt"
   pass "main direct terminal presentation has a durable receipt"
+}
+
+# A failed `axi status` result at an older descendant head is historical when
+# the lane's current runs row is healthy at the reset head.  The fixture has no
+# backlog file, so the resolver must use live endpoint evidence rather than a
+# retained task record.
+test_superseded_failed_head_does_not_report_pruned_lane() {
+  local branch
+  make_world superseded-failed-pruned
+  write_ship_child "$MAIN" child 'working: resumed from the reset lane' superseded
+  branch="fm/child"
+  [ ! -e "$MAIN/data/backlog.md" ] || fail "fixture unexpectedly retained a backlog record"
+  FM_FAKE_AXI_STATUS=$(failed_run_status "$branch" "$FAILED_HEAD") \
+    FM_FAKE_RUNS_LIST="running    $branch $CURRENT_SHORT  2026-08-20 20:00" \
+    run_real_reconcile "$MAIN" --startup
+  [ "$(outcome_count "$MAIN" pending)" = 0 ] \
+    || fail "superseded failed head created a terminal receipt"
+  ! grep -Fq 'inactive-outcome:' "$MAIN/state/.wake-queue" 2>/dev/null \
+    || fail "superseded failed head queued a terminal presentation"
+  pass "pruned backlog lane ignores a failed run superseded by its current head"
+}
+
+# A failed run at the current lane head remains a terminal outcome, even though
+# the reconciler now rejects failed history at a different head.
+test_current_failed_head_still_reports() {
+  local branch
+  make_world current-failed
+  write_ship_child "$MAIN" child 'working: validating the current lane' current
+  branch="fm/child"
+  FM_FAKE_AXI_STATUS=$(failed_run_status "$branch" "$FAILED_HEAD") \
+    FM_FAKE_RUNS_LIST="failed    $branch $CURRENT_SHORT  2026-08-20 20:00" \
+    run_real_reconcile "$MAIN" --startup
+  [ "$(outcome_count "$MAIN" pending)" = 1 ] \
+    || fail "current failed head did not retain a terminal receipt"
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] \
+    || fail "current failed head did not queue a terminal presentation"
+  pass "current failed head remains an inactive terminal outcome"
+}
+
+# If the current lane head cannot be read, a terminal result remains surfaced.
+# Treating indeterminate evidence as superseded would turn this false-positive
+# fix into a missed real failure.
+test_indeterminate_current_head_preserves_failed_report() {
+  local branch
+  make_world indeterminate-current-head
+  write_ship_child "$MAIN" child 'working: lane current head unavailable' superseded
+  branch="fm/child"
+  FM_FAKE_AXI_STATUS=$(failed_run_status "$branch" "$FAILED_HEAD") \
+    FM_FAKE_RUNS_LIST='' \
+    run_real_reconcile "$MAIN" --startup
+  [ "$(outcome_count "$MAIN" pending)" = 1 ] \
+    || fail "indeterminate current head suppressed the failed terminal receipt"
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] \
+    || fail "indeterminate current head suppressed the failed terminal presentation"
+  pass "indeterminate current head fails safe by preserving the failed report"
 }
 
 # A secondmate independently reports a genuinely terminal inactive child.
@@ -445,6 +558,9 @@ test_reconciliation_never_calls_forge() {
 }
 
 test_main_direct_terminal_presentation_receipt
+test_superseded_failed_head_does_not_report_pruned_lane
+test_current_failed_head_still_reports
+test_indeterminate_current_head_preserves_failed_report
 test_local_secondmate_reports_terminal_child
 test_local_secondmate_rejects_relative_parent_home
 test_invalid_secondmate_marker_blocks_routing

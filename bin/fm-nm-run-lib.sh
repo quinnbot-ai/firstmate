@@ -71,3 +71,15 @@ fm_nm_head_matches_worktree() {  # <worktree> <run_head>
   [ "$run_full" = "$local_full" ] && return 0
   git -C "$wt" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null
 }
+
+# 0 when two run heads resolve to the exact same commit in worktree $1.
+# Unlike fm_nm_head_matches_worktree, this deliberately does not accept an
+# ancestor or descendant: callers use it when an older terminal run must be
+# distinguished from the lane's current run.
+fm_nm_heads_equal() {  # <worktree> <left-head> <right-head>
+  local wt=$1 left=$2 right=$3 left_full right_full
+  [ -n "$left" ] && [ -n "$right" ] || return 1
+  left_full=$(git -C "$wt" rev-parse --verify "${left}^{commit}" 2>/dev/null) || return 1
+  right_full=$(git -C "$wt" rev-parse --verify "${right}^{commit}" 2>/dev/null) || return 1
+  [ "$left_full" = "$right_full" ]
+}
