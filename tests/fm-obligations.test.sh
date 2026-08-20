@@ -35,8 +35,8 @@ BRIEF="$ROOT/bin/fm-brief.sh"
 TMP_ROOT=$(fm_test_tmproot fm-obligations)
 
 # A fresh firstmate home for one case; echoes its path.
-make_home() {
-  local name=$1 home="$TMP_ROOT/$1"
+make_home() {  # <case-name>
+  local home="$TMP_ROOT/$1"
   mkdir -p "$home/data" "$home/state"
   printf '%s\n' "$home"
 }
