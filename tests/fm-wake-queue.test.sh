@@ -811,3 +811,112 @@ test_legacy_generationless_wake_is_adopted
 test_stale_recovery_generation_cannot_touch_a_newer_episode
 test_recovery_ack_failure_is_reported
 test_interruption_before_and_after_raw_commit
+
+# The acknowledgement's outcome must be readable from the drain's own output,
+# because a supervisor reads its exit status through whatever it wrapped around
+# the call. Two shapes have actually misled one: a presenting drain piped into a
+# reader that closes early, and an acknowledgement rebuilt out of a captured
+# variable. Both must be self-describing, and neither may leave the operator
+# guessing whether the wakes were consumed.
+test_acknowledgement_outcome_is_readable_from_output() {
+  local dir state out err ackout rc sequence generation
+
+  dir=$(make_case ack-receipt)
+  state="$dir/state"
+  out="$dir/drain.out"
+  err="$dir/drain.err"
+  ackout="$dir/ack.err"
+
+  append_wake "$state" signal receipt.status "signal: $state/receipt.status" \
+    || fail "receipt wake append failed"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "presenting drain failed"
+  assert_grep 'WAKE_ACK_REQUIRED: after handling completes' "$err" \
+    "presenting drain omitted its acknowledgement boundary"
+  assert_grep 'it reports success by printing WAKE_ACK_OK' "$err" \
+    "presenting drain did not state how its acknowledgement reports success"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  # The added guidance line must stay outside the machine extractors that every
+  # unattended acknowledgement path (fm-supervise-daemon.sh, fm-afk-return.sh)
+  # depends on, so each still resolves exactly one sequence and one generation.
+  [ "$sequence" = "1" ] || fail "acknowledgement sequence extractor resolved '$sequence', not a single value"
+  case "$generation" in
+    ''|*[!A-Za-z0-9._-]*) fail "acknowledgement generation extractor resolved '$generation', not a single value" ;;
+  esac
+
+  # A rebuilt command re-quotes the four printed arguments into one. That is
+  # refused, and the refusal has to say that nothing was consumed - otherwise
+  # the exit status alone invites acknowledging twice.
+  rc=0
+  FM_STATE_OVERRIDE="$state" "$DRAIN" "--ack-through $sequence --recovery-generation $generation" \
+    > /dev/null 2> "$ackout" || rc=$?
+  expect_code 2 "$rc" "a rebuilt acknowledgement was not refused"
+  assert_grep 'nothing was acknowledged and every queued wake stays durable' "$ackout" \
+    "a refused acknowledgement did not state that nothing was consumed"
+  assert_no_grep 'WAKE_ACK_OK' "$ackout" \
+    "a refused acknowledgement printed a success receipt"
+  [ -s "$state/.wake-queue" ] || fail "a refused acknowledgement consumed durable wakes"
+
+  # The verbatim command reports success in its output, not only in its status.
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    > /dev/null 2> "$ackout" || fail "verbatim acknowledgement failed"
+  assert_grep "WAKE_ACK_OK: acknowledged wakes through $sequence" "$ackout" \
+    "a consumed acknowledgement printed no receipt"
+  [ ! -s "$state/.wake-queue" ] || fail "acknowledged wakes remained queued"
+
+  pass "acknowledgement success and refusal are both readable from the drain's output"
+}
+
+# A reader that stops early - `| grep -q`, `| head` - closes the record stream
+# mid-presentation. The drain must not die on that pipe: it has to release the
+# queue lock, refuse to publish an acknowledgement boundary for records it never
+# finished showing, and keep every record durable for the next standalone drain.
+test_truncated_presentation_refuses_its_acknowledgement_boundary() {
+  local dir state err queued i pad
+
+  dir=$(make_case ack-broken-pipe)
+  state="$dir/state"
+  err="$dir/drain.err"
+
+  # Pad each payload so the presentation is far larger than any pipe buffer.
+  # Otherwise a short burst can fit entirely in the buffer, the write completes
+  # before the reader closes, and the case silently stops exercising anything.
+  pad=$(printf '%08000d' 0)
+  i=1
+  while [ "$i" -le 40 ]; do
+    append_wake "$state" signal "burst-$i" "signal: $state/burst-$i.status $pad" \
+      || fail "burst wake append failed"
+    i=$((i + 1))
+  done
+  queued=$(wc -l < "$state/.wake-queue")
+  [ "$queued" -eq 40 ] || fail "expected 40 queued records, got $queued"
+  [ "$(wc -c < "$state/.wake-queue")" -gt 262144 ] \
+    || fail "burst is small enough to fit a pipe buffer, so the truncation case would be vacuous"
+
+  # grep -q exits at its first match, closing the drain's stdout long before the
+  # last record is written.
+  FM_STATE_OVERRIDE="$state" "$DRAIN" 2> "$err" | grep -q signal
+  expect_code 1 "${PIPESTATUS[0]}" "a truncated presentation did not report a plain failure"
+  assert_grep 'no acknowledgement boundary was printed' "$err" \
+    "a truncated presentation did not explain why it published no acknowledgement"
+  assert_no_grep 'WAKE_ACK_REQUIRED' "$err" \
+    "a truncated presentation still invited acknowledging records it never showed"
+  queued=$(wc -l < "$state/.wake-queue")
+  [ "$queued" -eq 40 ] || fail "a truncated presentation consumed records, leaving $queued"
+
+  # The queue lock must be free, so the next standalone drain presents the same
+  # records in full rather than blocking on a lock the dead drain still held.
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/replay.out" 2> "$dir/replay.err" \
+    || fail "standalone replay after a truncated presentation failed"
+  queued=$(awk -F '\t' 'NF == 5 { n++ } END { print n + 0 }' "$dir/replay.out")
+  [ "$queued" -eq 40 ] || fail "standalone replay presented $queued of 40 records"
+  assert_grep 'WAKE_ACK_REQUIRED: after handling completes' "$dir/replay.err" \
+    "standalone replay omitted the acknowledgement boundary the truncated run withheld"
+  ack_drain_err "$state" "$dir/replay.err" || fail "could not acknowledge the replayed records"
+
+  pass "a truncated presentation stays durable, unlocked, and unacknowledgeable"
+}
+
+test_acknowledgement_outcome_is_readable_from_output
+test_truncated_presentation_refuses_its_acknowledgement_boundary
