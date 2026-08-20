@@ -413,12 +413,40 @@ spawn_secondmate_task() {
     "$ROOT/bin/fm-spawn.sh" "$id" "$home" "sh -c 'sleep 120'" --secondmate --backend herdr
 }
 
-teardown_task() {  # <id> <home>
+teardown_invoke() {  # <id> <home> [extra-flag...]
   local id=$1 home=$2
+  shift 2
   FM_GATE_REFUSE_BYPASS=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" \
-    "$ROOT/bin/fm-teardown.sh" "$id" --force
+    "$ROOT/bin/fm-teardown.sh" "$id" --force "$@"
+}
+
+teardown_task() {  # <id> <home>
+  local id=$1 home=$2 err rc
+  err="$TMP_ROOT/teardown-$id-$$.err"
+  : > "$err"
+  if teardown_invoke "$id" "$home" 2>>"$err"; then
+    cat "$err" >&2
+    return 0
+  fi
+  # This fixture stops and reprovisions the whole isolated session several
+  # times, which kills the panes of tasks that are still recorded as live.
+  # Treehouse then treats those pool slots as free and hands them to later
+  # spawns, so by cleanup time a long-lived task's recorded copy can genuinely
+  # belong to a different task. fm-teardown refuses to act on another task's
+  # copy on purpose, and --force does not override that, so the supported way
+  # through is to retire the stale pointer - which still closes this task's own
+  # exact pane, which is what this suite actually measures.
+  if grep -q 'owns it now' "$err"; then
+    if teardown_invoke "$id" "$home" --forget-worktree 2>>"$err"; then
+      cat "$err" >&2
+      return 0
+    fi
+  fi
+  rc=$?
+  cat "$err" >&2
+  return "$rc"
 }
 
 normalize_meta() {  # <meta>

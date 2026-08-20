@@ -51,6 +51,7 @@
 #   (z5) copy still bound to this task                         -> ALLOW  (no regression)
 #   (z6) binding declared in meta but missing from the copy    -> REFUSE, --force overrides
 #   (z7) plain re-run over an already-retired pointer          -> ALLOW  (durably idempotent)
+#   (z8) --force with --forget-worktree on a reassigned copy   -> ALLOW  (other copy untouched)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -653,6 +654,10 @@ test_recycled_slot_refuses_and_names_the_live_owner() {
     "recycled-slot: the refusal names the task that owns the copy"
   assert_contains "$(cat "$case_dir/stderr")" "fm/live-lane" \
     "recycled-slot: the refusal names the branch actually checked out in the copy"
+  # tests/fm-backend-herdr-presentation-e2e.test.sh keys its retire-and-retry
+  # cleanup off this phrase, so it is part of the refusal's contract.
+  assert_contains "$(cat "$case_dir/stderr")" "owns it now" \
+    "recycled-slot: the refusal keeps the phrase other suites key their cleanup off"
   git -C "$case_dir/project" rev-parse --verify -q fm/live-lane >/dev/null \
     || fail "recycled-slot: the live lane's branch was deleted"
   [ ! -s "$case_dir/treehouse.log" ] \
@@ -719,6 +724,34 @@ test_forget_worktree_retires_the_stale_pointer_and_spares_the_copy() {
   [ ! -s "$case_dir/treehouse.log" ] \
     || fail "forget-worktree: the live lane's copy was returned to the pool"
   pass "--forget-worktree retires the stale pointer and leaves the live copy alone"
+}
+
+# The combination a cleanup path actually uses: an authorized discard of this
+# task's own work whose recorded copy turns out to belong to somebody else. The
+# discard applies to this task; the other task's copy is still left alone.
+test_force_and_forget_worktree_together_complete() {
+  local case_dir rc
+  case_dir=$(make_case forget-with-force)
+  write_meta "$case_dir" no-mistakes ship
+  declare_binding_in_meta "$case_dir"
+  log_treehouse_calls "$case_dir"
+  hand_worktree_to_other_task "$case_dir" live-lane fm/live-lane
+  wt_commit "$case_dir" "live lane work"
+
+  set +e
+  run_teardown "$case_dir" --force --forget-worktree > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "forget-with-force: --force --forget-worktree should complete"$'\n'"$(cat "$case_dir/stderr")"
+  [ ! -f "$case_dir/state/task-x1.meta" ] \
+    || fail "forget-with-force: the stale task's records were not cleaned up"
+  [ -d "$case_dir/wt" ] || fail "forget-with-force: the live lane's copy was removed"
+  [ "$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)" = fm/live-lane ] \
+    || fail "forget-with-force: the live lane's copy was reset off its branch"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "forget-with-force: the live lane's copy was returned to the pool"
+  pass "--force and --forget-worktree together discard this task without touching the other copy"
 }
 
 # --forget-worktree must never become a general way to skip the copy checks.
@@ -2860,6 +2893,7 @@ test_local_only_fork_remote_allows
 test_recycled_slot_refuses_and_names_the_live_owner
 test_recycled_slot_refuses_even_under_force
 test_forget_worktree_retires_the_stale_pointer_and_spares_the_copy
+test_force_and_forget_worktree_together_complete
 test_forget_worktree_refuses_without_a_proven_reassignment
 test_retired_pointer_is_honoured_on_a_plain_rerun
 test_own_binding_tears_down_normally
