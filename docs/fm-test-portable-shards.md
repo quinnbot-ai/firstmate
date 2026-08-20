@@ -96,6 +96,7 @@ It separately verifies that the portable serial CI shards are non-empty, disjoin
 
 Portable shards, each portable serial shard, and the Herdr lane upload runner-generated timing JSON.
 `bin/fm-test-run.sh --aggregate-json` creates the combined summary artifact.
+The colocated bounded failure receipts and their aggregate are owned by [fm-test-failure-receipts.md](fm-test-failure-receipts.md).
 `.github/workflows/ci.yml` owns the exact artifact names and aggregation wiring.
 
 ## Local entry points

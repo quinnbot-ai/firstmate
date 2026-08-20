@@ -703,6 +703,359 @@ assert len(doc["scripts"])==3
   pass "aggregate-json merges lane timing artifacts"
 }
 
+
+# --- CI failure receipts ----------------------------------------------------
+#
+# Schema owner: docs/fm-test-failure-receipts.md. These tests hold the parts a
+# rerun diagnosis depends on: the receipt exists on red runs, carries only typed
+# runner-owned fields, never carries script output, states declared runtime
+# availability, stays inside its bounds, and aggregates or refuses loudly.
+
+test_failure_receipt_green_run() {
+  local tmp receipt
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-receipt-green.XXXXXX")
+  cat >"$tmp/ok.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "ok - fixture"
+SH
+  chmod +x "$tmp/ok.test.sh"
+  receipt="$tmp/receipt.json"
+  "$RUNNER" --failure-receipt "$receipt" --declare-runtime herdr=required \
+    "$tmp/ok.test.sh" >"$tmp/out" 2>&1 \
+    || { rm -rf "$tmp"; fail "runner should pass on a green fixture"; }
+  grep -q '^FM_TEST_FAILURE_RECEIPT status=passed ' "$tmp/out" \
+    || { rm -rf "$tmp"; fail "green run did not announce its receipt: $(grep FM_TEST_FAILURE_RECEIPT "$tmp/out")"; }
+  python3 -c '
+import json, re, sys
+doc = json.load(open(sys.argv[1]))
+assert doc["schema_version"] == 1, doc["schema_version"]
+assert doc["kind"] == "lane", doc["kind"]
+assert doc["status"] == "passed", doc["status"]
+assert doc["size_cap_bytes"] == 32768, doc["size_cap_bytes"]
+assert re.match(r"^[0-9a-f]{40,64}$", doc["candidate_head"]), doc["candidate_head"]
+assert doc["failure"] == {"kind": "none", "count": 0, "scripts": [], "truncated": False}, doc["failure"]
+assert doc["summary"] == {"total": 1, "failed": 0, "skipped_gate": 0}, doc["summary"]
+assert doc["scripts_truncated"] is False
+assert len(doc["scripts"]) == 1, doc["scripts"]
+script = doc["scripts"][0]
+assert sorted(script) == ["duration_ms", "exit", "family", "gate_outcome", "path", "runtime_gate"], sorted(script)
+assert script["exit"] == 0 and script["gate_outcome"] == "exercised", script
+# Identity defaults keep a local run valid with no CI environment at all.
+assert doc["workflow"] == {"name": "local", "run_id": "local", "attempt": "local"}, doc["workflow"]
+assert doc["job"] == {"name": "local"}, doc["job"]
+# A declared runtime appears even when no selected script exercised it.
+assert doc["runtime_availability"] == [
+    {"runtime": "herdr", "requirement": "required", "availability": "not-confirmed"}
+], doc["runtime_availability"]
+' "$receipt" || { rm -rf "$tmp"; fail "green lane receipt shape wrong"; }
+  rm -rf "$tmp"
+  pass "green lane receipt is typed, bounded, and valid without CI identity"
+}
+
+test_failure_receipt_red_run_is_typed_and_carries_no_output() {
+  local tmp receipt rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-receipt-red.XXXXXX")
+  cat >"$tmp/red.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "FM_RECEIPT_LEAK_CANARY=super-secret-value"
+echo "not ok - boom" >&2
+exit 3
+SH
+  cat >"$tmp/ok.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "ok - fixture"
+SH
+  chmod +x "$tmp/red.test.sh" "$tmp/ok.test.sh"
+  receipt="$tmp/receipt.json"
+  set +e
+  FM_TEST_RECEIPT_WORKFLOW=CI \
+  FM_TEST_RECEIPT_RUN_ID=42 \
+  FM_TEST_RECEIPT_RUN_ATTEMPT=2 \
+  FM_TEST_RECEIPT_JOB=tests-portable-serial \
+  FM_TEST_RECEIPT_LANE=portable-serial-1 \
+    "$RUNNER" --failure-receipt "$receipt" "$tmp/ok.test.sh" "$tmp/red.test.sh" \
+    >"$tmp/out" 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "a failing fixture must keep the run red"; }
+  # The receipt is the point of a red run: it must exist despite the failure.
+  [ -f "$receipt" ] || { rm -rf "$tmp"; fail "red run wrote no failure receipt"; }
+  grep -q '^FM_TEST_FAILURE_RECEIPT status=failed lane=portable-serial-1 failures=1 ' "$tmp/out" \
+    || { rm -rf "$tmp"; fail "red receipt line wrong: $(grep FM_TEST_FAILURE_RECEIPT "$tmp/out")"; }
+  grep -q 'FM_RECEIPT_LEAK_CANARY' "$receipt" \
+    && { rm -rf "$tmp"; fail "receipt carried script output"; }
+  python3 -c '
+import json, sys
+doc = json.load(open(sys.argv[1]))
+assert doc["status"] == "failed", doc["status"]
+assert doc["workflow"] == {"name": "CI", "run_id": "42", "attempt": "2"}, doc["workflow"]
+assert doc["job"] == {"name": "tests-portable-serial"}, doc["job"]
+assert doc["lane"] == "portable-serial-1", doc["lane"]
+assert doc["summary"] == {"total": 2, "failed": 1, "skipped_gate": 0}, doc["summary"]
+failure = doc["failure"]
+assert failure["kind"] == "test-failure" and failure["count"] == 1, failure
+assert failure["truncated"] is False
+assert len(failure["scripts"]) == 1, failure["scripts"]
+record = failure["scripts"][0]
+assert record["path"].endswith("red.test.sh"), record
+assert record["exit"] == 3, record
+assert record["gate_outcome"] == "not-confirmed", record
+assert isinstance(record["duration_ms"], int) and record["duration_ms"] >= 0, record
+' "$receipt" || { rm -rf "$tmp"; fail "red lane receipt shape wrong"; }
+  rm -rf "$tmp"
+  pass "red lane receipt survives the failure, stays typed, and drops all output"
+}
+
+test_failure_receipt_runtime_availability() {
+  local tmp
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-receipt-runtime.XXXXXX")
+  # A basename the runner classifies into the gated Herdr family, so the record
+  # carries a real runtime gate class rather than "none".
+  cat >"$tmp/fm-backend-herdr-smoke.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "skip: herdr not found"
+SH
+  chmod +x "$tmp/fm-backend-herdr-smoke.test.sh"
+  "$RUNNER" --failure-receipt "$tmp/skipped.json" --declare-runtime herdr=required \
+    "$tmp/fm-backend-herdr-smoke.test.sh" >"$tmp/out1" 2>&1 \
+    || { rm -rf "$tmp"; fail "an ordinary gate skip must stay green"; }
+  python3 -c '
+import json, sys
+doc = json.load(open(sys.argv[1]))
+assert doc["scripts"][0]["runtime_gate"] == "herdr", doc["scripts"][0]
+assert doc["scripts"][0]["gate_outcome"] == "declared-unavailable", doc["scripts"][0]
+assert doc["runtime_availability"] == [
+    {"runtime": "herdr", "requirement": "required", "availability": "unavailable"}
+], doc["runtime_availability"]
+' "$tmp/skipped.json" || { rm -rf "$tmp"; fail "gate-skipped runtime must read unavailable"; }
+
+  cat >"$tmp/fm-backend-herdr-smoke.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "ok - real herdr"
+SH
+  chmod +x "$tmp/fm-backend-herdr-smoke.test.sh"
+  "$RUNNER" --failure-receipt "$tmp/exercised.json" \
+    "$tmp/fm-backend-herdr-smoke.test.sh" >"$tmp/out2" 2>&1 \
+    || { rm -rf "$tmp"; fail "green gated fixture must pass"; }
+  python3 -c '
+import json, sys
+doc = json.load(open(sys.argv[1]))
+# Undeclared runtimes are still reported, marked as undeclared rather than guessed.
+assert doc["runtime_availability"] == [
+    {"runtime": "herdr", "requirement": "undeclared", "availability": "exercised"}
+], doc["runtime_availability"]
+' "$tmp/exercised.json" || { rm -rf "$tmp"; fail "exercised runtime availability wrong"; }
+  rm -rf "$tmp"
+  pass "declared runtime availability reflects real gate outcomes"
+}
+
+test_runtime_declaration_refusals() {
+  local runtimes out rc
+  runtimes=$("$RUNNER" --list-runtimes)
+  [ "$runtimes" = "herdr
+optin-env
+optional-binary" ] || fail "--list-runtimes drifted from the gate classes: $runtimes"
+  local bad
+  for bad in "bogus=required" "herdr=maybe" "herdr" "=required"; do
+    set +e
+    out=$("$RUNNER" --declare-runtime "$bad" --list tests/fm-lint.test.sh 2>&1)
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "--declare-runtime accepted invalid declaration: $bad"
+    assert_contains "$out" "--declare-runtime" "refusal names the option for $bad"
+  done
+  pass "--declare-runtime refuses unknown runtimes and requirements"
+}
+
+test_failure_receipt_bounds_and_size_cap() {
+  local tmp deep i rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-receipt-bounds.XXXXXX")
+  # Long paths plus many failures push the document past its 32768-byte cap, so
+  # the producer must shed per-script detail while keeping the counts exact.
+  deep="$tmp/$(printf 'd%.0s' $(seq 1 120))/$(printf 'e%.0s' $(seq 1 120))"
+  mkdir -p "$deep"
+  local -a fixtures=()
+  for i in $(seq 1 60); do
+    cat >"$deep/red$i.test.sh" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+    chmod +x "$deep/red$i.test.sh"
+    fixtures+=("$deep/red$i.test.sh")
+  done
+  set +e
+  "$RUNNER" --failure-receipt "$tmp/receipt.json" "${fixtures[@]}" >"$tmp/out" 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "60 failing fixtures must keep the run red"; }
+  python3 -c '
+import json, os, sys
+path = sys.argv[1]
+size = os.path.getsize(path)
+doc = json.load(open(path))
+assert size <= doc["size_cap_bytes"], (size, doc["size_cap_bytes"])
+assert doc["summary"]["total"] == 60 and doc["summary"]["failed"] == 60, doc["summary"]
+# Counts stay exact even where the detail lists were shed.
+assert doc["failure"]["count"] == 60, doc["failure"]["count"]
+assert len(doc["failure"]["scripts"]) <= 32, len(doc["failure"]["scripts"])
+assert doc["failure"]["truncated"] is True
+assert doc["scripts_truncated"] is True
+assert len(doc["scripts"]) < 60, len(doc["scripts"])
+assert all(len(record["path"].encode("utf-8")) <= 240 for record in doc["scripts"])
+' "$tmp/receipt.json" || { rm -rf "$tmp"; fail "receipt bounds or size cap not enforced"; }
+  rm -rf "$tmp"
+  pass "receipt stays inside its bounds and size cap with exact counts"
+}
+
+test_aggregate_failure_receipt() {
+  local tmp out rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-receipt-agg.XXXXXX")
+  python3 -c '
+import json, sys
+root = sys.argv[1]
+head = "0" * 40
+
+
+def lane(name, status, failed):
+    return {
+        "schema_version": 1, "kind": "lane", "status": status,
+        "size_cap_bytes": 32768, "candidate_head": head,
+        "workflow": {"name": "CI", "run_id": "7", "attempt": "1"},
+        "job": {"name": name}, "lane": name, "duration_ms": 1000,
+        "summary": {"total": 2, "failed": failed, "skipped_gate": 0},
+        "scripts": [], "scripts_truncated": False,
+        "runtime_availability": [
+            {"runtime": "herdr", "requirement": "required", "availability": "exercised"}
+        ],
+        "failure": {
+            "kind": "test-failure" if failed else "none",
+            "count": failed, "scripts": [], "truncated": False,
+        },
+    }
+
+
+json.dump(lane("green-lane", "passed", 0), open(root + "/green.json", "w"))
+json.dump(lane("red-lane", "failed", 1), open(root + "/red.json", "w"))
+mixed = lane("other-head", "passed", 0)
+mixed["candidate_head"] = "1" * 40
+json.dump(mixed, open(root + "/mixed.json", "w"))
+broken = lane("broken", "passed", 0)
+del broken["failure"]
+json.dump(broken, open(root + "/broken.json", "w"))
+aggregate = lane("recursive", "passed", 0)
+aggregate["kind"] = "aggregate"
+json.dump(aggregate, open(root + "/aggregate-input.json", "w"))
+open(root + "/malformed.json", "w").write("{not json")
+' "$tmp" || { rm -rf "$tmp"; fail "could not build aggregate fixtures"; }
+
+  out=$("$RUNNER" --aggregate-failure-receipt "$tmp/out.json" "$tmp/red.json" "$tmp/green.json") \
+    || { rm -rf "$tmp"; fail "aggregate of two valid lane receipts failed"; }
+  assert_contains "$out" "FM_TEST_FAILURE_RECEIPT_AGGREGATE lanes=2 failed=1" "aggregate summary line"
+  python3 -c '
+import json, sys
+doc = json.load(open(sys.argv[1]))
+assert doc["kind"] == "aggregate" and doc["status"] == "failed", doc["kind"]
+assert doc["candidate_head"] == "0" * 40, doc["candidate_head"]
+assert doc["failure"] == {"kind": "lane-failure", "count": 1, "lanes": ["red-lane"]}, doc["failure"]
+assert [entry["lane"] for entry in doc["lanes"]] == ["green-lane", "red-lane"], doc["lanes"]
+# Lane entries keep identity and typed summaries, not per-script detail.
+assert all("scripts" not in entry for entry in doc["lanes"]), doc["lanes"]
+' "$tmp/out.json" || { rm -rf "$tmp"; fail "aggregate receipt shape wrong"; }
+
+  local bad expect
+  for bad in mixed:head broken:schema malformed:malformed aggregate-input:schema; do
+    expect=${bad#*:}
+    bad=${bad%%:*}
+    set +e
+    out=$("$RUNNER" --aggregate-failure-receipt "$tmp/x.json" "$tmp/green.json" "$tmp/$bad.json" 2>&1)
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "aggregate accepted $bad input"; }
+    case "$expect" in
+      head) assert_contains "$out" "candidate head" "mixed-head diagnostic" ;;
+      schema) assert_contains "$out" "invalid failure receipt schema" "schema diagnostic for $bad" ;;
+      malformed) assert_contains "$out" "malformed failure receipt" "malformed diagnostic" ;;
+    esac
+  done
+
+  set +e
+  out=$("$RUNNER" --aggregate-failure-receipt "$tmp/x.json" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "aggregate accepted an empty input list"; }
+  rm -rf "$tmp"
+  pass "aggregate merges lane receipts and refuses malformed, mixed-head, or wrong-kind input"
+}
+
+test_ci_uploads_a_failure_receipt_for_every_test_lane() {
+  # Every lane that runs tests must produce a receipt and upload it even when the
+  # lane is red, and the aggregate must not be able to re-ingest its own output.
+  command -v ruby >/dev/null 2>&1 \
+    || fail "ruby is required to parse .github/workflows/ci.yml as YAML"
+  local report
+  report=$(ruby -ryaml -rjson -e '
+doc = YAML.load_file(ARGV[0])
+jobs = doc.fetch("jobs")
+problems = []
+lanes = jobs.select { |_, job|
+  job.fetch("steps", []).any? { |step|
+    step.is_a?(Hash) && step["run"].is_a?(String) && step["run"].include?("bin/fm-test-run.sh --lane") ||
+      step.is_a?(Hash) && step["run"].is_a?(String) && step["run"].include?("bin/fm-test-run.sh --family")
+  }
+}
+problems << "no test lanes found" if lanes.empty?
+lanes.each do |name, job|
+  steps = job.fetch("steps", [])
+  run = steps.find { |s| s.is_a?(Hash) && s["run"].is_a?(String) && s["run"].include?("--failure-receipt") }
+  problems << "#{name}: no step passes --failure-receipt" if run.nil?
+  next if run.nil?
+  env = run["env"] || {}
+  %w[FM_TEST_RECEIPT_WORKFLOW FM_TEST_RECEIPT_RUN_ID FM_TEST_RECEIPT_RUN_ATTEMPT
+     FM_TEST_RECEIPT_JOB FM_TEST_RECEIPT_LANE].each do |key|
+    problems << "#{name}: run step does not declare #{key}" unless env.key?(key)
+  end
+  upload = steps.find { |s|
+    s.is_a?(Hash) && s["uses"].to_s.start_with?("actions/upload-artifact") &&
+      s.dig("with", "name").to_s.start_with?("fm-test-receipt-")
+  }
+  if upload.nil?
+    problems << "#{name}: no receipt upload step"
+  elsif upload["if"] != "always()"
+    problems << "#{name}: receipt upload is not if: always()"
+  end
+end
+aggregate = jobs.fetch("tests-timing-aggregate")
+build = aggregate.fetch("steps").find { |s|
+  s.is_a?(Hash) && s["run"].is_a?(String) && s["run"].include?("--aggregate-failure-receipt")
+}
+problems << "aggregate job does not build a failure receipt" if build.nil?
+upload = aggregate.fetch("steps").find { |s|
+  s.is_a?(Hash) && s["uses"].to_s.start_with?("actions/upload-artifact") &&
+    s.dig("with", "name").to_s.include?("receipt")
+}
+if upload.nil?
+  problems << "aggregate job does not upload a failure receipt"
+else
+  download = aggregate.fetch("steps").find { |s|
+    s.is_a?(Hash) && s["uses"].to_s.start_with?("actions/download-artifact") &&
+      s.dig("with", "pattern").to_s.start_with?("fm-test-receipt")
+  }
+  problems << "aggregate job does not download lane receipts" if download.nil?
+  if download && File.fnmatch(download.dig("with", "pattern"), upload.dig("with", "name"))
+    problems << "aggregate artifact name matches its own lane download pattern"
+  end
+end
+puts JSON.generate("lanes" => lanes.keys.sort, "problems" => problems)
+' "$ROOT/.github/workflows/ci.yml") \
+    || fail "could not parse failure-receipt wiring from ci.yml"
+  local problems lanes
+  problems=$(python3 -c 'import json,sys; print("; ".join(json.load(sys.stdin)["problems"]))' <<<"$report")
+  [ -z "$problems" ] || fail "CI failure-receipt wiring incomplete: $problems"
+  lanes=$(python3 -c 'import json,sys; print(len(json.load(sys.stdin)["lanes"]))' <<<"$report")
+  [ "$lanes" -ge 4 ] || fail "expected every test lane wired for receipts, found $lanes"
+  pass "every CI test lane writes and always uploads a bounded failure receipt"
+}
+
 test_list_all_exact_suite_coverage
 test_family_selection
 test_single_script_selection
@@ -721,3 +1074,10 @@ test_jobs_requires_proven_isolated
 test_jobs_parallel_scheduler_and_failure_propagation
 test_herdr_ci_family_run_has_a_step_timeout
 test_aggregate_json
+test_failure_receipt_green_run
+test_failure_receipt_red_run_is_typed_and_carries_no_output
+test_failure_receipt_runtime_availability
+test_runtime_declaration_refusals
+test_failure_receipt_bounds_and_size_cap
+test_aggregate_failure_receipt
+test_ci_uploads_a_failure_receipt_for_every_test_lane

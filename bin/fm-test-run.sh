@@ -23,9 +23,24 @@
 #
 # Aggregation (no suite execution):
 #   fm-test-run.sh --aggregate-json <out.json> <lane.json> [more lane.json...]
+#   fm-test-run.sh --aggregate-failure-receipt <out.json> <lane-receipt.json> [more...]
 #
 # Options:
 #   --json <path>   write a deterministic timing artifact after the run
+#   --failure-receipt <path>
+#                   write a bounded credential-free CI failure receipt after the
+#                   run. The receipt carries only runner-owned typed fields:
+#                   exact candidate head, workflow/job identity, lane selection,
+#                   per-script classification and durations, declared runtime
+#                   availability, and a typed failure summary. Never any script
+#                   output, environment value, or free-form diagnostic text.
+#                   Schema owner: docs/fm-test-failure-receipts.md.
+#   --declare-runtime <runtime>=<required|optional>
+#                   declare how this lane treats a gated runtime (repeatable).
+#                   <runtime> is a gate class from --list-runtimes. Declared
+#                   runtimes always appear in the receipt's runtime_availability,
+#                   even when no selected script exercised them.
+#   --list-runtimes print the known runtime gate classes and exit 0
 #   --list          print selected script paths (one per line) and exit 0
 #   --base <ref>    with --changed, compare against this ref (default: origin/main)
 #   --exclude-family <name>
@@ -79,15 +94,30 @@ LIST_FAMILIES=0
 LIST_LANES=0
 CHECK_COVERAGE=0
 AGGREGATE_OUT=
+AGGREGATE_RECEIPT_OUT=
 FAMILY=
 LANE=
 BASE_REF=origin/main
 JSON_PATH=
+FAILURE_RECEIPT_PATH=
+LIST_RUNTIMES=0
 SCRIPTS=()
 EXCLUDE_FAMILIES=()
+RUNTIME_DECLARATIONS=()
+declaration=  # scratch for one parsed --declare-runtime argument
 FAIL_ON_GATE_SKIP=
 JOBS=1
 JOBS_MAX=8
+
+# One owner of the CI failure-receipt contract. The schema, its bounds, and how
+# the aggregate consumes lane receipts are documented in
+# docs/fm-test-failure-receipts.md; change both together.
+FAILURE_RECEIPT_SCHEMA_VERSION=1
+FAILURE_RECEIPT_SIZE_CAP_BYTES=32768
+FAILURE_RECEIPT_MAX_SCRIPTS=128
+FAILURE_RECEIPT_MAX_FAILURES=32
+FAILURE_RECEIPT_MAX_LANES=16
+FAILURE_RECEIPT_MAX_STRING_BYTES=240
 
 # How many separate-runner shards the portable serial remainder splits into.
 # One owner: CI lane names carry this count and are refused when they disagree.
@@ -257,6 +287,39 @@ zellij
 orca
 unclassified
 EOF
+}
+
+# Runtime gate classes a lane may declare. These are exactly the non-"none"
+# values expected_gate_skip_for_family can return; a declaration for anything
+# else is refused rather than silently recorded.
+list_known_runtimes() {
+  cat <<'EOF'
+herdr
+optin-env
+optional-binary
+EOF
+}
+
+# Validate one --declare-runtime argument and normalize it to "<runtime>\t<req>".
+normalize_runtime_declaration() {
+  local raw=$1 runtime requirement known line
+  case "$raw" in
+    *=*) ;;
+    *) die "--declare-runtime requires <runtime>=<required|optional>, got: $raw" ;;
+  esac
+  runtime=${raw%%=*}
+  requirement=${raw#*=}
+  known=0
+  while IFS= read -r line; do
+    [ "$line" = "$runtime" ] && known=1
+  done <<<"$(list_known_runtimes)"
+  [ "$known" -eq 1 ] \
+    || die "--declare-runtime unknown runtime: ${runtime:-<empty>} (see --list-runtimes)"
+  case "$requirement" in
+    required|optional) ;;
+    *) die "--declare-runtime requirement must be required or optional, got: ${requirement:-<empty>}" ;;
+  esac
+  printf '%s\t%s\n' "$runtime" "$requirement"
 }
 
 list_known_lanes() {
@@ -1196,6 +1259,325 @@ with open(out, "w", encoding="utf-8") as fh:
 PY
 }
 
+# Bounded, credential-free CI failure receipt. Only runner-owned typed fields
+# reach the document: no script output, no environment values beyond the
+# sanitized workflow/job identity CI declares, and no free-form diagnostics.
+write_failure_receipt() {
+  local out=$1
+  local started=$2
+  local finished=$3
+  local run_id=$4
+  local total=$5
+  local failed=$6
+  local skipped=$7
+  local duration=$8
+  local selection=$9
+  local records_file=${10}
+  local declarations_file=${11}
+  local head workflow workflow_run workflow_attempt job lane
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    die "--failure-receipt requires python3 to emit a valid receipt"
+  fi
+  head=$(git rev-parse HEAD 2>/dev/null) \
+    || die "--failure-receipt requires an exact candidate head from git"
+  workflow=${FM_TEST_RECEIPT_WORKFLOW:-local}
+  workflow_run=${FM_TEST_RECEIPT_RUN_ID:-local}
+  workflow_attempt=${FM_TEST_RECEIPT_RUN_ATTEMPT:-local}
+  job=${FM_TEST_RECEIPT_JOB:-local}
+  lane=${FM_TEST_RECEIPT_LANE:-$selection}
+
+  python3 - "$out" "$started" "$finished" "$run_id" "$total" "$failed" \
+    "$skipped" "$duration" "$selection" "$records_file" "$declarations_file" \
+    "$head" "$workflow" "$workflow_run" "$workflow_attempt" "$job" "$lane" \
+    "$FAILURE_RECEIPT_SCHEMA_VERSION" "$FAILURE_RECEIPT_SIZE_CAP_BYTES" \
+    "$FAILURE_RECEIPT_MAX_SCRIPTS" "$FAILURE_RECEIPT_MAX_FAILURES" \
+    "$FAILURE_RECEIPT_MAX_STRING_BYTES" <<'PY'
+import json, os, re, sys
+
+(out, started, finished, run_id, total, failed, skipped, duration, selection,
+ records_file, declarations_file, head, workflow, workflow_run,
+ workflow_attempt, job, lane, schema, cap, max_scripts, max_failures,
+ max_string) = sys.argv[1:]
+
+schema, cap = int(schema), int(cap)
+max_scripts, max_failures = int(max_scripts), int(max_failures)
+max_string = int(max_string)
+
+
+def die(message):
+    sys.stderr.write("fm-test-run: %s\n" % message)
+    raise SystemExit(1)
+
+
+def sanitize(value):
+    """Bound one identity string: no control characters, capped UTF-8 bytes."""
+    cleaned = "".join(ch for ch in value if ord(ch) >= 32 and ord(ch) != 127)
+    encoded = cleaned.encode("utf-8")[:max_string]
+    return encoded.decode("utf-8", "ignore") or "unknown"
+
+
+if not re.match(r"^[0-9a-f]{40,64}$", head):
+    die("failure receipt requires an exact candidate head")
+
+records = []
+with open(records_file, encoding="utf-8") as fh:
+    for raw in fh:
+        raw = raw.rstrip("\n")
+        if not raw:
+            continue
+        fields = raw.split("\t")
+        if len(fields) != 6:
+            die("invalid failure receipt record")
+        path, family, runtime, exit_s, duration_s, gate_skip = fields
+        if gate_skip not in ("true", "false"):
+            die("invalid failure receipt gate flag")
+        try:
+            exit_code, duration_ms = int(exit_s), int(duration_s)
+        except ValueError:
+            die("invalid failure receipt numeric field")
+        if exit_code < 0 or duration_ms < 0:
+            die("invalid failure receipt numeric field")
+        if gate_skip == "true":
+            outcome = "declared-unavailable"
+        elif exit_code == 0:
+            outcome = "exercised"
+        else:
+            outcome = "not-confirmed"
+        records.append({
+            "path": sanitize(path),
+            "family": sanitize(family),
+            "runtime_gate": sanitize(runtime),
+            "exit": exit_code,
+            "duration_ms": duration_ms,
+            "gate_outcome": outcome,
+        })
+
+declarations = {}
+if declarations_file and os.path.exists(declarations_file):
+    with open(declarations_file, encoding="utf-8") as fh:
+        for raw in fh:
+            raw = raw.rstrip("\n")
+            if not raw:
+                continue
+            fields = raw.split("\t")
+            if len(fields) != 2:
+                die("invalid runtime declaration record")
+            runtime, requirement = fields
+            if requirement not in ("required", "optional"):
+                die("invalid runtime declaration requirement")
+            if declarations.get(runtime, requirement) != requirement:
+                die("conflicting runtime declaration for %s" % runtime)
+            declarations[runtime] = requirement
+
+runtimes = set(declarations)
+runtimes.update(
+    record["runtime_gate"] for record in records if record["runtime_gate"] != "none"
+)
+runtime_availability = []
+for runtime in sorted(runtimes):
+    outcomes = set(
+        record["gate_outcome"] for record in records if record["runtime_gate"] == runtime
+    )
+    if "exercised" in outcomes:
+        availability = "exercised"
+    elif "declared-unavailable" in outcomes:
+        availability = "unavailable"
+    else:
+        availability = "not-confirmed"
+    runtime_availability.append({
+        "runtime": runtime,
+        "requirement": declarations.get(runtime, "undeclared"),
+        "availability": availability,
+    })
+
+records.sort(key=lambda record: record["path"])
+failures = [record for record in records if record["exit"] != 0]
+status = "failed" if int(failed) else "passed"
+
+
+def build(script_limit, failure_limit):
+    return {
+        "schema_version": schema,
+        "kind": "lane",
+        "status": status,
+        "size_cap_bytes": cap,
+        "candidate_head": head,
+        "workflow": {
+            "name": sanitize(workflow),
+            "run_id": sanitize(workflow_run),
+            "attempt": sanitize(workflow_attempt),
+        },
+        "job": {"name": sanitize(job)},
+        "lane": sanitize(lane),
+        "runner": {"run_id": sanitize(run_id), "selection": sanitize(selection)},
+        "started_at": sanitize(started),
+        "finished_at": sanitize(finished),
+        "duration_ms": int(duration),
+        "summary": {
+            "total": int(total),
+            "failed": int(failed),
+            "skipped_gate": int(skipped),
+        },
+        "scripts": records[:script_limit],
+        "scripts_truncated": len(records) > script_limit,
+        "runtime_availability": runtime_availability,
+        "failure": {
+            "kind": "test-failure" if status == "failed" else "none",
+            "count": len(failures),
+            "scripts": failures[:failure_limit],
+            "truncated": len(failures) > failure_limit,
+        },
+    }
+
+
+def encode(script_limit, failure_limit):
+    doc = build(script_limit, failure_limit)
+    return (json.dumps(doc, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+# Declared bounds first, then a hard size ceiling. Shedding per-script detail
+# keeps a receipt available on the worst runs instead of losing it exactly when
+# it is needed; the counts above it stay exact.
+script_limit, failure_limit = max_scripts, max_failures
+encoded = encode(script_limit, failure_limit)
+while len(encoded) > cap and script_limit > 0:
+    script_limit = script_limit // 2
+    encoded = encode(script_limit, failure_limit)
+while len(encoded) > cap and failure_limit > 0:
+    failure_limit = failure_limit // 2
+    encoded = encode(script_limit, failure_limit)
+if len(encoded) > cap:
+    die("failure receipt exceeds the %d byte cap with no detail left to shed" % cap)
+
+directory = os.path.dirname(out)
+if directory:
+    os.makedirs(directory, exist_ok=True)
+tmp = "%s.tmp-%d" % (out, os.getpid())
+with open(tmp, "wb") as fh:
+    fh.write(encoded)
+os.replace(tmp, out)
+print("FM_TEST_FAILURE_RECEIPT status=%s lane=%s failures=%d bytes=%d"
+      % (status, sanitize(lane), len(failures), len(encoded)))
+PY
+}
+
+# Merge bounded lane receipts into one aggregate receipt. Unlike the producer,
+# this consumer refuses malformed, oversized, schema-incompatible, or mixed-head
+# input outright: every lane receipt is already uploaded, so refusing here loses
+# no evidence.
+aggregate_failure_receipts() {
+  local out=$1
+  shift
+  [ "$#" -gt 0 ] || die "--aggregate-failure-receipt requires at least one lane receipt"
+  if ! command -v python3 >/dev/null 2>&1; then
+    die "--aggregate-failure-receipt requires python3"
+  fi
+  python3 - "$out" "$FAILURE_RECEIPT_SCHEMA_VERSION" \
+    "$FAILURE_RECEIPT_SIZE_CAP_BYTES" "$FAILURE_RECEIPT_MAX_LANES" "$@" <<'PY'
+import json, os, re, sys
+
+out, schema_s, cap_s, max_lanes_s = sys.argv[1:5]
+paths = sys.argv[5:]
+schema, cap, max_lanes = int(schema_s), int(cap_s), int(max_lanes_s)
+
+
+def die(message):
+    sys.stderr.write("fm-test-run: %s\n" % message)
+    raise SystemExit(1)
+
+
+if len(paths) > max_lanes:
+    die("aggregate failure receipt lane limit is %d, got %d" % (max_lanes, len(paths)))
+
+KEPT = ("schema_version", "kind", "status", "size_cap_bytes", "candidate_head",
+        "workflow", "job", "lane", "duration_ms", "summary",
+        "runtime_availability", "failure")
+
+
+def valid(receipt):
+    if not isinstance(receipt, dict) or not set(KEPT).issubset(receipt):
+        return False
+    if receipt["schema_version"] != schema or receipt["kind"] != "lane":
+        return False
+    if receipt["status"] not in ("passed", "failed"):
+        return False
+    if receipt["size_cap_bytes"] != cap:
+        return False
+    if not isinstance(receipt["candidate_head"], str):
+        return False
+    if not re.match(r"^[0-9a-f]{40,64}$", receipt["candidate_head"]):
+        return False
+    if not isinstance(receipt["workflow"], dict) or not isinstance(receipt["job"], dict):
+        return False
+    for key in ("name", "run_id", "attempt"):
+        if not isinstance(receipt["workflow"].get(key), str):
+            return False
+    if not isinstance(receipt["job"].get("name"), str):
+        return False
+    if not isinstance(receipt["lane"], str):
+        return False
+    if not isinstance(receipt["duration_ms"], int) or receipt["duration_ms"] < 0:
+        return False
+    if not isinstance(receipt["summary"], dict):
+        return False
+    if not isinstance(receipt["runtime_availability"], list):
+        return False
+    failure = receipt["failure"]
+    if not isinstance(failure, dict) or not isinstance(failure.get("kind"), str):
+        return False
+    return isinstance(failure.get("count"), int) and failure["count"] >= 0
+
+
+lanes = []
+for path in paths:
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    if len(raw) > cap:
+        die("failure receipt exceeds the %d byte cap: %s" % (cap, path))
+    try:
+        receipt = json.loads(raw)
+    except ValueError:
+        die("malformed failure receipt: %s" % path)
+    if not valid(receipt):
+        die("invalid failure receipt schema: %s" % path)
+    lanes.append(dict((key, receipt[key]) for key in KEPT))
+
+lanes.sort(key=lambda receipt: (receipt["lane"], receipt["job"]["name"]))
+heads = sorted(set(receipt["candidate_head"] for receipt in lanes))
+if len(heads) != 1:
+    die("aggregate failure receipts disagree on the candidate head")
+
+failed = [receipt for receipt in lanes if receipt["status"] == "failed"]
+doc = {
+    "schema_version": schema,
+    "kind": "aggregate",
+    "status": "failed" if failed else "passed",
+    "size_cap_bytes": cap,
+    "candidate_head": heads[0],
+    "lanes": lanes,
+    "failure": {
+        "kind": "lane-failure" if failed else "none",
+        "count": len(failed),
+        "lanes": [receipt["lane"] for receipt in failed],
+    },
+}
+encoded = (json.dumps(doc, indent=2, sort_keys=True) + "\n").encode("utf-8")
+if len(encoded) > cap:
+    die("aggregate failure receipt exceeds the %d byte cap" % cap)
+
+directory = os.path.dirname(out)
+if directory:
+    os.makedirs(directory, exist_ok=True)
+tmp = "%s.tmp-%d" % (out, os.getpid())
+with open(tmp, "wb") as fh:
+    fh.write(encoded)
+os.replace(tmp, out)
+print("FM_TEST_FAILURE_RECEIPT_AGGREGATE lanes=%d failed=%d bytes=%d"
+      % (len(lanes), len(failed), len(encoded)))
+PY
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --all)
@@ -1257,6 +1639,27 @@ while [ "$#" -gt 0 ]; do
       JSON_PATH=${1#--json=}
       shift
       ;;
+    --failure-receipt)
+      [ "$#" -gt 1 ] || die "--failure-receipt requires a path"
+      FAILURE_RECEIPT_PATH=$2
+      shift 2
+      ;;
+    --failure-receipt=*)
+      FAILURE_RECEIPT_PATH=${1#--failure-receipt=}
+      shift
+      ;;
+    --declare-runtime)
+      [ "$#" -gt 1 ] || die "--declare-runtime requires <runtime>=<required|optional>"
+      # Refuse explicitly rather than leaning on set -e inside a substitution.
+      declaration=$(normalize_runtime_declaration "$2") || exit $?
+      RUNTIME_DECLARATIONS+=("$declaration")
+      shift 2
+      ;;
+    --declare-runtime=*)
+      declaration=$(normalize_runtime_declaration "${1#--declare-runtime=}") || exit $?
+      RUNTIME_DECLARATIONS+=("$declaration")
+      shift
+      ;;
     --jobs)
       [ "$#" -gt 1 ] || die "--jobs requires a positive integer"
       JOBS=$2
@@ -1278,6 +1681,10 @@ while [ "$#" -gt 0 ]; do
       LIST_LANES=1
       shift
       ;;
+    --list-runtimes)
+      LIST_RUNTIMES=1
+      shift
+      ;;
     --check-coverage)
       CHECK_COVERAGE=1
       shift
@@ -1289,6 +1696,13 @@ while [ "$#" -gt 0 ]; do
       # Remaining args after options will be collected as inputs below via MODE.
       # For aggregation we accept only input JSON paths as free args after this.
       MODE=aggregate
+      ;;
+    --aggregate-failure-receipt)
+      [ "$#" -gt 1 ] || die "--aggregate-failure-receipt requires an output path"
+      AGGREGATE_RECEIPT_OUT=$2
+      shift 2
+      # Remaining free args are lane receipt paths, same shape as --aggregate-json.
+      MODE=aggregate-receipt
       ;;
     --exclude-family)
       [ "$#" -gt 1 ] || die "--exclude-family requires a name"
@@ -1323,7 +1737,7 @@ while [ "$#" -gt 0 ]; do
       die "unknown option: $1"
       ;;
     *)
-      if [ "${MODE:-}" = "aggregate" ]; then
+      if [ "${MODE:-}" = "aggregate" ] || [ "${MODE:-}" = "aggregate-receipt" ]; then
         SCRIPTS+=("$1")
       elif [ -z "$MODE" ] || [ "$MODE" = scripts ]; then
         MODE=scripts
@@ -1346,6 +1760,11 @@ if [ "$LIST_LANES" -eq 1 ]; then
   exit 0
 fi
 
+if [ "$LIST_RUNTIMES" -eq 1 ]; then
+  list_known_runtimes
+  exit 0
+fi
+
 if [ "$CHECK_COVERAGE" -eq 1 ]; then
   run_coverage_guard
   exit $?
@@ -1358,6 +1777,16 @@ if [ "${MODE:-}" = "aggregate" ]; then
     [ -f "$s" ] || die "aggregate input not found: $s"
   done
   aggregate_timing_json "$AGGREGATE_OUT" "${SCRIPTS[@]}"
+  exit 0
+fi
+
+if [ "${MODE:-}" = "aggregate-receipt" ]; then
+  [ -n "$AGGREGATE_RECEIPT_OUT" ] || die "--aggregate-failure-receipt requires an output path"
+  [ "${#SCRIPTS[@]}" -gt 0 ] || die "--aggregate-failure-receipt requires at least one lane receipt"
+  for s in "${SCRIPTS[@]}"; do
+    [ -f "$s" ] || die "aggregate receipt input not found: $s"
+  done
+  aggregate_failure_receipts "$AGGREGATE_RECEIPT_OUT" "${SCRIPTS[@]}"
   exit 0
 fi
 
@@ -1420,17 +1849,31 @@ if [ "$LIST_ONLY" -eq 1 ]; then
   exit 0
 fi
 
+# Materialize the lane's runtime declarations once so every receipt write site
+# reads the same normalized "<runtime>\t<requirement>" records.
+DECLARATIONS_TSV=$(mktemp "${TMPDIR:-/tmp}/fm-test-run-declarations.XXXXXX")
+trap 'rm -f "$DECLARATIONS_TSV"' EXIT
+if [ "${#RUNTIME_DECLARATIONS[@]}" -gt 0 ]; then
+  printf '%s\n' "${RUNTIME_DECLARATIONS[@]}" >"$DECLARATIONS_TSV"
+fi
+
 if [ "${#SCRIPTS[@]}" -eq 0 ]; then
   log "nothing to run"
   printf 'FM_TEST_SUMMARY total=0 failed=0 skipped_gate=0 duration_ms=0\n'
-  if [ -n "$JSON_PATH" ]; then
+  if [ -n "$JSON_PATH" ] || [ -n "$FAILURE_RECEIPT_PATH" ]; then
     empty_rec=$(mktemp)
     empty_fam=$(mktemp)
     : >"$empty_rec"
     : >"$empty_fam"
     started=$(now_iso)
-    mkdir -p "$(dirname "$JSON_PATH")"
-    write_json_artifact "$JSON_PATH" "$started" "$started" "empty" 0 0 0 0 "$SELECTION_DESC" "$empty_rec" "$empty_fam"
+    if [ -n "$JSON_PATH" ]; then
+      mkdir -p "$(dirname "$JSON_PATH")"
+      write_json_artifact "$JSON_PATH" "$started" "$started" "empty" 0 0 0 0 "$SELECTION_DESC" "$empty_rec" "$empty_fam"
+    fi
+    if [ -n "$FAILURE_RECEIPT_PATH" ]; then
+      write_failure_receipt "$FAILURE_RECEIPT_PATH" "$started" "$started" \
+        "empty" 0 0 0 0 "$SELECTION_DESC" "$empty_rec" "$DECLARATIONS_TSV"
+    fi
     rm -f "$empty_rec" "$empty_fam"
   fi
   exit 0
@@ -1455,7 +1898,7 @@ RUN_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run.XXXXXX")
 RECORDS="$RUN_TMP/records.tsv"
 FAMILIES_TSV="$RUN_TMP/families.tsv"
 : >"$RECORDS"
-trap 'rm -rf "$RUN_TMP"' EXIT
+trap 'rm -rf "$RUN_TMP"; rm -f "$DECLARATIONS_TSV"' EXIT
 
 RUN_STARTED_ISO=$(now_iso)
 RUN_STARTED_MS=$(now_ms)
@@ -1715,6 +2158,14 @@ if [ -n "$JSON_PATH" ]; then
     "$TOTAL" "$FAILED" "$SKIPPED_GATE" "$RUN_DURATION" \
     "$SELECTION_DESC" "$RECORDS" "$FAMILIES_TSV"
   log "wrote timing artifact: $JSON_PATH"
+fi
+
+if [ -n "$FAILURE_RECEIPT_PATH" ]; then
+  write_failure_receipt "$FAILURE_RECEIPT_PATH" \
+    "$RUN_STARTED_ISO" "$RUN_FINISHED_ISO" "$RUN_ID" \
+    "$TOTAL" "$FAILED" "$SKIPPED_GATE" "$RUN_DURATION" \
+    "$SELECTION_DESC" "$RECORDS" "$DECLARATIONS_TSV"
+  log "wrote failure receipt: $FAILURE_RECEIPT_PATH"
 fi
 
 exit "$AGG_RC"

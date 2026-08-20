@@ -70,17 +70,35 @@ jobs:
           npm install -g tasks-axi
           tasks-axi --version
       - name: Run portable parallel shard 1
+        env:
+          FM_TEST_RECEIPT_WORKFLOW: ${{ github.workflow }}
+          FM_TEST_RECEIPT_RUN_ID: ${{ github.run_id }}
+          FM_TEST_RECEIPT_RUN_ATTEMPT: ${{ github.run_attempt }}
+          FM_TEST_RECEIPT_JOB: ${{ github.job }}
+          FM_TEST_RECEIPT_LANE: portable-parallel-1
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
           bin/fm-test-run.sh --lane portable-parallel-1 \
-            --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-1.json"
+            --declare-runtime optin-env=optional \
+            --declare-runtime optional-binary=optional \
+            --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-1.json" \
+            --failure-receipt "$RUNNER_TEMP/fm-test/fm-test-receipt-portable-parallel-1.json"
       - name: Upload shard 1 timing artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: fm-test-timing-portable-parallel-1
           path: ${{ runner.temp }}/fm-test/fm-test-timing-portable-parallel-1.json
+          if-no-files-found: warn
+      # Failure receipts are the rerun-diagnosis evidence, so they upload on red
+      # runs too; the run step above already wrote the receipt before failing.
+      - name: Upload shard 1 failure receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fm-test-receipt-portable-parallel-1
+          path: ${{ runner.temp }}/fm-test/fm-test-receipt-portable-parallel-1.json
           if-no-files-found: warn
 
   tests-portable-parallel-2:
@@ -107,17 +125,35 @@ jobs:
           npm install -g tasks-axi
           tasks-axi --version
       - name: Run portable parallel shard 2
+        env:
+          FM_TEST_RECEIPT_WORKFLOW: ${{ github.workflow }}
+          FM_TEST_RECEIPT_RUN_ID: ${{ github.run_id }}
+          FM_TEST_RECEIPT_RUN_ATTEMPT: ${{ github.run_attempt }}
+          FM_TEST_RECEIPT_JOB: ${{ github.job }}
+          FM_TEST_RECEIPT_LANE: portable-parallel-2
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
           bin/fm-test-run.sh --lane portable-parallel-2 \
-            --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-2.json"
+            --declare-runtime optin-env=optional \
+            --declare-runtime optional-binary=optional \
+            --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-2.json" \
+            --failure-receipt "$RUNNER_TEMP/fm-test/fm-test-receipt-portable-parallel-2.json"
       - name: Upload shard 2 timing artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: fm-test-timing-portable-parallel-2
           path: ${{ runner.temp }}/fm-test/fm-test-timing-portable-parallel-2.json
+          if-no-files-found: warn
+      # Failure receipts are the rerun-diagnosis evidence, so they upload on red
+      # runs too; the run step above already wrote the receipt before failing.
+      - name: Upload shard 2 failure receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fm-test-receipt-portable-parallel-2
+          path: ${{ runner.temp }}/fm-test/fm-test-receipt-portable-parallel-2.json
           if-no-files-found: warn
 
   # Required portable serial remainder: watcher, lock, AFK, tmux, daemon,
@@ -172,17 +208,32 @@ jobs:
           # leaving a shard of the required lane unrun.
           FM_SERIAL_LANE: portable-serial-${{ matrix.shard }}of${{ strategy.job-total }}
           FM_SERIAL_SHARD: ${{ matrix.shard }}
+          FM_TEST_RECEIPT_WORKFLOW: ${{ github.workflow }}
+          FM_TEST_RECEIPT_RUN_ID: ${{ github.run_id }}
+          FM_TEST_RECEIPT_RUN_ATTEMPT: ${{ github.run_attempt }}
+          FM_TEST_RECEIPT_JOB: ${{ github.job }}
+          FM_TEST_RECEIPT_LANE: portable-serial-${{ matrix.shard }}
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
           bin/fm-test-run.sh --lane "$FM_SERIAL_LANE" \
-            --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-serial-${FM_SERIAL_SHARD}.json"
+            --declare-runtime optin-env=optional \
+            --declare-runtime optional-binary=optional \
+            --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-serial-${FM_SERIAL_SHARD}.json" \
+            --failure-receipt "$RUNNER_TEMP/fm-test/fm-test-receipt-portable-serial-${FM_SERIAL_SHARD}.json"
       - name: Upload portable serial shard ${{ matrix.shard }} timing artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: fm-test-timing-portable-serial-${{ matrix.shard }}
           path: ${{ runner.temp }}/fm-test/fm-test-timing-portable-serial-${{ matrix.shard }}.json
+          if-no-files-found: warn
+      - name: Upload portable serial shard ${{ matrix.shard }} failure receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fm-test-receipt-portable-serial-${{ matrix.shard }}
+          path: ${{ runner.temp }}/fm-test/fm-test-receipt-portable-serial-${{ matrix.shard }}.json
           if-no-files-found: warn
 
   # Required real-Herdr lane: pinned install, serial real-herdr-gated family,
@@ -279,6 +330,12 @@ jobs:
         # Comfortably above the ~7 min healthy wall and far below the 75 min
         # job backstop. A hang must fail this step so cleanup still runs.
         timeout-minutes: 20
+        env:
+          FM_TEST_RECEIPT_WORKFLOW: ${{ github.workflow }}
+          FM_TEST_RECEIPT_RUN_ID: ${{ github.run_id }}
+          FM_TEST_RECEIPT_RUN_ATTEMPT: ${{ github.run_attempt }}
+          FM_TEST_RECEIPT_JOB: ${{ github.job }}
+          FM_TEST_RECEIPT_LANE: herdr
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
@@ -286,7 +343,9 @@ jobs:
           # harness credential tests stay outside this family (opt-in env only).
           bin/fm-test-run.sh --family real-herdr-gated \
             --fail-on-gate-skip 'herdr not found' \
-            --json "$RUNNER_TEMP/fm-test/fm-test-timing-herdr.json"
+            --declare-runtime herdr=required \
+            --json "$RUNNER_TEMP/fm-test/fm-test-timing-herdr.json" \
+            --failure-receipt "$RUNNER_TEMP/fm-test/fm-test-receipt-herdr.json"
       - name: Cleanup job-owned Herdr lab sessions
         if: always()
         run: |
@@ -306,6 +365,13 @@ jobs:
             ${{ runner.temp }}/fm-test/fm-test-timing-herdr.json
             ${{ runner.temp }}/fm-herdr/sessions-before.json
             ${{ runner.temp }}/fm-herdr/default-server.log
+          if-no-files-found: warn
+      - name: Upload Herdr failure receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fm-test-receipt-herdr
+          path: ${{ runner.temp }}/fm-test/fm-test-receipt-herdr.json
           if-no-files-found: warn
 
   # Aggregate per-lane timing into one summary artifact for critical-path review.
@@ -345,6 +411,34 @@ jobs:
         with:
           name: fm-test-timing-aggregate
           path: ${{ runner.temp }}/fm-test/fm-test-timing-aggregate.json
+          if-no-files-found: warn
+      - name: Download lane failure receipts
+        if: always()
+        uses: actions/download-artifact@v4
+        with:
+          pattern: fm-test-receipt-*
+          path: ${{ runner.temp }}/fm-receipt-aggregate
+          merge-multiple: true
+      - name: Build aggregate failure receipt
+        if: always()
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/fm-test"
+          shopt -s nullglob
+          inputs=("$RUNNER_TEMP"/fm-receipt-aggregate/fm-test-receipt-*.json)
+          if [ "${#inputs[@]}" -eq 0 ]; then
+            echo "::warning::no lane failure receipts found to aggregate"
+            exit 0
+          fi
+          bin/fm-test-run.sh --aggregate-failure-receipt \
+            "$RUNNER_TEMP/fm-test/fm-test-receipts-aggregate.json" \
+            "${inputs[@]}"
+      - name: Upload aggregate failure receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fm-test-receipts-aggregate
+          path: ${{ runner.temp }}/fm-test/fm-test-receipts-aggregate.json
           if-no-files-found: warn
 
   macos-stock-bash:

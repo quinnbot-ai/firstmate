@@ -261,6 +261,10 @@
       "audience": "operator-example"
     },
     {
+      "path": "docs/fm-test-failure-receipts.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/fm-test-isolation-proof.md",
       "audience": "maintainer-verification"
     },
