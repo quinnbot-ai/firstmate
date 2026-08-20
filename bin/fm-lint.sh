@@ -338,6 +338,14 @@ while [ "$worker" -lt "$SHARD_COUNT" ]; do
   worker=$((worker + 1))
 done
 
+# Concurrency telemetry ONLY - never a liveness decision.
+#
+# This is a name-pattern probe, so its count is a LOWER BOUND, not a census: it
+# sees shellcheck processes whose kernel-side name is exactly `shellcheck`, and
+# misses any that run behind a wrapper or shim under a different name. A zero
+# here therefore means "none matched the name", not "none running". Nothing
+# branches on this value - it is reported and discarded - which is the only
+# reason a pattern probe is acceptable at this call site.
 fm_lint_shellcheck_count() {
   if command -v pgrep >/dev/null 2>&1; then
     pgrep -x shellcheck 2>/dev/null | wc -l | tr -d '[:space:]'

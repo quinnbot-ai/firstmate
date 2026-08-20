@@ -99,7 +99,10 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
 # --- identity: only the lock-owning session's hooks may arm ------------------
 # A prior session may have died after leaving its numeric harness pid in .lock.
-# Use the shared liveness predicate to recognize only that stale-owner case.
+# Recover ONLY from that stale-owner case, which the shared classifier is the
+# single owner of. A holder that is running but whose name no pattern
+# recognizes reports `unidentified`, not `stale`, and this hook stands down: an
+# unrecognized command name is not evidence that a session ended.
 # Defer the mutating claim until after the unchanged AFK and need gates, so an
 # idle or away home remains byte-for-byte inert. Missing or malformed locks are
 # uncertainty rather than stale-owner evidence and remain inert.
@@ -109,7 +112,7 @@ if ! fm_session_lock_owned_by_self "$STATE"; then
   case "$LOCK_PID" in
     ''|*[!0-9]*) exit 0 ;;
   esac
-  fm_harness_pid_alive "$LOCK_PID" && exit 0
+  fm_session_lock_state_permits_claim "$(fm_session_lock_holder_state "$STATE/.lock")" || exit 0
   RECOVER_SESSION_LOCK=1
 fi
 
