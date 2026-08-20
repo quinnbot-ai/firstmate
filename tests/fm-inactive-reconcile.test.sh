@@ -62,6 +62,24 @@ make_world() { # <name>
   : > "$WORLD/forge.log"
 }
 
+# Exercise the production state resolver against no-mistakes' durable outcome,
+# rather than substituting the state result the reconciler is meant to interpret.
+install_no_mistakes_fake() { # <world>
+  local world=$1
+  cat > "$world/fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  axi)
+    case "${2:-}" in
+      status) printf '%s\n' "${FM_FAKE_AXI_STATUS:-}" ;;
+    esac
+    ;;
+  runs) printf '%s\n' "${FM_FAKE_RUNS_LIST:-}" ;;
+esac
+SH
+  chmod +x "$world/fakebin/no-mistakes"
+}
+
 bind_secondmate() { # <local|remote>
   local route=$1
   printf 'mate\n' > "$MATE/.fm-secondmate-home"
@@ -104,8 +122,52 @@ run_reconcile() { # <home> [--startup]
     FM_FORGE_LOG="$WORLD/forge.log" "$RECON" scan ${option:+"$option"}
 }
 
+run_real_reconcile() { # <home> [--startup]
+  local home=$1 option=${2:-}
+  PATH="$WORLD/fakebin:$PATH" FM_ROOT_OVERRIDE="$WORLD/root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_INACTIVE_RECONCILE_SECS=60 FM_INACTIVE_CREW_STATE_BIN="$ROOT/bin/fm-crew-state.sh" \
+    FM_FORGE_LOG="$WORLD/forge.log" "$RECON" scan ${option:+"$option"}
+}
+
+write_pipeline_child() { # <home> <id> <status>
+  local home=$1 id=$2 status=$3 wt branch head
+  wt="$home/projects/$id"
+  branch="fm/$id"
+  mkdir -p "$wt"
+  git -C "$wt" init -q
+  git -C "$wt" config user.name fmtest
+  git -C "$wt" config user.email fmtest@example.invalid
+  git -C "$wt" commit -q --allow-empty -m base
+  git -C "$wt" checkout -q -b "$branch"
+  head=$(git -C "$wt" rev-parse HEAD)
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$wt" "project=alpha" \
+    'harness=codex' 'kind=ship' 'mode=no-mistakes' 'yolo=off' \
+    "spawn_gen=s${BASHPID:-$$}.$RANDOM"
+  printf '%s\n' "$status" > "$home/state/$id.status"
+  : > "$home/state/$id.turn-ended"
+  age "$home/state/$id.meta" "$home/state/$id.status" "$home/state/$id.turn-ended"
+  printf '%s\n' "$head"
+}
+
+pipeline_terminal_status() { # <branch> <head> <cancelled|failed>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "$2"
+outcome: $3
+EOF
+}
+
 wake_count() { # <home> <key prefix>
-  grep -c "$2" "$1/state/.wake-queue" 2>/dev/null || true
+  if [ -f "$1/state/.wake-queue" ]; then
+    grep -c "$2" "$1/state/.wake-queue" 2>/dev/null || true
+  else
+    printf '0\n'
+  fi
 }
 
 outcome_count() { # <home> <suffix>
@@ -120,12 +182,18 @@ prime_seen() { # <state> <status>
 
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
-# The main retains a terminal presentation receipt until the corresponding wake
-# is handled and acknowledged.
-test_main_direct_terminal_presentation_receipt() {
+# A stale promotion task can keep appending hold/status context after its
+# terminal endpoint was reported, even after its backlog row has been pruned.
+# That context must not manufacture a second terminal outcome for the same
+# worker incarnation, while a replacement worker with the same task id remains
+# a genuinely new outcome.
+test_main_promotion_terminal_presentation_receipt() {
   local err seq generation
-  make_world main-direct; write_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
-  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  make_world main-promotion
+  write_child "$MAIN" weho-promotion-symlink-hardening 'paused: PR 42 is preserved pending the captain decision' spawn-promotion-one
+  printf '%s\n' '- [ ] weho-promotion-symlink-hardening - retained terminal work' > "$MAIN/data/backlog.md"
+  rm -f "$MAIN/data/backlog.md"
+  FM_FAKE_CREW_STATE='failed' run_reconcile "$MAIN" --startup
   [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] || fail "main did not queue terminal presentation"
   [ "$(outcome_count "$MAIN" pending)" = 1 ] || fail "main did not retain presentation receipt"
 
@@ -136,7 +204,59 @@ test_main_direct_terminal_presentation_receipt() {
   [ -n "$seq" ] && [ -n "$generation" ] || fail "main presentation did not require durable acknowledgement"
   FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$DRAIN" --ack-through "$seq" --recovery-generation "$generation"
   [ "$(outcome_count "$MAIN" presented)" = 1 ] || fail "acknowledged presentation did not receive its own receipt"
-  pass "main direct terminal presentation has a durable receipt"
+
+  # This is the weho shape: a later status line describes the same captain hold
+  # after the terminal outcome was already handled, and the task's backlog row
+  # is no longer available to deduplicate it.
+  printf '%s\n' 'paused: PR 42 remains preserved pending the same captain decision' \
+    >> "$MAIN/state/weho-promotion-symlink-hardening.status"
+  age "$MAIN/state/weho-promotion-symlink-hardening.status"
+  FM_FAKE_CREW_STATE='failed' run_reconcile "$MAIN" --startup
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 0 ] \
+    || fail "handled promotion outcome was re-announced after a status update"
+  [ "$(outcome_count "$MAIN" presented)" = 1 ] \
+    || fail "handled promotion outcome did not survive restart/pruned backlog"
+
+  rm -f "$MAIN/state/weho-promotion-symlink-hardening.meta" \
+    "$MAIN/state/weho-promotion-symlink-hardening.status" \
+    "$MAIN/state/weho-promotion-symlink-hardening.turn-ended"
+  write_child "$MAIN" weho-promotion-symlink-hardening 'done: replacement worker completed' spawn-promotion-two
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] \
+    || fail "new promotion-worker incarnation did not surface"
+  pass "handled promotion outcomes survive restart/pruning without suppressing a new incarnation"
+}
+
+# A presentation receipt created before the stable identity change still means
+# the outcome was handled after this upgrade, even though its old filename was
+# derived from mutable status context.
+test_legacy_presentation_receipt_remains_handled() {
+  local record
+  make_world legacy-presentation
+  write_child "$MAIN" child 'paused: earlier terminal context' spawn-legacy
+  mkdir -p "$MAIN/state/terminal-outcomes"
+  record="$MAIN/state/terminal-outcomes/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.presented"
+  cat > "$record" <<'EOF'
+schema=fm-terminal-outcome.v1
+fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+task_id=child
+incarnation=spawn-legacy
+state=failed
+outcome_key=inactive-outcome-main-child-failed
+origin=direct
+phase=presentation
+pr=
+created_epoch=1
+notice_emitted=0
+EOF
+  printf '%s\n' 'paused: later context after the handled terminal outcome' >> "$MAIN/state/child.status"
+  age "$MAIN/state/child.status"
+  FM_FAKE_CREW_STATE='failed' run_reconcile "$MAIN" --startup
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 0 ] \
+    || fail "legacy handled receipt was re-announced after status context changed"
+  [ "$(outcome_count "$MAIN" presented)" = 1 ] \
+    || fail "legacy handled receipt was not retained"
+  pass "legacy presentation receipts remain handled across the identity upgrade"
 }
 
 # A secondmate independently reports a genuinely terminal inactive child.
@@ -328,6 +448,42 @@ test_nonterminal_and_captain_held_states_do_not_report() {
   pass "nonterminal and captain-held workers remain outside inactive terminal reporting"
 }
 
+# no-mistakes writes outcome=cancelled after its supported axi abort path.
+# That terminal record is intentional supervisor action, not a validation failure,
+# so the reconciler must neither create a failure receipt nor wake for re-dispatch.
+test_supervisor_cancelled_pipeline_does_not_escalate() {
+  local head
+  make_world supervisor-cancelled
+  install_no_mistakes_fake "$WORLD"
+  head=$(write_pipeline_child "$MAIN" child 'working: validation invalidated by supervisor')
+  FM_FAKE_AXI_STATUS="$(pipeline_terminal_status fm/child "$head" cancelled)" \
+    run_real_reconcile "$MAIN" --startup
+  [ "$(outcome_count "$MAIN" pending)" = 0 ] \
+    || fail "supervisor-cancelled pipeline created a terminal failure receipt"
+  [ ! -e "$MAIN/state/.wake-queue" ] \
+    || ! grep -Fq 'inactive-outcome:' "$MAIN/state/.wake-queue" \
+    || fail "supervisor-cancelled pipeline queued a failure escalation"
+  pass "supervisor-cancelled pipeline stays out of inactive failure escalation"
+}
+
+# A no-mistakes outcome=failed record is the distinct durable terminal signal
+# for a pipeline that died on its own, so it must remain actionable.
+test_failed_pipeline_still_escalates() {
+  local head
+  make_world pipeline-failed
+  install_no_mistakes_fake "$WORLD"
+  head=$(write_pipeline_child "$MAIN" child 'working: validation under way')
+  FM_FAKE_AXI_STATUS="$(pipeline_terminal_status fm/child "$head" failed)" \
+    run_real_reconcile "$MAIN" --startup
+  [ "$(outcome_count "$MAIN" pending)" = 1 ] \
+    || fail "failed pipeline did not create a terminal failure receipt"
+  grep -Fq 'state=failed' "$MAIN/state/terminal-outcomes"/*.pending \
+    || fail "failed pipeline receipt lost its failure state"
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] \
+    || fail "failed pipeline did not queue a failure escalation"
+  pass "failed pipeline remains an inactive failure escalation"
+}
+
 # The actual watcher poll invokes the helper, while an idle secondmate remains
 # exempt from wedge escalation and emits no false wake.
 test_watcher_hook_and_idle_secondmate_exemption() {
@@ -444,7 +600,8 @@ test_reconciliation_never_calls_forge() {
   pass "reconciliation makes zero forge or PR API calls"
 }
 
-test_main_direct_terminal_presentation_receipt
+test_main_promotion_terminal_presentation_receipt
+test_legacy_presentation_receipt_remains_handled
 test_local_secondmate_reports_terminal_child
 test_local_secondmate_rejects_relative_parent_home
 test_invalid_secondmate_marker_blocks_routing
@@ -455,6 +612,8 @@ test_relaunch_cannot_replace_metadata_during_state_snapshot
 test_heartbeat_cap_does_not_delay_reconciliation
 test_scan_marker_replaces_symlink_safely
 test_nonterminal_and_captain_held_states_do_not_report
+test_failed_pipeline_still_escalates
+test_supervisor_cancelled_pipeline_does_not_escalate
 test_watcher_hook_and_idle_secondmate_exemption
 test_stalled_state_read_is_bounded_and_scan_progresses
 test_full_scan_budget_includes_wake_lock_wait

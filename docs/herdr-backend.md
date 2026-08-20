@@ -67,6 +67,51 @@ Existing task operations use recorded endpoint ids and do not move a live task w
 The per-home workspace is reused while it has task tabs.
 Closing its last tab can remove the workspace, and the next spawn recreates it.
 
+## Sidebar legibility
+
+Herdr draws its Spaces and Agents sidebar lists from configurable row templates.
+Rows are built from built-in display tokens and from custom `$name` tokens that an integration supplies as display-only pane and workspace metadata.
+Firstmate reports the facts only Firstmate knows, so a captain can tell a persistent second mate from a task worker at a glance instead of decoding task ids.
+
+Every new crewmate, scout, and second mate is reported once, immediately after its endpoint record is published:
+
+| Reported value | Meaning |
+|---|---|
+| display name | The badge, role word, and scope as one string, for example `⚓ secondmate trading`. |
+| `$fm_role` | `secondmate`, `crew`, or `scout` for a worker and for a projected one-task Space, and `home` for a shared per-home Space. |
+| `$fm_glyph` | The fixed wide-glyph role badge, so a narrow sidebar can show the role in one column. |
+| `$fm_scope` | A second mate's domain, or the project a crewmate or scout is working; on a Space, the owning home's own domain for the shared per-home container - the second mate's id, or the primary home's label - and the task's own scope for a projected one-task Space. |
+| `$fm_task` | The task id, for a row layout that drops the built-in `tab` token. |
+| `$fm_home` | The owning home's label, `firstmate` or `2ndmate-<id>`. |
+
+The display name is the one channel a completely unconfigured Herdr already renders, through its built-in `agent` row token.
+The custom tokens need row layouts, which arrived in Herdr 0.7.4, and per-token colors, which arrived in 0.7.5.
+The display name and the tokens are reported as two independent calls so an older release that cannot store tokens still shows the readable name.
+
+A captain who wants more than the default rows configures them in their own Herdr `config.toml`, which is where presentation taste belongs:
+
+```toml
+[ui.sidebar.agents]
+rows = [["state_icon", "$fm_glyph", "$fm_scope", "tab"], [{ token = "$fm_role", dim = true }]]
+
+[ui.sidebar.spaces]
+rows = [["state_icon", "$fm_glyph", "workspace"], ["branch", "git_status"]]
+```
+
+This whole surface is display-only and carries no authority.
+Reporting never renames a workspace, never renames a tab, and never touches any value that placement, endpoint metadata, the presentation journal, husk replacement, list-live discovery, bare-selector resolution, or cleanup resolves a worker by; the task tab stays exactly `fm-<id>`.
+Every report is best-effort: a refused or unsupported call is absorbed, because a sidebar row is never a reason to fail a spawn.
+
+Reporting happens at spawn time only, and no path retitles a worker that is already running.
+An existing fleet therefore converges as its tasks turn over, and a relaunch re-badges only the worker pane.
+A relaunch adopts the recorded endpoint rather than creating one, so that same pane keeps the metadata it already carries; the re-report is a refresh that picks up facts which can change between spawns while the endpoint stays the same.
+The concrete case is promotion: `bin/fm-promote.sh` flips a task from scout to ship in place on the same endpoint without going through the spawn path, so the badge still reads scout until a later relaunch re-reads that kind and re-badges the pane as crew.
+Promotion alone therefore does not update the sidebar, and the refresh is not a guarantee that a badge is continuously current.
+A relaunch leaves the Space's existing tokens untouched, which is lossless because reported tokens persist per key until overwritten, so the Space keeps the role and scope its original spawn reported.
+
+`tests/fm-backend-herdr.test.sh` covers the role vocabulary, the reported argv, omission of unknown facts, independence of the name and the tokens, absorption of a refusal, the stable home-Space scope, and the guarantee that reporting emits no rename, label, create, or close.
+`tests/fm-backend-herdr-smoke.test.sh` proves against the real binary that the reported values land on a live pane and Space and that both labels, and label-based discovery, come back unchanged.
+
 ## Presentation spaces
 
 Each new crewmate or scout is placed in a disposable one-task workspace by default, on Herdr 0.8.0 and newer.

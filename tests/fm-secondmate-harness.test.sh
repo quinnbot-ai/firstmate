@@ -14,6 +14,7 @@
 #      explicit per-spawn harness arg still wins.
 #   B) Inheritance. The primary pushes a declared, extensible set of LOCAL
 #      (gitignored) config items - config/crew-dispatch.json, config/crew-harness,
+#      config/crew-claude-profile,
 #      config/backlog-backend, config/backend, config/herdr-presentation-spaces,
 #      config/startup-memory-budget, and config/trace-context -
 #      down into each secondmate home's config/, so the secondmate's OWN crewmates,
@@ -474,6 +475,7 @@ test_spawn_split_and_inherit() {
   mkdir -p "$w/home/config"
   printf '{"default":{"harness":"claude","model":"haiku","effort":"low"}}\n' > "$w/home/config/crew-dispatch.json"
   printf 'claude\n' > "$w/home/config/crew-harness"
+  printf '%s\n' "$w/crew-claude-profile" > "$w/home/config/crew-claude-profile"
   printf 'codex\n' > "$w/home/config/secondmate-harness"
   printf 'manual\n' > "$w/home/config/backlog-backend"
   printf 'zellij\n' > "$w/home/config/backend"
@@ -487,6 +489,8 @@ test_spawn_split_and_inherit() {
     || fail "split: secondmate launched on '$(meta_harness "$meta")', expected codex"
   [ "$(cat "$sm/config/crew-harness" 2>/dev/null)" = claude ] \
     || fail "split: home crew-harness not inherited as claude (got '$(cat "$sm/config/crew-harness" 2>/dev/null)')"
+  [ "$(cat "$sm/config/crew-claude-profile" 2>/dev/null)" = "$w/crew-claude-profile" ] \
+    || fail "split: home crew-claude-profile not inherited"
   [ "$(cat "$sm/config/crew-dispatch.json" 2>/dev/null)" = '{"default":{"harness":"claude","model":"haiku","effort":"low"}}' ] \
     || fail "split: home crew-dispatch.json not inherited"
   [ "$(cat "$sm/config/backlog-backend" 2>/dev/null)" = manual ] \

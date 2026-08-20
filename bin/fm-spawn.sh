@@ -134,6 +134,12 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   A fresh ship or scout spawn writes a private current-task binding in that
+#   worktree's Git metadata before it publishes state/<id>.meta. A relaunch
+#   verifies the binding and refuses if a pooled worktree was reassigned, rather
+#   than claiming another task's live copy. Persistent secondmate homes are not
+#   pooled task worktrees and never receive this marker.
+#   bin/fm-worktree-binding-lib.sh owns the marker.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
@@ -186,6 +192,12 @@
 # success line and state/<id>.meta omit them.
 # Every fresh spawn or relaunch records a new spawn_gen= incarnation token so durable
 # consumers can distinguish a replacement worker that reuses the same task id.
+# Claude crewmate and scout launches resolve their credential store solely from
+# config/crew-claude-profile or the standing shared crew profile.
+# The exact selected directory must contain a structurally valid account_sha256
+# fingerprint and its matching Claude Code Keychain item.
+# An invalid declared profile or unavailable credential refuses the launch rather
+# than falling back to the launcher's default Claude store.
 # When the home session's frozen trace-context decision is enabled (see
 # docs/configuration.md and bin/fm-trace-context-lib.sh), the meta also records
 # one W3C traceparent= carrier, the same value injected into the pane as
@@ -262,6 +274,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
+# shellcheck source=bin/fm-worktree-binding-lib.sh
+. "$SCRIPT_DIR/fm-worktree-binding-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-brief-script-reference-lib.sh
@@ -1231,6 +1245,114 @@ esac
 if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
   echo "error: muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
+fi
+
+# resolve_claude_crew_profile establishes the only credential directory a
+# Claude crewmate can use. Do not read CLAUDE_CONFIG_DIR here: an ambient value
+# can silently select the seat's default credential store. The account
+# fingerprint check is deliberately read from this exact directory only.
+# Neither that identity nor the profile location is emitted or persisted.
+CLAUDE_CREW_PROFILE=
+claude_crew_default_profile() {
+  # Tests use an isolated fixture without changing the production default.
+  if [ "${FM_SPAWN_NO_GUARD:-}" = 1 ] && [ -n "${FM_TEST_CLAUDE_CREW_PROFILE_DEFAULT:-}" ]; then
+    printf '%s\n' "$FM_TEST_CLAUDE_CREW_PROFILE_DEFAULT"
+    return 0
+  fi
+  printf '%s\n' '/Users/nick/ventures/agent-ops/firstmate/data/claude-crewmate/profile'
+}
+
+claude_credential_service() {  # <canonical-config-dir> -> service name
+  local config_dir=$1 digest
+  if command -v shasum >/dev/null 2>&1; then
+    digest=$(printf '%s' "$config_dir" | shasum -a 256 2>/dev/null | awk '{print $1}') || return 1
+  elif command -v sha256sum >/dev/null 2>&1; then
+    digest=$(printf '%s' "$config_dir" | sha256sum 2>/dev/null | awk '{print $1}') || return 1
+  else
+    return 1
+  fi
+  [ "${#digest}" -ge 8 ] || return 1
+  printf 'Claude Code-credentials-%s\n' "${digest:0:8}"
+}
+
+claude_credential_available() {  # <canonical-config-dir>
+  local service
+  # The portable behavior suite supplies a fake Keychain only when it is
+  # explicitly exercising this guard.  Production always requires macOS.
+  if [ "${FM_SPAWN_NO_GUARD:-}" != 1 ] || [ "${FM_TEST_CLAUDE_CREDENTIAL_GUARD:-}" != 1 ]; then
+    [ "$(uname)" = Darwin ] || return 1
+  fi
+  command -v security >/dev/null 2>&1 || return 1
+  service=$(claude_credential_service "$1") || return 1
+  security find-generic-password -s "$service" >/dev/null 2>&1
+}
+
+resolve_claude_crew_profile() {
+  local config_file raw_profile profile identity_record
+  config_file="$CONFIG/crew-claude-profile"
+  if [ -e "$config_file" ] || [ -L "$config_file" ]; then
+    if [ ! -f "$config_file" ] || [ -L "$config_file" ]; then
+      echo "error: Claude crew profile declaration is unsafe" >&2
+      return 1
+    fi
+    raw_profile=$(awk '!/^[[:space:]]*(#|$)/ { print; exit }' "$config_file" 2>/dev/null) || {
+      echo "error: Claude crew profile declaration cannot be read" >&2
+      return 1
+    }
+    if [ -z "$raw_profile" ]; then
+      echo "error: Claude crew profile declaration is empty" >&2
+      return 1
+    fi
+    case "$raw_profile" in
+      /*) profile=$raw_profile ;;
+      *)
+        profile=$(CDPATH='' cd -- "$CONFIG/$raw_profile" 2>/dev/null && pwd -P) || {
+          echo "error: Claude crew profile directory cannot be resolved" >&2
+          return 1
+        }
+        ;;
+    esac
+  else
+    profile=$(claude_crew_default_profile)
+  fi
+  if [ ! -d "$profile" ] || [ -L "$profile" ]; then
+    echo "error: Claude crew profile directory is missing or unsafe" >&2
+    return 1
+  fi
+  profile=$(CDPATH='' cd -- "$profile" 2>/dev/null && pwd -P) || {
+    echo "error: Claude crew profile directory cannot be resolved" >&2
+    return 1
+  }
+  identity_record="$profile/.firstmate-account.json"
+  if [ ! -f "$identity_record" ] || [ -L "$identity_record" ] || [ ! -r "$identity_record" ]; then
+    echo "error: Claude crew profile has no readable identity record" >&2
+    return 1
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "error: Claude crew profile requires jq to verify its identity record" >&2
+    return 1
+  fi
+  jq -e '.account_sha256 | select(type == "string" and test("^[0-9A-Fa-f]{64}$"))' "$identity_record" >/dev/null 2>&1 || {
+    echo "error: Claude crew profile has no readable identity record" >&2
+    return 1
+  }
+  if ! claude_credential_available "$profile"; then
+    echo "error: Claude crew credential is unavailable for its selected profile; refusing to fall back to the default Claude store" >&2
+    return 1
+  fi
+  CLAUDE_CREW_PROFILE=$profile
+}
+
+if [ "$HARNESS" = claude ] && [ "$KIND" != secondmate ]; then
+  # Existing hermetic spawn tests use FM_SPAWN_NO_GUARD for unrelated
+  # lifecycle guards.  They may opt out of this credential integration only
+  # with an additional test-only marker; ordinary and batched launches always
+  # retain the credential refusal.
+  if [ "${FM_SPAWN_NO_GUARD:-}" = 1 ] && [ "${FM_TEST_BYPASS_CLAUDE_CREDENTIAL_GUARD:-}" = 1 ]; then
+    :
+  else
+    resolve_claude_crew_profile || exit 1
+  fi
 fi
 
 case "$HARNESS" in
@@ -2276,6 +2398,21 @@ fi
 # per-home contract - a sibling checkout's bin/ is never used as evidence.
 fm_brief_refuse_missing_helper_scripts "$BRIEF_REAL" "$WT" || exit 1
 
+# A pooled path is intentionally reusable, so the historical worktree= in an
+# older task's metadata cannot establish ownership. Bind a fresh assignment
+# before it publishes its metadata; a relaunch only proves that its recorded
+# binding remains exact and must never overwrite a newer task's binding.
+if [ "$KIND" != secondmate ]; then
+  if [ "$RELAUNCH" -eq 1 ]; then
+    if ! fm_worktree_binding_matches "$WT" "$ID"; then
+      echo "error: task $ID's recorded worktree cannot be reused: $(fm_worktree_binding_detail); refusing to relaunch" >&2
+      exit 1
+    fi
+  elif ! fm_worktree_binding_write "$WT" "$ID"; then
+    exit 1
+  fi
+fi
+
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
@@ -2644,7 +2781,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent worktree_binding backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2662,6 +2799,7 @@ preserve_relaunch_meta() {
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  [ "$KIND" = secondmate ] || echo "worktree_binding=fm-worktree-binding.v1"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.
@@ -2717,6 +2855,56 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
 fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
+# Herdr renders its Spaces and Agents sidebar from row templates fed by
+# display-only pane and workspace metadata, so tell it what this worker IS -
+# a persistent secondmate, an ordinary crewmate, or a scout, and the domain or
+# project it belongs to. The adapter owns the reporting contract and every
+# safety boundary (bin/backends/herdr.sh "sidebar legibility"); the facts are
+# resolved here because only the spawn knows the task's kind and project.
+# Reported AFTER the endpoint record is published so a report can never sit
+# between a live pane and its durable identity, and best-effort throughout: a
+# sidebar row is presentation, never a reason to fail a spawn.
+if [ "$BACKEND" = herdr ]; then
+  SIDEBAR_ROLE=$(fm_backend_herdr_sidebar_role "$KIND")
+  # The home whose label this worker's entry belongs under is the secondmate's
+  # own home for a --secondmate launch and this process's own home otherwise -
+  # the same rule the workspace label itself resolves by.
+  SIDEBAR_HOME_DIR=$FM_HOME
+  [ "$KIND" = secondmate ] && SIDEBAR_HOME_DIR=$PROJ_ABS
+  SIDEBAR_HOME_LABEL=$(FM_HOME="$SIDEBAR_HOME_DIR" fm_backend_herdr_workspace_label)
+  # Scope is the fact that separates one entry from another: a secondmate's
+  # domain, or the project a crewmate or scout is working.
+  if [ "$KIND" = secondmate ]; then
+    SIDEBAR_SCOPE=${SIDEBAR_HOME_LABEL#2ndmate-}
+    [ "$SIDEBAR_SCOPE" = "$SIDEBAR_HOME_LABEL" ] && SIDEBAR_SCOPE=$(basename "$PROJ_ABS")
+  else
+    SIDEBAR_SCOPE=$(basename "$PROJ_ABS")
+  fi
+  fm_backend_herdr_sidebar_report_pane "$HERDR_SES" "$HERDR_PANE_ID" \
+    "$SIDEBAR_ROLE" "$SIDEBAR_SCOPE" "$ID" "$SIDEBAR_HOME_LABEL"
+  # The Space is reported only on a fresh spawn, where HERDR_PROJECTED records
+  # what this spawn actually did: 1 means a projected space holding exactly
+  # this one task, which carries the task's own role, and 0 means the shared
+  # per-home container, which is a home and says so. A relaunch adopts the
+  # recorded endpoint rather than creating one, so it re-badges the worker
+  # above to refresh facts that can change while the endpoint stays the same
+  # (docs/herdr-backend.md "Sidebar legibility") and skips the Space report;
+  # that is lossless because reported tokens persist per key until overwritten
+  # (docs/verification/runtime-backends.md "Sidebar legibility metadata").
+  if [ "$RELAUNCH" -ne 1 ]; then
+    SIDEBAR_WORKSPACE_ROLE=home
+    [ "${HERDR_PROJECTED:-0}" = 1 ] && SIDEBAR_WORKSPACE_ROLE=$SIDEBAR_ROLE
+    # A shared per-home space's scope is the home's own domain, never any one
+    # task's project, so it stays stable as tasks spawn into it; a projected
+    # one-task space keeps its task's own scope.
+    SIDEBAR_WORKSPACE_SCOPE=$SIDEBAR_SCOPE
+    [ "$SIDEBAR_WORKSPACE_ROLE" = home ] \
+      && SIDEBAR_WORKSPACE_SCOPE=$(fm_backend_herdr_sidebar_home_scope "$SIDEBAR_HOME_LABEL")
+    fm_backend_herdr_sidebar_report_workspace "$HERDR_SES" "$HERDR_WORKSPACE_ID" \
+      "$SIDEBAR_WORKSPACE_ROLE" "$SIDEBAR_WORKSPACE_SCOPE" "$SIDEBAR_HOME_LABEL"
+  fi
+fi
+
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
@@ -2744,15 +2932,11 @@ case "$HARNESS" in
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $LAUNCH"
     ;;
 esac
-# Crewmate panes are created by a long-lived tmux/herdr daemon that does not
-# inherit firstmate's current environment, so a bare `claude` in the pane falls
-# back to the default ~/.claude store even when firstmate itself runs under a
-# different CLAUDE_CONFIG_DIR (for example a work-vs-personal subscription split).
-# Forward firstmate's own resolved store onto the claude launch so the crewmate
-# uses the same credential/config firstmate is authenticated with. Only when set;
-# an unset value is the single-store default and needs no prefix.
-if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
-  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+# Crewmate panes are created by a long-lived backend daemon and cannot inherit
+# the launcher's shell reliably. Prefix only the exact selected profile, never
+# ambient CLAUDE_CONFIG_DIR, so a launch cannot silently run on the seat store.
+if [ "$HARNESS" = claude ] && [ "$KIND" != secondmate ]; then
+  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CREW_PROFILE") $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
