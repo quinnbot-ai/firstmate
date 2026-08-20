@@ -124,8 +124,14 @@ SH
 
 # new_case <name> [id] -> echoes a case dir with a live claude ship task.
 new_case() {
-  local id=${2:-t1} dir="$TMP_ROOT/$1-$RANDOM"
-  mkdir -p "$dir/home/state" "$dir/home/data" "$dir/fake"
+  local id=${2:-t1} dir="$TMP_ROOT/$1-$RANDOM" profile
+  mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config" "$dir/fake"
+  profile="$dir/crew-claude-profile"
+  mkdir -p "$profile"
+  # A structural, non-production oauthAccount fixture.  Tests must never carry
+  # a real account identifier, email address, or credential value.
+  printf '%s\n' '{"claudeAiOauth":{"oauthAccount":{"fixture":true}}}' > "$profile/.credentials.json"
+  printf '%s\n' "$profile" > "$dir/home/config/crew-claude-profile"
   : > "$dir/fake/literal"
   : > "$dir/fake/keys"
   printf 'claude' > "$dir/fake/command"
@@ -249,7 +255,7 @@ SH
 # --- 1. same-harness relaunch -----------------------------------------------
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
-  local dir out rc gen_before gen_after
+  local dir out rc gen_before gen_after profile account profile_real
   dir=$(new_case same rl1)
   add_ship_task "$dir" rl1 claude
   gen_before=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" rl1)
@@ -270,6 +276,15 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
     || fail "the transaction journal should end complete"
   assert_grep "/exit" "$dir/fake/literal" "the previous agent should have been exited"
   assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement should have been launched"
+  profile=$(meta_field "$dir" rl1 claude_crew_profile)
+  profile_real=$(CDPATH='' cd -- "$dir/crew-claude-profile" && pwd -P)
+  [ "$profile" = "$profile_real" ] \
+    || fail "relaunch did not record its resolved Claude profile (got '$profile')"
+  account=$(meta_field "$dir" rl1 claude_oauth_account)
+  jq -e 'type == "object" and .fixture == true' <<<"$account" >/dev/null \
+    || fail "relaunch did not record a readable oauthAccount structure"
+  assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$profile_real'" \
+    "control relaunch did not inject the durable Claude profile"
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
 }
 
