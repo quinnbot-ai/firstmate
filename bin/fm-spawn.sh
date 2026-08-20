@@ -134,6 +134,10 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   A fresh local spawn writes a private current-task binding in that worktree's
+#   Git metadata before it publishes state/<id>.meta. A relaunch verifies the
+#   binding and refuses if a pooled worktree was reassigned, rather than claiming
+#   another task's live copy. bin/fm-worktree-binding-lib.sh owns the marker.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
@@ -258,6 +262,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
+# shellcheck source=bin/fm-worktree-binding-lib.sh
+. "$SCRIPT_DIR/fm-worktree-binding-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
@@ -2262,6 +2268,19 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
+fi
+
+# A pooled path is intentionally reusable, so the historical worktree= in an
+# older task's metadata cannot establish ownership. Bind a fresh assignment
+# before it publishes its metadata; a relaunch only proves that its recorded
+# binding remains exact and must never overwrite a newer task's binding.
+if [ "$RELAUNCH" -eq 1 ]; then
+  if ! fm_worktree_binding_matches "$WT" "$ID"; then
+    echo "error: task $ID's recorded worktree cannot be reused: $(fm_worktree_binding_detail); refusing to relaunch" >&2
+    exit 1
+  fi
+elif ! fm_worktree_binding_write "$WT" "$ID"; then
+  exit 1
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
