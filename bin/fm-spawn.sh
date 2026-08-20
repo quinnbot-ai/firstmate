@@ -138,6 +138,10 @@
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
 #   refuses the spawn rather than risking a PR based on stale history.
+#   Before dispatch, worker-directed bin/fm-*.sh references in the brief are
+#   resolved against that actual task worktree.  Missing helpers refuse the
+#   dispatch; descriptive prose mentions do not, so stale context cannot turn
+#   into a false stop (bin/fm-brief-script-reference-lib.sh).
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -260,6 +264,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-brief-script-reference-lib.sh
+. "$SCRIPT_DIR/fm-brief-script-reference-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -2263,6 +2269,12 @@ fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
+
+# Briefs can be generated long before a worker is dispatched, so check their
+# executable helper references only after the exact worktree is known and, for
+# fresh crewmates, refreshed to the remote default base.  This preserves the
+# per-home contract - a sibling checkout's bin/ is never used as evidence.
+fm_brief_refuse_missing_helper_scripts "$BRIEF_REAL" "$WT" || exit 1
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
