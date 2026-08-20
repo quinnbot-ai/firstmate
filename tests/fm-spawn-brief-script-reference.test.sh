@@ -74,6 +74,7 @@ run_spawn() {
 
 test_absent_variable_expanded_helper_refuses_at_task_worktree() {
   local id=brief-missing-var-a1 rec out status expected
+  # shellcheck disable=SC2016 # Fixture must preserve the literal brief variable.
   rec=$(make_case missing-variable "$id" 'Run `$FM_ROOT/bin/fm-missing-helper.sh` before editing.')
   read_case "$rec"
   mkdir -p "$HOME_DIR/bin"
@@ -90,6 +91,7 @@ test_absent_variable_expanded_helper_refuses_at_task_worktree() {
 
 test_present_helper_passes() {
   local id=brief-present-a2 rec out status
+  # shellcheck disable=SC2016 # Fixture must preserve the literal inline command.
   rec=$(make_case present-helper "$id" 'Run `bin/fm-present-helper.sh` before editing.' fm-present-helper.sh)
   read_case "$rec"
 
@@ -116,6 +118,7 @@ test_fenced_command_reference_refuses() {
 
 test_prose_only_mention_does_not_refuse() {
   local id=brief-prose-a4 rec out status
+  # shellcheck disable=SC2016 # Fixture must preserve the literal prose mention.
   rec=$(make_case prose-only "$id" 'The dispatcher uses `$FM_ROOT/bin/fm-prose-only.sh` only as historical context.')
   read_case "$rec"
 
