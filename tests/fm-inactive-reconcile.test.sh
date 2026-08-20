@@ -105,7 +105,11 @@ run_reconcile() { # <home> [--startup]
 }
 
 wake_count() { # <home> <key prefix>
-  grep -c "$2" "$1/state/.wake-queue" 2>/dev/null || true
+  if [ -f "$1/state/.wake-queue" ]; then
+    grep -c "$2" "$1/state/.wake-queue" 2>/dev/null || true
+  else
+    printf '0\n'
+  fi
 }
 
 outcome_count() { # <home> <suffix>
@@ -120,12 +124,18 @@ prime_seen() { # <state> <status>
 
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
-# The main retains a terminal presentation receipt until the corresponding wake
-# is handled and acknowledged.
-test_main_direct_terminal_presentation_receipt() {
+# A stale promotion task can keep appending hold/status context after its
+# terminal endpoint was reported, even after its backlog row has been pruned.
+# That context must not manufacture a second terminal outcome for the same
+# worker incarnation, while a replacement worker with the same task id remains
+# a genuinely new outcome.
+test_main_promotion_terminal_presentation_receipt() {
   local err seq generation
-  make_world main-direct; write_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
-  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  make_world main-promotion
+  write_child "$MAIN" weho-promotion-symlink-hardening 'paused: PR 42 is preserved pending the captain decision' spawn-promotion-one
+  printf '%s\n' '- [ ] weho-promotion-symlink-hardening - retained terminal work' > "$MAIN/data/backlog.md"
+  rm -f "$MAIN/data/backlog.md"
+  FM_FAKE_CREW_STATE='failed' run_reconcile "$MAIN" --startup
   [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] || fail "main did not queue terminal presentation"
   [ "$(outcome_count "$MAIN" pending)" = 1 ] || fail "main did not retain presentation receipt"
 
@@ -136,7 +146,59 @@ test_main_direct_terminal_presentation_receipt() {
   [ -n "$seq" ] && [ -n "$generation" ] || fail "main presentation did not require durable acknowledgement"
   FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$DRAIN" --ack-through "$seq" --recovery-generation "$generation"
   [ "$(outcome_count "$MAIN" presented)" = 1 ] || fail "acknowledged presentation did not receive its own receipt"
-  pass "main direct terminal presentation has a durable receipt"
+
+  # This is the weho shape: a later status line describes the same captain hold
+  # after the terminal outcome was already handled, and the task's backlog row
+  # is no longer available to deduplicate it.
+  printf '%s\n' 'paused: PR 42 remains preserved pending the same captain decision' \
+    >> "$MAIN/state/weho-promotion-symlink-hardening.status"
+  age "$MAIN/state/weho-promotion-symlink-hardening.status"
+  FM_FAKE_CREW_STATE='failed' run_reconcile "$MAIN" --startup
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 0 ] \
+    || fail "handled promotion outcome was re-announced after a status update"
+  [ "$(outcome_count "$MAIN" presented)" = 1 ] \
+    || fail "handled promotion outcome did not survive restart/pruned backlog"
+
+  rm -f "$MAIN/state/weho-promotion-symlink-hardening.meta" \
+    "$MAIN/state/weho-promotion-symlink-hardening.status" \
+    "$MAIN/state/weho-promotion-symlink-hardening.turn-ended"
+  write_child "$MAIN" weho-promotion-symlink-hardening 'done: replacement worker completed' spawn-promotion-two
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] \
+    || fail "new promotion-worker incarnation did not surface"
+  pass "handled promotion outcomes survive restart/pruning without suppressing a new incarnation"
+}
+
+# A presentation receipt created before the stable identity change still means
+# the outcome was handled after this upgrade, even though its old filename was
+# derived from mutable status context.
+test_legacy_presentation_receipt_remains_handled() {
+  local record
+  make_world legacy-presentation
+  write_child "$MAIN" child 'paused: earlier terminal context' spawn-legacy
+  mkdir -p "$MAIN/state/terminal-outcomes"
+  record="$MAIN/state/terminal-outcomes/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.presented"
+  cat > "$record" <<'EOF'
+schema=fm-terminal-outcome.v1
+fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+task_id=child
+incarnation=spawn-legacy
+state=failed
+outcome_key=inactive-outcome-main-child-failed
+origin=direct
+phase=presentation
+pr=
+created_epoch=1
+notice_emitted=0
+EOF
+  printf '%s\n' 'paused: later context after the handled terminal outcome' >> "$MAIN/state/child.status"
+  age "$MAIN/state/child.status"
+  FM_FAKE_CREW_STATE='failed' run_reconcile "$MAIN" --startup
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 0 ] \
+    || fail "legacy handled receipt was re-announced after status context changed"
+  [ "$(outcome_count "$MAIN" presented)" = 1 ] \
+    || fail "legacy handled receipt was not retained"
+  pass "legacy presentation receipts remain handled across the identity upgrade"
 }
 
 # A secondmate independently reports a genuinely terminal inactive child.
@@ -444,7 +506,8 @@ test_reconciliation_never_calls_forge() {
   pass "reconciliation makes zero forge or PR API calls"
 }
 
-test_main_direct_terminal_presentation_receipt
+test_main_promotion_terminal_presentation_receipt
+test_legacy_presentation_receipt_remains_handled
 test_local_secondmate_reports_terminal_child
 test_local_secondmate_rejects_relative_parent_home
 test_invalid_secondmate_marker_blocks_routing
