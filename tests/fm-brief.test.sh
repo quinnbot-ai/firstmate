@@ -319,6 +319,26 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   pass "fm-brief.sh: faster paths use configured authority without stacked review"
 }
 
+# Direct-PR workers must receive the supported GitHub CLI in the generated
+# contract.  A brief that points at a removed local wrapper turns a routine
+# delivery step into a false blocker, so assert the rendered artifact rather
+# than the implementation source.
+test_direct_pr_brief_uses_supported_github_cli() {
+  local home id brief
+  home="$TMP_ROOT/direct-pr-github-cli-home"
+  mkdir -p "$home/data"
+  id="brief-direct-pr-github-cli-a5"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "direct-PR GitHub CLI fixture could not scaffold"
+  brief="$home/data/$id/brief.md"
+  # shellcheck disable=SC2016 # Backticks are literal generated-brief syntax.
+  assert_grep 'open a PR with `gh-axi`' "$brief" \
+    "direct-PR brief did not name gh-axi as its GitHub path"
+  assert_no_grep 'fm-gh.sh' "$brief" \
+    "direct-PR brief referred to removed fm-gh.sh"
+  pass "fm-brief.sh: direct-PR briefs use gh-axi and never a removed wrapper"
+}
+
 # Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
 # reference must render as plain prose with no dangling apostrophe artifact.
 test_no_mistakes_dod_wording() {
@@ -720,6 +740,7 @@ test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
+test_direct_pr_brief_uses_supported_github_cli
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
