@@ -136,7 +136,8 @@ run_spawn() {
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_TEST_BYPASS_CLAUDE_CREDENTIAL_GUARD='' \
+    FM_TEST_CLAUDE_CREDENTIAL_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_TEST_CLAUDE_CREW_PROFILE_DEFAULT="${FM_TEST_CLAUDE_CREW_PROFILE_DEFAULT:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
@@ -167,7 +168,7 @@ assert_meta_profile() {
 
 test_no_profile_keeps_claude_profile_defaults() {
   local rec id out status launch
-  id=profile-off-z1
+  id="profile-off-z1"
   rec=$(make_spawn_case profile-off claude "$id")
   read_case_record "$rec"
 
@@ -187,7 +188,7 @@ test_no_profile_keeps_claude_profile_defaults() {
 
 test_non_cursor_launch_clears_inherited_cursor_markers() {
   local rec id out status launch
-  id=profile-claude-cursor-markers-z1b
+  id="profile-claude-cursor-markers-z1b"
   rec=$(make_spawn_case profile-claude-cursor-markers claude "$id")
   read_case_record "$rec"
 
@@ -203,7 +204,7 @@ test_non_cursor_launch_clears_inherited_cursor_markers() {
 
 test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
   local rec id out status launch home_real
-  id=profile-relative-paths-z1b
+  id="profile-relative-paths-z1b"
   rec=$(make_spawn_case profile-relative-paths pi "$id")
   read_case_record "$rec"
   home_real=$(cd "$HOME_DIR" && pwd -P)
@@ -232,8 +233,8 @@ test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
 
 test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
   local rec relative_id absolute_id out status launch home_real linked_home
-  relative_id=profile-relative-home-defaults-z1c
-  absolute_id=profile-absolute-home-defaults-z1d
+  relative_id="profile-relative-home-defaults-z1c"
+  absolute_id="profile-absolute-home-defaults-z1d"
   rec=$(make_spawn_case profile-home-defaults pi "$relative_id" "$absolute_id")
   read_case_record "$rec"
   home_real=$(cd "$HOME_DIR" && pwd -P)
@@ -281,7 +282,7 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
 
 test_absolute_override_spelling_is_preserved_in_launch_paths() {
   local rec id out status launch linked_home
-  id=profile-absolute-paths-z1c
+  id="profile-absolute-paths-z1c"
   rec=$(make_spawn_case profile-absolute-paths pi "$id")
   read_case_record "$rec"
   linked_home="$CASE_DIR/home-link"
@@ -309,7 +310,7 @@ test_absolute_override_spelling_is_preserved_in_launch_paths() {
 
 test_unresolvable_relative_overrides_fail_loudly() {
   local rec id out status
-  id=profile-unresolvable-paths-z1d
+  id="profile-unresolvable-paths-z1d"
   rec=$(make_spawn_case profile-unresolvable-paths pi "$id")
   read_case_record "$rec"
 
@@ -350,7 +351,7 @@ test_unresolvable_relative_overrides_fail_loudly() {
 
 test_active_dispatch_profile_requires_explicit_harness_for_ship() {
   local rec id out status
-  id=profile-required-ship-z11
+  id="profile-required-ship-z11"
   rec=$(make_spawn_case profile-required-ship claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
@@ -366,7 +367,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_ship() {
 
 test_active_dispatch_profile_requires_explicit_harness_for_scout() {
   local rec id out status
-  id=profile-required-scout-z12
+  id="profile-required-scout-z12"
   rec=$(make_spawn_case profile-required-scout claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
@@ -382,7 +383,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout() {
 
 test_active_dispatch_profile_allows_explicit_harness() {
   local rec id out status launch
-  id=profile-explicit-z13
+  id="profile-explicit-z13"
   rec=$(make_spawn_case profile-explicit claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
@@ -401,7 +402,7 @@ test_active_dispatch_profile_allows_explicit_harness() {
 
 test_active_dispatch_profile_allows_positional_harness() {
   local rec id out status
-  id=profile-positional-z14
+  id="profile-positional-z14"
   rec=$(make_spawn_case profile-positional claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
@@ -417,7 +418,7 @@ test_active_dispatch_profile_allows_positional_harness() {
 
 test_active_dispatch_profile_allows_raw_launch_command() {
   local rec id out status launch
-  id=profile-raw-z15
+  id="profile-raw-z15"
   rec=$(make_spawn_case profile-raw claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
@@ -435,7 +436,7 @@ test_active_dispatch_profile_allows_raw_launch_command() {
 
 test_claude_threads_model_and_effort() {
   local rec id out status launch
-  id=profile-claude-z2
+  id="profile-claude-z2"
   rec=$(make_spawn_case profile-claude claude "$id")
   read_case_record "$rec"
 
@@ -452,7 +453,7 @@ test_claude_threads_model_and_effort() {
 
 test_codex_threads_model_and_effort() {
   local rec id out status launch
-  id=profile-codex-z3
+  id="profile-codex-z3"
   rec=$(make_spawn_case profile-codex codex "$id")
   read_case_record "$rec"
 
@@ -468,7 +469,7 @@ test_codex_threads_model_and_effort() {
 
 test_codex_omits_invalid_max_effort() {
   local rec id out status launch
-  id=profile-codex-max-z4
+  id="profile-codex-max-z4"
   rec=$(make_spawn_case profile-codex-max codex "$id")
   read_case_record "$rec"
 
@@ -485,7 +486,7 @@ test_codex_omits_invalid_max_effort() {
 
 test_grok_threads_model_and_reasoning_effort() {
   local rec id out status launch
-  id=profile-grok-z5
+  id="profile-grok-z5"
   rec=$(make_spawn_case profile-grok grok "$id")
   read_case_record "$rec"
 
@@ -502,7 +503,7 @@ test_grok_threads_model_and_reasoning_effort() {
 
 test_grok_omits_invalid_max_reasoning_effort() {
   local rec id out status launch
-  id=profile-grok-max-z6
+  id="profile-grok-max-z6"
   rec=$(make_spawn_case profile-grok-max grok "$id")
   read_case_record "$rec"
 
@@ -520,7 +521,7 @@ test_grok_omits_invalid_max_reasoning_effort() {
 
 test_grok_omits_invalid_xhigh_reasoning_effort() {
   local rec id out status launch
-  id=profile-grok-xhigh-z6b
+  id="profile-grok-xhigh-z6b"
   rec=$(make_spawn_case profile-grok-xhigh grok "$id")
   read_case_record "$rec"
 
@@ -539,7 +540,7 @@ test_grok_omits_invalid_xhigh_reasoning_effort() {
 
 test_cursor_threads_model_workspace_and_omits_effort_axis() {
   local rec id out status launch
-  id=profile-cursor-z6c
+  id="profile-cursor-z6c"
   rec=$(make_spawn_case profile-cursor cursor "$id")
   read_case_record "$rec"
 
@@ -573,7 +574,7 @@ test_cursor_threads_model_workspace_and_omits_effort_axis() {
 
 test_cursor_refuses_model_absent_from_live_catalog() {
   local rec id out status
-  id=profile-cursor-unsupported-z6d
+  id="profile-cursor-unsupported-z6d"
   rec=$(make_spawn_case profile-cursor-unsupported cursor "$id")
   read_case_record "$rec"
 
@@ -591,7 +592,7 @@ test_cursor_refuses_model_absent_from_live_catalog() {
 
 test_cursor_failed_catalog_probe_does_not_block_spawn() {
   local rec id out status launch
-  id=profile-cursor-catalog-unreachable-z6e
+  id="profile-cursor-catalog-unreachable-z6e"
   rec=$(make_spawn_case profile-cursor-catalog-unreachable cursor "$id")
   read_case_record "$rec"
 
@@ -609,7 +610,7 @@ test_cursor_failed_catalog_probe_does_not_block_spawn() {
 
 test_opencode_threads_model_and_ignores_effort_axis() {
   local rec id out status launch
-  id=profile-opencode-z7
+  id="profile-opencode-z7"
   rec=$(make_spawn_case profile-opencode opencode "$id")
   read_case_record "$rec"
 
@@ -628,7 +629,7 @@ test_opencode_threads_model_and_ignores_effort_axis() {
 
 test_pi_threads_model_and_max_effort() {
   local rec id out status launch
-  id=profile-pi-z8
+  id="profile-pi-z8"
   rec=$(make_spawn_case profile-pi pi "$id")
   read_case_record "$rec"
 
@@ -649,7 +650,7 @@ test_pi_threads_model_and_max_effort() {
 
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   local rec id out status launch
-  id=profile-pi-signed-z8b
+  id="profile-pi-signed-z8b"
   rec=$(make_spawn_case profile-pi-signed pi-signed "$id")
   read_case_record "$rec"
 
@@ -712,7 +713,7 @@ test_pi_tui_mode_probe_is_safe_for_old_and_new_pi() {
 
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata() {
   local rec id out status
-  id=profile-pi-signed-missing-z8c
+  id="profile-pi-signed-missing-z8c"
   rec=$(make_spawn_case profile-pi-signed-missing pi-signed "$id")
   read_case_record "$rec"
   rm -f "$FAKEBIN_DIR/pi-signed"
@@ -735,7 +736,7 @@ test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata() {
 
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   local rec id sm out status launch
-  id=profile-pi-signed-secondmate-z8d
+  id="profile-pi-signed-secondmate-z8d"
   rec=$(make_spawn_case profile-pi-signed-secondmate codex "$id")
   read_case_record "$rec"
   printf '%s\n' pi-signed > "$HOME_DIR/config/secondmate-harness"
@@ -757,8 +758,8 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
 
 test_batch_forwards_shared_profile_flags() {
   local rec id1 id2 out status
-  id1=profile-batch-a-z9
-  id2=profile-batch-b-z10
+  id1="profile-batch-a-z9"
+  id2="profile-batch-b-z10"
   rec=$(make_spawn_case profile-batch claude "$id1" "$id2")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
@@ -776,7 +777,7 @@ test_batch_forwards_shared_profile_flags() {
 
 test_claude_ignores_ambient_config_dir() {
   local rec id out status launch profile
-  id=profile-claude-cfgdir-z17
+  id="profile-claude-cfgdir-z17"
   rec=$(make_spawn_case profile-claude-cfgdir claude "$id")
   read_case_record "$rec"
 
@@ -795,7 +796,7 @@ test_claude_ignores_ambient_config_dir() {
 
 test_claude_absent_profile_uses_standing_default() {
   local rec id out status launch
-  id=profile-claude-nocfgdir-z18
+  id="profile-claude-nocfgdir-z18"
   rec=$(make_spawn_case profile-claude-nocfgdir claude "$id")
   read_case_record "$rec"
   rm -f "$HOME_DIR/config/crew-claude-profile"
@@ -815,7 +816,7 @@ test_claude_absent_profile_uses_standing_default() {
 
 test_claude_accepts_keychain_only_profile() {
   local rec id out status
-  id=profile-claude-keychain-only-z23
+  id="profile-claude-keychain-only-z23"
   rec=$(make_spawn_case profile-claude-keychain-only claude "$id")
   read_case_record "$rec"
 
@@ -834,7 +835,7 @@ test_claude_accepts_keychain_only_profile() {
 
 test_claude_refuses_missing_keychain_credential_before_launch() {
   local rec id out status
-  id=profile-claude-keychain-missing-z21
+  id="profile-claude-keychain-missing-z21"
   rec=$(make_spawn_case profile-claude-keychain-missing claude "$id")
   read_case_record "$rec"
 
@@ -851,7 +852,7 @@ test_claude_refuses_missing_keychain_credential_before_launch() {
 
 test_claude_reads_identity_from_configured_profile_only() {
   local rec id out status ambient
-  id=profile-claude-identity-exact-z22
+  id="profile-claude-identity-exact-z22"
   rec=$(make_spawn_case profile-claude-identity-exact claude "$id")
   read_case_record "$rec"
   ambient="$CASE_DIR/ambient-profile"
@@ -872,7 +873,7 @@ test_claude_reads_identity_from_configured_profile_only() {
 
 test_non_claude_harness_ignores_config_dir() {
   local rec id out status launch
-  id=profile-codex-nocfgdir-z19
+  id="profile-codex-nocfgdir-z19"
   rec=$(make_spawn_case profile-codex-nocfgdir codex "$id")
   read_case_record "$rec"
 
@@ -888,7 +889,7 @@ test_non_claude_harness_ignores_config_dir() {
 
 test_active_dispatch_profile_does_not_block_secondmate_launch() {
   local rec id sm out status
-  id=profile-secondmate-z16
+  id="profile-secondmate-z16"
   rec=$(make_spawn_case profile-secondmate codex "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"

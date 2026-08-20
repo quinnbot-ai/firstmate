@@ -1263,7 +1263,11 @@ claude_credential_service() {  # <canonical-config-dir> -> service name
 
 claude_credential_available() {  # <canonical-config-dir>
   local service
-  [ "$(uname)" = Darwin ] || return 1
+  # The portable behavior suite supplies a fake Keychain only when it is
+  # explicitly exercising this guard.  Production always requires macOS.
+  if [ "${FM_SPAWN_NO_GUARD:-}" != 1 ] || [ "${FM_TEST_CLAUDE_CREDENTIAL_GUARD:-}" != 1 ]; then
+    [ "$(uname)" = Darwin ] || return 1
+  fi
   command -v security >/dev/null 2>&1 || return 1
   service=$(claude_credential_service "$1") || return 1
   security find-generic-password -s "$service" >/dev/null 2>&1
@@ -1326,7 +1330,15 @@ resolve_claude_crew_profile() {
 }
 
 if [ "$HARNESS" = claude ] && [ "$KIND" != secondmate ]; then
-  resolve_claude_crew_profile || exit 1
+  # Existing hermetic spawn tests use FM_SPAWN_NO_GUARD for unrelated
+  # lifecycle guards.  They may opt out of this credential integration only
+  # with an additional test-only marker; ordinary and batched launches always
+  # retain the credential refusal.
+  if [ "${FM_SPAWN_NO_GUARD:-}" = 1 ] && [ "${FM_TEST_BYPASS_CLAUDE_CREDENTIAL_GUARD:-}" = 1 ]; then
+    :
+  else
+    resolve_claude_crew_profile || exit 1
+  fi
 fi
 
 case "$HARNESS" in
