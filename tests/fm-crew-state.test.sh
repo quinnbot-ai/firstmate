@@ -512,7 +512,11 @@ test_top_level_ci_checks_green_surfaces_done() {
   pass "top-level ci status uses ci log green marker"
 }
 
-test_ci_monitoring_no_checks_terminal_surfaces_done() {
+# A PR that reported NO checks at all has not passed - it has not been tested.
+# This marker used to be folded in with the genuine green marker and surfaced as
+# "done: checks green", which is how an untested PR reads as ready to merge.
+# It must now surface as unverified and never as done or green.
+test_ci_monitoring_no_checks_is_unverified_not_green() {
   reset_fakes
   local d; d=$(new_case ci-nochecks)
   make_repo_on_branch "$d/wt" fm/feat-cinochecks
@@ -521,9 +525,32 @@ test_ci_monitoring_no_checks_terminal_surfaces_done() {
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinochecks)"
   FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
   local out; out=$(run_crew_state "$d" feat-cinochecks)
-  assert_contains "$out" "state: done" "terminal no-checks ci-monitor run -> done"
-  assert_contains "$out" "checks green" "terminal no-checks ci-monitor detail mentions checks green"
-  pass "terminal no-checks ci-monitor marker surfaces done"
+  assert_not_contains "$out" "state: done" "no-checks ci-monitor run must not read as done"
+  assert_not_contains "$out" "checks green" "no-checks ci-monitor run must not read as checks green"
+  assert_contains "$out" "unverified" "no-checks ci-monitor detail must name the unverified state"
+  pass "no-checks ci-monitor marker surfaces unverified, never green"
+}
+
+# The harder half of the same rule: the crew ALSO wrote its own
+# "done: PR <url> checks green" status line. The ci log is the harder evidence -
+# it says nothing ever tested the PR - so the crew's own claim must not promote
+# the task to done on top of it.
+test_ci_monitoring_no_checks_beats_crew_checks_green_claim() {
+  reset_fakes
+  local d; d=$(new_case ci-nochecks-claimed-green)
+  make_repo_on_branch "$d/wt" fm/feat-cinochecksclaim
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cinochecksclaim.meta" \
+    "window=fm:fm-feat-cinochecksclaim" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/148 checks green\n' \
+    > "$d/state/feat-cinochecksclaim.status"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinochecksclaim)"
+  FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
+  local out; out=$(run_crew_state "$d" feat-cinochecksclaim)
+  assert_not_contains "$out" "state: done" \
+    "an untested PR must not read as done just because the crew claimed checks green"
+  assert_contains "$out" "unverified" "detail must name the unverified state"
+  pass "crew checks-green claim cannot override a no-checks ci log"
 }
 
 test_ci_monitoring_green_then_rearm_stays_working() {
@@ -1521,7 +1548,8 @@ test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
-test_ci_monitoring_no_checks_terminal_surfaces_done
+test_ci_monitoring_no_checks_is_unverified_not_green
+test_ci_monitoring_no_checks_beats_crew_checks_green_claim
 test_ci_monitoring_green_then_rearm_stays_working
 test_ci_monitoring_no_checks_yet_stays_working
 test_ci_monitoring_still_waiting_stays_working

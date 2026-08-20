@@ -14,6 +14,9 @@
 #   (f) malformed PR URL fails fast without calling gh-axi
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL
+#   (i) a PR whose head carries NO check set is refused, not merged
+#   (j) an unreadable check set is refused the same way (fail closed)
+#   (k) --allow-unverified merges an untested PR deliberately, and says so
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -44,11 +47,22 @@ make_case() {
 
 # gh-axi mock recording every invocation to a log file, and gh mock answering
 # headRefOid for fm-pr-check.sh's pr_head lookup. Args: case_dir head_sha
+# The `api` arm answers bin/fm-pr-verify-lib.sh's CI verification gate the way a
+# real PR with checks does: a readable head SHA and a non-empty check set. Only
+# the merge-gate cases below drive it to the unverified and unreadable answers.
 add_gh_mocks() {
   local case_dir=$1 head=$2
-  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+  cat > "$case_dir/fakebin/gh-axi" <<SH
 #!/usr/bin/env bash
-printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+printf '%s\n' "\$*" >> "\$FM_TEST_GH_AXI_LOG"
+if [ "\${1:-}" = api ]; then
+  case " \$* " in
+    *.head.sha*)     printf '%s\n' '$head' ;;
+    *check-runs*)    printf '%s\n' "\${FM_TEST_CHECK_RUNS-12}" ;;
+    *commits/*status*) printf '%s\n' "\${FM_TEST_STATUSES-0}" ;;
+    *mergeable_state*) printf '%s\n' "\${FM_TEST_MERGEABLE-clean}" ;;
+  esac
+fi
 exit 0
 SH
   cat > "$case_dir/fakebin/gh" <<SH
@@ -75,6 +89,13 @@ printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 case "${1:-} ${2:-}" in
   "pr merge") echo "error: pr merge failed" >&2 ; exit 1 ;;
 esac
+if [ "${1:-}" = api ]; then
+  case " $* " in
+    *.head.sha*)     printf '%s\n' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' ;;
+    *check-runs*)    printf '%s\n' '12' ;;
+    *commits/*status*) printf '%s\n' '0' ;;
+  esac
+fi
 exit 0
 SH
   cat > "$case_dir/fakebin/gh" <<'SH'
@@ -89,6 +110,9 @@ run_pr_merge() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+  FM_TEST_CHECK_RUNS="${FM_TEST_CHECK_RUNS-12}" \
+  FM_TEST_STATUSES="${FM_TEST_STATUSES-0}" \
+  FM_TEST_MERGEABLE="${FM_TEST_MERGEABLE-clean}" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
   rc=$?
@@ -301,6 +325,106 @@ test_parses_pr_url_for_gh_axi() {
   pass "fm-pr-merge parses a GitHub PR URL into gh-axi number and --repo arguments"
 }
 
+# gh-axi mock whose api arm returns an error instead of a value. It prints the
+# real `error:`/`code:` shape on stdout but exits ZERO, which is deliberately
+# harsher than the real CLI (which exits 2): it proves the gate refuses on the
+# shape of the answer and does not lean on exit status alone.
+add_gh_mocks_api_unreadable() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+if [ "${1:-}" = api ]; then
+  printf '%s\n' 'error: Validation error'
+  printf '%s\n' 'code: VALIDATION_ERROR'
+fi
+exit 0
+SH
+  cat > "$case_dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+# THE REGRESSION this gate exists for. A PR whose head carries no check runs and
+# no commit statuses has not passed - nothing tested it. Before the gate,
+# fm-pr-merge merged it without ever looking, so an untested PR landed exactly
+# as quietly as a green one. It must now refuse, and it must name the conflict
+# cause when GitHub reports one, because a conflicted PR never gets a merge
+# commit for pull_request workflows to run against.
+test_absent_check_set_refuses_merge() {
+  local case_dir rc
+  case_dir=$(make_case no-check-set)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  FM_TEST_CHECK_RUNS=0 FM_TEST_STATUSES=0 FM_TEST_MERGEABLE=dirty \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/148 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 4 "$rc" "no-check-set: fm-pr-merge should refuse an untested PR"
+  assert_grep 'CI is unverified, not green' "$case_dir/stderr" \
+    "no-check-set: refusal did not report the PR as unverified"
+  assert_grep 'no check runs and no commit statuses' "$case_dir/stderr" \
+    "no-check-set: refusal did not say what was absent"
+  assert_grep 'conflicts with its base' "$case_dir/stderr" \
+    "no-check-set: refusal did not name the conflict as the cause"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "no-check-set: gh-axi pr merge was invoked for an untested PR"
+  # The PR stays recorded and monitored: refusing the merge must not also
+  # forget the PR.
+  assert_grep 'pr=https://github.com/example/repo/pull/148' "$case_dir/state/task-x1.meta" \
+    "no-check-set: pr= should still be recorded so the PR stays monitored"
+  pass "fm-pr-merge refuses to merge a PR whose head carries no check set"
+}
+
+test_unreadable_check_set_refuses_merge() {
+  local case_dir rc
+  case_dir=$(make_case unreadable-check-set)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks_api_unreadable "$case_dir"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/77 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 4 "$rc" "unreadable-check-set: fm-pr-merge should refuse when it cannot read the checks"
+  assert_grep 'CI is unverified, not green' "$case_dir/stderr" \
+    "unreadable-check-set: refusal did not report the PR as unverified"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "unreadable-check-set: gh-axi pr merge was invoked on unreadable evidence"
+  pass "fm-pr-merge refuses to merge when the check set cannot be read"
+}
+
+# A repository with genuinely no PR CI still has to be mergeable, but only as a
+# stated decision that prints what it is overriding.
+test_allow_unverified_merges_and_warns() {
+  local case_dir
+  case_dir=$(make_case allow-unverified)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" cccccccccccccccccccccccccccccccccccccccc
+  : > "$case_dir/gh-axi.log"
+
+  FM_TEST_CHECK_RUNS=0 FM_TEST_STATUSES=0 \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/31 --allow-unverified \
+      > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "allow-unverified: fm-pr-merge should merge when the override is passed"
+
+  grep -qxF 'pr merge 31 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "allow-unverified: gh-axi pr merge was not invoked with the default --squash"
+  assert_grep 'without CI verification' "$case_dir/stderr" \
+    "allow-unverified: the override merged silently instead of saying what it overrode"
+  pass "fm-pr-merge --allow-unverified merges an untested PR and reports that it did"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
@@ -311,3 +435,6 @@ test_repo_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi
+test_absent_check_set_refuses_merge
+test_unreadable_check_set_refuses_merge
+test_allow_unverified_merges_and_warns
