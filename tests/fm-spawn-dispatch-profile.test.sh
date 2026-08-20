@@ -80,7 +80,7 @@ SH
 }
 
 make_spawn_case() {
-  local name=$1 harness=$2 case_dir home proj wt fakebin launchlog id
+  local name=$1 harness=$2 case_dir home proj wt fakebin launchlog profile id
   shift 2
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
@@ -90,6 +90,12 @@ make_spawn_case() {
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
   printf '%s\n' "$harness" > "$home/config/crew-harness"
+  profile="$case_dir/crew-claude-profile"
+  mkdir -p "$profile"
+  # A structural, non-production oauthAccount fixture.  Tests must never carry
+  # a real account identifier, email address, or credential value.
+  printf '%s\n' '{"claudeAiOauth":{"oauthAccount":{"fixture":true}}}' > "$profile/.credentials.json"
+  printf '%s\n' "$profile" > "$home/config/crew-claude-profile"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   touch "$home/state/.last-watcher-beat"
   for id in "$@"; do
@@ -117,10 +123,8 @@ run_spawn() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
   shift 4
   : > "$launchlog"
-  # CLAUDE_CONFIG_DIR is forwarded onto claude launches by fm-spawn, so pin it
-  # explicitly (empty by default) instead of leaking the invoking shell's value,
-  # which would make launch assertions depend on the developer's environment.
-  # A test opts in to the set case via FM_TEST_CLAUDE_CONFIG_DIR.
+  # Pin an ambient directory separately from the durable config so tests prove
+  # fm-spawn never treats the caller environment as its credential authority.
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
@@ -153,7 +157,7 @@ assert_meta_profile() {
 }
 
 test_no_profile_keeps_claude_profile_defaults() {
-  local rec id out status expected launch
+  local rec id out status expected launch account profile
   id=profile-off-z1
   rec=$(make_spawn_case profile-off claude "$id")
   read_case_record "$rec"
@@ -165,8 +169,14 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  profile=$(CDPATH='' cd -- "$CASE_DIR/crew-claude-profile" && pwd -P)
+  expected="CLAUDE_CONFIG_DIR='$profile' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+  assert_grep "claude_crew_profile=$profile" "$HOME_DIR/state/$id.meta" \
+    "Claude metadata did not record the resolved durable profile"
+  account=$(grep '^claude_oauth_account=' "$HOME_DIR/state/$id.meta" | cut -d= -f2-)
+  jq -e 'type == "object" and .fixture == true' <<<"$account" >/dev/null \
+    || fail "Claude metadata did not record a readable oauthAccount structure"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
 
@@ -759,37 +769,62 @@ test_batch_forwards_shared_profile_flags() {
   pass "batch dispatch forwards shared --harness, --model, and --effort to every pair"
 }
 
-test_claude_forwards_firstmate_config_dir_when_set() {
-  local rec id out status launch
+test_claude_ignores_ambient_config_dir() {
+  local rec id out status launch profile
   id=profile-claude-cfgdir-z17
   rec=$(make_spawn_case profile-claude-cfgdir claude "$id")
   read_case_record "$rec"
 
-  out=$(FM_TEST_CLAUDE_CONFIG_DIR="/opt/test/claude-work" \
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/stale-sibling-profile" \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
-  expect_code 0 "$status" "claude spawn with CLAUDE_CONFIG_DIR set should succeed"
+  expect_code 0 "$status" "Claude spawn with an ambient profile should succeed from durable config"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
-    "claude launch did not forward firstmate's CLAUDE_CONFIG_DIR to the crewmate pane"
-  pass "claude forwards firstmate's CLAUDE_CONFIG_DIR so the crewmate uses the same credential store"
+  profile=$(CDPATH='' cd -- "$CASE_DIR/crew-claude-profile" && pwd -P)
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$profile' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
+    "Claude launch did not use the durable profile path"
+  assert_not_contains "$launch" "stale-sibling-profile" \
+    "Claude launch accepted the ambient profile path"
+  pass "Claude ignores ambient CLAUDE_CONFIG_DIR and uses only the durable profile"
 }
 
-test_claude_omits_config_dir_prefix_when_unset() {
-  local rec id out status launch
+test_claude_refuses_unset_profile_even_with_ambient_sibling() {
+  local rec id out status
   id=profile-claude-nocfgdir-z18
   rec=$(make_spawn_case profile-claude-nocfgdir claude "$id")
   read_case_record "$rec"
+  rm -f "$HOME_DIR/config/crew-claude-profile"
 
-  # run_spawn pins CLAUDE_CONFIG_DIR empty by default, exercising the single-store
-  # default path where fm-spawn adds no prefix.
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/crew-claude-profile" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
-  expect_code 0 "$status" "claude spawn without CLAUDE_CONFIG_DIR should succeed"
-  launch=$(cat "$LAUNCH_LOG")
-  assert_not_contains "$launch" "CLAUDE_CONFIG_DIR=" \
-    "claude launch must not add a config-dir prefix when firstmate has no CLAUDE_CONFIG_DIR set"
-  pass "claude omits the config-dir prefix when firstmate runs with the single-store default"
+  [ "$status" -ne 0 ] || fail "Claude spawn without config/crew-claude-profile unexpectedly succeeded"
+  assert_contains "$out" "Claude crew profile is required" \
+    "unset Claude profile did not name its refusal"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "unset Claude profile wrote task metadata before refusal"
+  [ ! -s "$LAUNCH_LOG" ] || fail "unset Claude profile sent a launch command"
+  pass "Claude refuses an unset profile instead of accepting an ambient sibling"
+}
+
+test_claude_refuses_missing_configured_profile_even_with_stale_sibling() {
+  local rec id out status stale
+  id=profile-claude-missing-z20
+  rec=$(make_spawn_case profile-claude-missing claude "$id")
+  read_case_record "$rec"
+  stale="$CASE_DIR/stale-sibling-profile"
+  mkdir -p "$stale"
+  printf '%s\n' '{"claudeAiOauth":{"oauthAccount":{"fixture":true}}}' > "$stale/.credentials.json"
+  printf '%s\n' "$CASE_DIR/configured-profile-is-missing" > "$HOME_DIR/config/crew-claude-profile"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$stale" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "configured missing Claude profile unexpectedly succeeded from a stale sibling"
+  assert_contains "$out" "Claude crew profile directory is missing or unsafe" \
+    "missing configured Claude profile did not name its refusal"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "missing configured profile wrote task metadata before refusal"
+  [ ! -s "$LAUNCH_LOG" ] || fail "missing configured profile sent a launch command"
+  pass "a stale sibling profile cannot satisfy the exact configured-profile check"
 }
 
 test_non_claude_harness_ignores_config_dir() {
@@ -853,8 +888,9 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags
-test_claude_forwards_firstmate_config_dir_when_set
-test_claude_omits_config_dir_prefix_when_unset
+test_claude_ignores_ambient_config_dir
+test_claude_refuses_unset_profile_even_with_ambient_sibling
+test_claude_refuses_missing_configured_profile_even_with_stale_sibling
 test_non_claude_harness_ignores_config_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch
 

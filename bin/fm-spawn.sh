@@ -182,6 +182,13 @@
 # success line and state/<id>.meta omit them.
 # Every fresh spawn or relaunch records a new spawn_gen= incarnation token so durable
 # consumers can distinguish a replacement worker that reuses the same task id.
+# Claude crewmate and scout launches resolve their credential store solely from
+# config/crew-claude-profile.  The file names the profile directory, and its
+# .credentials.json must contain a readable claudeAiOauth.oauthAccount value.
+# An absent, malformed, or unavailable profile refuses the launch rather than
+# falling back to the launcher's default Claude store.  The resolved path and
+# compact account identity are recorded in task metadata for after-the-fact
+# attribution.  This local config is inherited into secondmate homes.
 # When the home session's frozen trace-context decision is enabled (see
 # docs/configuration.md and bin/fm-trace-context-lib.sh), the meta also records
 # one W3C traceparent= carrier, the same value injected into the pane as
@@ -1225,6 +1232,66 @@ esac
 if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
   echo "error: muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
+fi
+
+# resolve_claude_crew_profile establishes the only credential directory a
+# Claude crewmate can use.  Do not read CLAUDE_CONFIG_DIR here: tool calls do
+# not preserve shell state, and an ambient value can silently select the seat's
+# default credential store.  The account value is compact JSON so it is one
+# safe metadata line, never a shell argument assembled from unparsed input.
+CLAUDE_CREW_PROFILE=
+CLAUDE_CREW_OAUTH_ACCOUNT=
+resolve_claude_crew_profile() {
+  local config_file raw_profile profile credentials account
+  config_file="$CONFIG/crew-claude-profile"
+  if [ ! -f "$config_file" ] || [ -L "$config_file" ]; then
+    echo "error: Claude crew profile is required at $config_file; refusing to fall back to the default Claude store" >&2
+    return 1
+  fi
+  raw_profile=$(awk '!/^[[:space:]]*(#|$)/ { print; exit }' "$config_file" 2>/dev/null) || {
+    echo "error: Claude crew profile at $config_file cannot be read" >&2
+    return 1
+  }
+  if [ -z "$raw_profile" ]; then
+    echo "error: Claude crew profile at $config_file is empty; refusing to fall back to the default Claude store" >&2
+    return 1
+  fi
+  case "$raw_profile" in
+    /*) profile=$raw_profile ;;
+    *)
+      profile=$(CDPATH='' cd -- "$CONFIG/$raw_profile" 2>/dev/null && pwd -P) || {
+        echo "error: Claude crew profile directory from $config_file cannot be resolved: $raw_profile" >&2
+        return 1
+      }
+      ;;
+  esac
+  if [ ! -d "$profile" ] || [ -L "$profile" ]; then
+    echo "error: Claude crew profile directory is missing or unsafe: $profile" >&2
+    return 1
+  fi
+  profile=$(CDPATH='' cd -- "$profile" 2>/dev/null && pwd -P) || {
+    echo "error: Claude crew profile directory cannot be resolved: $raw_profile" >&2
+    return 1
+  }
+  credentials="$profile/.credentials.json"
+  if [ ! -f "$credentials" ] || [ -L "$credentials" ] || [ ! -r "$credentials" ]; then
+    echo "error: Claude crew profile has no readable .credentials.json: $profile" >&2
+    return 1
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "error: Claude crew profile requires jq to verify oauthAccount" >&2
+    return 1
+  fi
+  account=$(jq -ce '.claudeAiOauth.oauthAccount | select(. != null and . != "")' "$credentials" 2>/dev/null) || {
+    echo "error: Claude crew profile has no readable oauthAccount: $profile" >&2
+    return 1
+  }
+  CLAUDE_CREW_PROFILE=$profile
+  CLAUDE_CREW_OAUTH_ACCOUNT=$account
+}
+
+if [ "$HARNESS" = claude ] && [ "$KIND" != secondmate ]; then
+  resolve_claude_crew_profile || exit 1
 fi
 
 case "$HARNESS" in
@@ -2632,7 +2699,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id claude_crew_profile claude_oauth_account home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2650,6 +2717,10 @@ preserve_relaunch_meta() {
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  if [ "$HARNESS" = claude ] && [ "$KIND" != secondmate ]; then
+    echo "claude_crew_profile=$CLAUDE_CREW_PROFILE"
+    echo "claude_oauth_account=$CLAUDE_CREW_OAUTH_ACCOUNT"
+  fi
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.
@@ -2732,15 +2803,12 @@ case "$HARNESS" in
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $LAUNCH"
     ;;
 esac
-# Crewmate panes are created by a long-lived tmux/herdr daemon that does not
-# inherit firstmate's current environment, so a bare `claude` in the pane falls
-# back to the default ~/.claude store even when firstmate itself runs under a
-# different CLAUDE_CONFIG_DIR (for example a work-vs-personal subscription split).
-# Forward firstmate's own resolved store onto the claude launch so the crewmate
-# uses the same credential/config firstmate is authenticated with. Only when set;
-# an unset value is the single-store default and needs no prefix.
-if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
-  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+# Crewmate panes are created by a long-lived backend daemon and cannot inherit
+# the launcher shell reliably.  Prefix the exact durable profile we validated,
+# never the ambient CLAUDE_CONFIG_DIR, so a missing config cannot silently run
+# the worker on the seat's default store.
+if [ "$HARNESS" = claude ] && [ "$KIND" != secondmate ]; then
+  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CREW_PROFILE") $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
