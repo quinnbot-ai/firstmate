@@ -182,6 +182,12 @@
 # success line and state/<id>.meta omit them.
 # Every fresh spawn or relaunch records a new spawn_gen= incarnation token so durable
 # consumers can distinguish a replacement worker that reuses the same task id.
+# Claude crewmate and scout launches resolve their credential store solely from
+# config/crew-claude-profile or the standing shared crew profile.
+# The exact selected directory must contain a structurally valid account_sha256
+# fingerprint and its matching Claude Code Keychain item.
+# An invalid declared profile or unavailable credential refuses the launch rather
+# than falling back to the launcher's default Claude store.
 # When the home session's frozen trace-context decision is enabled (see
 # docs/configuration.md and bin/fm-trace-context-lib.sh), the meta also records
 # one W3C traceparent= carrier, the same value injected into the pane as
@@ -1225,6 +1231,102 @@ esac
 if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
   echo "error: muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
+fi
+
+# resolve_claude_crew_profile establishes the only credential directory a
+# Claude crewmate can use. Do not read CLAUDE_CONFIG_DIR here: an ambient value
+# can silently select the seat's default credential store. The account
+# fingerprint check is deliberately read from this exact directory only.
+# Neither that identity nor the profile location is emitted or persisted.
+CLAUDE_CREW_PROFILE=
+claude_crew_default_profile() {
+  # Tests use an isolated fixture without changing the production default.
+  if [ "${FM_SPAWN_NO_GUARD:-}" = 1 ] && [ -n "${FM_TEST_CLAUDE_CREW_PROFILE_DEFAULT:-}" ]; then
+    printf '%s\n' "$FM_TEST_CLAUDE_CREW_PROFILE_DEFAULT"
+    return 0
+  fi
+  printf '%s\n' '/Users/nick/ventures/agent-ops/firstmate/data/claude-crewmate/profile'
+}
+
+claude_credential_service() {  # <canonical-config-dir> -> service name
+  local config_dir=$1 digest
+  if command -v shasum >/dev/null 2>&1; then
+    digest=$(printf '%s' "$config_dir" | shasum -a 256 2>/dev/null | awk '{print $1}') || return 1
+  elif command -v sha256sum >/dev/null 2>&1; then
+    digest=$(printf '%s' "$config_dir" | sha256sum 2>/dev/null | awk '{print $1}') || return 1
+  else
+    return 1
+  fi
+  [ "${#digest}" -ge 8 ] || return 1
+  printf 'Claude Code-credentials-%s\n' "${digest:0:8}"
+}
+
+claude_credential_available() {  # <canonical-config-dir>
+  local service
+  [ "$(uname)" = Darwin ] || return 1
+  command -v security >/dev/null 2>&1 || return 1
+  service=$(claude_credential_service "$1") || return 1
+  security find-generic-password -s "$service" >/dev/null 2>&1
+}
+
+resolve_claude_crew_profile() {
+  local config_file raw_profile profile identity_record
+  config_file="$CONFIG/crew-claude-profile"
+  if [ -e "$config_file" ] || [ -L "$config_file" ]; then
+    if [ ! -f "$config_file" ] || [ -L "$config_file" ]; then
+      echo "error: Claude crew profile declaration is unsafe" >&2
+      return 1
+    fi
+    raw_profile=$(awk '!/^[[:space:]]*(#|$)/ { print; exit }' "$config_file" 2>/dev/null) || {
+      echo "error: Claude crew profile declaration cannot be read" >&2
+      return 1
+    }
+    if [ -z "$raw_profile" ]; then
+      echo "error: Claude crew profile declaration is empty" >&2
+      return 1
+    fi
+    case "$raw_profile" in
+      /*) profile=$raw_profile ;;
+      *)
+        profile=$(CDPATH='' cd -- "$CONFIG/$raw_profile" 2>/dev/null && pwd -P) || {
+          echo "error: Claude crew profile directory cannot be resolved" >&2
+          return 1
+        }
+        ;;
+    esac
+  else
+    profile=$(claude_crew_default_profile)
+  fi
+  if [ ! -d "$profile" ] || [ -L "$profile" ]; then
+    echo "error: Claude crew profile directory is missing or unsafe" >&2
+    return 1
+  fi
+  profile=$(CDPATH='' cd -- "$profile" 2>/dev/null && pwd -P) || {
+    echo "error: Claude crew profile directory cannot be resolved" >&2
+    return 1
+  }
+  identity_record="$profile/.firstmate-account.json"
+  if [ ! -f "$identity_record" ] || [ -L "$identity_record" ] || [ ! -r "$identity_record" ]; then
+    echo "error: Claude crew profile has no readable identity record" >&2
+    return 1
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "error: Claude crew profile requires jq to verify its identity record" >&2
+    return 1
+  fi
+  jq -e '.account_sha256 | select(type == "string" and test("^[0-9A-Fa-f]{64}$"))' "$identity_record" >/dev/null 2>&1 || {
+    echo "error: Claude crew profile has no readable identity record" >&2
+    return 1
+  }
+  if ! claude_credential_available "$profile"; then
+    echo "error: Claude crew credential is unavailable for its selected profile; refusing to fall back to the default Claude store" >&2
+    return 1
+  fi
+  CLAUDE_CREW_PROFILE=$profile
+}
+
+if [ "$HARNESS" = claude ] && [ "$KIND" != secondmate ]; then
+  resolve_claude_crew_profile || exit 1
 fi
 
 case "$HARNESS" in
@@ -2732,15 +2834,11 @@ case "$HARNESS" in
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $LAUNCH"
     ;;
 esac
-# Crewmate panes are created by a long-lived tmux/herdr daemon that does not
-# inherit firstmate's current environment, so a bare `claude` in the pane falls
-# back to the default ~/.claude store even when firstmate itself runs under a
-# different CLAUDE_CONFIG_DIR (for example a work-vs-personal subscription split).
-# Forward firstmate's own resolved store onto the claude launch so the crewmate
-# uses the same credential/config firstmate is authenticated with. Only when set;
-# an unset value is the single-store default and needs no prefix.
-if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
-  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+# Crewmate panes are created by a long-lived backend daemon and cannot inherit
+# the launcher's shell reliably. Prefix only the exact selected profile, never
+# ambient CLAUDE_CONFIG_DIR, so a launch cannot silently run on the seat store.
+if [ "$HARNESS" = claude ] && [ "$KIND" != secondmate ]; then
+  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CREW_PROFILE") $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")

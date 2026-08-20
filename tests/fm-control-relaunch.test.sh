@@ -52,6 +52,13 @@ trap relaunch_cleanup EXIT
 make_tmux_stub() {  # <dir>
   local fb="$1/fakebin"
   mkdir -p "$fb"
+  cat > "$fb/security" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${1:-}" = find-generic-password ] && exit 0
+exit 1
+SH
+  chmod +x "$fb/security"
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -124,8 +131,12 @@ SH
 
 # new_case <name> [id] -> echoes a case dir with a live claude ship task.
 new_case() {
-  local id=${2:-t1} dir="$TMP_ROOT/$1-$RANDOM"
-  mkdir -p "$dir/home/state" "$dir/home/data" "$dir/fake"
+  local id=${2:-t1} dir="$TMP_ROOT/$1-$RANDOM" profile
+  mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config" "$dir/fake"
+  profile="$dir/crew-claude-profile"
+  mkdir -p "$profile"
+  printf '%s\n' '{"account_sha256":"0000000000000000000000000000000000000000000000000000000000000000"}' > "$profile/.firstmate-account.json"
+  printf '%s\n' "$profile" > "$dir/home/config/crew-claude-profile"
   : > "$dir/fake/literal"
   : > "$dir/fake/keys"
   printf 'claude' > "$dir/fake/command"
