@@ -30,7 +30,7 @@
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
-#   no-mistakes  implement -> /no-mistakes pipeline -> PR -> configured merge authority
+#   no-mistakes  implement -> /no-mistakes pipeline -> push + PR -> configured merge authority
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                the configured merge authority approves, firstmate merges to local main
@@ -360,8 +360,10 @@ case "$MODE" in
 # Definition of done
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
-The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+Before reporting done, commit the work on your branch, push that branch to its authorized remote, and open its PR with \`gh-axi\`.
+When those preconditions hold, append exactly \`done: PR {url} (branch pushed)\` to the status file and stop.
+If you cannot push because of a credential, permission, or remote failure, append \`done: completed locally; push blocked: {reason}\` and stop instead.
+That exception reports the completed local work and the delivery gap explicitly; it does not claim that the direct-PR preconditions were met.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
     ;;
@@ -372,9 +374,9 @@ EOF
 # Definition of done
 Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
-The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
-Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
+Before reporting done, commit the work on your branch \`fm/$ID\` and keep it clean and fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
+Do NOT push, do NOT open a PR, and do NOT merge.
+When those preconditions hold, append exactly \`done: ready in local branch fm/$ID (committed, clean, fast-forward)\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
     ;;
@@ -385,9 +387,8 @@ EOF
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=no-mistakes
-The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+Do not report done after the implementation commit alone.
+Before reporting done, commit the work on your branch, run /no-mistakes to its CI-ready return point, and confirm that it pushed the branch and opened the PR.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
@@ -400,7 +401,9 @@ Two firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append exactly \`done: PR {url} checks green (branch pushed)\` and stop. You are finished.
+If you cannot push because of a credential, permission, or remote failure, append \`done: completed locally; push blocked: {reason}\` and stop instead.
+That exception reports the completed local work and the delivery gap explicitly; it does not claim that the no-mistakes preconditions were met.
 EOF
     ;;
 esac

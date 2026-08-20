@@ -650,6 +650,8 @@ test_local_only_merged_to_local_main_allows() {
 
   expect_code 0 "$rc" "merged-main: teardown should succeed when work is merged into local main"
   ! grep -q REFUSED "$case_dir/stderr" || fail "merged-main: teardown printed a REFUSED line"
+  assert_no_grep "Push the branch as required by mode=local-only" "$case_dir/stderr" \
+    "merged-main: local-only work incorrectly acquired a remote-push requirement"
   pass "local-only worktree with work merged into local main is torn down (no regression)"
 }
 
@@ -689,7 +691,32 @@ test_no_mistakes_truly_unpushed_refuses() {
 
   expect_code 1 "$rc" "nm-unpushed: teardown should refuse"
   grep -q REFUSED "$case_dir/stderr" || fail "nm-unpushed: no REFUSED line in stderr"
+  assert_grep "no-mistakes ship worktree" "$case_dir/stderr" \
+    "nm-unpushed: refusal did not identify the mode-specific ship worktree"
+  assert_grep "has an unpushed branch and work not landed" "$case_dir/stderr" \
+    "nm-unpushed: refusal did not identify the unpushed branch"
+  assert_grep "Push the branch as required by mode=no-mistakes" "$case_dir/stderr" \
+    "nm-unpushed: refusal did not name the mode's push requirement"
   pass "no-mistakes worktree with genuinely unlanded work is refused (safety preserved)"
+}
+
+test_direct_pr_truly_unpushed_refuses() {
+  local case_dir rc
+  case_dir=$(make_case direct-pr-unpushed)
+  write_meta "$case_dir" direct-PR ship
+  wt_commit_file "$case_dir" feature.txt hello "unpushed direct-PR work"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "direct-pr-unpushed: teardown should refuse"
+  assert_grep "direct-PR ship worktree" "$case_dir/stderr" \
+    "direct-pr-unpushed: refusal did not identify the mode-specific ship worktree"
+  assert_grep "Push the branch as required by mode=direct-PR" "$case_dir/stderr" \
+    "direct-pr-unpushed: refusal did not name the direct-PR push requirement"
+  pass "direct-PR worktree with genuinely unlanded work is refused (safety preserved)"
 }
 
 test_squash_merged_branch_deleted_allows() {
@@ -2598,6 +2625,7 @@ test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
+test_direct_pr_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
 test_herdr_teardown_clears_escalation_marker

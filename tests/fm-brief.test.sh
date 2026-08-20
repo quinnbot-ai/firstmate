@@ -256,7 +256,7 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+  assert_grep "Do not report done after the implementation commit alone." "$brief" \
     "explicit no-mistakes brief did not render the pipeline definition of done"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
@@ -352,6 +352,51 @@ test_no_mistakes_dod_wording() {
   assert_grep "firstmate's authority check" "$brief" \
     "no-mistakes DOD lost the apostrophe prose that the structural fix makes parse-safe"
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
+}
+
+# A `done:` event is a terminal report to firstmate, so each delivery mode must
+# state both its literal form and the preconditions that make that form true.
+# The only exception is a failed push: reporting that explicit delivery gap is
+# preferable to leaving a completed local branch silently stranded.
+test_done_templates_state_mode_preconditions_and_push_exception() {
+  local home id brief
+  home="$TMP_ROOT/done-template-home"
+  mkdir -p "$home/data"
+
+  id="brief-done-direct"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "commit the work on your branch, push that branch to its authorized remote, and open its PR" "$brief" \
+    "direct-PR done preconditions did not require commit, push, and PR"
+  assert_grep 'done: PR {url} (branch pushed)' "$brief" \
+    "direct-PR brief did not provide its literal pushed-PR done template"
+  assert_grep 'done: completed locally; push blocked: {reason}' "$brief" \
+    "direct-PR brief did not preserve an explicit push-blocked completion report"
+
+  id="brief-done-no-mistakes"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "Do not report done after the implementation commit alone." "$brief" \
+    "no-mistakes brief still treats a commit alone as done"
+  assert_grep "commit the work on your branch, run /no-mistakes to its CI-ready return point, and confirm that it pushed the branch and opened the PR" "$brief" \
+    "no-mistakes done preconditions did not require validation, push, and PR"
+  assert_grep 'done: PR {url} checks green (branch pushed)' "$brief" \
+    "no-mistakes brief did not provide its literal CI-ready done template"
+  assert_grep 'done: completed locally; push blocked: {reason}' "$brief" \
+    "no-mistakes brief did not preserve an explicit push-blocked completion report"
+
+  id="brief-done-local"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "commit the work on your branch \`fm/$id\` and keep it clean and fast-forward" "$brief" \
+    "local-only done preconditions did not require a clean fast-forward branch"
+  assert_grep "Do NOT push, do NOT open a PR, and do NOT merge." "$brief" \
+    "local-only brief lost its deliberate no-push exemption"
+  assert_grep "done: ready in local branch fm/$id (committed, clean, fast-forward)" "$brief" \
+    "local-only brief did not provide its literal local done template"
+  assert_no_grep 'push blocked' "$brief" \
+    "local-only brief inherited the remote-delivery exception"
+  pass "fm-brief.sh: mode-specific done templates require the correct delivery preconditions"
 }
 
 test_ship_project_memory_wording() {
@@ -721,6 +766,7 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_done_templates_state_mode_preconditions_and_push_exception
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path

@@ -1192,9 +1192,23 @@ validate_worktree_teardown_safety() {
       TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
     fi
     if ! work_is_landed "$branch"; then
-      echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
+      case "$MODE" in
+        no-mistakes|direct-PR)
+          echo "REFUSED: $MODE ship worktree $WT has an unpushed branch and work not landed." >&2
+          ;;
+        *)
+          echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
+          ;;
+      esac
       printf 'unpushed commits:\n%s\n' "$unpushed" >&2
-      echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
+      case "$MODE" in
+        no-mistakes|direct-PR)
+          echo "Push the branch as required by mode=$MODE, land its PR, or get the captain's explicit OK to discard, then --force." >&2
+          ;;
+        *)
+          echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
+          ;;
+      esac
       return 1
     fi
   fi
