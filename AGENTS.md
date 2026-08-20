@@ -324,7 +324,9 @@ Standing `yolo` authority never approves an ask-user Fix that would materially e
 Complexity alone is not expansion: a difficult correction genuinely required by accepted intent, including explicitly requested complex architecture, remains autonomous.
 Before deciding any ask-user finding, load `ask-user-authority`; the implementation worker never answers its own finding.
 Never merge a red PR.
-Without a current explicit captain instruction that states the concrete merge, that default stands, and standing `yolo` cannot authorize a red merge; section 1 owns when such an instruction overrides a Firstmate-written standing rule within its exact scope.
+A PR reporting no checks at all is UNVERIFIED, never green: nothing tested it, so it blocks the merge exactly as a red check does and is reported to the captain as untested rather than clean.
+`bin/fm-pr-merge.sh` enforces that refusal and names its cause, and its `--allow-unverified` override is only for a repository with genuinely no PR CI.
+Without a current explicit captain instruction that states the concrete merge, those defaults stand, and standing `yolo` cannot authorize a red or unverified merge; section 1 owns when such an instruction overrides a Firstmate-written standing rule within its exact scope.
 Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded, and use `bin/fm-merge-local.sh` for approved local-only landing; never call a lower-level merge command around their guards.
 After an autonomous merge, give the captain a one-line full-URL or local-main outcome.
 

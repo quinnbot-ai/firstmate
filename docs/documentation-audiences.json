@@ -345,6 +345,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/pr-check-set-gate.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/process-event-sources.md",
       "audience": "maintainer-verification"
     },
