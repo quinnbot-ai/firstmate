@@ -9,9 +9,19 @@ We require this to reduce the maintainer's burden of reviewing and merging contr
 `no-mistakes` puts a local git proxy in front of your real remote.
 Pushing through it runs an AI-driven review/test/lint pipeline in an isolated worktree, forwards the push upstream only after every check passes, and opens a clean PR automatically.
 
-A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and fails if the body is missing the deterministic signature that no-mistakes writes.
+A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and fails unless the PR body shows which delivery path raised it.
 It evaluates every PR opening and body edit independently, so a later edit cannot replace an earlier pending compliance check.
 GitHub Actions and Dependabot are exempt so their automation keeps working, but regular contributor PRs without the signature will not be reviewed or merged.
+
+Two things satisfy the check, and `bin/fm-pr-body-compliance.sh` owns the verdict:
+
+1. **The pipeline raised it.** The body carries the deterministic signature no-mistakes writes.
+   This is the path for every contribution.
+2. **A maintainer declared a bypass.** The body carries one line of the form `no-mistakes-bypass: direct-PR - <reason>`, and GitHub reports the PR author as an owner, member, or collaborator of this repository.
+
+The second path exists because maintainers ship some internal work without the pipeline, and a check that failed on correct work would train everyone to dismiss red.
+It is not a way around the first path: GitHub computes the author association, so a contributor cannot grant it to themselves by copying the line, and the declared reason is published to the check run so a bypass is a recorded fact rather than a silent one.
+A red `Require no-mistakes` therefore always means a real problem - the pipeline was skipped and nobody with the standing to skip it said why.
 
 ## Workflow
 

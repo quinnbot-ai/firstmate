@@ -22,12 +22,17 @@
 # WHAT THIS LIB DECIDES, AND WHAT IT DELIBERATELY DOES NOT. It answers only
 # "does the head commit carry a check set at all". It does NOT adjudicate red
 # versus green, because a red check set is a DIFFERENT state that is already
-# visible to whoever is merging, and because a repository can legitimately carry
-# a permanently failing advisory check - this one does: "PR must be raised via
-# no-mistakes" fails by design on every direct-PR task. Refusing red here would
-# block every such merge. AGENTS.md section 7's "never merge a red PR" rule
-# keeps owning that judgement; this lib owns only the state nothing else could
-# see.
+# visible to whoever is merging. AGENTS.md section 7's "never merge a red PR"
+# rule keeps owning that judgement; this lib owns only the state nothing else
+# could see.
+#
+# THAT SPLIT IS NO LONGER PROPPED UP BY A FALSE RED. This comment used to add a
+# second reason: the repo carried "PR must be raised via no-mistakes", which
+# failed by design on every direct-PR delivery, so refusing red would have
+# blocked every such merge. bin/fm-pr-body-compliance.sh retired that permanent
+# false red on 2026-08-20. No check here is expected to be red on a healthy
+# delivery now, so a red check is a stop-and-read result rather than a
+# documented exception - which is the whole point of section 7 owning it.
 #
 # FAIL CLOSED ON AN UNREADABLE ANSWER. gh-axi renders a scalar sometimes bare
 # and sometimes wrapped in an `api_response:`/`body:` envelope, and it reports

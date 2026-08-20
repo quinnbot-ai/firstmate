@@ -19,6 +19,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The job NAME is the published check name and may be a required status check
+  # on a protecting branch, so it stays byte-stable across changes to what the
+  # check actually decides. bin/fm-pr-body-compliance.sh owns that decision.
   check:
     name: PR must be raised via no-mistakes
     runs-on: ubuntu-latest
@@ -26,29 +29,32 @@ jobs:
       github.event.pull_request.user.login != 'github-actions[bot]' &&
       github.event.pull_request.user.login != 'dependabot[bot]'
     steps:
-      - name: Verify no-mistakes signature in PR body
+      - uses: actions/checkout@v6
+      - name: Verify declared delivery path in PR body
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_AUTHOR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -eu
-          marker='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
-          if printf '%s' "${PR_BODY:-}" | grep -qF -- "$marker"; then
-            echo "Found no-mistakes signature in PR #${PR_NUMBER} body."
+          # Pass the body through a file rather than an argument: a PR body is
+          # attacker-controlled text of arbitrary length, and a file keeps it
+          # data instead of anything the shell could reinterpret.
+          printf '%s' "${PR_BODY:-}" > "$RUNNER_TEMP/pr-body.txt"
+          if bin/fm-pr-body-compliance.sh \
+            --body-file "$RUNNER_TEMP/pr-body.txt" \
+            --author-association "${PR_AUTHOR_ASSOCIATION:-}" \
+            --author "${PR_AUTHOR:-}" \
+            --pr "${PR_NUMBER:-}" > "$RUNNER_TEMP/verdict.txt"; then
+            cat "$RUNNER_TEMP/verdict.txt"
+            # Publish which path was taken, so a declared bypass is a visible
+            # record on the run rather than a green tick that says nothing.
+            {
+              echo '### Delivery path'
+              echo
+              sed 's/^/- /' "$RUNNER_TEMP/verdict.txt"
+            } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          {
-            echo "::error::This PR was not raised through no-mistakes."
-            echo
-            echo "Contributions to this repository must be submitted via 'git push no-mistakes'."
-            echo "That pipeline runs the required review/test/lint/CI steps and writes a"
-            echo "deterministic '## Pipeline' section into the PR body containing:"
-            echo
-            echo "    $marker"
-            echo
-            echo "See CONTRIBUTING.md for setup and the full workflow."
-            echo
-            echo "PR author: ${PR_AUTHOR}"
-          } >&2
           exit 1
