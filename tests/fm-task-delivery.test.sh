@@ -146,6 +146,43 @@ EOF
   pass "fm-spawn: the brief's recorded mode and the spawn's explicit mode must agree"
 }
 
+# direct-PR is the only mode whose worker pushes, and git's default target is
+# `origin` - the upstream in a fork-based checkout, which denies the push and
+# reads like a permissions wall. A brief that predates fm-brief.sh's
+# "Push target: " line, or lost it to a hand edit, must be called out before the
+# worker hits that wall. It is a warning, not a refusal: an unnamed target still
+# works wherever origin is writable, so refusing would be its own false wall.
+test_spawn_warns_when_a_direct_pr_brief_names_no_push_target() {
+  local rec home proj fakebin out
+  rec=$(make_home push-target)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+
+  write_brief "$home" delivery-nopush-e1 direct-PR
+  out=$(run_spawn "$home" "$fakebin" delivery-nopush-e1 "$proj" claude --mode direct-PR --yolo off)
+  assert_contains "$out" "names no push target" "a direct-PR brief without a push target dispatched silently"
+  assert_contains "$out" "falls back to origin" "the warning did not name the wrong remote the worker would use"
+  assert_not_contains "$out" "delivery mismatch" "the push-target warning was reported as a mode mismatch"
+
+  # Naming the target clears the warning.
+  write_brief "$home" delivery-haspush-e2 direct-PR
+  # shellcheck disable=SC2016  # single quotes are deliberate: the brief text's backticks must stay literal
+  printf 'Push target: the `fork` remote. Push with `git push fork HEAD:refs/heads/fm/delivery-haspush-e2`.\n' \
+    >> "$home/data/delivery-haspush-e2/brief.md"
+  out=$(run_spawn "$home" "$fakebin" delivery-haspush-e2 "$proj" claude --mode direct-PR --yolo off)
+  assert_not_contains "$out" "names no push target" "a brief naming its push target still warned"
+
+  # The other two modes have no worker push, so they must never be nagged for one.
+  write_brief "$home" delivery-nopush-e3 no-mistakes
+  out=$(run_spawn "$home" "$fakebin" delivery-nopush-e3 "$proj" claude --mode no-mistakes --yolo off)
+  assert_not_contains "$out" "names no push target" "a no-mistakes spawn was asked for a push target the pipeline owns"
+  write_brief "$home" delivery-nopush-e4 local-only
+  out=$(run_spawn "$home" "$fakebin" delivery-nopush-e4 "$proj" claude --mode local-only --yolo off)
+  assert_not_contains "$out" "names no push target" "a local-only spawn was asked for a push target it must never use"
+  pass "fm-spawn: a direct-PR brief that names no push target is called out before dispatch"
+}
+
 # The registry is the captain's standing posture, so dropping below its rigor is
 # allowed but never silent, while matching or exceeding it stays quiet. An
 # unregistered project resolves to the same no-mistakes standing default
@@ -275,6 +312,7 @@ EOF
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
+test_spawn_warns_when_a_direct_pr_brief_names_no_push_target
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract

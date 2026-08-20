@@ -85,9 +85,19 @@ case " $* " in
     ;;
 esac
 SH
+  # The api arm answers bin/fm-pr-verify-lib.sh's CI verification gate the way a
+  # real PR with checks does, so these cases exercise merge-wrapper safety rather
+  # than re-testing the gate that tests/fm-pr-merge.test.sh owns.
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+if [ "${1:-}" = api ]; then
+  case " $* " in
+    *.head.sha*)       printf '%s\n' '0123456789abcdef0123456789abcdef01234567' ;;
+    *check-runs*)      printf '%s\n' '7' ;;
+    *commits/*status*) printf '%s\n' '0' ;;
+  esac
+fi
 exit "${FM_TEST_GH_AXI_RC:-0}"
 SH
   # Plain glab, reproducing the real CLI's contract: its field output on stdout

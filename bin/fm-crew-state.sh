@@ -366,6 +366,15 @@ nm_effective_ci_step_status() {
 # for the MOST RECENT recognized marker (the log is append-only/chronological,
 # so the last match is current): green with nothing red after it means CI is
 # green right now, still only waiting on merge/close.
+#
+# "no CI checks reported - still monitoring" is deliberately NOT green. It used
+# to be folded in with the genuine green marker, on the reasoning that a repo
+# with no PR CI has nothing left to wait for. That reasoning is wrong and it was
+# dangerous: it also fires for a PR that SHOULD have checks and silently got
+# none, which is exactly what a conflicted PR looks like (bin/fm-pr-verify-lib.sh
+# owns why a conflicted PR records zero workflow runs). A PR nothing tested has
+# not passed, so it gets its own `unverified` verdict that no caller may read as
+# done. bin/fm-pr-merge.sh enforces the same rule at the merge itself.
 nm_ci_checks_state() {
   local run_id log_tail marker
   run_id=$(strip_quotes "$(nm_field id)")
@@ -376,7 +385,8 @@ nm_ci_checks_state() {
     | grep -E 'CI checks passed|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running|base branch advanced.*re-arming CI monitor timeout' \
     | tail -1)
   case "$marker" in
-    *"checks passed"*|*"no CI checks reported - still monitoring"*) printf 'green' ;;
+    *"checks passed"*) printf 'green' ;;
+    *"no CI checks reported - still monitoring"*) printf 'unverified' ;;
     *"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'not-ready' ;;
     *) printf 'unknown' ;;
   esac
@@ -563,6 +573,8 @@ if [ "$HAVE_RUN" = 1 ]; then
             if [ "$CI_LOG_STATE" = green ]; then
               RUN_STATE="done"
               RUN_DETAIL="checks green: PR ready for review (still monitoring for merge/close)"
+            elif [ "$CI_LOG_STATE" = unverified ]; then
+              RUN_DETAIL="CI reported no checks at all: unverified, not green - the PR has not been tested and must not be merged on this evidence"
             fi
             ;;
           fixing)
@@ -585,7 +597,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     elif [ "$CI_STEP_STATUS" = fixing ]; then
       CI_LOG_STATE=not-ready
     fi
-    if [ "$CI_LOG_STATE" != not-ready ]; then
+    if [ "$CI_LOG_STATE" != not-ready ] && [ "$CI_LOG_STATE" != unverified ]; then
       emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
     fi
   fi

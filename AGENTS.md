@@ -326,7 +326,9 @@ Standing `yolo` authority never approves an ask-user Fix that would materially e
 Complexity alone is not expansion: a difficult correction genuinely required by accepted intent, including explicitly requested complex architecture, remains autonomous.
 Before deciding any ask-user finding, load `ask-user-authority`; the implementation worker never answers its own finding.
 Never merge a red PR.
-Without a current explicit captain instruction that states the concrete merge, that default stands, and standing `yolo` cannot authorize a red merge; section 1 owns when such an instruction overrides a Firstmate-written standing rule within its exact scope.
+A PR reporting no checks at all is UNVERIFIED, never green: nothing tested it, so it blocks the merge exactly as a red check does and is reported to the captain as untested rather than clean.
+`bin/fm-pr-merge.sh` enforces that refusal and names its cause, and its `--allow-unverified` override is only for a repository with genuinely no PR CI.
+Without a current explicit captain instruction that states the concrete merge, those defaults stand, and standing `yolo` cannot authorize a red or unverified merge; section 1 owns when such an instruction overrides a Firstmate-written standing rule within its exact scope.
 Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded, and use `bin/fm-merge-local.sh` for approved local-only landing; never call a lower-level merge command around their guards.
 After an autonomous merge, give the captain a one-line full-URL or local-main outcome.
 
@@ -363,7 +365,7 @@ A captain instruction to merge is explicit authority; `yolo` is the only standin
 For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.
 
 Tear down a ship task only after landing is confirmed.
-A teardown refusal for uncommitted or unlanded work is a stop-and-investigate result, never an obstacle to bypass.
+A teardown refusal - for uncommitted or unlanded work, or because the recorded isolated copy now belongs to another task - is a stop-and-investigate result, never an obstacle to bypass.
 Never force teardown without explicit discard authority.
 After successful teardown, record completion, retain only the configured recent Done history, and re-evaluate queued work whose blockers and time gates have cleared.
 

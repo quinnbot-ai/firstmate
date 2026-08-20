@@ -6,7 +6,8 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only>
+#          [--push-remote <name>] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -49,6 +50,9 @@
 #   The flag must be explicit because {TASK} is filled after scaffolding and the
 #   caller-supplied repo string cannot reliably identify this repo. Briefs made
 #   without it carry a loud declaration so an omitted contract cannot be silent.
+#   --push-remote names the remote a direct-PR worker pushes to, overriding the
+#   resolution below. It applies only to --mode direct-PR, because that is the
+#   only mode whose worker pushes.
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
@@ -76,6 +80,18 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
+# A direct-PR brief must NAME its push target instead of letting the worker fall
+# back to git's default of `origin`: in a fork-based checkout `origin` is the
+# upstream, so that default push is denied and reads to the worker like a
+# permissions wall rather than a wrong remote. The generated DOD therefore
+# always carries a fixed machine-readable "Push target: " line, which
+# bin/fm-spawn.sh checks before dispatch.
+# The remote is resolved from the project clone at scaffold time, in order:
+# an explicit --push-remote; the repo's own `remote.pushDefault`; a remote named
+# `fork`; `origin`; the first configured remote. When no clone can be inspected
+# the line instead tells the worker to resolve the remote in its own worktree,
+# which is always better than an unstated `origin` default. A forge-style remote
+# URL also yields the explicit `--repo <owner>/<name>` for the PR command.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -132,6 +148,8 @@ SOURCE_INSTRUCTION=
 SOURCE_INSTRUCTION_SET=0
 REPORTS=()
 EXCLUDED=()
+PUSH_REMOTE=
+PUSH_REMOTE_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -144,6 +162,7 @@ for a in "$@"; do
       report) REPORTS+=("$a") ;;
       source-instruction) SOURCE_INSTRUCTION=$a; SOURCE_INSTRUCTION_SET=1 ;;
       excluded) EXCLUDED+=("$a") ;;
+      push-remote) PUSH_REMOTE=$a; PUSH_REMOTE_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -162,6 +181,8 @@ for a in "$@"; do
     --source-instruction=*) SOURCE_INSTRUCTION=${a#--source-instruction=}; SOURCE_INSTRUCTION_SET=1 ;;
     --excluded) want_value=excluded ;;
     --excluded=*) EXCLUDED+=("${a#--excluded=}") ;;
+    --push-remote) want_value=push-remote ;;
+    --push-remote=*) PUSH_REMOTE=${a#--push-remote=}; PUSH_REMOTE_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's approval authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -188,6 +209,20 @@ if [ "$KIND" = ship ]; then
 elif [ "$MODE_SET" -eq 1 ]; then
   echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
+fi
+
+# Only a direct-PR worker pushes, so naming a remote anywhere else would look
+# recorded and change nothing. Refuse rather than drop it silently.
+if [ "$PUSH_REMOTE_SET" -eq 1 ]; then
+  [ "$MODE" = direct-PR ] || {
+    echo "error: --push-remote applies only to --mode direct-PR; no other brief has the worker push" >&2
+    exit 1
+  }
+  case "$PUSH_REMOTE" in
+    '' ) echo "error: --push-remote requires a remote name" >&2; exit 1 ;;
+    -*) echo "error: --push-remote must be a remote name, not an option ('$PUSH_REMOTE')" >&2; exit 1 ;;
+    *[[:space:]]*) echo "error: --push-remote must be a single remote name (got '$PUSH_REMOTE')" >&2; exit 1 ;;
+  esac
 fi
 ID=${POS[0]}
 
@@ -518,6 +553,113 @@ echo "scaffolded: $BRIEF (scout; replace {TASK})"
 exit 0
 fi
 
+# --- direct-PR push target ---------------------------------------------------
+# A direct-PR worker is the only one that pushes, and git's own default target is
+# `origin`. In a fork-based checkout `origin` is the upstream nobody can push to,
+# so an unnamed target turns a wrong-remote instruction into what reads like a
+# permissions wall. Resolve the target here and name it in the brief.
+
+PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+
+brief_repo_dir() {  # -> the project clone's own worktree top-level, or nothing
+  local cand abs top top_real
+  for cand in "$PROJECTS/$REPO" "$REPO"; do
+    [ -d "$cand" ] || continue
+    abs=$(CDPATH='' cd -- "$cand" 2>/dev/null && pwd -P) || continue
+    top=$(git -C "$abs" rev-parse --show-toplevel 2>/dev/null) || continue
+    top_real=$(CDPATH='' cd -- "$top" 2>/dev/null && pwd -P) || continue
+    # Require the candidate to BE the repository root: a non-repo directory that
+    # merely sits inside one would otherwise borrow that ancestor's remotes.
+    [ "$abs" = "$top_real" ] || continue
+    printf '%s\n' "$abs"
+    return 0
+  done
+  return 1
+}
+
+brief_resolve_push_remote() {  # <repo-dir> -> remote name, or nothing
+  local dir=$1 configured candidate
+  configured=$(git -C "$dir" config --get remote.pushDefault 2>/dev/null) || configured=
+  if [ -n "$configured" ] && git -C "$dir" remote get-url "$configured" >/dev/null 2>&1; then
+    printf '%s\n' "$configured"
+    return 0
+  fi
+  # `fork` is the conventional name for the writable side of a triangular
+  # workflow, which is exactly the case git's own default gets wrong.
+  for candidate in fork origin; do
+    if git -C "$dir" remote get-url "$candidate" >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  git -C "$dir" remote 2>/dev/null | head -n 1
+}
+
+brief_remote_slug() {  # <remote-url> -> owner/name for a forge URL, nothing otherwise
+  local url=$1 path
+  case "$url" in
+    ''|file://*|/*|.*) return 0 ;;
+    *://*)
+      path=${url#*://}
+      path=${path#*@}
+      case "$path" in */*) path=${path#*/} ;; *) return 0 ;; esac
+      ;;
+    *:*/*) path=${url#*:} ;;
+    *) return 0 ;;
+  esac
+  path=${path%.git}
+  path=${path#/}
+  # Keep only the final two segments, so a nested group path still yields the
+  # owner/name pair every forge CLI expects.
+  case "$path" in
+    */*/*) path=${path#"${path%/*/*}/"} ;;
+  esac
+  case "$path" in
+    */*/*|*/) return 0 ;;
+    */*) printf '%s\n' "$path" ;;
+  esac
+}
+
+# The generated line always begins with the fixed "Push target: " prefix that
+# bin/fm-spawn.sh checks before dispatch.
+brief_push_target_line() {
+  local dir remote url slug push_cmd origin_url
+  dir=$(brief_repo_dir) || dir=
+  remote=$PUSH_REMOTE
+  if [ -z "$remote" ] && [ -n "$dir" ]; then
+    remote=$(brief_resolve_push_remote "$dir")
+  fi
+  if [ -z "$remote" ]; then
+    printf '%s' "Push target: this scaffold could not resolve the project's push remote, so resolve it in your worktree before pushing: run \`git remote -v\` and push to the remote you can actually write to, then pass that remote's \`<owner>/<name>\` to every \`gh-axi\` call for this PR. Do not let git fall back to \`origin\`: it is often a read-only upstream, so a denied push there means the wrong remote, not a permissions problem."
+    return 0
+  fi
+  url=
+  slug=
+  if [ -n "$dir" ]; then
+    url=$(git -C "$dir" remote get-url --push "$remote" 2>/dev/null) || url=
+    [ -z "$url" ] || slug=$(brief_remote_slug "$url")
+  fi
+  push_cmd="git push $remote HEAD:refs/heads/fm/$ID"
+  printf '%s' "Push target: the \`$remote\` remote"
+  [ -z "$url" ] || printf '%s' " ($url)"
+  printf '%s' ". Push with \`$push_cmd\`"
+  if [ -n "$slug" ]; then
+    printf '%s' " and pass \`--repo $slug\` to every \`gh-axi\` call for this PR"
+  else
+    printf '%s' " and name the PR's target repository explicitly rather than letting the tool infer it"
+  fi
+  printf '%s' "."
+  # Only warn about git's default when following it would actually land
+  # somewhere else; an `origin` that already points at the same repository makes
+  # the warning a false alarm.
+  if [ "$remote" != origin ] && [ -n "$dir" ]; then
+    origin_url=$(git -C "$dir" remote get-url --push origin 2>/dev/null) || origin_url=
+    if [ -n "$origin_url" ] && [ "$origin_url" != "$url" ]; then
+      printf '%s' " Do not let git fall back to \`origin\` ($origin_url): pushing there is denied because it is the wrong target, not because your permissions are wrong."
+    fi
+  fi
+}
+
 # Ship task: shape Setup / Rule 1 / Definition of done by this task's explicit
 # delivery mode, validated above. The generated DOD opens with the fixed
 # "Delivery contract: mode=<mode>" line that bin/fm-spawn.sh checks against its own
@@ -526,12 +668,14 @@ case "$MODE" in
   direct-PR)
     SETUP2=""
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
+    PUSH_TARGET=$(brief_push_target_line)
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+$PUSH_TARGET
+When it is implemented and committed, push that branch to the target above and open the PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
     ;;
