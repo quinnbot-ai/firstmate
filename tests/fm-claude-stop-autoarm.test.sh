@@ -116,13 +116,22 @@ printf 'watcher: FAILED - cycle ended without an actionable reason\n'
 exit 1
 SH
       ;;
-    slow-actionable)
+    held-actionable)
+      # Holds the single-flight owner lock open until the test releases it, so
+      # the competing firing provably closes DURING this arm. A wall-clock sleep
+      # could only make that overlap likely.
       cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 echo "$$" >> "$FM_HOME/state/arm-ran"
-sleep 2
+: > "$FM_HOME/state/arm-entered"
+i=0
+while [ ! -e "$FM_HOME/state/arm-release" ]; do
+  sleep 0.01
+  i=$((i + 1))
+  [ "$i" -lt 3000 ] || break
+done
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
-printf 'signal: task.status done: slow fixture\n'
+printf 'signal: task.status done: held fixture\n'
 exit 0
 SH
       ;;
@@ -229,10 +238,9 @@ test_inert_when_lock_held_by_other_harness() {
   dir=$(make_primary_dir "$TMP_ROOT/other-lock")
   : > "$dir/state/task.meta"
   write_arm_fixture "$dir" actionable
-  # The trailing no-op keeps the fake harness process alive instead of allowing
-  # bash to exec the final sleep into a non-harness process.
-  "$FAKE_CLAUDE" -c 'sleep 60; :' &
-  other=$!
+  # The placeholder must BE a live fake-harness process, so it runs under
+  # $FAKE_CLAUDE rather than blocking a plain shell.
+  other=$(fm_test_holder "$TMP_ROOT/other-lock.hold" "$FAKE_CLAUDE")
   printf '%s\n' "$other" > "$dir/state/.lock"
   out=$(printf '%s\n' '{"session_id":"s"}' | FM_HOME="$dir" "$FAKE_CLAUDE" -c '"$FM_HOME/bin/fm-claude-stop-autoarm.sh"' 2>&1); status=$?
   owner_after=$(cat "$dir/state/.lock")
@@ -352,8 +360,7 @@ test_actionable_close_with_live_successor_rewakes_once() {
   dir=$(make_primary_dir "$TMP_ROOT/actionable-live-successor")
   : > "$dir/state/task.meta"
   write_arm_fixture "$dir" actionable
-  sleep 60 &
-  pid=$!
+  pid=$(fm_test_holder "$TMP_ROOT/actionable-successor.hold")
   identity=$(watcher_identity "$dir" "$pid") || fail "could not identify live successor for actionable close"
   record_watcher_lock "$dir" "$pid" "$identity"
   touch "$dir/state/.last-watcher-beat"
@@ -443,8 +450,7 @@ test_benign_cycle_end_with_live_watcher_is_silent() {
   dir=$(make_primary_dir "$TMP_ROOT/benign-live")
   : > "$dir/state/task.meta"
   write_arm_fixture "$dir" benign-live
-  sleep 60 &
-  pid=$!
+  pid=$(fm_test_holder "$TMP_ROOT/benign-live.hold")
   identity=$(watcher_identity "$dir" "$pid") || fail "could not identify live watcher holder for benign close"
   record_watcher_lock "$dir" "$pid" "$identity"
   touch "$dir/state/.last-watcher-beat"
@@ -472,15 +478,13 @@ test_positive_recovery_budget_contention_preserves_episode() {
   dir=$(make_primary_dir "$TMP_ROOT/recovery-budget-contention")
   : > "$dir/state/task.meta"
   write_arm_fixture "$dir" benign-live
-  sleep 60 &
-  pid=$!
+  pid=$(fm_test_holder "$TMP_ROOT/recovery-watcher.hold")
   identity=$(watcher_identity "$dir" "$pid") || fail "could not identify live watcher holder for recovery contention"
   record_watcher_lock "$dir" "$pid" "$identity"
   touch "$dir/state/.last-watcher-beat"
   printf 'session=sess-autoarm\ncount=3\nepoch=9\n' > "$dir/state/.turnend-claude-blocks"
   : > "$dir/state/.claude-autoarm-failure-notified"
-  sleep 60 &
-  holder=$!
+  holder=$(fm_test_holder "$TMP_ROOT/recovery-budget.hold")
   mkdir -p "$dir/state/.turnend-claude-blocks.lock"
   printf '%s\n' "$holder" > "$dir/state/.turnend-claude-blocks.lock/pid"
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
@@ -515,19 +519,46 @@ test_single_flight_admits_exactly_one_owner() {
   local dir rc1 rc2 count
   dir=$(make_primary_dir "$TMP_ROOT/single-flight")
   : > "$dir/state/task.meta"
-  write_arm_fixture "$dir" slow-actionable
+  write_arm_fixture "$dir" held-actionable
+  # Both firings still start concurrently and race for the owner lock, so either
+  # may win. The winner then parks inside its arm until the loser has already
+  # closed, which makes the contended window an observed fact rather than a bet
+  # on a fixed sleep being long enough.
   FM_HOME="$dir" "$FAKE_CLAUDE" -c '
     printf "%s\n" "$$" > "$FM_HOME/state/.lock"
-    printf "%s\n" "{\"session_id\":\"s\"}" | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" >/dev/null 2>"$FM_HOME/state/err1" &
+    ( printf "%s\n" "{\"session_id\":\"s\"}" | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" >/dev/null 2>"$FM_HOME/state/err1"
+      printf "%s\n" "$?" > "$FM_HOME/state/rc1" ) &
     p1=$!
-    printf "%s\n" "{\"session_id\":\"s\"}" | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" >/dev/null 2>"$FM_HOME/state/err2" &
+    ( printf "%s\n" "{\"session_id\":\"s\"}" | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" >/dev/null 2>"$FM_HOME/state/err2"
+      printf "%s\n" "$?" > "$FM_HOME/state/rc2" ) &
     p2=$!
-    wait "$p1"; echo $? > "$FM_HOME/state/rc1"
-    wait "$p2"; echo $? > "$FM_HOME/state/rc2"
+    i=0
+    while [ ! -e "$FM_HOME/state/arm-entered" ]; do
+      sleep 0.01
+      i=$((i + 1))
+      [ "$i" -lt 3000 ] || break
+    done
+    i=0
+    while [ ! -e "$FM_HOME/state/rc1" ] && [ ! -e "$FM_HOME/state/rc2" ]; do
+      sleep 0.01
+      i=$((i + 1))
+      [ "$i" -lt 3000 ] || break
+    done
+    # One firing is parked inside its arm, still holding the owner lock, and the
+    # other has already closed. Recorded before the release so the window it
+    # describes cannot have passed.
+    if [ -e "$FM_HOME/state/arm-entered" ] &&
+      { [ ! -e "$FM_HOME/state/rc1" ] || [ ! -e "$FM_HOME/state/rc2" ]; }; then
+      : > "$FM_HOME/state/contended"
+    fi
+    : > "$FM_HOME/state/arm-release"
+    wait "$p1"
+    wait "$p2"
   '
   rc1=$(cat "$dir/state/rc1")
   rc2=$(cat "$dir/state/rc2")
   count=$(wc -l < "$dir/state/arm-ran" | tr -d ' ')
+  assert_present "$dir/state/contended" "the competing firing must close while the owner still holds its arm"
   [ "$count" -eq 1 ] || fail "concurrent firings must foreground exactly one arm, saw $count"
   { [ "$rc1" = 2 ] && [ "$rc2" = 0 ]; } || { [ "$rc1" = 0 ] && [ "$rc2" = 2 ]; } \
     || fail "exactly one firing must translate the close (rc 2) and the other must no-op (rc 0), got rc1=$rc1 rc2=$rc2"

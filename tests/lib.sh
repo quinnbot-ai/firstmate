@@ -70,6 +70,7 @@ pass() {
 
 FM_TEST_CLEANUP_DIRS=()
 FM_TEST_CLEANUP_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-cleanup.$$.XXXXXX") || return 1
+FM_TEST_HOLDER_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-holders.$$.XXXXXX") || return 1
 
 fm_test_pid_identity() {
   local pid=$1
@@ -78,12 +79,23 @@ fm_test_pid_identity() {
 }
 
 FM_TEST_OWNER_IDENTITY=$(fm_test_pid_identity "$$") || {
-  rm -f "$FM_TEST_CLEANUP_REGISTRY"
+  rm -f "$FM_TEST_CLEANUP_REGISTRY" "$FM_TEST_HOLDER_REGISTRY"
   return 1
 }
 
 fm_test_cleanup() {
-  local d
+  local d pid recorded current
+  # Registered placeholder processes first: a fixture root that still holds a
+  # FIFO a holder is blocked on must not be removed out from under it.
+  if [ -f "$FM_TEST_HOLDER_REGISTRY" ]; then
+    while IFS=$'\t' read -r pid recorded; do
+      [ -n "$pid" ] || continue
+      current=$(fm_test_pid_identity "$pid" 2>/dev/null) || continue
+      [ -n "$recorded" ] && [ "$current" = "$recorded" ] || continue
+      kill "$pid" 2>/dev/null || true
+    done < "$FM_TEST_HOLDER_REGISTRY"
+    rm -f "$FM_TEST_HOLDER_REGISTRY"
+  fi
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d"
   done
@@ -185,6 +197,48 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/$tool"
+}
+
+# --- long-lived placeholder processes ---------------------------------------
+#
+# A test that needs a live pid to stand in for a watcher, a competing harness,
+# or a busy lock holder must not reach for `sleep <n> &`. That shape carries two
+# defects, and the second one dominates a suite's measured runtime:
+#
+#   - `harness -c 'sleep 60; :'` forks the sleep as a CHILD of the process whose
+#     pid the test records, so killing that pid leaves the sleep behind. The
+#     orphan is reparented to init and runs out its full duration.
+#   - Either shape inherits the suite's stdout and stderr, so a placeholder that
+#     outlives its test holds a PIPED run open until it exits on its own. CI
+#     always pipes, so one leaked 60-second sleeper reports a 13-second suite as
+#     a 60-second one - which is also exactly how a genuine timing regression
+#     would present, leaving the two indistinguishable.
+#
+# fm_test_holder <fifo-path> [interpreter] blocks a placeholder on a private
+# FIFO instead and echoes its pid. The placeholder forks nothing, so killing the
+# echoed pid ends all of it; it holds no inherited stdio, so it can never keep a
+# piped run open; and it self-terminates after FM_TEST_HOLDER_MAX_SECONDS so a
+# test that dies before its own kill cannot leak an immortal process. The
+# optional interpreter runs the placeholder under a chosen binary name, for
+# cases that assert on the process's own identity (a fake harness, say).
+#
+# Registered holders are killed by fm_test_cleanup on EXIT/INT/TERM, matched on
+# recorded process identity so a recycled pid is never signalled.
+FM_TEST_HOLDER_MAX_SECONDS=${FM_TEST_HOLDER_MAX_SECONDS:-300}
+
+fm_test_holder() {
+  local fifo=$1 interp=${2:-bash} pid identity
+  rm -f "$fifo" || return 1
+  mkfifo "$fifo" || return 1
+  # `exec 3<>` opens both ends in the placeholder itself, so the open never
+  # blocks and the bounded read below is the only wait.
+  # shellcheck disable=SC2016 # $1/$2 are the placeholder's own positional parameters, expanded by it
+  "$interp" -c 'exec 3<>"$1"; read -r -t "$2" _ <&3' _ "$fifo" "$FM_TEST_HOLDER_MAX_SECONDS" \
+    </dev/null >/dev/null 2>&1 &
+  pid=$!
+  identity=$(fm_test_pid_identity "$pid" 2>/dev/null) || identity=
+  printf '%s\t%s\n' "$pid" "$identity" >> "$FM_TEST_HOLDER_REGISTRY"
+  printf '%s\n' "$pid"
 }
 
 # --- deterministic git identity and fixtures --------------------------------
