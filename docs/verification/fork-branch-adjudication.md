@@ -9,7 +9,7 @@ It records verdicts only and authorizes no deletion, rename, force-push, or othe
 
 The inventory contains the 153 accumulated remote-tracking refs matching `refs/remotes/fork/fm/*` at the time of this check.
 It excludes `fm/fork-branch-adjudication`, the delivery branch created after the inventory snapshot to carry this document.
-The target is `fork/main` at `45c179bb783680ae451b86eaa8f94f6f3625729e`, the merge commit that joined the fork carries with the upstream line.
+The target is `fork/main` at `653871a4126b6a0e2b11244230ec2db23ca2de3b`, the current merge commit for PR #150; all merge bases were recomputed against this target at delivery recheck.
 Every verdict uses `git merge-base fork/main <ref>` and measures the branch delta from that merge base.
 This record deliberately does not use a tip-to-tip diff against `fork/main`.
 
@@ -23,7 +23,9 @@ Tip ancestry establishes only direct commit reachability, not shipment.
 A squash merge replaces a branch tip with a new commit on `fork/main`, so a non-ancestor tip cannot disprove that its PR landed.
 PR merge state is authoritative for the landed verdict, and rows whose tip differs from the landed commit note that delivery shape.
 Each inventory ref was also queried against the fork's all-state PR records by head branch; 29 returned no matching PR, and the two otherwise-unattributed matches (#86 and #87) are recorded below as closed unmerged.
+For every ref named in the protected inventory, **preserved on purpose** is the controlling retention verdict regardless of merge state; shipment evidence is recorded only as supporting detail because the captain retains the branch-fate decision.
 The protected inventory records `fm/fm-backend-activity-provenance` as fork-absent by design; because it is absent from the fork inventory, it has no table row and its absence receives no verdict.
+The same protected inventory names `fm/afk-completion-refill` and `fm/nm-history-rewrite-custody`; neither has a fork ref, so neither has a table row and neither absence is an oversight or a verdict.
 
 Positive control: `refs/remotes/fork/fm/reconciler-abort-attribution` resolved to `8e357a1c272710f906a07698166ce83d6261aacd`, and `git merge-base --is-ancestor fork/fm/reconciler-abort-attribution fork/main` exited zero.
 That known merged PR #149 branch proves the exact `fork` remote-ref and reachability probe used for every row.
@@ -40,8 +42,8 @@ A superseded verdict records ref disposition after fork-carry reconciliation, no
 
 ## Summary
 
-- Landed: 106.
-- Preserved on purpose: 27.
+- Landed: 105.
+- Preserved on purpose: 28.
 - Superseded: 0.
 - Unknown: 20.
 - Genuinely abandoned: 0.
@@ -64,7 +66,7 @@ A superseded verdict records ref disposition after fork-carry reconciliation, no
 | `fm/claude-crew-second-account` | landed | `33125bdc3400` | `bc1a21b2ccfcd500ae29181f82b28b6cf1075bfb` | 25/116 | PR #19 is merged; landed by PR state despite the non-ancestor branch tip (delivery may be squash or rebase). Subject: fix(test): use portable file-mode check in fm-claude-home tests |
 | `fm/codex-crew-autocompact` | landed | `194d47e8ba77` | `bc1a21b2ccfcd500ae29181f82b28b6cf1075bfb` | 21/124 | PR #21 is merged; landed by PR state despite the non-ancestor branch tip (delivery may be squash or rebase). Subject: feat(codex): enable crew home auto-compaction |
 | `fm/crew-claude-quota-visibility` | preserved on purpose | `851e28ab7a23` | `1cb900c28faf23fe23c9bb54e63f7c3b436ea096` | 1/5 | PR #137 is open; ancestor=no. Subject: feat(quota): measure crew Claude headroom |
-| `fm/crew-credential-propagation` | preserved on purpose | `72f6f66564fa` | `1cb900c28faf23fe23c9bb54e63f7c3b436ea096` | 1/7 | Protected inventory: [recut-ci-wait] says the re-cut branch is deliberately idle while CI runs; PR #147 is open; ancestor=no. Subject: fix(spawn): propagate Claude crew credentials |
+| `fm/crew-credential-propagation` | preserved on purpose | `72f6f66564fa` | `55c140198337f49ac3557de8378bd350333024a8` | 1/7 | Protected inventory: [recut-ci-wait] says the re-cut branch is deliberately idle while CI runs; PR #147 is open; ancestor=no. Subject: fix(spawn): propagate Claude crew credentials |
 | `fm/crew-decision-attribution` | landed | `621f596a6cd3` | `861b1f8a342b819729a1f43a8413f5040c1ce4fb` | 74/102 | PR #29 is merged; landed by PR state despite the non-ancestor branch tip (delivery may be squash or rebase). Subject: no-mistakes(document): document scaffold decision-attribution rule in fm-brief help |
 | `fm/decision-cadence-program` | landed | `a73d24e1aace` | `fbece9c394004b48dda7aa77c99be2465b17f2a6` | 40/134 | PR #68 is merged; landed by PR state despite the non-ancestor branch tip (delivery may be squash or rebase). Subject: no-mistakes(review): Fix config ignores, decision filtering, and date validation |
 | `fm/decision-hold-dupe-guard` | landed | `d29c7ea189ed` | `861b1f8a342b819729a1f43a8413f5040c1ce4fb` | 95/124 | PR #34 is merged; landed by PR state despite the non-ancestor branch tip (delivery may be squash or rebase). Subject: no-mistakes(document): Scope legacy-title duplicate guard limit in owner doc |
@@ -96,7 +98,7 @@ A superseded verdict records ref disposition after fork-carry reconciliation, no
 | `fm/fm-gh-ci-fallback-signature` | landed | `82a6389732ac` | `fbece9c394004b48dda7aa77c99be2465b17f2a6` | 56/268 | PR #106 is merged; landed by PR state despite the non-ancestor branch tip (delivery may be squash or rebase). Subject: fix(gh): recognize deeper statusCheckRollup denial paths in the CI fallback |
 | `fm/fm-gh-ci-fallback-slurp` | unknown | `b466b99278cd` | `fffe91eae4f88823403917958c4902a33a2f1986` | 54/172 | Durable records checked: primary state/fm-gh-ci-fallback-slurp.status, state/decision-bindings, protected-branch inventory, and main-deck reroute/reset orders; none positively establishes abandonment; ancestor=no. Subject: fix: resolve rebase integration regressions |
 | `fm/fm-gh-ci-fallback-slurp-fork` | landed | `9ae32bb17b0b` | `fbece9c394004b48dda7aa77c99be2465b17f2a6` | 57/268 | PR #107 is merged; landed by PR state despite the non-ancestor branch tip (delivery may be squash or rebase). Subject: fix(gh): paginate exact-head workflow runs without the rejected --slurp flag |
-| `fm/fm-guard-banner-names-its-cause` | preserved on purpose | `51db6539fd28` | `1cb900c28faf23fe23c9bb54e63f7c3b436ea096` | 1/3 | PR #150 is open; ancestor=no. Subject: fix(bin): name watcher health failure |
+| `fm/fm-guard-banner-names-its-cause` | landed | `51db6539fd28` | `51db6539fd28ee88e2c782cd3ed065cb056c98a6` | 0/0 | PR #150 is merged and the branch tip is reachable from current `fork/main`; landed. Subject: fix(bin): name watcher health failure |
 | `fm/fm-gh-shim-repo-targeting` | landed | `cf206febb9ed` | `fbece9c394004b48dda7aa77c99be2465b17f2a6` | 57/268 | PR #105 is merged; landed by PR state despite the non-ancestor branch tip (delivery may be squash or rebase). Subject: no-mistakes(review): Fix long option repository flag confusion |
 | `fm/fm-isolation-assert-false-positive` | landed | `629ff187fcf7` | `fbece9c394004b48dda7aa77c99be2465b17f2a6` | 30/208 | PR #74 is merged; landed by PR state despite the non-ancestor branch tip (delivery may be squash or rebase). Subject: test(brief): guard the isolation assertion by its named operands |
 | `fm/fm-landed-detached-meta-retirement` | landed | `049a79b4ff54` | `fbece9c394004b48dda7aa77c99be2465b17f2a6` | 79/284 | PR #123 is merged; landed by PR state despite the non-ancestor branch tip (delivery may be squash or rebase). Subject: fix(teardown): recheck stale locks at return boundary |
@@ -130,10 +132,10 @@ A superseded verdict records ref disposition after fork-carry reconciliation, no
 | `fm/fm-stale-recheck-batch` | landed | `2874a5802eea` | `bc1a21b2ccfcd500ae29181f82b28b6cf1075bfb` | 26/124 | PR #22 is merged; landed by PR state despite the non-ancestor branch tip (delivery may be squash or rebase). Subject: no-mistakes(document): recognize batched stale-rechecks wake in arm-layer classifiers |
 | `fm/fm-sync-upstream-current` | preserved on purpose | `1aeead7dea6f` | `85e750ab9b76df275c1f6b9e2bc95b671955bae9` | 65/65 | PR #111 is open; ancestor=no. Subject: test(pi): make hung successor recovery deterministic |
 | `fm/fm-tasktmp-legacy-format` | landed | `1969aed8025a` | `bc1a21b2ccfcd500ae29181f82b28b6cf1075bfb` | 11/37 | PR #8 is merged; landed by PR state despite the non-ancestor branch tip (delivery may be squash or rebase). Subject: test: cover legacy teardown task temp paths |
-| `fm/fm-teardown-detached-meta` | landed | `f0806a7ef0bc` | `554983438606101316cb23726bdf80d4ae2f9a6b` | 48/100 | PR #24 is merged; landed by PR state despite the non-ancestor branch tip (delivery may be squash or rebase). Subject: no-mistakes(document): document detached-window endpoint-absence proof for teardown cleanup |
+| `fm/fm-teardown-detached-meta` | preserved on purpose | `f0806a7ef0bc` | `554983438606101316cb23726bdf80d4ae2f9a6b` | 48/100 | Protected inventory: [pure-kun-custody] keeps the retired source preserved pending the open captain decision; PR #24 is merged (landed by PR state) but does not replace the retention verdict; ancestor=no. Subject: no-mistakes(document): document detached-window endpoint-absence proof for teardown cleanup |
 | `fm/fm-teardown-landing-gaps` | landed | `3230d8cabc6a` | `861b1f8a342b819729a1f43a8413f5040c1ce4fb` | 88/109 | PR #35 is merged; landed by PR state despite the non-ancestor branch tip (delivery may be squash or rebase). Subject: no-mistakes(document): docs: correct local-only review base and teardown landed-work proofs |
 | `fm/fm-test-inventory-collect-tree-mismatch` | landed | `4f44660e814d` | `fbece9c394004b48dda7aa77c99be2465b17f2a6` | 62/271 | PR #116 is merged; landed by PR state despite the non-ancestor branch tip (delivery may be squash or rebase). Subject: fix: bind test inventory collection to Git index |
-| `fm/fm-test-run-required-gates` | landed | `6d319f75fb2f` | `fbece9c394004b48dda7aa77c99be2465b17f2a6` | 45/234 | PR #94 is merged; landed by PR state despite the non-ancestor branch tip (delivery may be squash or rebase). Subject: no-mistakes(review): map focus-flash Herdr E2E into declarative runtime gate |
+| `fm/fm-test-run-required-gates` | preserved on purpose | `6d319f75fb2f` | `fbece9c394004b48dda7aa77c99be2465b17f2a6` | 45/234 | Protected inventory: [pure-kun-reroute] keeps the merged-fork runtime-gate source preserved behind ordered items; PR #94 is merged (landed by PR state) but does not replace the retention verdict; ancestor=no. Subject: no-mistakes(review): map focus-flash Herdr E2E into declarative runtime gate |
 | `fm/fm-test-run-worker-deadlines` | preserved on purpose | `fed1f3daba6e` | `6f0f87f4ce62a31cf36bf6afb5c56aa818c6fe6b` | 1/2 | Protected inventory: [pure-kun-reroute] holds the captain-gated redesign and preserves fed1f3daba6e; ancestor=no. Subject: fix(test-runner): bound parallel workers |
 | `fm/fm-test-runtime-claude-autoarm` | preserved on purpose | `fb35832a60fd` | `fbece9c394004b48dda7aa77c99be2465b17f2a6` | 72/284 | Protected inventory: [pure-kun-reroute] preserves PR #128 and this branch behind ordered upstream work; ancestor=no. Subject: test: make Claude auto-arm timing deterministic |
 | `fm/fm-token-expiry-reminder` | landed | `99494823e91b` | `fbece9c394004b48dda7aa77c99be2465b17f2a6` | 63/274 | PR #114 is merged; landed by PR state despite the non-ancestor branch tip (delivery may be squash or rebase). Subject: fix(bootstrap): satisfy reminder shell lint |
