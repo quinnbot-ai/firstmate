@@ -76,7 +76,7 @@ make_case() {
   local name=$1 case_dir fakebin
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin"
+  mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data" "$fakebin"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
@@ -544,6 +544,7 @@ run_teardown() {
   local case_dir=$1; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
     "$TEARDOWN" task-x1 "$@"
@@ -1287,6 +1288,103 @@ test_fractional_legacy_retry_wait_refuses_without_arithmetic_error() {
   assert_not_contains "$(cat "$case_dir/stderr")" "syntax error" \
     "fractional-legacy-retry-wait: teardown hit an arithmetic error"
   pass "fractional legacy retry wait remains supported without arithmetic"
+}
+
+# A brief can state a reporting requirement and a worker can deliver the
+# deliverable while silently skipping the report. Cleanup erases the records that
+# made the omission checkable, so the refusal has to live here: after teardown,
+# only a supervisor who still remembered the brief would ever notice.
+record_obligation() {  # <case-dir> <key> <text>
+  local case_dir=$1 key=$2 text=$3
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_DATA_OVERRIDE="$case_dir/data" \
+    "$ROOT/bin/fm-obligations.sh" record task-x1 "$key" --text "$text" >/dev/null
+}
+
+test_unreported_obligation_refuses_teardown() {
+  local case_dir rc
+  case_dir=$(make_case obligation-unreported)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "landed work"
+  add_fork_with_pushed_branch "$case_dir"
+  record_obligation "$case_dir" base-vs-head \
+    "Run the regression on the unfixed base and at your head; report the pair."
+  # The deliverable landed and the worker reported done - the exact shape of the
+  # failure, where everything looks finished and the stated report is missing.
+  printf '%s\n' "done: ready in branch fm/task-x1" >> "$case_dir/state/task-x1.status"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "obligation-unreported: teardown must refuse"
+  assert_grep "REFUSED: task task-x1 still owes a report" "$case_dir/stderr" \
+    "obligation-unreported: the refusal must say a stated report is missing"
+  assert_grep "base-vs-head" "$case_dir/stderr" \
+    "obligation-unreported: the refusal must name the unmet obligation"
+  pass "landed work with an unreported stated obligation refuses teardown"
+}
+
+test_reported_obligation_allows_teardown() {
+  local case_dir rc
+  case_dir=$(make_case obligation-reported)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "landed work"
+  add_fork_with_pushed_branch "$case_dir"
+  record_obligation "$case_dir" base-vs-head \
+    "Run the regression on the unfixed base and at your head; report the pair."
+  printf '%s\n' \
+    "note [key=base-vs-head]: base FAILS (1 failure), head PASSES (0 failures)" \
+    "done: ready in branch fm/task-x1" >> "$case_dir/state/task-x1.status"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "obligation-reported: teardown must proceed once the report landed"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "obligation-reported: teardown printed a REFUSED line"
+  pass "landed work whose stated obligation was reported tears down normally"
+}
+
+test_waived_obligation_allows_teardown() {
+  local case_dir rc
+  case_dir=$(make_case obligation-waived)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "landed work"
+  add_fork_with_pushed_branch "$case_dir"
+  record_obligation "$case_dir" base-vs-head "report the pair"
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_DATA_OVERRIDE="$case_dir/data" \
+    "$ROOT/bin/fm-obligations.sh" waive task-x1 base-vs-head \
+      --reason "firstmate ran both controls itself" >/dev/null
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "obligation-waived: an explicitly waived obligation must not block teardown"
+  pass "an explicitly waived obligation does not block teardown"
+}
+
+test_force_overrides_unreported_obligation() {
+  local case_dir rc
+  case_dir=$(make_case obligation-force)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "landed work"
+  add_fork_with_pushed_branch "$case_dir"
+  record_obligation "$case_dir" base-vs-head "report the pair"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "obligation-force: --force must remain the authorized discard path"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "obligation-force: REFUSED printed despite --force"
+  pass "an unreported obligation is discardable only through the explicit --force path"
 }
 
 test_local_only_force_overrides_unpushed() {
@@ -2598,6 +2696,10 @@ test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
+test_unreported_obligation_refuses_teardown
+test_reported_obligation_allows_teardown
+test_waived_obligation_allows_teardown
+test_force_overrides_unreported_obligation
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
 test_herdr_teardown_clears_escalation_marker

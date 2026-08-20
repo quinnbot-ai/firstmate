@@ -86,6 +86,8 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   secondmates.md      local and remote secondmate routing table; firstmate-private, maintained by the secondmate seed helpers (section 6)
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
+  <id>/obligations.tsv <id>/obligations.waived  durable reporting obligations this brief stated and any explicitly reasoned waivers; teardown refuses while one is neither reported nor waived (bin/fm-obligations.sh)
+  <id>/source-instruction.md  the originating instruction this brief narrows, recorded verbatim for the worker to read when the narrowed task dead-ends
 projects/            cloned repos; gitignored; read-only except under hard rule 1's concrete captain-approved project operation exception
 state/               runtime records and signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
@@ -501,6 +503,11 @@ Preserve durable structured identifiers, dependencies, and completion artifact l
 `bin/fm-brief.sh` and its help own scaffold syntax, generated variants, status protocol, delivery-mode definitions of done, and exact safety mechanics.
 Use its scaffold as the contract, then replace every `{TASK}` placeholder with a clear task description, acceptance criteria, constraints, and necessary context before dispatch or seeding.
 Keep additions task-specific rather than repeating lifecycle instructions, and alter generated sections only when the task genuinely differs from the standard shape.
+
+A brief is a narrowing of the instruction that prompted it, and narrowing is a decision rather than transcription.
+When a brief carries less than its originating instruction offered, record that instruction with `--source-instruction` and name what the brief drops with `--excluded`, so a worker who dead-ends can read what was actually available instead of reporting blocked against a path it was never told existed.
+State every reporting requirement as `--report <key>=<text>` rather than as prose, because a worker can deliver the deliverable while silently omitting prose and cleanup then erases the record that made the omission checkable.
+`bin/fm-obligations.sh` owns the obligation record, its satisfaction shape, and its waiver; teardown refuses while a recorded obligation is neither reported nor waived.
 
 Every ship brief must retain the worktree-isolation assertion and stop if launched in the primary checkout.
 If a ship task touches firstmate's shared tracked material, explicitly require `firstmate-coding-guidelines` before editing.
