@@ -23,6 +23,28 @@
 #   omitting both still fails loudly so an accidental omission is never silent.
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
+#   --report <key>=<text> records a REPORTING OBLIGATION (repeatable; ship and
+#   scout only). A brief can state a reporting requirement and a worker can
+#   deliver good work while silently omitting it, and nothing notices except a
+#   supervisor who still remembers what the brief asked. An obligation recorded
+#   here outlives that memory: it is written to data/<task-id>/obligations.tsv,
+#   the brief carries the exact one-line command that satisfies it, and
+#   bin/fm-teardown.sh refuses cleanup while it is neither reported nor waived.
+#   bin/fm-obligations.sh owns the record, the satisfaction shape, and the gate.
+#   --source-instruction <path|-> records the ORIGINATING instruction verbatim at
+#   data/<task-id>/source-instruction.md and points the worker at it (ship and
+#   scout only). A brief is a narrowing of the instruction that prompted it, and
+#   that narrowing is a decision: the worker who hits a wall can then read what
+#   was originally offered instead of reporting blocked against an alternative it
+#   was never told existed.
+#   --excluded <text> records one alternative or requirement the originating
+#   instruction offered that this brief deliberately does NOT carry (repeatable),
+#   or the single literal `none` to state that the brief carries the instruction
+#   whole. It is REQUIRED alongside --source-instruction: recording the source is
+#   the act of admitting the brief narrows it, so the narrowing must be named
+#   rather than left silent. No check compares the two texts - the semantic
+#   comparison is the author's judgement, and this flag only forces that
+#   judgement to be written down where the worker and a later reader can see it.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
 #   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
 #   The flag must be explicit because {TASK} is filled after scaffolding and the
@@ -122,6 +144,10 @@ HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+SOURCE_INSTRUCTION=
+SOURCE_INSTRUCTION_SET=0
+REPORTS=()
+EXCLUDED=()
 PUSH_REMOTE=
 PUSH_REMOTE_SET=0
 POS=()
@@ -133,6 +159,9 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      report) REPORTS+=("$a") ;;
+      source-instruction) SOURCE_INSTRUCTION=$a; SOURCE_INSTRUCTION_SET=1 ;;
+      excluded) EXCLUDED+=("$a") ;;
       push-remote) PUSH_REMOTE=$a; PUSH_REMOTE_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
@@ -146,6 +175,12 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --report) want_value=report ;;
+    --report=*) REPORTS+=("${a#--report=}") ;;
+    --source-instruction) want_value=source-instruction ;;
+    --source-instruction=*) SOURCE_INSTRUCTION=${a#--source-instruction=}; SOURCE_INSTRUCTION_SET=1 ;;
+    --excluded) want_value=excluded ;;
+    --excluded=*) EXCLUDED+=("${a#--excluded=}") ;;
     --push-remote) want_value=push-remote ;;
     --push-remote=*) PUSH_REMOTE=${a#--push-remote=}; PUSH_REMOTE_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's approval authority, not a
@@ -201,6 +236,81 @@ if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
   exit 1
 fi
 
+# Reporting obligations and originating-instruction fidelity are per-task brief
+# material: they are enforced at teardown, and a persistent charter is never torn
+# down as finished work. Refuse them on a charter rather than writing records
+# nothing will ever check.
+if [ "$KIND" = secondmate ]; then
+  [ "${#REPORTS[@]}" -eq 0 ] || {
+    echo "error: --report applies only to crewmate ship or scout briefs" >&2; exit 1; }
+  [ "$SOURCE_INSTRUCTION_SET" -eq 0 ] || {
+    echo "error: --source-instruction applies only to crewmate ship or scout briefs" >&2; exit 1; }
+  [ "${#EXCLUDED[@]}" -eq 0 ] || {
+    echo "error: --excluded applies only to crewmate ship or scout briefs" >&2; exit 1; }
+fi
+
+# Recording the originating instruction is the act of admitting this brief is a
+# narrowing of it. Nothing here can compare the two texts - that judgement is the
+# brief author's - so the one thing this scaffold CAN do is refuse to let the
+# narrowing stay silent: name what the instruction offered and this brief drops,
+# or state `none` and mean it. Same fail-closed discipline as --mode.
+if [ "$SOURCE_INSTRUCTION_SET" -eq 1 ] && [ "${#EXCLUDED[@]}" -eq 0 ]; then
+  echo "error: --source-instruction requires at least one --excluded <text>, or --excluded none" >&2
+  echo "A brief that narrows its originating instruction is making a decision; record what it drops." >&2
+  exit 1
+fi
+
+# `none` is an explicit whole-instruction attestation, so it cannot be one item
+# in a list of exclusions - that would be a contradiction recorded as fact.
+if [ "${#EXCLUDED[@]}" -gt 1 ]; then
+  for e in "${EXCLUDED[@]}"; do
+    [ "$e" = none ] || continue
+    echo "error: --excluded none states the brief drops nothing; it cannot be combined with other --excluded entries" >&2
+    exit 1
+  done
+fi
+
+# Each --report is "<key>=<text>": the key is the slug the worker states in its
+# status line and the gate matches on, so it is validated here rather than at
+# teardown, when the brief is long gone.
+REPORT_KEYS=()
+REPORT_TEXTS=()
+if [ "${#REPORTS[@]}" -gt 0 ]; then
+  for r in "${REPORTS[@]}"; do
+    case "$r" in
+      *=*) ;;
+      *) echo "error: --report must be <key>=<text> (got '$r')" >&2; exit 1 ;;
+    esac
+    rkey=${r%%=*}
+    rtext=${r#*=}
+    _fm_decision_slug_ok "$rkey" || {
+      echo "error: --report key must be a slug of A-Za-z0-9._- (got '$rkey')" >&2; exit 1; }
+    [ -n "$rtext" ] || { echo "error: --report '$rkey' has empty text" >&2; exit 1; }
+    for existing in ${REPORT_KEYS[@]+"${REPORT_KEYS[@]}"}; do
+      [ "$existing" != "$rkey" ] || {
+        echo "error: duplicate --report key '$rkey'" >&2; exit 1; }
+    done
+    REPORT_KEYS+=("$rkey")
+    REPORT_TEXTS+=("$rtext")
+  done
+fi
+
+# Read the originating instruction NOW, before anything is written, so an
+# unreadable path fails the scaffold instead of producing a brief that points at
+# a record that does not exist.
+SOURCE_INSTRUCTION_TEXT=
+if [ "$SOURCE_INSTRUCTION_SET" -eq 1 ]; then
+  if [ "$SOURCE_INSTRUCTION" = "-" ]; then
+    SOURCE_INSTRUCTION_TEXT=$(cat)
+  else
+    [ -f "$SOURCE_INSTRUCTION" ] && [ -r "$SOURCE_INSTRUCTION" ] || {
+      echo "error: --source-instruction file cannot be read: $SOURCE_INSTRUCTION" >&2; exit 1; }
+    SOURCE_INSTRUCTION_TEXT=$(cat -- "$SOURCE_INSTRUCTION")
+  fi
+  [ -n "$SOURCE_INSTRUCTION_TEXT" ] || {
+    echo "error: --source-instruction content is empty" >&2; exit 1; }
+fi
+
 BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
 mkdir -p "$DATA/$ID"
@@ -212,6 +322,66 @@ shell_quote() {
 }
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
+
+# Both sections below follow one whitespace convention so an unused section
+# leaves the generated brief byte-identical to what it was before this flag
+# existed: the variable is EMPTY when unused and occupies a heredoc line that
+# was already blank, and when used it carries its own surrounding blank lines.
+SOURCE_SECTION=
+OBLIGATIONS_SECTION=
+
+if [ "$SOURCE_INSTRUCTION_SET" -eq 1 ]; then
+  SOURCE_RECORD="$DATA/$ID/source-instruction.md"
+  [ -e "$SOURCE_RECORD" ] && {
+    echo "error: $SOURCE_RECORD already exists" >&2; exit 1; }
+  printf '%s\n' "$SOURCE_INSTRUCTION_TEXT" > "$SOURCE_RECORD"
+  SOURCE_BODY="# Originating instruction
+The instruction that prompted this task is recorded verbatim at \`$SOURCE_RECORD\`.
+The \`# Task\` section above is this brief's reading of that instruction, not a copy of it.
+If you hit a wall the Task section gives you no way around, READ that file before you report blocked: it may have offered an alternative this brief did not carry."
+  if [ "${#EXCLUDED[@]}" -eq 1 ] && [ "${EXCLUDED[0]}" = none ]; then
+    SOURCE_BODY="$SOURCE_BODY
+
+The brief author states this brief carries that instruction whole and drops nothing from it.
+If you find that is not true, say so - that is a finding about the instructions, and it is worth reporting."
+  else
+    SOURCE_BODY="$SOURCE_BODY
+
+The brief author deliberately excluded the following from this task:"
+    for e in "${EXCLUDED[@]}"; do
+      SOURCE_BODY="$SOURCE_BODY
+- $e"
+    done
+    SOURCE_BODY="$SOURCE_BODY
+
+Those exclusions are decisions, not oversights. Work within them; if one of them is the only way past a wall, report that as a decision for firstmate rather than crossing it silently."
+  fi
+  SOURCE_SECTION="
+$SOURCE_BODY
+"
+fi
+
+if [ "${#REPORT_KEYS[@]}" -gt 0 ]; then
+  OB_BODY="# Reporting obligations
+This brief states reporting requirements that are recorded durably, not only written here.
+Satisfy each one by appending exactly the line shown under it; cleanup of this task is refused while any of them is unreported, so an omission is visible rather than silent.
+Append them before your terminal status line.
+Each obligation asks you to STATE what you observed - it never asks for a particular result, and a result you did not expect is still a satisfied obligation."
+  ob_idx=0
+  while [ "$ob_idx" -lt "${#REPORT_KEYS[@]}" ]; do
+    OB_BODY="$OB_BODY
+
+- ${REPORT_TEXTS[$ob_idx]}
+  \`echo \"note [key=${REPORT_KEYS[$ob_idx]}]: {what you observed}\" >> $STATUS_FILE\`"
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      "$SCRIPT_DIR/fm-obligations.sh" record "$ID" "${REPORT_KEYS[$ob_idx]}" \
+      --text "${REPORT_TEXTS[$ob_idx]}" >/dev/null
+    ob_idx=$((ob_idx + 1))
+  done
+  OBLIGATIONS_SECTION="
+$OB_BODY
+"
+fi
 
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
@@ -339,7 +509,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 # Task
 {TASK}
-
+$SOURCE_SECTION
 $HERDR_SECTION
 
 # Setup
@@ -370,7 +540,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
-
+$OBLIGATIONS_SECTION
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
@@ -559,7 +729,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 # Task
 {TASK}
-
+$SOURCE_SECTION
 $HERDR_SECTION
 
 # Setup
@@ -603,7 +773,7 @@ Record only project knowledge useful to almost every future session.
 For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
 If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
-
+$OBLIGATIONS_SECTION
 $DOD
 EOF
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"

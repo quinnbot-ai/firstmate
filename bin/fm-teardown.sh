@@ -29,6 +29,10 @@
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
 # unresolved-decision completion gate verifies its captain-held inventory.
+# Teardown also refuses while a reporting obligation recorded for the task by
+# bin/fm-brief.sh --report is neither reported in the status log nor explicitly
+# waived, so a stated report that the worker silently skipped surfaces here
+# instead of disappearing with the task records. See bin/fm-obligations.sh.
 # Before destructive cleanup, teardown validates task check artifacts and any
 # matching quarantine entries as ordinary single-link files on the state
 # device. It refuses and preserves task state when that proof fails; otherwise
@@ -69,8 +73,9 @@
 # and then delete it, and they do not run under --force at all.
 # Usage: fm-teardown.sh <task-id> [--force] [--forget-worktree]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
-#   checks, and discards secondmate child work for kind=secondmate. Only use it
-#   when the captain has explicitly said to discard the work.
+#   and reporting-obligation checks, and discards secondmate child work for
+#   kind=secondmate. Only use it when the captain has explicitly said to discard
+#   the work.
 #   --forget-worktree records this task's recorded copy as retired (a durable
 #   worktree_retired=<owner> line; the stale worktree= value is kept as history)
 #   and then cleans up records only. It refuses unless another task provably owns
@@ -2475,6 +2480,24 @@ if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
       FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-decision-hold.sh" verify "$ID" >/dev/null; then
     echo "REFUSED: scout task $ID has not passed the unresolved-decision completion gate." >&2
     echo "Inventory its report and any visual review through bin/fm-decision-hold.sh before teardown." >&2
+    exit 1
+  fi
+fi
+
+# A reporting obligation stated in the brief is durable, not supervisor memory.
+# A worker can deliver the deliverable and silently skip a stated report, and
+# this cleanup erases the very task records that make the omission checkable, so
+# after teardown nothing but a supervisor who still remembers the brief would
+# ever notice. Refuse while any recorded obligation is neither reported nor
+# explicitly waived. bin/fm-obligations.sh owns the record and the satisfaction
+# shape; a task scaffolded without --report has no record file and pays one
+# [ -f ] test here. --force remains the captain-authorized discard path.
+if [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ] \
+  && [ -f "$DATA/$ID/obligations.tsv" ]; then
+  if ! OBLIGATIONS_UNMET=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      "$SCRIPT_DIR/fm-obligations.sh" verify "$ID" 2>&1 >/dev/null); then
+    echo "REFUSED: task $ID still owes a report its brief stated as an obligation." >&2
+    printf '%s\n' "$OBLIGATIONS_UNMET" >&2
     exit 1
   fi
 fi
