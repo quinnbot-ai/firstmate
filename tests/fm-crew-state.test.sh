@@ -1208,7 +1208,8 @@ test_unverifiable_worktree_binding_refuses_distinctly() {
   make_repo_on_branch "$d/wt" fm/unverifiable-binding
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/unverifiable-binding.meta" \
-    "window=fm:fm-unverifiable-binding" "worktree=$d/wt" "kind=ship" "harness=claude"
+    "window=fm:fm-unverifiable-binding" "worktree=$d/wt" "kind=ship" "harness=claude" \
+    "worktree_binding=fm-worktree-binding.v1"
   FM_FAKE_AXI_STATUS=$(run_running fm/unverifiable-binding)
   FM_TEST_BINDING_MODE=absent
   out=$(run_crew_state "$d" unverifiable-binding)
@@ -1217,6 +1218,22 @@ test_unverifiable_worktree_binding_refuses_distinctly() {
   assert_contains "$out" "worktree binding unverifiable" "unverifiable binding says why it refused"
   assert_not_contains "$out" "worktree binding mismatch" "unverifiable is distinct from mismatched"
   pass "unverifiable worktree binding refuses distinctly"
+}
+
+test_legacy_worktree_without_binding_reads_normally() {
+  reset_fakes
+  local d out
+  d=$(new_case legacy-worktree-without-binding)
+  make_repo_on_branch "$d/wt" fm/legacy-unbound
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/legacy-unbound.meta" \
+    "window=fm:fm-legacy-unbound" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=$(run_running fm/legacy-unbound)
+  FM_TEST_BINDING_MODE=absent
+  out=$(run_crew_state "$d" legacy-unbound)
+  assert_contains "$out" "state: working" "legacy unbound worktree preserves normal state reads"
+  assert_contains "$out" "source: run-step" "legacy unbound worktree remains attributable"
+  pass "legacy worktree without binding reads normally"
 }
 
 test_cross_pool_worktree_binding_reads_normally() {
@@ -1539,6 +1556,7 @@ test_torn_down_worktree
 test_exact_worktree_binding_reads_normally
 test_recycled_worktree_binding_refuses_live_lane
 test_unverifiable_worktree_binding_refuses_distinctly
+test_legacy_worktree_without_binding_reads_normally
 test_cross_pool_worktree_binding_reads_normally
 test_remote_alive_with_log_uses_status_log
 test_remote_alive_idle_is_healthy_not_gone

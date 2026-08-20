@@ -134,10 +134,12 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
-#   A fresh local spawn writes a private current-task binding in that worktree's
-#   Git metadata before it publishes state/<id>.meta. A relaunch verifies the
-#   binding and refuses if a pooled worktree was reassigned, rather than claiming
-#   another task's live copy. bin/fm-worktree-binding-lib.sh owns the marker.
+#   A fresh ship or scout spawn writes a private current-task binding in that
+#   worktree's Git metadata before it publishes state/<id>.meta. A relaunch
+#   verifies the binding and refuses if a pooled worktree was reassigned, rather
+#   than claiming another task's live copy. Persistent secondmate homes are not
+#   pooled task worktrees and never receive this marker.
+#   bin/fm-worktree-binding-lib.sh owns the marker.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
@@ -2274,13 +2276,15 @@ fi
 # older task's metadata cannot establish ownership. Bind a fresh assignment
 # before it publishes its metadata; a relaunch only proves that its recorded
 # binding remains exact and must never overwrite a newer task's binding.
-if [ "$RELAUNCH" -eq 1 ]; then
-  if ! fm_worktree_binding_matches "$WT" "$ID"; then
-    echo "error: task $ID's recorded worktree cannot be reused: $(fm_worktree_binding_detail); refusing to relaunch" >&2
+if [ "$KIND" != secondmate ]; then
+  if [ "$RELAUNCH" -eq 1 ]; then
+    if ! fm_worktree_binding_matches "$WT" "$ID"; then
+      echo "error: task $ID's recorded worktree cannot be reused: $(fm_worktree_binding_detail); refusing to relaunch" >&2
+      exit 1
+    fi
+  elif ! fm_worktree_binding_write "$WT" "$ID"; then
     exit 1
   fi
-elif ! fm_worktree_binding_write "$WT" "$ID"; then
-  exit 1
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
@@ -2651,7 +2655,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent worktree_binding backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2669,6 +2673,7 @@ preserve_relaunch_meta() {
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  [ "$KIND" = secondmate ] || echo "worktree_binding=fm-worktree-binding.v1"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.
