@@ -62,6 +62,24 @@ make_world() { # <name>
   : > "$WORLD/forge.log"
 }
 
+# Exercise the production state resolver against no-mistakes' durable outcome,
+# rather than substituting the state result the reconciler is meant to interpret.
+install_no_mistakes_fake() { # <world>
+  local world=$1
+  cat > "$world/fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  axi)
+    case "${2:-}" in
+      status) printf '%s\n' "${FM_FAKE_AXI_STATUS:-}" ;;
+    esac
+    ;;
+  runs) printf '%s\n' "${FM_FAKE_RUNS_LIST:-}" ;;
+esac
+SH
+  chmod +x "$world/fakebin/no-mistakes"
+}
+
 bind_secondmate() { # <local|remote>
   local route=$1
   printf 'mate\n' > "$MATE/.fm-secondmate-home"
@@ -102,6 +120,46 @@ run_reconcile() { # <home> [--startup]
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
     FM_INACTIVE_RECONCILE_SECS=60 FM_INACTIVE_CREW_STATE_BIN="$WORLD/fakebin/fm-crew-state.sh" \
     FM_FORGE_LOG="$WORLD/forge.log" "$RECON" scan ${option:+"$option"}
+}
+
+run_real_reconcile() { # <home> [--startup]
+  local home=$1 option=${2:-}
+  PATH="$WORLD/fakebin:$PATH" FM_ROOT_OVERRIDE="$WORLD/root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_INACTIVE_RECONCILE_SECS=60 FM_INACTIVE_CREW_STATE_BIN="$ROOT/bin/fm-crew-state.sh" \
+    FM_FORGE_LOG="$WORLD/forge.log" "$RECON" scan ${option:+"$option"}
+}
+
+write_pipeline_child() { # <home> <id> <status>
+  local home=$1 id=$2 status=$3 wt branch head
+  wt="$home/projects/$id"
+  branch="fm/$id"
+  mkdir -p "$wt"
+  git -C "$wt" init -q
+  git -C "$wt" config user.name fmtest
+  git -C "$wt" config user.email fmtest@example.invalid
+  git -C "$wt" commit -q --allow-empty -m base
+  git -C "$wt" checkout -q -b "$branch"
+  head=$(git -C "$wt" rev-parse HEAD)
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$wt" "project=alpha" \
+    'harness=codex' 'kind=ship' 'mode=no-mistakes' 'yolo=off' \
+    "spawn_gen=s${BASHPID:-$$}.$RANDOM"
+  printf '%s\n' "$status" > "$home/state/$id.status"
+  : > "$home/state/$id.turn-ended"
+  age "$home/state/$id.meta" "$home/state/$id.status" "$home/state/$id.turn-ended"
+  printf '%s\n' "$head"
+}
+
+pipeline_terminal_status() { # <branch> <head> <cancelled|failed>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "$2"
+outcome: $3
+EOF
 }
 
 wake_count() { # <home> <key prefix>
@@ -390,6 +448,42 @@ test_nonterminal_and_captain_held_states_do_not_report() {
   pass "nonterminal and captain-held workers remain outside inactive terminal reporting"
 }
 
+# no-mistakes writes outcome=cancelled after its supported axi abort path.
+# That terminal record is intentional supervisor action, not a validation failure,
+# so the reconciler must neither create a failure receipt nor wake for re-dispatch.
+test_supervisor_cancelled_pipeline_does_not_escalate() {
+  local head
+  make_world supervisor-cancelled
+  install_no_mistakes_fake "$WORLD"
+  head=$(write_pipeline_child "$MAIN" child 'working: validation invalidated by supervisor')
+  FM_FAKE_AXI_STATUS="$(pipeline_terminal_status fm/child "$head" cancelled)" \
+    run_real_reconcile "$MAIN" --startup
+  [ "$(outcome_count "$MAIN" pending)" = 0 ] \
+    || fail "supervisor-cancelled pipeline created a terminal failure receipt"
+  [ ! -e "$MAIN/state/.wake-queue" ] \
+    || ! grep -Fq 'inactive-outcome:' "$MAIN/state/.wake-queue" \
+    || fail "supervisor-cancelled pipeline queued a failure escalation"
+  pass "supervisor-cancelled pipeline stays out of inactive failure escalation"
+}
+
+# A no-mistakes outcome=failed record is the distinct durable terminal signal
+# for a pipeline that died on its own, so it must remain actionable.
+test_failed_pipeline_still_escalates() {
+  local head
+  make_world pipeline-failed
+  install_no_mistakes_fake "$WORLD"
+  head=$(write_pipeline_child "$MAIN" child 'working: validation under way')
+  FM_FAKE_AXI_STATUS="$(pipeline_terminal_status fm/child "$head" failed)" \
+    run_real_reconcile "$MAIN" --startup
+  [ "$(outcome_count "$MAIN" pending)" = 1 ] \
+    || fail "failed pipeline did not create a terminal failure receipt"
+  grep -Fq 'state=failed' "$MAIN/state/terminal-outcomes"/*.pending \
+    || fail "failed pipeline receipt lost its failure state"
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] \
+    || fail "failed pipeline did not queue a failure escalation"
+  pass "failed pipeline remains an inactive failure escalation"
+}
+
 # The actual watcher poll invokes the helper, while an idle secondmate remains
 # exempt from wedge escalation and emits no false wake.
 test_watcher_hook_and_idle_secondmate_exemption() {
@@ -518,6 +612,8 @@ test_relaunch_cannot_replace_metadata_during_state_snapshot
 test_heartbeat_cap_does_not_delay_reconciliation
 test_scan_marker_replaces_symlink_safely
 test_nonterminal_and_captain_held_states_do_not_report
+test_failed_pipeline_still_escalates
+test_supervisor_cancelled_pipeline_does_not_escalate
 test_watcher_hook_and_idle_secondmate_exemption
 test_stalled_state_read_is_bounded_and_scan_progresses
 test_full_scan_budget_includes_wake_lock_wait
