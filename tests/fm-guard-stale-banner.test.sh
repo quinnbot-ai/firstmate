@@ -364,7 +364,7 @@ test_autoarm_stale_beacon_alarms_with_correct_reason() {
   out=$(run_guard_case_autoarm "$dir")
   [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
     || fail "auto-arm model with an absent/stale beacon must alarm: $out"
-  assert_contains "$out" "no watcher has a fresh beacon" \
+  assert_contains "$out" "watcher beacon is stale" \
     "auto-arm stale-beacon banner must name the stale-beacon reason"
   pass "fm-guard stale banner: auto-arm stale beacon alarms with the true reason"
 }
@@ -390,9 +390,9 @@ test_persistent_no_watcher_banner_names_missing_process() {
   # failing condition is the missing process, not a stale beacon.
   touch "$(case_home "$dir")/state/.last-watcher-beat"
   out=$(run_guard_case "$dir")
-  assert_contains "$out" "no live watcher process holds this home lock" \
+  assert_contains "$out" "watcher PID is missing or no longer running" \
     "persistent no-watcher banner must name the missing watcher process"
-  assert_not_contains "$out" "no watcher has a fresh beacon" \
+  assert_not_contains "$out" "watcher beacon is stale" \
     "persistent no-watcher banner must not blame the fresh beacon"
   pass "fm-guard stale banner: persistent no-watcher banner names the true reason"
 }
@@ -417,6 +417,68 @@ test_persistent_no_watcher_episode_survives_beacon_touch() {
   assert_contains "$out2" "full banner already printed this episode" \
     "same no-watcher episode did not print the concise reminder after a beacon touch"
   pass "fm-guard stale banner: a no-watcher episode survives a beacon mtime change"
+}
+
+# The persistent model's strict health check has three ordered conditions.
+# Each watcher-down banner must name the condition that failed, never blame one
+# of the other checks when its evidence is healthy.
+test_persistent_dead_pid_banner_names_dead_pid() {
+  local dir home out pid
+  dir=$(make_guard_case persistent-dead-pid-cause)
+  home=$(case_home "$dir")
+  sleep 60 &
+  pid=$!
+  record_live_watcher "$dir" "$pid" || fail "could not record the watcher before killing it"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  touch "$home/state/.last-watcher-beat"
+  out=$(run_guard_case "$dir")
+  assert_contains "$out" "watcher PID is missing or no longer running" \
+    "dead-PID banner must name the dead watcher PID"
+  assert_not_contains "$out" "watcher lock does not match its live PID" \
+    "dead-PID banner must not blame the watcher lock"
+  assert_not_contains "$out" "watcher beacon is stale" \
+    "dead-PID banner must not blame the fresh beacon"
+  pass "fm-guard stale banner: dead PID names the PID failure only"
+}
+
+test_persistent_lock_mismatch_banner_names_lock_mismatch() {
+  local dir home out pid
+  dir=$(make_guard_case persistent-lock-mismatch-cause)
+  home=$(case_home "$dir")
+  sleep 60 &
+  pid=$!
+  record_live_watcher "$dir" "$pid" || fail "could not record the live watcher"
+  printf '%s\n' "$home/other" > "$home/state/.watch.lock/fm-home"
+  touch "$home/state/.last-watcher-beat"
+  out=$(run_guard_case "$dir")
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  assert_contains "$out" "watcher lock does not match its live PID" \
+    "lock-mismatch banner must name the mismatched watcher lock"
+  assert_not_contains "$out" "watcher PID is missing or no longer running" \
+    "lock-mismatch banner must not blame the live PID"
+  assert_not_contains "$out" "watcher beacon is stale" \
+    "lock-mismatch banner must not blame the fresh beacon"
+  pass "fm-guard stale banner: lock mismatch names the lock failure only"
+}
+
+test_persistent_stale_beacon_banner_names_stale_beacon() {
+  local dir out pid
+  dir=$(make_guard_case persistent-stale-beacon-cause)
+  sleep 60 &
+  pid=$!
+  record_live_watcher "$dir" "$pid" || fail "could not record the live watcher"
+  out=$(run_guard_case "$dir")
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  assert_contains "$out" "watcher beacon is stale" \
+    "stale-beacon banner must name the stale watcher beacon"
+  assert_not_contains "$out" "watcher PID is missing or no longer running" \
+    "stale-beacon banner must not blame the live PID"
+  assert_not_contains "$out" "watcher lock does not match its live PID" \
+    "stale-beacon banner must not blame the matching lock"
+  pass "fm-guard stale banner: stale beacon names the beacon failure only"
 }
 
 # The send-time false alarm this suite exists to pin: on a Pi primary the watcher
@@ -510,8 +572,16 @@ test_extension_held_unhealthy_locks_stay_alarm() {
     wait "$session_pid" 2>/dev/null || true
     [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
       || fail "an extension-owned held lock with $case_name must alarm: $out"
-    assert_contains "$out" "no live watcher process holds this home lock" \
-      "a held unhealthy lock with $case_name must report no-watcher"
+    case "$case_name" in
+      dead-pid|malformed-pid)
+        assert_contains "$out" "watcher PID is missing or no longer running" \
+          "a held unhealthy lock with $case_name must report the dead watcher PID"
+        ;;
+      wrong-home|wrong-path|identity-mismatch)
+        assert_contains "$out" "watcher lock does not match its live PID" \
+          "a held unhealthy lock with $case_name must report the mismatched watcher lock"
+        ;;
+    esac
   done
   pass "fm-guard stale banner: held unhealthy extension locks stay loud"
 }
@@ -526,7 +596,7 @@ test_extension_without_ownership_evidence_stays_alarm() {
   out=$(run_guard_case_extension "$dir")
   [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
     || fail "an unheld lock with no extension ownership evidence must alarm: $out"
-  assert_contains "$out" "no live watcher process holds this home lock" \
+  assert_contains "$out" "watcher PID is missing or no longer running" \
     "the unowned extension-model banner must name the missing watcher process"
   pass "fm-guard stale banner: extension model without ownership evidence stays loud"
 }
@@ -569,22 +639,27 @@ test_extension_ownership_needs_every_signal() {
 # passes the grace window the extension has not restored the cycle and the banner
 # must fire even with a fully live, correctly loaded Pi session.
 test_extension_stale_beacon_alarms_despite_live_session() {
-  local dir home out pid
+  local dir home out session_pid watcher_pid
   dir=$(make_guard_case extension-stale-beacon)
   home=$(case_home "$dir")
   sleep 60 &
-  pid=$!
-  record_pi_extension_session "$dir" "$pid" || fail "could not record the Pi extension session"
+  session_pid=$!
+  record_pi_extension_session "$dir" "$session_pid" || fail "could not record the Pi extension session"
+  sleep 60 &
+  watcher_pid=$!
+  record_live_watcher "$dir" "$watcher_pid" || fail "could not record the live watcher"
   out=$(FM_ROOT_OVERRIDE="$(case_root "$dir")" \
     FM_HOME="$home" \
     FM_GUARD_GRACE=1 \
     FM_SUPERVISION_MODEL=extension \
     "$ROOT/bin/fm-guard.sh" 2>&1)
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  kill "$watcher_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+  kill "$session_pid" 2>/dev/null || true
+  wait "$session_pid" 2>/dev/null || true
   [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
     || fail "a beacon past grace must alarm even under a live Pi session: $out"
-  assert_contains "$out" "no watcher has a fresh beacon" \
+  assert_contains "$out" "watcher beacon is stale" \
     "the extension-model stale-beacon banner must name the stale beacon"
   pass "fm-guard stale banner: extension model still alarms on a genuinely stale beacon"
 }
@@ -626,7 +701,7 @@ test_persistent_model_ignores_pi_extension_evidence() {
   wait "$pid" 2>/dev/null || true
   [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
     || fail "a persistent-watcher primary must still alarm with Pi markers present: $out"
-  assert_contains "$out" "no live watcher process holds this home lock" \
+  assert_contains "$out" "watcher PID is missing or no longer running" \
     "the persistent-model banner must still name the missing watcher process"
   pass "fm-guard stale banner: persistent primaries ignore Pi extension evidence"
 }
@@ -697,6 +772,9 @@ test_autoarm_stale_beacon_alarms_with_correct_reason
 test_autoarm_stale_episode_is_stable
 test_persistent_no_watcher_banner_names_missing_process
 test_persistent_no_watcher_episode_survives_beacon_touch
+test_persistent_dead_pid_banner_names_dead_pid
+test_persistent_lock_mismatch_banner_names_lock_mismatch
+test_persistent_stale_beacon_banner_names_stale_beacon
 test_fresh_beacon_without_live_watcher_stays_alarm
 test_x_mode_without_live_watcher_stays_alarm
 test_healthy_recovery_rearms_next_stale_episode

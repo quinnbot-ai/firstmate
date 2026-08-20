@@ -18,8 +18,8 @@
 # while that live Pi session provably owns continuity; any held but unhealthy
 # lock is down; under every
 # persistent-watcher harness a live identity-matched watcher with a fresh beacon
-# is required. The banner names the true failing condition (a missing live
-# watcher process vs a genuinely stale beacon). The full banner is emitted once
+# is required. The banner names the true failing condition (a dead watcher PID,
+# lock mismatch, or genuinely stale beacon). The full banner is emitted once
 # per distinct down-episode in this FM_HOME (keyed to the failing condition, not
 # the beacon mtime, which a healthy between-turns watcher advances every poll);
 # later guarded commands in the same episode print a one-line reminder instead.
@@ -121,6 +121,25 @@ fm_guard_clear_stale_banner() {
   rm -f "$STALE_BANNER_MARKER" 2>/dev/null || true
 }
 
+# Render the strict health check's specific failed condition for an operator.
+fm_guard_watcher_cause() {
+  local reason=$1 beacon_desc=$2 grace=$3
+  case "$reason" in
+    watcher-pid-not-alive)
+      printf 'the watcher PID is missing or no longer running (last beat: %s)' "$beacon_desc"
+      ;;
+    watcher-lock-mismatch)
+      printf 'the watcher lock does not match its live PID (last beat: %s)' "$beacon_desc"
+      ;;
+    stale-beacon)
+      printf 'the watcher beacon is stale (last beat: %s, grace %ss)' "$beacon_desc" "$grace"
+      ;;
+    *)
+      printf 'the watcher health check failed (%s; last beat: %s)' "$reason" "$beacon_desc"
+      ;;
+  esac
+}
+
 # Worktree-tangle alarm, checked FIRST and independent of in-flight tasks: the
 # firstmate PRIMARY checkout (FM_ROOT) must stay on its default branch. If a
 # crewmate's branch/commits landed here instead of in its own isolated worktree,
@@ -198,11 +217,7 @@ if [ "$watcher_healthy" = false ]; then
     {
       printf '●%s\n' "$rule"
       printf '●  WATCHER DOWN - SUPERVISION IS OFF\n'
-      if [ "$watcher_down_reason" = no-watcher ]; then
-        watcher_cause=$(printf 'no live watcher process holds this home lock (last beat: %s)' "$beacon_desc")
-      else
-        watcher_cause=$(printf 'no watcher has a fresh beacon (last beat: %s, grace %ss)' "$beacon_desc" "$GRACE")
-      fi
+      watcher_cause=$(fm_guard_watcher_cause "$watcher_down_reason" "$beacon_desc" "$GRACE")
       if [ "$in_flight" -gt 0 ]; then
         printf '●  %s task(s) in flight, but %s.\n' "$in_flight" "$watcher_cause"
       elif [ "$sources" -gt 0 ]; then
@@ -220,8 +235,8 @@ if [ "$watcher_healthy" = false ]; then
       printf '●%s\n' "$rule"
     } >&2
   else
-    printf 'WARNING: watcher still down (same stale episode; last beat: %s, grace %ss) - full banner already printed this episode.\n' \
-      "$beacon_desc" "$GRACE" >&2
+    printf 'WARNING: watcher still down (same %s episode; last beat: %s) - full banner already printed this episode.\n' \
+      "$watcher_down_reason" "$beacon_desc" >&2
   fi
 else
   # Healthy again while work is still in flight: end the episode so a later
