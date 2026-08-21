@@ -690,6 +690,123 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+# A direct-PR worker is the only one that pushes, and git's own default target is
+# `origin`. In a fork-based checkout that is the upstream, so the push is denied
+# and the worker reads a wrong-remote instruction as a permissions wall. The
+# generated brief must therefore NAME the remote, the push command, and the PR's
+# target repository, resolved from the project clone rather than guessed.
+test_direct_pr_brief_names_its_push_remote() {
+  local root home projects brief
+  root="$TMP_ROOT/push-target"
+  home="$root/home"
+  projects="$root/projects"
+  mkdir -p "$home/data" "$projects"
+
+  # Fork-based clone: origin is an upstream nobody can push to.
+  fm_git_init_commit "$projects/forked"
+  git -C "$projects/forked" remote add origin https://forge.invalid/upstream-owner/forked.git
+  git -C "$projects/forked" remote add fork https://forge.invalid/crew-owner/forked.git
+  FM_HOME="$home" FM_PROJECTS_OVERRIDE="$projects" \
+    "$ROOT/bin/fm-brief.sh" push-fork-a1 forked --mode direct-PR >/dev/null 2>&1 \
+    || fail "direct-PR scaffold on a fork-based clone exited non-zero"
+  brief="$home/data/push-fork-a1/brief.md"
+  grep -q '^Push target: ' "$brief" \
+    || fail "direct-PR brief carries no machine-readable push-target line"
+  assert_grep 'git push fork HEAD:refs/heads/fm/push-fork-a1' "$brief" \
+    "direct-PR brief did not name the writable remote in its push command"
+  assert_grep '--repo crew-owner/forked' "$brief" \
+    "direct-PR brief did not name the PR's target repository"
+  assert_grep 'upstream-owner/forked' "$brief" \
+    "direct-PR brief did not say which remote git would otherwise default to"
+
+  # An origin-only clone still names the target explicitly, and must not warn
+  # about a fallback that would have landed in the same place.
+  fm_git_init_commit "$projects/solo"
+  git -C "$projects/solo" remote add origin https://forge.invalid/solo-owner/solo.git
+  FM_HOME="$home" FM_PROJECTS_OVERRIDE="$projects" \
+    "$ROOT/bin/fm-brief.sh" push-solo-a2 solo --mode direct-PR >/dev/null 2>&1 \
+    || fail "direct-PR scaffold on an origin-only clone exited non-zero"
+  brief="$home/data/push-solo-a2/brief.md"
+  assert_grep 'git push origin HEAD:refs/heads/fm/push-solo-a2' "$brief" \
+    "origin-only clone did not name origin as the resolved push target"
+  assert_grep '--repo solo-owner/solo' "$brief" \
+    "origin-only clone did not name the PR's target repository"
+  assert_no_grep 'Do not let git fall back' "$brief" \
+    "origin-only clone warned about a fallback that resolves to the same remote"
+
+  # No inspectable clone: the worker is told to resolve the remote itself, which
+  # is still better than an unstated origin default.
+  FM_HOME="$home" FM_PROJECTS_OVERRIDE="$projects" \
+    "$ROOT/bin/fm-brief.sh" push-none-a3 never-cloned --mode direct-PR >/dev/null 2>&1 \
+    || fail "direct-PR scaffold without an inspectable clone exited non-zero"
+  brief="$home/data/push-none-a3/brief.md"
+  grep -q '^Push target: ' "$brief" \
+    || fail "unresolvable clone dropped the push-target line instead of stating the gap"
+  assert_grep 'git remote -v' "$brief" \
+    "unresolvable clone did not tell the worker how to find its push remote"
+  assert_grep 'read-only upstream' "$brief" \
+    "unresolvable clone did not warn that origin is often unwritable"
+
+  # The other two modes have no worker push, so they must stay silent about one.
+  FM_HOME="$home" FM_PROJECTS_OVERRIDE="$projects" \
+    "$ROOT/bin/fm-brief.sh" push-local-a4 forked --mode local-only >/dev/null 2>&1
+  ! grep -q '^Push target: ' "$home/data/push-local-a4/brief.md" \
+    || fail "local-only brief carried a push target it must never use"
+  FM_HOME="$home" FM_PROJECTS_OVERRIDE="$projects" \
+    "$ROOT/bin/fm-brief.sh" push-nm-a5 forked --mode no-mistakes >/dev/null 2>&1
+  ! grep -q '^Push target: ' "$home/data/push-nm-a5/brief.md" \
+    || fail "no-mistakes brief carried a push target the pipeline owns"
+  pass "fm-brief.sh: a direct-PR brief names its push remote, PR repository, and the origin it must not default to"
+}
+
+# The resolution order is firstmate's to override: an explicit --push-remote wins
+# over the repo's own configuration, and the flag is refused where no worker pushes.
+test_push_remote_override_and_scope() {
+  local root home projects brief out status
+  root="$TMP_ROOT/push-override"
+  home="$root/home"
+  projects="$root/projects"
+  mkdir -p "$home/data" "$projects"
+  fm_git_init_commit "$projects/proj"
+  git -C "$projects/proj" remote add origin https://forge.invalid/upstream-owner/proj.git
+  git -C "$projects/proj" remote add fork https://forge.invalid/crew-owner/proj.git
+  git -C "$projects/proj" remote add mirror https://forge.invalid/mirror-owner/proj.git
+
+  # remote.pushDefault is the repo's own answer and outranks the `fork` convention.
+  git -C "$projects/proj" config remote.pushDefault mirror
+  FM_HOME="$home" FM_PROJECTS_OVERRIDE="$projects" \
+    "$ROOT/bin/fm-brief.sh" push-default-b1 proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "scaffold with remote.pushDefault exited non-zero"
+  assert_grep 'git push mirror HEAD:refs/heads/fm/push-default-b1' "$home/data/push-default-b1/brief.md" \
+    "remote.pushDefault did not win over the fork convention"
+
+  # The explicit flag outranks everything the repo says.
+  FM_HOME="$home" FM_PROJECTS_OVERRIDE="$projects" \
+    "$ROOT/bin/fm-brief.sh" push-flag-b2 proj --mode direct-PR --push-remote fork >/dev/null 2>&1 \
+    || fail "scaffold with --push-remote exited non-zero"
+  brief="$home/data/push-flag-b2/brief.md"
+  assert_grep 'git push fork HEAD:refs/heads/fm/push-flag-b2' "$brief" \
+    "--push-remote did not override the repo configuration"
+  assert_grep '--repo crew-owner/proj' "$brief" \
+    "--push-remote did not carry its own remote's PR repository"
+
+  while IFS='|' read -r label args expect; do
+    [ -n "$label" ] || continue
+    # shellcheck disable=SC2086  # args is an intentional word-split arg list
+    out=$(FM_HOME="$home" FM_PROJECTS_OVERRIDE="$projects" "$ROOT/bin/fm-brief.sh" $args 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "$label: expected a non-zero exit"
+    assert_contains "$out" "$expect" "$label: refusal did not explain why"
+  done <<'ROWS'
+push-remote on a no-mistakes brief|push-refuse-b3 proj --mode no-mistakes --push-remote fork|--push-remote applies only to --mode direct-PR
+push-remote on a local-only brief|push-refuse-b4 proj --mode local-only --push-remote fork|--push-remote applies only to --mode direct-PR
+push-remote on a scout brief|push-refuse-b5 proj --scout --push-remote fork|--push-remote applies only to --mode direct-PR
+empty push-remote value|push-refuse-b6 proj --mode direct-PR --push-remote=|--push-remote requires a remote name
+option-shaped push-remote value|push-refuse-b7 proj --mode direct-PR --push-remote=--force|must be a remote name, not an option
+ROWS
+  pass "fm-brief.sh: --push-remote overrides the resolved remote and is refused where no worker pushes"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -720,6 +837,8 @@ test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
+test_direct_pr_brief_names_its_push_remote
+test_push_remote_override_and_scope
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete

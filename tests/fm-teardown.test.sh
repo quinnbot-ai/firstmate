@@ -39,6 +39,20 @@
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
 #
+# Also covers the recycled-pool-slot collision. A meta worktree= value is an
+# allocation record, and a lane that is preserved rather than torn down (a
+# long-term pause) keeps pointing at a slot the pool later hands to another
+# task, so a home accumulates one stale pointer per protected lane. Ownership is
+# read from the copy's own current-owner binding, never from the recorded path:
+#   (z1) copy owned by another live task                       -> REFUSE, names the owner
+#   (z2) same collision under --force                          -> REFUSE (force is not misdirection)
+#   (z3) same collision with --forget-worktree                 -> pointer retired, copy untouched
+#   (z4) --forget-worktree while the copy is still this task's -> REFUSE (never a bypass)
+#   (z5) copy still bound to this task                         -> ALLOW  (no regression)
+#   (z6) binding declared in meta but missing from the copy    -> REFUSE, --force overrides
+#   (z7) plain re-run over an already-retired pointer          -> ALLOW  (durably idempotent)
+#   (z8) --force with --forget-worktree on a reassigned copy   -> ALLOW  (other copy untouched)
+#
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
 #   (r) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
@@ -53,6 +67,8 @@ set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-worktree-binding-lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
@@ -76,7 +92,7 @@ make_case() {
   local name=$1 case_dir fakebin
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin"
+  mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data" "$fakebin"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
@@ -544,6 +560,7 @@ run_teardown() {
   local case_dir=$1; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
     "$TEARDOWN" task-x1 "$@"
@@ -560,6 +577,288 @@ make_path_without_lsof() {  # <case-dir>
     case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
   done
   printf '%s\n' "$path_dir"
+}
+
+# --- recycled-pool-slot fixtures --------------------------------------------
+
+# Make $case_dir/wt the live copy of a DIFFERENT task: check out that task's own
+# branch there and record it as the copy's current owner, exactly as a fresh
+# spawn into a recycled pool slot does. The task-x1 meta written by write_meta
+# keeps pointing at the same path, which is the stale pointer a preserved lane
+# holds. Args: case_dir owner_task_id owner_branch
+hand_worktree_to_other_task() {
+  local case_dir=$1 owner=$2 branch=$3
+  git -C "$case_dir/wt" checkout -q -b "$branch"
+  fm_worktree_binding_write "$case_dir/wt" "$owner" \
+    || fail "could not bind the recycled copy to $owner"
+}
+
+# Record task-x1 as the copy's own current owner, the ordinary non-collision case.
+bind_worktree_to_task_x1() {
+  local case_dir=$1
+  fm_worktree_binding_write "$case_dir/wt" task-x1 \
+    || fail "could not bind the copy to task-x1"
+}
+
+# Declare the ownership binding in task-x1's meta, as fm-spawn does for every
+# ship or scout task it launches.
+declare_binding_in_meta() {
+  local case_dir=$1
+  printf '%s\n' 'worktree_binding=fm-worktree-binding.v1' >> "$case_dir/state/task-x1.meta"
+}
+
+# Replace the treehouse mock with one that records every invocation, so a test
+# can prove the copy was never returned to the pool.
+log_treehouse_calls() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+# Push the copy's CURRENT branch to a fork remote so the landed-work checks are
+# satisfied. Without this the pre-fix code refuses for an unrelated reason
+# (unpushed work) and the collision itself would never be exercised. Args: case_dir branch
+push_current_branch_to_fork() {
+  local case_dir=$1 branch=$2
+  git init -q --bare "$case_dir/fork.git"
+  git -C "$case_dir/project" remote add fork "$case_dir/fork.git"
+  git -C "$case_dir/wt" push -q fork "$branch"
+  git -C "$case_dir/project" fetch -q fork
+}
+
+# The reproduction: task-x1's record still names a pool slot that has since been
+# recycled to task live-lane. The live lane's work is pushed, so every existing
+# dirty/landed-work check is satisfied and only ownership stands between this
+# teardown and destroying another task's copy.
+test_recycled_slot_refuses_and_names_the_live_owner() {
+  local case_dir rc
+  case_dir=$(make_case recycled-slot-refuses)
+  write_meta "$case_dir" no-mistakes ship
+  declare_binding_in_meta "$case_dir"
+  log_treehouse_calls "$case_dir"
+  hand_worktree_to_other_task "$case_dir" live-lane fm/live-lane
+  wt_commit "$case_dir" "live lane work"
+  push_current_branch_to_fork "$case_dir" fm/live-lane
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "recycled-slot: teardown must refuse a copy another task owns"
+  assert_contains "$(cat "$case_dir/stderr")" "REFUSED" "recycled-slot: refusal is loud"
+  assert_contains "$(cat "$case_dir/stderr")" "live-lane" \
+    "recycled-slot: the refusal names the task that owns the copy"
+  assert_contains "$(cat "$case_dir/stderr")" "fm/live-lane" \
+    "recycled-slot: the refusal names the branch actually checked out in the copy"
+  # tests/fm-backend-herdr-presentation-e2e.test.sh keys its retire-and-retry
+  # cleanup off this phrase, so it is part of the refusal's contract.
+  assert_contains "$(cat "$case_dir/stderr")" "owns it now" \
+    "recycled-slot: the refusal keeps the phrase other suites key their cleanup off"
+  git -C "$case_dir/project" rev-parse --verify -q fm/live-lane >/dev/null \
+    || fail "recycled-slot: the live lane's branch was deleted"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "recycled-slot: the live lane's copy was returned to the pool"$'\n'"$(cat "$case_dir/treehouse.log")"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "recycled-slot: a refused teardown must leave its own records intact"
+  pass "a recycled pool slot refuses teardown and names the task that owns it"
+}
+
+# --force authorizes discarding THIS task's work. It never authorizes acting on a
+# copy that belongs to somebody else, and on the pre-fix code it is the most
+# destructive path of all, because it skips every dirty/landed-work check.
+test_recycled_slot_refuses_even_under_force() {
+  local case_dir rc
+  case_dir=$(make_case recycled-slot-force)
+  write_meta "$case_dir" no-mistakes ship
+  declare_binding_in_meta "$case_dir"
+  log_treehouse_calls "$case_dir"
+  hand_worktree_to_other_task "$case_dir" live-lane fm/live-lane
+  wt_commit "$case_dir" "live lane work with no second copy"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "recycled-slot-force: --force must not redirect teardown onto another task's copy"
+  assert_contains "$(cat "$case_dir/stderr")" "live-lane" \
+    "recycled-slot-force: the refusal names the task that owns the copy"
+  git -C "$case_dir/project" rev-parse --verify -q fm/live-lane >/dev/null \
+    || fail "recycled-slot-force: the live lane's only copy of its branch was deleted"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "recycled-slot-force: the live lane's copy was returned to the pool"
+  pass "--force never redirects teardown onto a copy another task owns"
+}
+
+# The supported way out: retire the stale pointer, then clean up records only.
+test_forget_worktree_retires_the_stale_pointer_and_spares_the_copy() {
+  local case_dir rc
+  case_dir=$(make_case recycled-slot-forget)
+  write_meta "$case_dir" no-mistakes ship
+  declare_binding_in_meta "$case_dir"
+  log_treehouse_calls "$case_dir"
+  hand_worktree_to_other_task "$case_dir" live-lane fm/live-lane
+  wt_commit "$case_dir" "live lane work"
+
+  set +e
+  run_teardown "$case_dir" --forget-worktree > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "forget-worktree: retiring a stale pointer should complete"$'\n'"$(cat "$case_dir/stderr")"
+  [ ! -f "$case_dir/state/task-x1.meta" ] \
+    || fail "forget-worktree: the stale task's own records were not cleaned up"
+  [ -d "$case_dir/wt" ] || fail "forget-worktree: the live lane's copy was removed"
+  [ "$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)" = fm/live-lane ] \
+    || fail "forget-worktree: the live lane's copy was reset off its branch"
+  fm_worktree_binding_read "$case_dir/wt" \
+    || fail "forget-worktree: the live lane's ownership record was destroyed"
+  [ "$FM_WORKTREE_BINDING_TASK_ID" = live-lane ] \
+    || fail "forget-worktree: the copy's owner changed to $FM_WORKTREE_BINDING_TASK_ID"
+  assert_contains "$(cat "$case_dir/stderr")" "which task live-lane owns" \
+    "forget-worktree: retiring the pointer names the task that owns the copy"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "forget-worktree: the live lane's copy was returned to the pool"
+  pass "--forget-worktree retires the stale pointer and leaves the live copy alone"
+}
+
+# The combination a cleanup path actually uses: an authorized discard of this
+# task's own work whose recorded copy turns out to belong to somebody else. The
+# discard applies to this task; the other task's copy is still left alone.
+test_force_and_forget_worktree_together_complete() {
+  local case_dir rc
+  case_dir=$(make_case forget-with-force)
+  write_meta "$case_dir" no-mistakes ship
+  declare_binding_in_meta "$case_dir"
+  log_treehouse_calls "$case_dir"
+  hand_worktree_to_other_task "$case_dir" live-lane fm/live-lane
+  wt_commit "$case_dir" "live lane work"
+
+  set +e
+  run_teardown "$case_dir" --force --forget-worktree > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "forget-with-force: --force --forget-worktree should complete"$'\n'"$(cat "$case_dir/stderr")"
+  [ ! -f "$case_dir/state/task-x1.meta" ] \
+    || fail "forget-with-force: the stale task's records were not cleaned up"
+  [ -d "$case_dir/wt" ] || fail "forget-with-force: the live lane's copy was removed"
+  [ "$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)" = fm/live-lane ] \
+    || fail "forget-with-force: the live lane's copy was reset off its branch"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "forget-with-force: the live lane's copy was returned to the pool"
+  pass "--force and --forget-worktree together discard this task without touching the other copy"
+}
+
+# --forget-worktree must never become a general way to skip the copy checks.
+test_forget_worktree_refuses_without_a_proven_reassignment() {
+  local case_dir rc
+  case_dir=$(make_case forget-without-conflict)
+  write_meta "$case_dir" no-mistakes ship
+  declare_binding_in_meta "$case_dir"
+  log_treehouse_calls "$case_dir"
+  bind_worktree_to_task_x1 "$case_dir"
+  wt_commit "$case_dir" "this task's own unpushed work"
+
+  set +e
+  run_teardown "$case_dir" --forget-worktree --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "forget-without-conflict: --forget-worktree must refuse without a proven reassignment"
+  assert_contains "$(cat "$case_dir/stderr")" "proven reassignment" \
+    "forget-without-conflict: the refusal explains why the flag does not apply"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "forget-without-conflict: records were cleaned up anyway"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "forget-without-conflict: the copy was returned to the pool anyway"
+  pass "--forget-worktree refuses when the copy still belongs to this task"
+}
+
+# Retirement is durable, so a teardown that fails a later step is re-run against a
+# record that already carries it. That re-run must repeat the record-only cleanup
+# on its own, with or without the flag, and must still leave the live copy alone.
+test_retired_pointer_is_honoured_on_a_plain_rerun() {
+  local case_dir rc
+  case_dir=$(make_case forget-idempotent)
+  write_meta "$case_dir" no-mistakes ship
+  declare_binding_in_meta "$case_dir"
+  log_treehouse_calls "$case_dir"
+  hand_worktree_to_other_task "$case_dir" live-lane fm/live-lane
+  wt_commit "$case_dir" "live lane work"
+  # The record exactly as the retire path leaves it: the stale pointer is kept as
+  # history, and the proven owner is recorded alongside it.
+  printf '%s\n' 'worktree_retired=live-lane' >> "$case_dir/state/task-x1.meta"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "forget-idempotent: a re-run over a retired pointer should complete"$'\n'"$(cat "$case_dir/stderr")"
+  [ ! -f "$case_dir/state/task-x1.meta" ] \
+    || fail "forget-idempotent: the stale task's records were not cleaned up"
+  [ -d "$case_dir/wt" ] || fail "forget-idempotent: the live lane's copy was removed"
+  [ "$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)" = fm/live-lane ] \
+    || fail "forget-idempotent: the live lane's copy was reset off its branch"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "forget-idempotent: the live lane's copy was returned to the pool"
+  pass "a retired copy pointer is honoured on a plain re-run"
+}
+
+# No regression: a task that still owns its copy tears down exactly as before.
+test_own_binding_tears_down_normally() {
+  local case_dir rc
+  case_dir=$(make_case own-binding-allows)
+  write_meta "$case_dir" local-only ship
+  declare_binding_in_meta "$case_dir"
+  bind_worktree_to_task_x1 "$case_dir"
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "own-binding: a task that still owns its copy tears down"$'\n'"$(cat "$case_dir/stderr")"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "own-binding: teardown printed a REFUSED line"
+  pass "a copy still bound to this task tears down normally"
+}
+
+# The copy published an ownership binding at spawn, and it has since vanished, so
+# ownership cannot be proven either way. That is an inspection failure, and takes
+# the same graduated path as every other "cannot inspect this copy" refusal.
+test_missing_binding_refuses_until_forced() {
+  local case_dir rc
+  case_dir=$(make_case binding-missing)
+  write_meta "$case_dir" local-only ship
+  declare_binding_in_meta "$case_dir"
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "binding-missing: an unverifiable copy must refuse"
+  assert_contains "$(cat "$case_dir/stderr")" "REFUSED" "binding-missing: refusal is loud"
+  assert_contains "$(cat "$case_dir/stderr")" "still belongs to task task-x1" \
+    "binding-missing: the refusal says what could not be proven"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout2" 2> "$case_dir/stderr2"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "binding-missing: --force is the documented discard path"$'\n'"$(cat "$case_dir/stderr2")"
+  pass "a declared-but-missing ownership record refuses, and --force overrides it"
 }
 
 test_local_only_fork_remote_allows() {
@@ -1287,6 +1586,103 @@ test_fractional_legacy_retry_wait_refuses_without_arithmetic_error() {
   assert_not_contains "$(cat "$case_dir/stderr")" "syntax error" \
     "fractional-legacy-retry-wait: teardown hit an arithmetic error"
   pass "fractional legacy retry wait remains supported without arithmetic"
+}
+
+# A brief can state a reporting requirement and a worker can deliver the
+# deliverable while silently skipping the report. Cleanup erases the records that
+# made the omission checkable, so the refusal has to live here: after teardown,
+# only a supervisor who still remembered the brief would ever notice.
+record_obligation() {  # <case-dir> <key> <text>
+  local case_dir=$1 key=$2 text=$3
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_DATA_OVERRIDE="$case_dir/data" \
+    "$ROOT/bin/fm-obligations.sh" record task-x1 "$key" --text "$text" >/dev/null
+}
+
+test_unreported_obligation_refuses_teardown() {
+  local case_dir rc
+  case_dir=$(make_case obligation-unreported)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "landed work"
+  add_fork_with_pushed_branch "$case_dir"
+  record_obligation "$case_dir" base-vs-head \
+    "Run the regression on the unfixed base and at your head; report the pair."
+  # The deliverable landed and the worker reported done - the exact shape of the
+  # failure, where everything looks finished and the stated report is missing.
+  printf '%s\n' "done: ready in branch fm/task-x1" >> "$case_dir/state/task-x1.status"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "obligation-unreported: teardown must refuse"
+  assert_grep "REFUSED: task task-x1 still owes a report" "$case_dir/stderr" \
+    "obligation-unreported: the refusal must say a stated report is missing"
+  assert_grep "base-vs-head" "$case_dir/stderr" \
+    "obligation-unreported: the refusal must name the unmet obligation"
+  pass "landed work with an unreported stated obligation refuses teardown"
+}
+
+test_reported_obligation_allows_teardown() {
+  local case_dir rc
+  case_dir=$(make_case obligation-reported)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "landed work"
+  add_fork_with_pushed_branch "$case_dir"
+  record_obligation "$case_dir" base-vs-head \
+    "Run the regression on the unfixed base and at your head; report the pair."
+  printf '%s\n' \
+    "note [key=base-vs-head]: base FAILS (1 failure), head PASSES (0 failures)" \
+    "done: ready in branch fm/task-x1" >> "$case_dir/state/task-x1.status"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "obligation-reported: teardown must proceed once the report landed"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "obligation-reported: teardown printed a REFUSED line"
+  pass "landed work whose stated obligation was reported tears down normally"
+}
+
+test_waived_obligation_allows_teardown() {
+  local case_dir rc
+  case_dir=$(make_case obligation-waived)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "landed work"
+  add_fork_with_pushed_branch "$case_dir"
+  record_obligation "$case_dir" base-vs-head "report the pair"
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_DATA_OVERRIDE="$case_dir/data" \
+    "$ROOT/bin/fm-obligations.sh" waive task-x1 base-vs-head \
+      --reason "firstmate ran both controls itself" >/dev/null
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "obligation-waived: an explicitly waived obligation must not block teardown"
+  pass "an explicitly waived obligation does not block teardown"
+}
+
+test_force_overrides_unreported_obligation() {
+  local case_dir rc
+  case_dir=$(make_case obligation-force)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "landed work"
+  add_fork_with_pushed_branch "$case_dir"
+  record_obligation "$case_dir" base-vs-head "report the pair"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "obligation-force: --force must remain the authorized discard path"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "obligation-force: REFUSED printed despite --force"
+  pass "an unreported obligation is discardable only through the explicit --force path"
 }
 
 test_local_only_force_overrides_unpushed() {
@@ -2592,12 +2988,24 @@ EOF
 }
 
 test_local_only_fork_remote_allows
+test_recycled_slot_refuses_and_names_the_live_owner
+test_recycled_slot_refuses_even_under_force
+test_forget_worktree_retires_the_stale_pointer_and_spares_the_copy
+test_force_and_forget_worktree_together_complete
+test_forget_worktree_refuses_without_a_proven_reassignment
+test_retired_pointer_is_honoured_on_a_plain_rerun
+test_own_binding_tears_down_normally
+test_missing_binding_refuses_until_forced
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
+test_unreported_obligation_refuses_teardown
+test_reported_obligation_allows_teardown
+test_waived_obligation_allows_teardown
+test_force_overrides_unreported_obligation
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
 test_herdr_teardown_clears_escalation_marker

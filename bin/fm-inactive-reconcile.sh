@@ -39,8 +39,10 @@
 #
 # New fm-terminal-outcome.v1 receipts contain schema, fingerprint, task_id,
 # incarnation, state, outcome_key, origin, phase, pr, created_epoch, and
-# notice_emitted; the fingerprint binds the spawn incarnation, task id, terminal
-# state, PR text, and sanitized last status.
+# notice_emitted; the fingerprint binds the spawn incarnation, task id, and
+# terminal state.
+# Later status or PR context describes the same outcome rather than creating a
+# new one, so it never changes the durable receipt identity.
 # Pending atomically becomes reported after parent append or presented after
 # main-home acknowledgement. The atomic epoch/cursor marker's mtime gates scans,
 # and its cursor records the last child visited within the aggregate budget.
@@ -156,8 +158,27 @@ record_field_set() {
   mv -f "$tmp" "$record"
 }
 
+record_matches_outcome() { # <record> <task> <incarnation> <state>
+  local record=$1 task=$2 incarnation=$3 state=$4
+  [ -f "$record" ] && [ ! -L "$record" ] || return 1
+  [ "$(record_value "$record" schema)" = fm-terminal-outcome.v1 ] \
+    && [ "$(record_value "$record" task_id)" = "$task" ] \
+    && [ "$(record_value "$record" incarnation)" = "$incarnation" ] \
+    && [ "$(record_value "$record" state)" = "$state" ]
+}
+
+existing_record() { # <task> <incarnation> <state>
+  local task=$1 incarnation=$2 state=$3 record
+  for record in "$OUTCOME_DIR"/*.presented "$OUTCOME_DIR"/*.reported "$OUTCOME_DIR"/*.pending; do
+    record_matches_outcome "$record" "$task" "$incarnation" "$state" || continue
+    printf '%s\n' "$record"
+    return 0
+  done
+  return 1
+}
+
 ensure_record() { # <fingerprint> <task> <incarnation> <state> <outcome-key> <origin> <phase> <pr>
-  local fingerprint=$1 task=$2 incarnation=$3 state=$4 outcome_key=$5 origin=$6 phase=$7 pr=$8 tmp
+  local fingerprint=$1 task=$2 incarnation=$3 state=$4 outcome_key=$5 origin=$6 phase=$7 pr=$8 tmp existing
   RECORD_PENDING=$(record_path "$fingerprint" pending)
   RECORD_PRESENTED=$(record_path "$fingerprint" presented)
   RECORD_REPORTED=$(record_path "$fingerprint" reported)
@@ -167,6 +188,20 @@ ensure_record() { # <fingerprint> <task> <incarnation> <state> <outcome-key> <or
   fi
   if [ -f "$RECORD_PENDING" ] && [ ! -L "$RECORD_PENDING" ]; then
     return 0
+  fi
+  if existing=$(existing_record "$task" "$incarnation" "$state"); then
+    case "$existing" in
+      *.presented|*.reported)
+        RECORD_PENDING=
+        return 0
+        ;;
+      *.pending)
+        RECORD_PENDING=$existing
+        RECORD_PRESENTED=${existing%.pending}.presented
+        RECORD_REPORTED=${existing%.pending}.reported
+        return 0
+        ;;
+    esac
   fi
   mkdir -p "$OUTCOME_DIR" || return 1
   [ ! -L "$OUTCOME_DIR" ] || return 1
@@ -353,7 +388,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   esac
   pr=$(pr_for_task "$meta" "$status")
   incarnation=$(meta_incarnation "$meta")
-  fingerprint=$(sha256_text "$incarnation|$id|$state|$pr|$(clean_field "$last")")
+  fingerprint=$(sha256_text "$incarnation|$id|$state")
   if [ -n "$self" ]; then
     outcome_key="inactive-outcome-$self-$id-$state"
   else

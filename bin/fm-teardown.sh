@@ -29,6 +29,10 @@
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
 # unresolved-decision completion gate verifies its captain-held inventory.
+# Teardown also refuses while a reporting obligation recorded for the task by
+# bin/fm-brief.sh --report is neither reported in the status log nor explicitly
+# waived, so a stated report that the worker silently skipped surfaces here
+# instead of disappearing with the task records. See bin/fm-obligations.sh.
 # Before destructive cleanup, teardown validates task check artifacts and any
 # matching quarantine entries as ordinary single-link files on the state
 # device. It refuses and preserves task state when that proof fails; otherwise
@@ -54,10 +58,29 @@
 # the retired home. Removing a leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force]
+# Before any of that, teardown proves the recorded isolated copy is still THIS
+# task's. A meta worktree= value is an allocation record, and pool slots are
+# recycled, so a lane that is preserved instead of torn down (a long-term pause)
+# holds its pointer while the slot is handed to someone else - which means the
+# count of stale pointers in a home grows with the number of protected lanes.
+# Ownership is therefore read from the copy itself (the current-owner binding in
+# its private Git directory, bin/fm-worktree-binding-lib.sh), never inferred from
+# the recorded path. A copy owned by another task refuses BEFORE fm-guard, any
+# backend command, process termination, branch deletion, worktree return, or
+# record removal, and --force does not override it: --force authorizes discarding
+# THIS task's work, never another task's. The dirty/landed-work checks cannot
+# stand in for this - they would clear a different task's already-pushed branch
+# and then delete it, and they do not run under --force at all.
+# Usage: fm-teardown.sh <task-id> [--force] [--forget-worktree]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
-#   checks, and discards secondmate child work for kind=secondmate. Only use it
-#   when the captain has explicitly said to discard the work.
+#   and reporting-obligation checks, and discards secondmate child work for
+#   kind=secondmate. Only use it when the captain has explicitly said to discard
+#   the work.
+#   --forget-worktree records this task's recorded copy as retired (a durable
+#   worktree_retired=<owner> line; the stale worktree= value is kept as history)
+#   and then cleans up records only. It refuses unless another task provably owns
+#   the recorded copy, so it can never become a way to skip the isolated-copy
+#   checks.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -168,12 +191,24 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-worktree-binding-lib.sh
+. "$SCRIPT_DIR/fm-worktree-binding-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
 fi
 ID=$1
-FORCE=${2:-}
+shift
+FORCE=
+FORGET_WORKTREE=0
+for teardown_arg in "$@"; do
+  case "$teardown_arg" in
+    --force) FORCE=--force ;;
+    --forget-worktree) FORGET_WORKTREE=1 ;;
+    *) echo "error: unknown teardown option: $teardown_arg" >&2; exit 2 ;;
+  esac
+done
+unset teardown_arg
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 CONTROL_LOCK="$STATE/.control-$ID.lock"
@@ -456,6 +491,126 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
+
+# --- current-owner check for a recycled pool slot ---------------------------
+# A state/<id>.meta worktree= value is an ALLOCATION record, not proof that the
+# path still belongs to that task: pool slots are deliberately recycled, and a
+# lane that is preserved rather than torn down (a long-term pause) keeps its
+# pointer for as long as it stays preserved. So the number of stale pointers in
+# a home grows with the number of protected lanes, and every one of them can be
+# handed a slot that now hosts somebody else's live work.
+# bin/fm-worktree-binding-lib.sh keeps the CURRENT owner inside the copy's own
+# private Git directory, which is why ownership is read from the copy itself -
+# never inferred from the recorded path. This runs before fm-guard, any backend
+# command, process termination, branch deletion, worktree return, or record
+# removal, so a misdirected teardown stops while the lane it would otherwise
+# have destroyed is still completely intact.
+# The dirty/landed-work checks further below cannot substitute for this: they
+# would happily clear a DIFFERENT task's already-pushed branch and then delete
+# it, and they never even run under --force.
+reject_unwarranted_forget_worktree() {  # <why-it-does-not-apply>
+  [ "$FORGET_WORKTREE" = 1 ] || return 0
+  echo "REFUSED: --forget-worktree needs a proven reassignment, but $1." >&2
+  echo "It only retires a worktree= pointer that another task provably owns, and is never a way to skip the isolated-copy checks." >&2
+  return 1
+}
+
+# Mark this task's recorded copy retired so the rest of teardown cleans records
+# only and never touches the copy the other task owns. The stale worktree= value
+# is KEPT: it is still the honest history of what this lane was allocated, and
+# bin/fm-backend.sh's endpoint validation requires it, so deleting it would make
+# the record permanently un-tearable. The added worktree_retired= line names the
+# task that was proven to own the path instead, and it is durable, so a run that
+# fails a later step is re-run idempotently rather than stranded.
+# Deliberately narrow: only reachable once a different task's binding has already
+# been read out of the copy itself.
+retire_recycled_worktree_record() {  # <owner-task-id> <owner-branch>
+  local owner=$1 owner_branch=$2 stale=$WT tmp
+  tmp="$META.forget.$$"
+  if ! { awk '!/^worktree_retired=/' "$META" && printf 'worktree_retired=%s\n' "$owner"; } > "$tmp" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    echo "REFUSED: could not rewrite $META to retire task $ID's stale copy pointer." >&2
+    return 1
+  fi
+  if ! mv -f "$tmp" "$META"; then
+    rm -f "$tmp" 2>/dev/null || true
+    echo "REFUSED: could not publish task $ID's retired copy pointer to $META." >&2
+    return 1
+  fi
+  WT=
+  echo "note: retired task $ID's stale pointer to $stale, which task $owner owns (branch $owner_branch); cleaning up task $ID's records only." >&2
+  return 0
+}
+
+validate_worktree_ownership() {
+  local declared owner_branch retired
+  # A secondmate home is a persistent home, not a pooled slot, and its own
+  # removal validation owns it.
+  if [ "$KIND" = secondmate ]; then
+    reject_unwarranted_forget_worktree "a secondmate home is not a pooled task copy" || return 1
+    return 0
+  fi
+  # An earlier run already proved this pointer stale and retired it. Honour that
+  # durably so a re-run repeats the same record-only cleanup; skipping the copy
+  # is never what endangers another lane, acting on it is.
+  retired=$(fm_meta_get "$META" worktree_retired)
+  if [ -n "$retired" ]; then
+    echo "note: task $ID's recorded copy is already retired to task $retired; cleaning up records only." >&2
+    WT=
+    return 0
+  fi
+  # No pointer, or a pointer to something that no longer exists: there is no
+  # live copy here to misidentify. --forget-worktree passes silently rather than
+  # refusing, so a re-run in that state stays idempotent too.
+  if [ -z "$WT" ] || [ ! -d "$WT" ]; then
+    return 0
+  fi
+
+  declared=$(fm_meta_get "$META" worktree_binding)
+  if [ -n "$declared" ] && [ "$declared" != fm-worktree-binding.v1 ]; then
+    echo "REFUSED: task $ID records an unsupported isolated-copy ownership binding: $declared." >&2
+    echo "Cannot prove the copy at $WT still belongs to this task; refusing before any cleanup step." >&2
+    return 1
+  fi
+
+  if fm_worktree_binding_read "$WT"; then
+    if [ "$FM_WORKTREE_BINDING_TASK_ID" = "$ID" ]; then
+      reject_unwarranted_forget_worktree "the copy at $WT still belongs to task $ID" || return 1
+      return 0
+    fi
+    owner_branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+    [ -n "$owner_branch" ] || owner_branch='<unreadable>'
+    if [ "$FORGET_WORKTREE" = 1 ]; then
+      retire_recycled_worktree_record "$FM_WORKTREE_BINDING_TASK_ID" "$owner_branch" || return 1
+      return 0
+    fi
+    echo "REFUSED: the isolated copy at $WT is no longer task $ID's; task $FM_WORKTREE_BINDING_TASK_ID owns it now." >&2
+    echo "That copy currently has branch $owner_branch checked out, so tearing down $ID here would kill task $FM_WORKTREE_BINDING_TASK_ID's processes, delete its branch, and reset its copy." >&2
+    echo "Task $ID's worktree= record is a stale pointer to a recycled pool slot." >&2
+    echo "Retire the stale pointer with: bin/fm-teardown.sh $ID --forget-worktree (add --force as well if task $ID's own work is being discarded)." >&2
+    echo "--force alone does NOT override this: it authorizes discarding task $ID's work, never task $FM_WORKTREE_BINDING_TASK_ID's." >&2
+    return 1
+  fi
+
+  if [ "$declared" != fm-worktree-binding.v1 ]; then
+    # A record that predates ownership bindings, over a copy that names no owner
+    # at all. Nothing here proves a reassignment, so behave exactly as before and
+    # let the dirty/landed-work checks below protect the copy.
+    reject_unwarranted_forget_worktree "the copy at $WT names no other owner" || return 1
+    return 0
+  fi
+  reject_unwarranted_forget_worktree "ownership of the copy at $WT is unverifiable rather than reassigned" || return 1
+  # This task DID publish an ownership binding, so a missing or malformed one is
+  # a real inspection failure. --force is the documented discard path, exactly as
+  # it is for the other "cannot inspect this copy" refusals below.
+  [ "$FORCE" != "--force" ] || return 0
+  echo "REFUSED: cannot verify that the isolated copy at $WT still belongs to task $ID." >&2
+  printf '%s\n' "$(fm_worktree_binding_detail)" >&2
+  echo "Restore the copy's ownership record, or get the captain's explicit OK to discard, then --force." >&2
+  return 1
+}
+
+validate_worktree_ownership || exit 1
 PUBLIC_FOLLOWUP_HOME=$FM_HOME
 PUBLIC_FOLLOWUP_STATE=$STATE
 PUBLIC_FOLLOWUP_WORK_HOME=main
@@ -2325,6 +2480,24 @@ if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
       FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-captain-hold.sh" verify "$ID" >/dev/null; then
     echo "REFUSED: scout task $ID has not passed the captain-call completion gate." >&2
     echo "Inventory its report and any visual review through bin/fm-captain-hold.sh before teardown." >&2
+    exit 1
+  fi
+fi
+
+# A reporting obligation stated in the brief is durable, not supervisor memory.
+# A worker can deliver the deliverable and silently skip a stated report, and
+# this cleanup erases the very task records that make the omission checkable, so
+# after teardown nothing but a supervisor who still remembers the brief would
+# ever notice. Refuse while any recorded obligation is neither reported nor
+# explicitly waived. bin/fm-obligations.sh owns the record and the satisfaction
+# shape; a task scaffolded without --report has no record file and pays one
+# [ -f ] test here. --force remains the captain-authorized discard path.
+if [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ] \
+  && [ -f "$DATA/$ID/obligations.tsv" ]; then
+  if ! OBLIGATIONS_UNMET=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      "$SCRIPT_DIR/fm-obligations.sh" verify "$ID" 2>&1 >/dev/null); then
+    echo "REFUSED: task $ID still owes a report its brief stated as an obligation." >&2
+    printf '%s\n' "$OBLIGATIONS_UNMET" >&2
     exit 1
   fi
 fi

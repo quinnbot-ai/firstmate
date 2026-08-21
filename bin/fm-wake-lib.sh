@@ -109,18 +109,32 @@ fm_watcher_lock_matches_pid() {
 
 FM_WATCHER_HEALTHY_PID=
 FM_WATCHER_HEALTHY_IDENTITY=
+# The strict check evaluates the PID, lock identity, and beacon in that order.
+# Callers that report a failed check use this value to name the first condition
+# that actually failed rather than infer one from a separate freshness probe.
+FM_WATCHER_HEALTH_REASON=
 fm_watcher_healthy() {
   local state=$1 watch_path=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME} lockdir beat pid identity age
   FM_WATCHER_HEALTHY_PID=
   FM_WATCHER_HEALTHY_IDENTITY=
+  FM_WATCHER_HEALTH_REASON=
   lockdir="$state/.watch.lock"
   beat="$state/.last-watcher-beat"
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  fm_pid_alive "$pid" || return 1
-  fm_watcher_lock_matches_pid "$state" "$watch_path" "$pid" "$home" || return 1
+  if ! fm_pid_alive "$pid"; then
+    FM_WATCHER_HEALTH_REASON=watcher-pid-not-alive
+    return 1
+  fi
+  if ! fm_watcher_lock_matches_pid "$state" "$watch_path" "$pid" "$home"; then
+    FM_WATCHER_HEALTH_REASON=watcher-lock-mismatch
+    return 1
+  fi
   identity=$FM_WATCHER_MATCHED_IDENTITY
   age=$(fm_path_age "$beat")
-  [ "$age" -lt "$grace" ] || return 1
+  if ! [ "$age" -lt "$grace" ]; then
+    FM_WATCHER_HEALTH_REASON=stale-beacon
+    return 1
+  fi
   # shellcheck disable=SC2034 # Read by callers after fm_watcher_healthy returns.
   FM_WATCHER_HEALTHY_PID=$pid
   # shellcheck disable=SC2034 # Read by callers after fm_watcher_healthy returns.
@@ -231,9 +245,10 @@ fm_pi_extension_owns_supervision() {
 # guard (bin/fm-guard.sh), NOT the arm layer or the turn-end guard. Sets:
 #   FM_WATCHER_VERDICT_OK      true when supervision is healthy for this model
 #   FM_WATCHER_VERDICT_REASON  when not ok, the true failing condition:
-#                              no-watcher   - a live watcher process is the real
-#                                             signal for this model but none holds
-#                                             the lock (the beacon is still fresh)
+#                              watcher-pid-not-alive - the lock's watcher PID is
+#                                             absent or no longer live
+#                              watcher-lock-mismatch - a live PID exists but its
+#                                             lock metadata or identity disagrees
 #                              stale-beacon - the beacon is stale beyond grace or
 #                                             absent (a genuine supervision lapse)
 # autoarm: a fresh beacon within grace is healthy even with no live watcher,
@@ -272,14 +287,16 @@ fm_watcher_supervision_verdict() {
   if fm_watcher_healthy "$state" "$watch" "$grace" "$home"; then
     # shellcheck disable=SC2034 # Read by callers after the function returns.
     FM_WATCHER_VERDICT_OK=true
-  elif [ "$fresh" = true ]; then
-    if [ "$model" = extension ] && fm_watcher_lock_unheld "$state" \
+  else
+    # Keep the strict check's ordered failure reason. A fresh beacon only proves
+    # that this is not the stale-beacon case; it must not overwrite a dead PID
+    # or mismatched lock with a generic no-watcher diagnosis.
+    # shellcheck disable=SC2034 # Read by callers after the function returns.
+    FM_WATCHER_VERDICT_REASON=$FM_WATCHER_HEALTH_REASON
+    if [ "$model" = extension ] && [ "$fresh" = true ] && fm_watcher_lock_unheld "$state" \
       && fm_pi_extension_owns_supervision "$state" "$root"; then
       # shellcheck disable=SC2034 # Read by callers after the function returns.
       FM_WATCHER_VERDICT_OK=true
-    else
-      # shellcheck disable=SC2034 # Read by callers after the function returns.
-      FM_WATCHER_VERDICT_REASON=no-watcher
     fi
   fi
   return 0

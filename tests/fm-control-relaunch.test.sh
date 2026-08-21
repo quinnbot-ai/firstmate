@@ -25,6 +25,8 @@ set -u
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-worktree-binding-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -52,6 +54,13 @@ trap relaunch_cleanup EXIT
 make_tmux_stub() {  # <dir>
   local fb="$1/fakebin"
   mkdir -p "$fb"
+  cat > "$fb/security" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${1:-}" = find-generic-password ] && exit 0
+exit 1
+SH
+  chmod +x "$fb/security"
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -124,8 +133,12 @@ SH
 
 # new_case <name> [id] -> echoes a case dir with a live claude ship task.
 new_case() {
-  local id=${2:-t1} dir="$TMP_ROOT/$1-$RANDOM"
-  mkdir -p "$dir/home/state" "$dir/home/data" "$dir/fake"
+  local id=${2:-t1} dir="$TMP_ROOT/$1-$RANDOM" profile
+  mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config" "$dir/fake"
+  profile="$dir/crew-claude-profile"
+  mkdir -p "$profile"
+  printf '%s\n' '{"account_sha256":"0000000000000000000000000000000000000000000000000000000000000000"}' > "$profile/.firstmate-account.json"
+  printf '%s\n' "$profile" > "$dir/home/config/crew-claude-profile"
   : > "$dir/fake/literal"
   : > "$dir/fake/keys"
   printf 'claude' > "$dir/fake/command"
@@ -155,9 +168,14 @@ add_ship_task() {
     echo "model=default"
     echo "effort=default"
   } > "$home/state/$id.meta"
+  fm_worktree_binding_write "$wt" "$id" || fail "could not bind relaunch fixture worktree for $id"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   printf '%s' "$wt" > "$dir/fake/cwd"
   TASK_TMPS+=("/tmp/fm-$id")
+}
+
+bind_fixture_worktree() {  # <worktree> <task-id>
+  fm_worktree_binding_write "$1" "$2" || fail "could not bind fixture worktree for $2"
 }
 
 run_control() {  # <case-dir> <args...>
@@ -627,6 +645,7 @@ test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
     echo "effort=default"
     echo "home=$dir/smhome"
   } > "$home/state/sm3.meta"
+  bind_fixture_worktree "$dir/smhome" sm3
   printf '%s\n' "fm-sm3" > "$dir/fake/windows"
   printf '%s' "$dir/smhome" > "$dir/fake/cwd"
   printf 'codex' > "$dir/fake/becomes"
@@ -666,6 +685,7 @@ test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop() {
     echo "effort=default"
     echo "home=$dir/smhome"
   } > "$home/state/sm6.meta"
+  bind_fixture_worktree "$dir/smhome" sm6
   printf '%s\n' "fm-sm6" > "$dir/fake/windows"
   printf '%s' "$dir/smhome" > "$dir/fake/cwd"
   printf 'codex' > "$dir/fake/becomes"
@@ -745,6 +765,7 @@ test_explicit_secondmate_harness_ignores_configured_profile_axes() {
     echo "effort=high"
     echo "home=$dir/smhome"
   } > "$home/state/sm4.meta"
+  bind_fixture_worktree "$dir/smhome" sm4
   printf '%s\n' "fm-sm4" > "$dir/fake/windows"
   printf '%s' "$dir/smhome" > "$dir/fake/cwd"
   printf 'codex' > "$dir/fake/becomes"
@@ -1089,6 +1110,7 @@ test_secondmate_relaunch_checkpoints_child_work_and_spares_the_charter() {
     echo "home=$dir/smhome"
     echo "projects="
   } > "$home/state/sm1.meta"
+  bind_fixture_worktree "$dir/smhome" sm1
   printf '%s\n' "fm-sm1" > "$dir/fake/windows"
   printf '%s' "$dir/smhome" > "$dir/fake/cwd"
   # No --note: a secondmate reconciles its own home's records at startup, so
@@ -1312,6 +1334,19 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
   pass "fm-spawn --relaunch: refuses to start a replacement outside the copy holding the work"
 }
 
+test_spawn_relaunch_refuses_a_reassigned_worktree() {
+  local dir out rc
+  dir=$(new_case reassigned rl34)
+  add_ship_task "$dir" rl34 claude
+  fm_worktree_binding_write "$dir/wt" live-successor || fail "could not rebind collision fixture worktree"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl34 --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "a relaunch must refuse a worktree reassigned to another task"
+  assert_contains "$out" "worktree binding mismatch" "the relaunch refusal should name the task binding collision"
+  [ "$(cat "$dir/fake/command")" = zsh ] || fail "a binding refusal must not launch a replacement agent"
+  pass "fm-spawn --relaunch: a reassigned worktree is never claimed by its old task"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
@@ -1358,3 +1393,4 @@ test_spawn_relaunch_refuses_a_live_agent
 test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
+test_spawn_relaunch_refuses_a_reassigned_worktree

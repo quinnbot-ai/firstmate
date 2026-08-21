@@ -16,13 +16,20 @@
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
 # token-tight line firstmate can read every heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
+#   state: <working|parked|done|blocked|paused|failed|cancelled|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
 #
 # Logic, in order:
-#   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
-#      recording remote_host= is a remote secondmate: its worktree and endpoint
-#      live on that host, so the local worktree and pane reads are skipped and
-#      the remote host is asked for the endpoint's recovery-grade state
+#   1. Resolve worktree + backend target + kind from state/<id>.meta. A local
+#      ship or scout record that declares worktree_binding=fm-worktree-binding.v1
+#      must prove its private current-task binding before any worktree read.
+#      A missing, unreadable, or mismatched declared binding is unknown/none
+#      rather than a plausible verdict about another recycled lane. Legacy
+#      records remain readable unless a current marker positively proves that
+#      their path has been reassigned. Persistent secondmate homes never use
+#      reusable-task bindings.
+#      A meta recording remote_host= is a remote secondmate: its worktree and
+#      endpoint live on that host, so the local worktree and pane reads are
+#      skipped and the remote host is asked for the endpoint's recovery-grade state
 #      (fm-on.sh + fm-remote-secondmate-control.sh state). alive falls through
 #      to the routed status log; dead/missing report the remote verdict; an
 #      unreachable or unreadable remote reports unknown-remote, never a false
@@ -37,7 +44,10 @@
 #      diverged from it, invalidates attribution.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
-#      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
+#      passed/checks-passed -> done, failed -> failed, cancelled -> cancelled.
+#      `cancelled` is the durable terminal record left by no-mistakes' supported
+#      supervisor abort path, so it is deliberately distinct from a pipeline
+#      failure. EXCEPT: while
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
@@ -53,9 +63,10 @@
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
 #      `resolved` never become current state or detail.
-#   5. Missing meta or torn-down worktree: report unknown · none. If no run is
-#      attributed to this crew, a dead endpoint also reports unknown · none rather
-#      than trusting a stale status log.
+#   5. Missing meta, torn-down worktree, or unverifiable declared local task
+#      binding: report unknown · none. If no run is attributed to this crew, a
+#      dead endpoint also reports unknown · none rather than trusting a stale
+#      status log.
 #
 # Read-only and side-effect free. Always exits 0 on a successful read regardless
 # of state; exit 2 only on a usage error (no id).
@@ -76,6 +87,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-worktree-binding-lib.sh
+. "$SCRIPT_DIR/fm-worktree-binding-lib.sh"
 
 ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
@@ -112,6 +125,7 @@ WT=$(meta_value worktree)
 KIND=$(meta_value kind)
 HARNESS=$(meta_value harness)
 REMOTE_HOST=$(meta_value remote_host)
+BINDING_SCHEMA=$(meta_value worktree_binding)
 [ -n "$KIND" ] || KIND=ship
 
 # A torn-down (or never-created) worktree has no current state to read. A
@@ -119,6 +133,20 @@ REMOTE_HOST=$(meta_value remote_host)
 # probe proves nothing for it - the remote arm below reads the true source.
 if [ -z "$REMOTE_HOST" ] && { [ -z "$WT" ] || [ ! -d "$WT" ]; }; then
   emit unknown none "worktree gone (torn down?)"
+fi
+if [ -z "$REMOTE_HOST" ] && [ "$KIND" != secondmate ]; then
+  if [ -n "$BINDING_SCHEMA" ] && [ "$BINDING_SCHEMA" != fm-worktree-binding.v1 ]; then
+    emit unknown none "worktree binding unverifiable: unsupported metadata binding for $WT"
+  fi
+  if [ "$BINDING_SCHEMA" = fm-worktree-binding.v1 ]; then
+    if ! fm_worktree_binding_matches "$WT" "$ID"; then
+      emit unknown none "$(fm_worktree_binding_detail)"
+    fi
+  elif fm_worktree_binding_read "$WT"; then
+    if [ "$FM_WORKTREE_BINDING_TASK_ID" != "$ID" ]; then
+      emit unknown none "worktree binding mismatch: meta task $ID but worktree is bound to $FM_WORKTREE_BINDING_TASK_ID"
+    fi
+  fi
 fi
 
 # --- status log ------------------------------------------------------------
@@ -341,6 +369,15 @@ nm_effective_ci_step_status() {
 # for the MOST RECENT recognized marker (the log is append-only/chronological,
 # so the last match is current): green with nothing red after it means CI is
 # green right now, still only waiting on merge/close.
+#
+# "no CI checks reported - still monitoring" is deliberately NOT green. It used
+# to be folded in with the genuine green marker, on the reasoning that a repo
+# with no PR CI has nothing left to wait for. That reasoning is wrong and it was
+# dangerous: it also fires for a PR that SHOULD have checks and silently got
+# none, which is exactly what a conflicted PR looks like (bin/fm-pr-verify-lib.sh
+# owns why a conflicted PR records zero workflow runs). A PR nothing tested has
+# not passed, so it gets its own `unverified` verdict that no caller may read as
+# done. bin/fm-pr-merge.sh enforces the same rule at the merge itself.
 nm_ci_checks_state() {
   local run_id log_tail marker
   run_id=$(strip_quotes "$(nm_field id)")
@@ -351,7 +388,8 @@ nm_ci_checks_state() {
     | grep -E 'CI checks passed|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running|base branch advanced.*re-arming CI monitor timeout' \
     | tail -1)
   case "$marker" in
-    *"checks passed"*|*"no CI checks reported - still monitoring"*) printf 'green' ;;
+    *"checks passed"*) printf 'green' ;;
+    *"no CI checks reported - still monitoring"*) printf 'unverified' ;;
     *"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'not-ready' ;;
     *) printf 'unknown' ;;
   esac
@@ -457,9 +495,11 @@ path_mtime() {  # <path>
 # A supported `no-mistakes axi abort` leaves the run cancelled while the branch,
 # PR, and worktree survive; the crew that aborted it then declares the external
 # wait it is idling on and exits, so no agent is expected in that endpoint. The
-# run-step is authoritative, so without this the cancelled record would report
-# `failed` forever and every supervision cadence would re-escalate the
-# deliberately agent-free endpoint as a possible wedge.
+# run-step is authoritative, so without this the terminal record would stand
+# forever and every supervision cadence would re-escalate the deliberately
+# agent-free endpoint as a possible wedge: the shared absorb classification
+# (bin/fm-classify-lib.sh's crew_absorb_class) reads `cancelled` as neither
+# working nor paused.
 #
 # Two conditions here, plus the caller's cancelled-not-failed test, are each
 # load-bearing:
@@ -539,7 +579,7 @@ if [ "$HAVE_RUN" = 1 ]; then
   RUN_STATE=working
   RUN_DETAIL=""
   # 1 only for the supported abort's TERMINAL CANCELLED record. Deliberately
-  # NOT set for `failed`: an ordinary terminal failure keeps surfacing exactly
+  # NOT set for `failed`: an ordinary pipeline failure keeps surfacing exactly
   # as before, whatever the status log says.
   RUN_CANCELLED=0
   CI_STEP_STATUS=""
@@ -557,7 +597,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       running)   RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
       completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
       failed)    RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
-      cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled"; RUN_CANCELLED=1 ;;
+      cancelled) RUN_STATE=cancelled; RUN_DETAIL="run cancelled"; RUN_CANCELLED=1 ;;
       *)         RUN_STATE=unknown; RUN_DETAIL="runs list status: $COARSE_STATUS" ;;
     esac
   else
@@ -574,7 +614,7 @@ if [ "$HAVE_RUN" = 1 ]; then
         passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed" ;;
         checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
         failed)        RUN_STATE=failed; RUN_DETAIL="run failed" ;;
-        cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled"; RUN_CANCELLED=1 ;;
+        cancelled)     RUN_STATE=cancelled; RUN_DETAIL="run cancelled"; RUN_CANCELLED=1 ;;
         *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
       esac
     elif [ -n "$awaiting" ] || [ "$status" = awaiting_approval ] || [ "$status" = fix_review ] || [ -n "$gate_status" ] || [ "$has_gate" = 1 ]; then
@@ -598,7 +638,7 @@ if [ "$HAVE_RUN" = 1 ]; then
         running|fixing) RUN_STATE=working; RUN_DETAIL="validating ($status)" ;;
         completed)      RUN_STATE="done"; RUN_DETAIL="run completed" ;;
         failed)         RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
-        cancelled)      RUN_STATE=failed;  RUN_DETAIL="run cancelled"; RUN_CANCELLED=1 ;;
+        cancelled)      RUN_STATE=cancelled; RUN_DETAIL="run cancelled"; RUN_CANCELLED=1 ;;
         "")             RUN_STATE=working; RUN_DETAIL="run active" ;;
         *)              RUN_STATE=working; RUN_DETAIL="run active ($status)" ;;
       esac
@@ -610,6 +650,8 @@ if [ "$HAVE_RUN" = 1 ]; then
             if [ "$CI_LOG_STATE" = green ]; then
               RUN_STATE="done"
               RUN_DETAIL="checks green: PR ready for review (still monitoring for merge/close)"
+            elif [ "$CI_LOG_STATE" = unverified ]; then
+              RUN_DETAIL="CI reported no checks at all: unverified, not green - the PR has not been tested and must not be merged on this evidence"
             fi
             ;;
           fixing)
@@ -639,7 +681,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     elif [ "$CI_STEP_STATUS" = fixing ]; then
       CI_LOG_STATE=not-ready
     fi
-    if [ "$CI_LOG_STATE" != not-ready ]; then
+    if [ "$CI_LOG_STATE" != not-ready ] && [ "$CI_LOG_STATE" != unverified ]; then
       emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
     fi
   fi

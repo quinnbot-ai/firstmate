@@ -33,6 +33,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-classify-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-worktree-binding-lib.sh"
 
 CREW_STATE="$ROOT/bin/fm-crew-state.sh"
 TMP_ROOT=$(fm_test_tmproot fm-crew-state)
@@ -150,7 +152,15 @@ make_no_timeout_toolbin() {  # <dir> -> echoes toolbin path
 # Run the helper for one case dir. FM_FAKE_* env (run output, busy flag) are read
 # from the caller's environment by the fakes above.
 run_crew_state() {  # <case-dir> <id>
-  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" "$2"
+  local case_dir=$1 id=$2 wt binding_id
+  wt=$(grep '^worktree=' "$case_dir/state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  if [ -n "$wt" ] && [ -d "$wt" ] \
+     && git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+     && [ "${FM_TEST_BINDING_MODE:-normal}" != absent ]; then
+    binding_id=${FM_TEST_BINDING_ID:-$id}
+    fm_worktree_binding_write "$wt" "$binding_id" || fail "could not bind fixture worktree for $id"
+  fi
+  PATH="$case_dir/fakebin:$PATH" FM_STATE_OVERRIDE="$case_dir/state" "$CREW_STATE" "$id"
 }
 
 new_case() {  # <name> -> echoes case dir with an empty state/
@@ -181,8 +191,11 @@ reset_fakes() {
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
   FM_FAKE_STAT_MISSING=0
+  FM_TEST_BINDING_ID=""
+  FM_TEST_BINDING_MODE=normal
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS FM_FAKE_STAT_MISSING
+  export FM_TEST_BINDING_ID FM_TEST_BINDING_MODE
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -541,7 +554,11 @@ test_top_level_ci_checks_green_surfaces_done() {
   pass "top-level ci status uses ci log green marker"
 }
 
-test_ci_monitoring_no_checks_terminal_surfaces_done() {
+# A PR that reported NO checks at all has not passed - it has not been tested.
+# This marker used to be folded in with the genuine green marker and surfaced as
+# "done: checks green", which is how an untested PR reads as ready to merge.
+# It must now surface as unverified and never as done or green.
+test_ci_monitoring_no_checks_is_unverified_not_green() {
   reset_fakes
   local d; d=$(new_case ci-nochecks)
   make_repo_on_branch "$d/wt" fm/feat-cinochecks
@@ -550,9 +567,32 @@ test_ci_monitoring_no_checks_terminal_surfaces_done() {
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinochecks)"
   FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
   local out; out=$(run_crew_state "$d" feat-cinochecks)
-  assert_contains "$out" "state: done" "terminal no-checks ci-monitor run -> done"
-  assert_contains "$out" "checks green" "terminal no-checks ci-monitor detail mentions checks green"
-  pass "terminal no-checks ci-monitor marker surfaces done"
+  assert_not_contains "$out" "state: done" "no-checks ci-monitor run must not read as done"
+  assert_not_contains "$out" "checks green" "no-checks ci-monitor run must not read as checks green"
+  assert_contains "$out" "unverified" "no-checks ci-monitor detail must name the unverified state"
+  pass "no-checks ci-monitor marker surfaces unverified, never green"
+}
+
+# The harder half of the same rule: the crew ALSO wrote its own
+# "done: PR <url> checks green" status line. The ci log is the harder evidence -
+# it says nothing ever tested the PR - so the crew's own claim must not promote
+# the task to done on top of it.
+test_ci_monitoring_no_checks_beats_crew_checks_green_claim() {
+  reset_fakes
+  local d; d=$(new_case ci-nochecks-claimed-green)
+  make_repo_on_branch "$d/wt" fm/feat-cinochecksclaim
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cinochecksclaim.meta" \
+    "window=fm:fm-feat-cinochecksclaim" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/148 checks green\n' \
+    > "$d/state/feat-cinochecksclaim.status"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinochecksclaim)"
+  FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
+  local out; out=$(run_crew_state "$d" feat-cinochecksclaim)
+  assert_not_contains "$out" "state: done" \
+    "an untested PR must not read as done just because the crew claimed checks green"
+  assert_contains "$out" "unverified" "detail must name the unverified state"
+  pass "crew checks-green claim cannot override a no-checks ci log"
 }
 
 test_ci_monitoring_green_then_rearm_stays_working() {
@@ -1048,7 +1088,7 @@ test_no_run_idle_pane_custom_paused_verb() {
 test_no_run_idle_secondmate_resolved_event_not_state() {
   reset_fakes
   local d; d=$(new_case resolved-idle)
-  mkdir -p "$d/wt"
+  make_repo_on_branch "$d/wt" fm/mate
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/mate.meta" "window=fm:fm-mate" "worktree=$d/wt" "kind=secondmate" "home=$d/wt"
   printf 'needs-decision [key=race]: pick subscribe order\n' > "$d/state/mate.status"
@@ -1143,6 +1183,7 @@ SH
   toolbin=$(make_no_timeout_toolbin "$d")
   fm_write_meta "$d/state/feat-timeout.meta" "window=fm:fm-feat-timeout" "worktree=$d/wt" "kind=ship" \
     "harness=claude"
+  fm_worktree_binding_write "$d/wt" feat-timeout || fail "could not bind no-timeout fixture worktree"
   FM_FAKE_BUSY=1
   local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-timeout)
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-timeout busy --gen "$gen" \
@@ -1178,7 +1219,10 @@ test_scout_skips_run_lookup() {
   pass "scout skips the run lookup"
 }
 
-# (j) torn-down worktree and missing meta are graceful (unknown/none, exit 0)
+# (j) torn-down, unverifiable, and recycled worktrees are graceful but fail
+# closed (unknown/none, exit 0). The binding belongs to the worktree's Git
+# metadata, so a foreign instance's pool remains interrogable without trusting
+# this home's allocation records.
 test_torn_down_worktree() {
   reset_fakes
   local d; d=$(new_case torndown)
@@ -1190,6 +1234,91 @@ test_torn_down_worktree() {
   assert_contains "$out" "state: unknown" "torn-down -> unknown"
   assert_contains "$out" "source: none" "torn-down -> none source"
   pass "torn-down worktree is handled gracefully"
+}
+
+test_exact_worktree_binding_reads_normally() {
+  reset_fakes
+  local d out
+  d=$(new_case exact-worktree-binding)
+  make_repo_on_branch "$d/wt" fm/explicit-binding
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/explicit-binding.meta" \
+    "window=fm:fm-explicit-binding" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=$(run_running fm/explicit-binding)
+  out=$(run_crew_state "$d" explicit-binding)
+  assert_contains "$out" "state: working" "exact binding preserves normal state reads"
+  assert_contains "$out" "source: run-step" "exact binding permits run attribution"
+  pass "exact worktree binding reads normally"
+}
+
+test_recycled_worktree_binding_refuses_live_lane() {
+  reset_fakes
+  local d out
+  d=$(new_case recycled-worktree-binding)
+  make_repo_on_branch "$d/wt" fm/live-lane
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/dormant-lane.meta" \
+    "window=fm:fm-dormant-lane" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=$(run_running fm/live-lane)
+  FM_TEST_BINDING_ID=live-lane
+  out=$(run_crew_state "$d" dormant-lane)
+  assert_contains "$out" "state: unknown" "recycled worktree never reports either lane's state"
+  assert_contains "$out" "source: none" "recycled worktree has no trusted source"
+  assert_contains "$out" "worktree binding mismatch" "recycled worktree mismatch is loud"
+  assert_not_contains "$out" "source: run-step" "the live lane's run is never attributed to dormant metadata"
+  assert_not_contains "$out" "state: working" "the live lane's active state is never returned"
+  pass "recycled worktree binding refuses the live lane"
+}
+
+test_unverifiable_worktree_binding_refuses_distinctly() {
+  reset_fakes
+  local d out
+  d=$(new_case unverifiable-worktree-binding)
+  make_repo_on_branch "$d/wt" fm/unverifiable-binding
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/unverifiable-binding.meta" \
+    "window=fm:fm-unverifiable-binding" "worktree=$d/wt" "kind=ship" "harness=claude" \
+    "worktree_binding=fm-worktree-binding.v1"
+  FM_FAKE_AXI_STATUS=$(run_running fm/unverifiable-binding)
+  FM_TEST_BINDING_MODE=absent
+  out=$(run_crew_state "$d" unverifiable-binding)
+  assert_contains "$out" "state: unknown" "unverifiable binding refuses state reads"
+  assert_contains "$out" "source: none" "unverifiable binding has no trusted source"
+  assert_contains "$out" "worktree binding unverifiable" "unverifiable binding says why it refused"
+  assert_not_contains "$out" "worktree binding mismatch" "unverifiable is distinct from mismatched"
+  pass "unverifiable worktree binding refuses distinctly"
+}
+
+test_legacy_worktree_without_binding_reads_normally() {
+  reset_fakes
+  local d out
+  d=$(new_case legacy-worktree-without-binding)
+  make_repo_on_branch "$d/wt" fm/legacy-unbound
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/legacy-unbound.meta" \
+    "window=fm:fm-legacy-unbound" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=$(run_running fm/legacy-unbound)
+  FM_TEST_BINDING_MODE=absent
+  out=$(run_crew_state "$d" legacy-unbound)
+  assert_contains "$out" "state: working" "legacy unbound worktree preserves normal state reads"
+  assert_contains "$out" "source: run-step" "legacy unbound worktree remains attributable"
+  pass "legacy worktree without binding reads normally"
+}
+
+test_cross_pool_worktree_binding_reads_normally() {
+  reset_fakes
+  local d wt out
+  d=$(new_case cross-pool-worktree-binding)
+  wt="$d/foreign-instance/.treehouse/firstmate-foreign/12/firstmate"
+  make_repo_on_branch "$wt" fm/foreign-feature
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/cross-pool-owner.meta" \
+    "window=fm:fm-cross-pool-owner" "worktree=$wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=$(run_running fm/foreign-feature)
+  out=$(run_crew_state "$d" cross-pool-owner)
+  assert_contains "$out" "state: working" "a foreign pool's exact binding remains readable"
+  assert_contains "$out" "source: run-step" "cross-pool state reads use the bound worktree normally"
+  pass "cross-pool worktree binding reads normally"
 }
 
 # --- remote secondmate arm ---------------------------------------------------
@@ -1317,6 +1446,7 @@ test_provably_working_via_runs_list_fallback() {
   short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-provable.meta" "window=fm:fm-feat-provable" "worktree=$d/wt" "kind=ship"
+  fm_worktree_binding_write "$d/wt" feat-provable || fail "could not bind provable-work fixture worktree"
   FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
   FM_FAKE_RUNS_LIST="$(cat <<EOF
   running    fm/other-crew aaaaaaa  2026-07-02 22:10
@@ -1334,6 +1464,7 @@ test_not_provably_working_when_stopped() {
   make_repo_on_branch "$d/wt" fm/feat-stopped
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-stopped.meta" "window=fm:fm-feat-stopped" "worktree=$d/wt" "kind=ship"
+  fm_worktree_binding_write "$d/wt" feat-stopped || fail "could not bind stopped-work fixture worktree"
   # Repo-wide run belongs to someone else, and this branch has no row in the
   # runs list either (it never validated, or genuinely finished/stopped) - the
   # only remaining signal is the pane, which is idle.
@@ -1395,11 +1526,11 @@ test_cancelled_run_declared_pause_after_run_is_paused() {
   assert_contains "$out" "state: paused" "cancelled run + pause declared after it -> paused"
   assert_contains "$out" "source: status-log" "the declared pause is the reported source"
   assert_contains "$out" "no agent expected" "the declared wait's reason is carried through"
-  assert_not_contains "$out" "state: failed" "a supported abort with a declared wait is not a failure"
+  assert_not_contains "$out" "state: cancelled" "a declared wait outranks the bare cancelled record"
   pass "a declared wait after a supported abort outranks the cancelled record"
 }
 
-test_cancelled_run_stale_pause_before_run_stays_failed() {
+test_cancelled_run_stale_pause_before_run_stays_cancelled() {
   reset_fakes
   local d; arm_abort_case abort-pause-before fm/feat-abortstale feat-abortstale \
     'paused: waiting on the upstream release' \
@@ -1407,13 +1538,13 @@ test_cancelled_run_stale_pause_before_run_stays_failed() {
   d=$ABORT_CASE_DIR
   FM_FAKE_AXI_STATUS="$(run_cancelled fm/feat-abortstale)"
   local out; out=$(run_crew_state "$d" feat-abortstale)
-  assert_contains "$out" "state: failed" "a pause declared before the run cannot mask its cancellation"
+  assert_contains "$out" "state: cancelled" "a pause declared before the run cannot mask its cancellation"
   assert_contains "$out" "run cancelled" "the terminal cancelled record stays authoritative"
   assert_not_contains "$out" "state: paused" "a stale earlier pause must not qualify"
   pass "a pause declared before the cancelled run does not outrank it"
 }
 
-test_cancelled_run_without_declared_pause_stays_failed() {
+test_cancelled_run_without_declared_pause_stays_cancelled() {
   reset_fakes
   local d; arm_abort_case abort-no-pause fm/feat-abortnodecl feat-abortnodecl \
     'working: rebasing onto the new base' \
@@ -1421,7 +1552,7 @@ test_cancelled_run_without_declared_pause_stays_failed() {
   d=$ABORT_CASE_DIR
   FM_FAKE_AXI_STATUS="$(run_cancelled fm/feat-abortnodecl)"
   local out; out=$(run_crew_state "$d" feat-abortnodecl)
-  assert_contains "$out" "state: failed" "an undeclared wait after a cancellation still surfaces"
+  assert_contains "$out" "state: cancelled" "an undeclared wait after a cancellation still surfaces"
   assert_not_contains "$out" "state: paused" "the wait must be explicitly declared, never inferred"
   pass "a cancelled run without a declared wait keeps surfacing"
 }
@@ -1448,7 +1579,7 @@ test_cancelled_status_without_outcome_declared_pause_is_paused() {
   FM_FAKE_AXI_STATUS="$(run_cancelled_status_only fm/feat-abortstatus)"
   local out; out=$(run_crew_state "$d" feat-abortstatus)
   assert_contains "$out" "state: paused" "outcome-less cancelled status + later declared wait -> paused"
-  assert_not_contains "$out" "state: failed" "both cancelled spellings yield the same way"
+  assert_not_contains "$out" "state: cancelled" "both cancelled spellings yield the same way"
   pass "an outcome-less cancelled status honors a later declared wait"
 }
 
@@ -1463,7 +1594,7 @@ test_coarse_cancelled_run_declared_pause_after_run_is_paused() {
   FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
   local out; out=$(run_crew_state "$d" feat-abortcoarse)
   assert_contains "$out" "state: paused" "coarse cancelled record + later declared wait -> paused"
-  assert_not_contains "$out" "state: failed" "the coarse cancelled record yields the same way"
+  assert_not_contains "$out" "state: cancelled" "the coarse cancelled record yields the same way"
   pass "the coarse cancelled record honors a later declared wait"
 }
 
@@ -1480,7 +1611,7 @@ test_unreadable_status_mtime_refuses_cleanly() {
   local out err
   err=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" "$CREW_STATE" feat-abortstat 2>&1 >/dev/null)
   out=$(run_crew_state "$d" feat-abortstat)
-  assert_contains "$out" "state: failed" "an unreadable mtime keeps the cancelled record authoritative"
+  assert_contains "$out" "state: cancelled" "an unreadable mtime keeps the cancelled record authoritative"
   [ -z "$err" ] || fail "unreadable mtime produced shell noise on stderr: $err"
   pass "an unreadable status mtime refuses cleanly instead of erroring"
 }
@@ -1619,7 +1750,8 @@ test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
-test_ci_monitoring_no_checks_terminal_surfaces_done
+test_ci_monitoring_no_checks_is_unverified_not_green
+test_ci_monitoring_no_checks_beats_crew_checks_green_claim
 test_ci_monitoring_green_then_rearm_stays_working
 test_ci_monitoring_no_checks_yet_stays_working
 test_ci_monitoring_still_waiting_stays_working
@@ -1651,14 +1783,19 @@ test_dead_window_still_reports_active_run_step
 test_no_timeout_uses_perl_bound
 test_scout_skips_run_lookup
 test_torn_down_worktree
+test_exact_worktree_binding_reads_normally
+test_recycled_worktree_binding_refuses_live_lane
+test_unverifiable_worktree_binding_refuses_distinctly
+test_legacy_worktree_without_binding_reads_normally
+test_cross_pool_worktree_binding_reads_normally
 test_remote_alive_with_log_uses_status_log
 test_remote_alive_idle_is_healthy_not_gone
 test_remote_unreachable_is_unknown_remote_not_dead
 test_remote_dead_reports_remote_verdict
 test_missing_meta
 test_cancelled_run_declared_pause_after_run_is_paused
-test_cancelled_run_stale_pause_before_run_stays_failed
-test_cancelled_run_without_declared_pause_stays_failed
+test_cancelled_run_stale_pause_before_run_stays_cancelled
+test_cancelled_run_without_declared_pause_stays_cancelled
 test_failed_run_declared_pause_after_run_stays_failed
 test_cancelled_status_without_outcome_declared_pause_is_paused
 test_coarse_cancelled_run_declared_pause_after_run_is_paused
