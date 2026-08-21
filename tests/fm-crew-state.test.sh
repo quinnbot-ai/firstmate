@@ -1310,6 +1310,45 @@ test_missing_meta() {
 # another branch must still be absorbed by the watcher via the runs-list
 # fallback (working), while a crew with genuinely no run anywhere and an idle
 # pane must still surface (the safety property the fix must never widen away).
+test_provably_working_via_runs_list_fallback() {
+  reset_fakes
+  local d short; d=$(new_case provably-working-crossbranch)
+  make_repo_on_branch "$d/wt" fm/feat-provable
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-provable.meta" "window=fm:fm-feat-provable" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-07-02 22:10
+  running    fm/feat-provable ${short}  2026-07-02 22:05
+EOF
+)"
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-provable \
+    || fail "cross-branch attribution via the runs list was not treated as provably working"
+  pass "crew_is_provably_working absorbs a validating crew found only via the runs-list fallback"
+}
+
+test_not_provably_working_when_stopped() {
+  reset_fakes
+  local d; d=$(new_case provably-working-stopped)
+  make_repo_on_branch "$d/wt" fm/feat-stopped
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-stopped.meta" "window=fm:fm-feat-stopped" "worktree=$d/wt" "kind=ship"
+  # Repo-wide run belongs to someone else, and this branch has no row in the
+  # runs list either (it never validated, or genuinely finished/stopped) - the
+  # only remaining signal is the pane, which is idle.
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<'EOF'
+  running    fm/other-crew aaaaaaa  2026-07-02 22:10
+EOF
+)"
+  FM_FAKE_BUSY=0
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-stopped \
+    && fail "a stopped crew with no run anywhere and an idle pane was treated as provably working"
+  pass "crew_is_provably_working still surfaces a genuinely stopped crew (safety property preserved)"
+}
+
+# Usage error (no id) is the one non-zero exit.
 # --- (l) a supported abort's cancelled record vs. a declared external wait ---
 # A supported abort leaves a TERMINAL cancelled run while the branch and PR
 # survive, and the crew that aborted it declares the external wait it is idling
@@ -1470,45 +1509,6 @@ test_cancelled_pause_absorb_class_end_to_end() {
   pass "the absorb classification follows the declared-wait override in both directions"
 }
 
-test_provably_working_via_runs_list_fallback() {
-  reset_fakes
-  local d short; d=$(new_case provably-working-crossbranch)
-  make_repo_on_branch "$d/wt" fm/feat-provable
-  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-provable.meta" "window=fm:fm-feat-provable" "worktree=$d/wt" "kind=ship"
-  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
-  FM_FAKE_RUNS_LIST="$(cat <<EOF
-  running    fm/other-crew aaaaaaa  2026-07-02 22:10
-  running    fm/feat-provable ${short}  2026-07-02 22:05
-EOF
-)"
-  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-provable \
-    || fail "cross-branch attribution via the runs list was not treated as provably working"
-  pass "crew_is_provably_working absorbs a validating crew found only via the runs-list fallback"
-}
-
-test_not_provably_working_when_stopped() {
-  reset_fakes
-  local d; d=$(new_case provably-working-stopped)
-  make_repo_on_branch "$d/wt" fm/feat-stopped
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-stopped.meta" "window=fm:fm-feat-stopped" "worktree=$d/wt" "kind=ship"
-  # Repo-wide run belongs to someone else, and this branch has no row in the
-  # runs list either (it never validated, or genuinely finished/stopped) - the
-  # only remaining signal is the pane, which is idle.
-  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
-  FM_FAKE_RUNS_LIST="$(cat <<'EOF'
-  running    fm/other-crew aaaaaaa  2026-07-02 22:10
-EOF
-)"
-  FM_FAKE_BUSY=0
-  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-stopped \
-    && fail "a stopped crew with no run anywhere and an idle pane was treated as provably working"
-  pass "crew_is_provably_working still surfaces a genuinely stopped crew (safety property preserved)"
-}
-
-# Usage error (no id) is the one non-zero exit.
 test_usage_error() {
   reset_fakes
   local rc
