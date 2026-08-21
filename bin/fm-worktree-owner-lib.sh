@@ -40,6 +40,11 @@
 #      about. A copy that is still its own lane's resolves to that lane and is
 #      reported as owned, not reassigned.
 #
+# SCOPE. Condition 2 reads one home's state directory, so a copy now held by a
+# task in a DIFFERENT firstmate home resolves to nothing rather than to that
+# task. That is the intended conservative answer: this home cannot prove another
+# home's ownership from its own records, and an unproven copy is left alone.
+#
 # Usage: . bin/fm-worktree-owner-lib.sh   (after bin/fm-worktree-binding-lib.sh)
 #
 # Public entry points:

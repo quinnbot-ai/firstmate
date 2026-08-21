@@ -37,7 +37,8 @@
 # its ownership binding when it has one, otherwise the branch it actually has
 # checked out cross-confirmed against the claimant's own record. A copy whose
 # owner cannot be proven is reported as unresolved and left completely alone:
-# "cannot tell" is never treated as "reassigned".
+# "cannot tell" is never treated as "reassigned". A copy now held by a task in
+# another firstmate home is one such case, since this home has no record of it.
 #
 # Output lines, one per task record:
 #   STALE:      <id> copy <path> is owned by <owner> (branch <branch>, via <method>)
