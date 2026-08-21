@@ -461,7 +461,7 @@ def structural(code: str, subject: str, evidence, action: str) -> Candidate:
     )
 
 
-def rule_candidates(spec, rule, records, explain):
+def rule_candidates(rule, records):
     out = []
     for record in records:
         if not isinstance(record, dict):
@@ -525,7 +525,7 @@ def predicates_hold(predicates, record) -> bool:
 # --- gate ------------------------------------------------------------------
 
 
-def admissible(candidate, spec, latch, explain):
+def admissible(candidate, spec, latch):
     """Apply G3, G4, G5, G6, G7. Returns None when admitted, else a reason."""
     if not candidate.subject or not SUBJECT_RE.match(candidate.subject):
         return "G3 shape: subject is empty or not a plain name"
@@ -566,7 +566,7 @@ def admissible(candidate, spec, latch, explain):
 # --- main ------------------------------------------------------------------
 
 
-def build_structural(spec_path, spec, state_dir, review_id, now):
+def build_structural(spec, review_id, now):
     """Structural candidates, plus the sources that are safe to review."""
     if spec is None:
         return [], {}
@@ -718,9 +718,7 @@ def main() -> int:
             )
         )
     else:
-        structural_found, fresh_sources = build_structural(
-            spec_path, spec, state_dir, review_id, now
-        )
+        structural_found, fresh_sources = build_structural(spec, review_id, now)
         candidates.extend(structural_found)
         payloads = {}
         for name, source in fresh_sources.items():
@@ -751,14 +749,14 @@ def main() -> int:
                     )
                 )
                 continue
-            candidates.extend(rule_candidates(spec, rule, records, args.explain))
+            candidates.extend(rule_candidates(rule, records))
 
     # G8 one line: rank, then decide. Structural findings outrank rule findings
     # because a review must report its own blindness before what it saw blind.
     candidates.sort(key=lambda c: c.sort_key())
     chosen = None
     for candidate in candidates:
-        reason = admissible(candidate, effective, latch, args.explain)
+        reason = admissible(candidate, effective, latch)
         if reason is None:
             chosen = candidate
             break
