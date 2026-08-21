@@ -41,7 +41,10 @@
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
-#      green, so a green PR is never silently read as still-validating.
+#      green, so a green PR is never silently read as still-validating. AND
+#      EXCEPT: a terminal `cancelled` record (never `failed`) yields to a
+#      declared external wait the crew appended after that run started - see
+#      pause_outranks_cancelled_run.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -383,8 +386,13 @@ nm_ci_checks_state() {
 # is a run for THIS branch active right now. Echoes the first (most recent)
 # matching row's status word (running/completed/cancelled/failed), or empty
 # when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
+# Start date+time of this branch's attributed run, as printed by the supported
+# top-level runs listing. Set by nm_runs_status_for_branch, so it stays empty
+# whenever that function ran inside a command substitution (the coarse
+# attribution path); nm_run_started_epoch re-reads the listing in that case.
+RUN_STARTED_AT=""
 nm_runs_status_for_branch() {  # <branch>
-  local branch=$1 out row st rest br sha
+  local branch=$1 out row st rest br sha d t
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
@@ -403,11 +411,74 @@ nm_runs_status_for_branch() {  # <branch>
       if ! nm_coarse_head_matches_worktree "$sha"; then
         continue
       fi
+      # The two columns after the short sha are the run's start date and time
+      # (local, minute resolution). Recorded for nm_run_started_epoch, which
+      # fails closed on anything it cannot parse as a time.
+      rest=${rest#* }
+      rest=$(trim "$rest")
+      d=${rest%% *}
+      rest=${rest#* }
+      rest=$(trim "$rest")
+      t=${rest%% *}
+      RUN_STARTED_AT="$d $t"
       printf '%s' "$st"
       return 0
     fi
   done <<< "$out"
   return 0
+}
+
+# Epoch seconds of that start time, or empty when it cannot be established.
+# This is the ONLY timestamp no-mistakes exposes for a run: `axi status` and
+# `axi logs` carry none, so a run's start is the anchor the declared-pause
+# ordering test below is bound to.
+nm_run_started_epoch() {
+  local e
+  [ -n "$RUN_STARTED_AT" ] || nm_runs_status_for_branch "$CREW_BRANCH" >/dev/null
+  [ -n "$RUN_STARTED_AT" ] || return 1
+  e=$(date -j -f '%Y-%m-%d %H:%M' "$RUN_STARTED_AT" +%s 2>/dev/null) || e=""
+  [ -n "$e" ] || e=$(date -d "$RUN_STARTED_AT" +%s 2>/dev/null) || e=""
+  case "$e" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$e"
+}
+
+# Epoch mtime of a path, or empty. The status log is append-only, so its mtime
+# is when its LAST line was appended.
+path_mtime() {  # <path>
+  if [ "$(uname -s 2>/dev/null || true)" = Darwin ]; then
+    stat -f %m "$1" 2>/dev/null
+  else
+    stat -c %Y "$1" 2>/dev/null
+  fi
+}
+
+# 0 when a declared external wait may outrank a TERMINAL CANCELLED run record.
+#
+# A supported `no-mistakes axi abort` leaves the run cancelled while the branch,
+# PR, and worktree survive; the crew that aborted it then declares the external
+# wait it is idling on and exits, so no agent is expected in that endpoint. The
+# run-step is authoritative, so without this the cancelled record would report
+# `failed` forever and every supervision cadence would re-escalate the
+# deliberately agent-free endpoint as a possible wedge.
+#
+# Two conditions here, plus the caller's cancelled-not-failed test, are each
+# load-bearing:
+#   - the status log's LAST line is a declared `paused:` external wait, so the
+#     wait is explicitly declared rather than inferred from an idle endpoint;
+#   - that declaration was appended after the cancelled run started, so a
+#     `paused:` line left over from before this run cannot mask its
+#     cancellation.
+# Both fail closed: an unreadable mtime or an unavailable run start keeps the
+# terminal record authoritative. The declared-pause test runs first because it
+# is free, so the bounded runs-listing call is paid only by a cancelled run that
+# actually carries a declared wait.
+pause_outranks_cancelled_run() {
+  local started log_mtime
+  status_is_paused "$LOG_LINE" || return 1
+  started=$(nm_run_started_epoch) || return 1
+  log_mtime=$(path_mtime "$LOG")
+  case "$log_mtime" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$log_mtime" -gt "$started" ]
 }
 
 # CREW_BRANCH is empty at detached HEAD (a just-spawned crew, or a scout's
@@ -467,6 +538,10 @@ fi
 if [ "$HAVE_RUN" = 1 ]; then
   RUN_STATE=working
   RUN_DETAIL=""
+  # 1 only for the supported abort's TERMINAL CANCELLED record. Deliberately
+  # NOT set for `failed`: an ordinary terminal failure keeps surfacing exactly
+  # as before, whatever the status log says.
+  RUN_CANCELLED=0
   CI_STEP_STATUS=""
   CI_LOG_STATE=""
   RUN_STATUS=""
@@ -482,7 +557,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       running)   RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
       completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
       failed)    RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
-      cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
+      cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled"; RUN_CANCELLED=1 ;;
       *)         RUN_STATE=unknown; RUN_DETAIL="runs list status: $COARSE_STATUS" ;;
     esac
   else
@@ -499,7 +574,7 @@ if [ "$HAVE_RUN" = 1 ]; then
         passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed" ;;
         checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
         failed)        RUN_STATE=failed; RUN_DETAIL="run failed" ;;
-        cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
+        cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled"; RUN_CANCELLED=1 ;;
         *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
       esac
     elif [ -n "$awaiting" ] || [ "$status" = awaiting_approval ] || [ "$status" = fix_review ] || [ -n "$gate_status" ] || [ "$has_gate" = 1 ]; then
@@ -523,7 +598,7 @@ if [ "$HAVE_RUN" = 1 ]; then
         running|fixing) RUN_STATE=working; RUN_DETAIL="validating ($status)" ;;
         completed)      RUN_STATE="done"; RUN_DETAIL="run completed" ;;
         failed)         RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
-        cancelled)      RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
+        cancelled)      RUN_STATE=failed;  RUN_DETAIL="run cancelled"; RUN_CANCELLED=1 ;;
         "")             RUN_STATE=working; RUN_DETAIL="run active" ;;
         *)              RUN_STATE=working; RUN_DETAIL="run active ($status)" ;;
       esac
@@ -543,6 +618,13 @@ if [ "$HAVE_RUN" = 1 ]; then
         esac
       fi
     fi
+  fi
+
+  # A cancelled run whose crew declared an external wait afterwards is idling
+  # on purpose with no agent expected, not wedged and not failed. See
+  # pause_outranks_cancelled_run for the three conditions this depends on.
+  if [ "$RUN_CANCELLED" = 1 ] && pause_outranks_cancelled_run; then
+    emit paused status-log "$(status_line_note "$LOG_LINE")${SEP}declared after the cancelled run"
   fi
 
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
