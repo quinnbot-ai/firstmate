@@ -64,7 +64,9 @@ for arg in "$@"; do
   case "$arg" in
     --apply) APPLY=1 ;;
     -h|--help)
-      sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'
+      # The header IS the documentation, so print it rather than re-spelling a
+      # summary that can drift from it.
+      awk 'NR>1 && !/^#/{exit} NR>1{sub(/^# ?/, ""); print}' "$0"
       exit 0
       ;;
     *) echo "error: unknown option: $arg" >&2; exit 2 ;;

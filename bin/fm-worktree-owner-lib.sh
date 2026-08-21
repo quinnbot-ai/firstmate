@@ -52,9 +52,13 @@
 #     KEEPS the stale `worktree=` value as history. Callers own the meta lock;
 #     this function does not take one.
 
+# shellcheck disable=SC2034 # Read by callers (fm-teardown.sh, fm-reconcile-worktree-pointers.sh), not this lib.
 FM_WORKTREE_OWNER_TASK_ID=
+# shellcheck disable=SC2034 # Read by callers, not this lib.
 FM_WORKTREE_OWNER_METHOD=
+# shellcheck disable=SC2034 # Read by callers, not this lib.
 FM_WORKTREE_OWNER_BRANCH=
+# shellcheck disable=SC2034 # Read by callers, not this lib.
 FM_WORKTREE_OWNER_DETAIL=
 
 # The one place that knows bin/fm-brief.sh's `fm/<task-id>` branch convention.

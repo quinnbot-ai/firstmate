@@ -21,6 +21,7 @@
 #   (r7) copy on a detached HEAD                         -> UNRESOLVED, untouched
 #   (r8) kind=secondmate home                            -> skipped entirely
 #   (r9) any repair                                      -> never appends to a status log
+#  (r10) --help                                          -> pure read, real usage
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -247,6 +248,27 @@ test_repair_never_touches_the_status_log() {
   pass "reconcile repairs records without waking any paused lane"
 }
 
+# (r10) --help must stay a pure read, and must keep describing the real script.
+test_help_is_a_pure_read() {
+  local case_dir out rc
+  case_dir=$(make_home help)
+  record_lane "$case_dir" lane-a
+  hand_copy_to_branch "$case_dir" fm/lane-b
+  record_lane "$case_dir" lane-b
+
+  set +e
+  out=$(run_reconcile "$case_dir" --help)
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "help: --help exits cleanly"
+  assert_contains "$out" "Usage: fm-reconcile-worktree-pointers.sh [--apply]" \
+    "help: --help states how to run the repair"
+  assert_no_grep "worktree_retired" "$case_dir/state/lane-a.meta" \
+    "help: --help must never change a record"
+  pass "--help prints the script's own documentation and changes nothing"
+}
+
 test_unbound_recycled_slot_is_retired
 test_own_copy_is_not_reassigned
 test_branch_without_a_matching_record_is_unresolved
@@ -256,3 +278,4 @@ test_rerun_is_idempotent
 test_detached_head_is_unresolved
 test_secondmate_home_is_skipped
 test_repair_never_touches_the_status_log
+test_help_is_a_pure_read
