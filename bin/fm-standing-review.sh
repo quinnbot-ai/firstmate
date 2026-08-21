@@ -47,7 +47,8 @@
 #                   number. Rejects: "this venture looks quiet" - any finding
 #                   whose whole content is a classification. A supervisor
 #                   cannot act on an adjective, so an adjective is not evidence.
-#   G5 dispatchable subject_root/<subject> must be an existing directory.
+#   G5 dispatchable the subject must be an existing directory inside the
+#                   spec's subject_root, named either relatively or absolutely.
 #                   Rejects: findings naming something no worker can be sent
 #                   to - a misspelled name, a venture not on this machine, or
 #                   an aggregate like "the portfolio". Dispatchable work has a
@@ -107,7 +108,8 @@ DEFAULT_SOURCE_MAX_AGE = 172800     # 2 days
 LINE_CAP = 200
 LINE_CAP_SUFFIX = " [truncated]"
 
-SUBJECT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+SUBJECT_RE = re.compile(r"^/?[A-Za-z0-9][A-Za-z0-9._/-]*$")
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 SPEC_KEYS = {
@@ -223,7 +225,7 @@ def load_spec(path: Path) -> dict:
         where = f"sources[{index}]"
         require_keys(source, SOURCE_KEYS, where)
         name = source.get("name")
-        if not isinstance(name, str) or not SUBJECT_RE.match(name or ""):
+        if not isinstance(name, str) or not NAME_RE.match(name or ""):
             raise SpecError(f"{where}.name must be a plain identifier")
         if name in spec["sources"]:
             raise SpecError(f"{where}.name is a duplicate: {name}")
@@ -250,7 +252,7 @@ def load_spec(path: Path) -> dict:
         where = f"rules[{index}]"
         require_keys(rule, RULE_KEYS, where)
         name = rule.get("name")
-        if not isinstance(name, str) or not SUBJECT_RE.match(name or ""):
+        if not isinstance(name, str) or not NAME_RE.match(name or ""):
             raise SpecError(f"{where}.name must be a plain identifier")
         if name in seen:
             raise SpecError(f"{where}.name is a duplicate: {name}")
@@ -308,6 +310,22 @@ def load_spec(path: Path) -> dict:
             }
         )
     return spec
+
+
+def field_value(record, dotted: str):
+    """Read a field, reaching into nested objects by dotted path.
+
+    Real sources nest their measurements (a "signals" object beside a flat
+    label), so a reviewer restricted to top-level keys can read the
+    classification but not the number underneath it - which is exactly the
+    finding G4 refuses. Returns None for anything missing.
+    """
+    node = record
+    for part in dotted.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return None
+        node = node[part]
+    return node
 
 
 def walk_records(payload, dotted: str):
@@ -450,11 +468,11 @@ def rule_candidates(spec, rule, records, explain):
             continue
         if not predicates_hold(rule["when"], record):
             continue
-        subject_value = record.get(rule["subject_field"])
+        subject_value = field_value(record, rule["subject_field"])
         subject = clean(subject_value) if subject_value is not None else ""
         evidence = []
         for field in rule["evidence_fields"]:
-            value = record.get(field)
+            value = field_value(record, field)
             if value is None:
                 continue
             evidence.append((field, fmt_value(value), is_number(value)))
@@ -473,7 +491,7 @@ def rule_candidates(spec, rule, records, explain):
 
 def predicates_hold(predicates, record) -> bool:
     for field, op, value in predicates:
-        actual = record.get(field)
+        actual = field_value(record, field)
         if op == "present":
             if actual is None:
                 return False
@@ -521,7 +539,20 @@ def admissible(candidate, spec, latch, explain):
             f"classification ({candidate.evidence_text})"
         )
     if not candidate.structural:
-        target = spec["subject_root"] / candidate.subject
+        # A source names its subjects however it likes: some relative to a
+        # common root, some by absolute path. Either is accepted, and both are
+        # held to the same containment rule, so a review can only ever name
+        # work inside the root its spec declared.
+        root = spec["subject_root"]
+        named = Path(candidate.subject)
+        target = named if named.is_absolute() else root / named
+        try:
+            target = target.resolve()
+            root = root.resolve()
+        except OSError:
+            return "G5 dispatchable: the work location cannot be resolved"
+        if target != root and root not in target.parents:
+            return f"G5 dispatchable: {target} is outside {root}"
         if not target.is_dir():
             return f"G5 dispatchable: no work location at {target}"
     if latch.seen_finding(candidate.identity):
@@ -595,7 +626,7 @@ def main() -> int:
         return 0 if args.help else 2
 
     review_id = args.id
-    if not SUBJECT_RE.match(review_id) or "/" in review_id:
+    if not NAME_RE.match(review_id):
         sys.stderr.write("error: review id must be a plain identifier\n")
         return 2
 

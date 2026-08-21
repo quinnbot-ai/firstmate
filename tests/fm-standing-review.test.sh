@@ -420,6 +420,79 @@ JSON
   pass "a review reports its own blindness ahead of any finding it can still make"
 }
 
+test_a_subject_may_be_named_by_absolute_path() {
+  local home out
+  home=$(make_home absolute-subject acme)
+  # Real sources disagree about this: one lists "agent-ops/firstmate", another
+  # lists the full path to the same directory. Both must be reviewable.
+  printf '{"rows":[{"venture":"%s/subjects/acme","cost_30d":10}]}\n' "$home" \
+    > "$home/source.json"
+  write_spec "$home" r '[{"field":"cost_30d","op":"ge","value":1}]' '["cost_30d"]'
+
+  out=$(scan "$home" --id r)
+  case "$out" in
+    *acme*) ;;
+    *) fail "a subject named by absolute path was not reviewable: [$out]" ;;
+  esac
+  pass "a subject may be named relative to the root or by absolute path"
+}
+
+test_a_subject_outside_the_declared_root_is_rejected() {
+  local home out err
+  home=$(make_home escaping-subject)
+  mkdir -p "$home/elsewhere"
+  # Containment is the point of declaring a root: a source is someone else's
+  # file, and a review must not be steerable into naming work outside it. A
+  # relative escape is already refused by G3's name shape, so the case that
+  # reaches G5 is a well-formed absolute path to a real directory elsewhere.
+  printf '{"rows":[{"venture":"%s/elsewhere","cost_30d":10}]}\n' "$home" \
+    > "$home/source.json"
+  write_spec "$home" r '[{"field":"cost_30d","op":"ge","value":1}]' '["cost_30d"]'
+
+  err=$("$SCAN" --home "$home" --id r --explain 2>&1 >"$home/out")
+  out=$(cat "$home/out")
+  [ -z "$out" ] || fail "a subject outside the declared root woke firstmate: $out"
+  case "$err" in
+    *"G5 dispatchable"*"outside"*) ;;
+    *) fail "escaping the declared root was not the stated rejection: $err" ;;
+  esac
+  pass "G5: a subject outside the declared root is rejected however it is spelled"
+}
+
+test_measurements_nested_beside_a_label_are_reachable() {
+  local home out
+  home=$(make_home nested acme)
+  # The shape real sources actually have: a flat human label, with the numbers
+  # that justify it in an object beside it. A reviewer that can read only the
+  # label produces exactly the classification-only finding G4 refuses.
+  cat > "$home/source.json" <<'JSON'
+{"rows":[{"path":"acme","disposition":"promote-candidate",
+          "signals":{"daysSinceCommit":0,"commits90d":360}}]}
+JSON
+  cat > "$home/config/standing-reviews/r.json" <<JSON
+{
+  "version": "fm-standing-review-v1",
+  "subject_root": "$home/subjects",
+  "sources": [
+    { "name": "src", "path": "$home/source.json", "records": "rows" }
+  ],
+  "rules": [
+    { "name": "candidate", "source": "src", "subject_field": "path",
+      "when": [{"field":"disposition","op":"eq","value":"promote-candidate"},
+               {"field":"signals.commits90d","op":"ge","value":10}],
+      "evidence_fields": ["signals.commits90d","signals.daysSinceCommit"],
+      "action": "assign this to a lane or decline it" }
+  ]
+}
+JSON
+  out=$(scan "$home" --id r)
+  case "$out" in
+    *"signals.commits90d=360"*) ;;
+    *) fail "a measurement nested beside its label was unreachable: [$out]" ;;
+  esac
+  pass "measurements nested beside a label are reachable as evidence"
+}
+
 test_predicates_can_match_on_a_missing_measurement() {
   local home out
   home=$(make_home predicates acme beta)
@@ -540,3 +613,6 @@ test_records_can_be_located_anywhere_in_the_source
 test_a_source_that_changed_shape_is_reported
 test_a_long_finding_is_bounded_for_the_wake_digest
 test_blindness_is_reported_before_a_finding_from_elsewhere
+test_a_subject_may_be_named_by_absolute_path
+test_a_subject_outside_the_declared_root_is_rejected
+test_measurements_nested_beside_a_label_are_reachable
