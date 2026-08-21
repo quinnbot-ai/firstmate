@@ -507,3 +507,41 @@ Observed output:
 ```
 
 The safe command-channel contract is covered without a notification by `tests/fm-daemon.test.sh`: the summary reaches both `$1` and stdin, every channel is process-group bounded, and a failed channel falls through.
+
+## Cancelled-run record and run timestamps
+
+This record supports the declared-external-wait exception to run-step precedence in `bin/fm-crew-state.sh` (`pause_outranks_cancelled_run`).
+Checked on 2026-08-21 against no-mistakes v1.48.0.
+
+A run stopped through the supported abort keeps its branch, head, and PR, and reports the terminal record as `cancelled` in both spellings:
+
+```sh
+no-mistakes axi status
+```
+
+```
+run:
+  id: "01M0HAZ3CPTH8XEVK9XXCS105G"
+  branch: fm/password-vault-security-audit
+  status: cancelled
+  head: a490472a
+  pr: "https://github.com/quinnbot-ai/agentic-access/pull/12"
+  findings: none
+outcome: cancelled
+error: "cancelled: aborted by user"
+```
+
+Neither `no-mistakes axi status` nor `no-mistakes axi logs --step <step> --run <id>` carries any timestamp, so no cancellation instant is available from the run record.
+The only timestamp no-mistakes exposes for a run is the start time in the top-level runs listing:
+
+```sh
+no-mistakes runs --limit 5
+```
+
+```
+  cancelled    fm/password-vault-security-audit a490472a  2026-08-20 21:58  https://github.com/quinnbot-ai/agentic-access/pull/12
+```
+
+That column is the run's start, not its last update: the same run's first step log was written at 2026-08-20 21:58 while its last step log was written at 2026-08-21 06:53.
+The ordering test is therefore bound to the run's start, which is the strongest ordering the CLI supports; it admits a wait declared while the run was still active and excludes every wait declared before the run existed.
+`tests/fm-crew-state.test.sh` case group (l) pins the resulting behavior without the CLI.

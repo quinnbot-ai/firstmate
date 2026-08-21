@@ -25,6 +25,8 @@
 #       This is the direct regression pair for the 2026-07-02 herdr incident,
 #       proving the watcher's own absorb-only-when-provably-working predicate
 #       benefits from the fix in both directions.
+#   (l) a supported abort's terminal cancelled record yields to an external wait
+#       the crew declared after that run started - and to nothing else
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -122,7 +124,15 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/herdr"
+  # Real stat, except when a case deliberately makes the status file's mtime
+  # unreadable. Resolved now, while PATH still points at the real one.
+  cat > "$fb/stat" <<SH
+#!/usr/bin/env bash
+set -u
+[ "\${FM_FAKE_STAT_MISSING:-0}" = 1 ] && exit 1
+exec $(command -v stat) "\$@"
+SH
+  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/herdr" "$fb/stat"
   printf '%s\n' "$fb"
 }
 
@@ -170,8 +180,9 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
+  FM_FAKE_STAT_MISSING=0
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
-  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
+  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS FM_FAKE_STAT_MISSING
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -288,6 +299,37 @@ run:
   pr: ""
   findings: none
 outcome: failed
+EOF
+}
+
+# A supported `no-mistakes axi abort` leaves this terminal record: the run is
+# cancelled while the branch, head, and PR survive. Shape verified against a
+# real aborted run on the installed CLI.
+run_cancelled() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: cancelled
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/12"
+  findings: none
+outcome: cancelled
+error: "cancelled: aborted by user"
+EOF
+}
+
+# Some cancelled records carry only the top-level status word, with no
+# outcome line; the run-step mapping has always handled both spellings.
+run_cancelled_status_only() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: cancelled
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/12"
+  findings: none
 EOF
 }
 
@@ -1268,6 +1310,166 @@ test_missing_meta() {
 # another branch must still be absorbed by the watcher via the runs-list
 # fallback (working), while a crew with genuinely no run anywhere and an idle
 # pane must still surface (the safety property the fix must never widen away).
+# --- (l) a supported abort's cancelled record vs. a declared external wait ---
+# A supported abort leaves a TERMINAL cancelled run while the branch and PR
+# survive, and the crew that aborted it declares the external wait it is idling
+# on and exits, so no agent is expected in that endpoint. Without the override
+# the cancelled record reports `failed` forever and every supervision cadence
+# re-escalates the deliberately agent-free endpoint as a possible wedge. Three
+# conditions gate the override and each is pinned separately below: the record
+# must be cancelled (never failed), the log's last line must be a declared
+# pause, and that pause must have been appended AFTER the run started.
+
+# The run start recorded in the runs list for every case below, and two status
+# file stamps that straddle it.
+CANCELLED_RUN_STARTED='2026-08-20 21:58'
+PAUSE_AFTER_RUN=202608210705
+PAUSE_BEFORE_RUN=202608190100
+
+# Real repo on <branch>, a fake bin, meta, a status log whose last line is
+# <last-line> stamped at <touch-stamp>, and a runs list recording this branch's
+# run as <runs-status> started at CANCELLED_RUN_STARTED. Sets ABORT_CASE_DIR
+# (not a command substitution: make_repo_on_branch's exported run head and the
+# runs list must reach the fakes in the caller's own environment).
+ABORT_CASE_DIR=""
+arm_abort_case() {  # <case-name> <branch> <id> <last-line> <touch-stamp> <runs-status>
+  local name=$1 branch=$2 id=$3 last=$4 stamp=$5 runs_status=$6 short
+  ABORT_CASE_DIR=$(new_case "$name")
+  make_repo_on_branch "$ABORT_CASE_DIR/wt" "$branch"
+  short=$(git -C "$ABORT_CASE_DIR/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$ABORT_CASE_DIR" >/dev/null
+  fm_write_meta "$ABORT_CASE_DIR/state/$id.meta" "window=fm:fm-$id" \
+    "worktree=$ABORT_CASE_DIR/wt" "kind=ship"
+  printf '%s\n' "$last" > "$ABORT_CASE_DIR/state/$id.status"
+  touch -t "$stamp" "$ABORT_CASE_DIR/state/$id.status"
+  FM_FAKE_RUNS_LIST="  $runs_status    $branch ${short}  $CANCELLED_RUN_STARTED  https://github.com/o/r/pull/12"
+}
+
+test_cancelled_run_declared_pause_after_run_is_paused() {
+  reset_fakes
+  local d; arm_abort_case abort-pause-after fm/feat-abort feat-abort \
+    'paused: run aborted via supported path, no agent expected until the upstream fix lands' \
+    "$PAUSE_AFTER_RUN" cancelled
+  d=$ABORT_CASE_DIR
+  FM_FAKE_AXI_STATUS="$(run_cancelled fm/feat-abort)"
+  local out; out=$(run_crew_state "$d" feat-abort)
+  assert_contains "$out" "state: paused" "cancelled run + pause declared after it -> paused"
+  assert_contains "$out" "source: status-log" "the declared pause is the reported source"
+  assert_contains "$out" "no agent expected" "the declared wait's reason is carried through"
+  assert_not_contains "$out" "state: failed" "a supported abort with a declared wait is not a failure"
+  pass "a declared wait after a supported abort outranks the cancelled record"
+}
+
+test_cancelled_run_stale_pause_before_run_stays_failed() {
+  reset_fakes
+  local d; arm_abort_case abort-pause-before fm/feat-abortstale feat-abortstale \
+    'paused: waiting on the upstream release' \
+    "$PAUSE_BEFORE_RUN" cancelled
+  d=$ABORT_CASE_DIR
+  FM_FAKE_AXI_STATUS="$(run_cancelled fm/feat-abortstale)"
+  local out; out=$(run_crew_state "$d" feat-abortstale)
+  assert_contains "$out" "state: failed" "a pause declared before the run cannot mask its cancellation"
+  assert_contains "$out" "run cancelled" "the terminal cancelled record stays authoritative"
+  assert_not_contains "$out" "state: paused" "a stale earlier pause must not qualify"
+  pass "a pause declared before the cancelled run does not outrank it"
+}
+
+test_cancelled_run_without_declared_pause_stays_failed() {
+  reset_fakes
+  local d; arm_abort_case abort-no-pause fm/feat-abortnodecl feat-abortnodecl \
+    'working: rebasing onto the new base' \
+    "$PAUSE_AFTER_RUN" cancelled
+  d=$ABORT_CASE_DIR
+  FM_FAKE_AXI_STATUS="$(run_cancelled fm/feat-abortnodecl)"
+  local out; out=$(run_crew_state "$d" feat-abortnodecl)
+  assert_contains "$out" "state: failed" "an undeclared wait after a cancellation still surfaces"
+  assert_not_contains "$out" "state: paused" "the wait must be explicitly declared, never inferred"
+  pass "a cancelled run without a declared wait keeps surfacing"
+}
+
+test_failed_run_declared_pause_after_run_stays_failed() {
+  reset_fakes
+  local d; arm_abort_case abort-failed-run fm/feat-abortfailed feat-abortfailed \
+    'paused: waiting on the upstream fix, no agent expected here' \
+    "$PAUSE_AFTER_RUN" failed
+  d=$ABORT_CASE_DIR
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-abortfailed)"
+  local out; out=$(run_crew_state "$d" feat-abortfailed)
+  assert_contains "$out" "state: failed" "an ordinary terminal failure keeps surfacing exactly as before"
+  assert_not_contains "$out" "state: paused" "no declared wait may mask a failed run"
+  pass "a declared wait never masks a terminal failed run"
+}
+
+test_cancelled_status_without_outcome_declared_pause_is_paused() {
+  reset_fakes
+  local d; arm_abort_case abort-status-only fm/feat-abortstatus feat-abortstatus \
+    'paused: aborted, idling until the upstream fix lands' \
+    "$PAUSE_AFTER_RUN" cancelled
+  d=$ABORT_CASE_DIR
+  FM_FAKE_AXI_STATUS="$(run_cancelled_status_only fm/feat-abortstatus)"
+  local out; out=$(run_crew_state "$d" feat-abortstatus)
+  assert_contains "$out" "state: paused" "outcome-less cancelled status + later declared wait -> paused"
+  assert_not_contains "$out" "state: failed" "both cancelled spellings yield the same way"
+  pass "an outcome-less cancelled status honors a later declared wait"
+}
+
+# The coarse path (this branch's run resolved only from the runs list, because
+# `axi status` answered for another branch) carries the same cancelled record.
+test_coarse_cancelled_run_declared_pause_after_run_is_paused() {
+  reset_fakes
+  local d; arm_abort_case abort-coarse fm/feat-abortcoarse feat-abortcoarse \
+    'paused: aborted, idling until the runner repair lands' \
+    "$PAUSE_AFTER_RUN" cancelled
+  d=$ABORT_CASE_DIR
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  local out; out=$(run_crew_state "$d" feat-abortcoarse)
+  assert_contains "$out" "state: paused" "coarse cancelled record + later declared wait -> paused"
+  assert_not_contains "$out" "state: failed" "the coarse cancelled record yields the same way"
+  pass "the coarse cancelled record honors a later declared wait"
+}
+
+# The ordering test is bound to the status log's mtime, so an unreadable mtime
+# must refuse cleanly rather than letting an empty value reach the comparison.
+test_unreadable_status_mtime_refuses_cleanly() {
+  reset_fakes
+  local d; arm_abort_case abort-stat-missing fm/feat-abortstat feat-abortstat \
+    'paused: aborted, idling until the upstream fix lands' \
+    "$PAUSE_AFTER_RUN" cancelled
+  d=$ABORT_CASE_DIR
+  FM_FAKE_AXI_STATUS="$(run_cancelled fm/feat-abortstat)"
+  FM_FAKE_STAT_MISSING=1
+  local out err
+  err=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" "$CREW_STATE" feat-abortstat 2>&1 >/dev/null)
+  out=$(run_crew_state "$d" feat-abortstat)
+  assert_contains "$out" "state: failed" "an unreadable mtime keeps the cancelled record authoritative"
+  [ -z "$err" ] || fail "unreadable mtime produced shell noise on stderr: $err"
+  pass "an unreadable status mtime refuses cleanly instead of erroring"
+}
+
+# The wedge escalation this fixes is driven by the absorb classification the
+# watcher and the away-mode daemon share, so pin it end to end over the REAL
+# helper rather than a canned verdict.
+test_cancelled_pause_absorb_class_end_to_end() {
+  reset_fakes
+  local d class
+  arm_abort_case abort-absorb-after fm/feat-abortabs feat-abortabs \
+    'paused: aborted, no agent expected until the upstream fix lands' \
+    "$PAUSE_AFTER_RUN" cancelled
+  d=$ABORT_CASE_DIR
+  FM_FAKE_AXI_STATUS="$(run_cancelled fm/feat-abortabs)"
+  class=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_absorb_class feat-abortabs)
+  [ "$class" = paused ] || fail "declared wait after a supported abort classified as '$class', not paused"
+
+  arm_abort_case abort-absorb-before fm/feat-abortabsstale feat-abortabsstale \
+    'paused: waiting on the upstream release' \
+    "$PAUSE_BEFORE_RUN" cancelled
+  d=$ABORT_CASE_DIR
+  FM_FAKE_AXI_STATUS="$(run_cancelled fm/feat-abortabsstale)"
+  class=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_absorb_class feat-abortabsstale)
+  [ "$class" = none ] || fail "a stale earlier pause classified as '$class', not none"
+  pass "the absorb classification follows the declared-wait override in both directions"
+}
+
 test_provably_working_via_runs_list_fallback() {
   reset_fakes
   local d short; d=$(new_case provably-working-crossbranch)
@@ -1454,6 +1656,14 @@ test_remote_alive_idle_is_healthy_not_gone
 test_remote_unreachable_is_unknown_remote_not_dead
 test_remote_dead_reports_remote_verdict
 test_missing_meta
+test_cancelled_run_declared_pause_after_run_is_paused
+test_cancelled_run_stale_pause_before_run_stays_failed
+test_cancelled_run_without_declared_pause_stays_failed
+test_failed_run_declared_pause_after_run_stays_failed
+test_cancelled_status_without_outcome_declared_pause_is_paused
+test_coarse_cancelled_run_declared_pause_after_run_is_paused
+test_unreadable_status_mtime_refuses_cleanly
+test_cancelled_pause_absorb_class_end_to_end
 test_provably_working_via_runs_list_fallback
 test_not_provably_working_when_stopped
 test_usage_error
