@@ -62,6 +62,9 @@ make_fake_root() {
   # fm-worktree-binding-lib.sh: teardown sources it to prove the recorded
   # isolated copy still belongs to this task before any cleanup step.
   ln -s "$ROOT/bin/fm-worktree-binding-lib.sh" "$fake/bin/fm-worktree-binding-lib.sh"
+  # fm-worktree-owner-lib.sh: teardown sources it to resolve the copy's current
+  # owner when the copy carries no binding of its own.
+  ln -s "$ROOT/bin/fm-worktree-owner-lib.sh" "$fake/bin/fm-worktree-owner-lib.sh"
   # fm-lock-lib.sh: teardown sources it for the shared lock-staleness proof.
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
   # Lifecycle serialization, status presentation retirement, and shared adapter
@@ -146,6 +149,9 @@ test_teardown_skips_gracefully_without_tasktmp() {
   # fm-worktree-binding-lib.sh: teardown sources it to prove the recorded
   # isolated copy still belongs to this task before any cleanup step.
   ln -s "$ROOT/bin/fm-worktree-binding-lib.sh" "$fake/bin/fm-worktree-binding-lib.sh"
+  # fm-worktree-owner-lib.sh: teardown sources it to resolve the copy's current
+  # owner when the copy carries no binding of its own.
+  ln -s "$ROOT/bin/fm-worktree-owner-lib.sh" "$fake/bin/fm-worktree-owner-lib.sh"
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
   ln -s "$ROOT/bin/fm-control-lib.sh" "$fake/bin/fm-control-lib.sh"
   ln -s "$ROOT/bin/fm-classify-lib.sh" "$fake/bin/fm-classify-lib.sh"
