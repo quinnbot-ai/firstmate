@@ -515,6 +515,43 @@ test_the_shipped_example_still_matches_the_spec() {
   pass "the example a spec author copies still matches the current spec"
 }
 
+test_a_review_that_cannot_track_its_cadence_does_not_run() {
+  local home out rc
+  home=$(make_home uncadenced acme)
+  write_source "$home" '[{"venture":"acme","cost_30d":10,"commits_30d":0}]'
+  write_spec "$home" r '[{"field":"commits_30d","op":"eq","value":0}]' \
+    '["cost_30d","commits_30d"]'
+  # Block only the cadence marker, leaving the durable record writable, so
+  # this isolates the cadence step. Reviewing without being able to advance
+  # the marker means reviewing again on the very next sweep, and every sweep
+  # after that, for as long as the condition holds.
+  ln -s /nonexistent-directory-for-this-test/target "$home/state/r.standing-review-last"
+
+  out=$("$SCAN" --home "$home" --id r 2>/dev/null); rc=$?
+  [ -z "$out" ] || fail "a review that cannot advance its cadence ran anyway: $out"
+  [ "$rc" -ne 0 ] || fail "a review that could not advance its cadence reported success"
+  pass "a review that cannot advance its cadence does not run every sweep instead"
+}
+
+test_a_review_that_cannot_record_stays_quiet() {
+  local home out rc
+  home=$(make_home unrecordable acme)
+  write_source "$home" '[{"venture":"acme","cost_30d":10,"commits_30d":0}]'
+  write_spec "$home" r '[{"field":"commits_30d","op":"eq","value":0}]' \
+    '["cost_30d","commits_30d"]'
+  # Block only the durable record, leaving everything else working, so this
+  # exercises the decision to speak rather than the ability to run at all.
+  mkdir -p "$home/state/r.standing-review-latch"
+
+  # Waking without being able to record the wake is the worst outcome
+  # available: the finding would be re-reported on every sweep forever, with
+  # nothing left able to suppress it. Refusing to speak is the safe direction.
+  out=$("$SCAN" --home "$home" --id r 2>/dev/null); rc=$?
+  [ -z "$out" ] || fail "a review that cannot record its wake reported anyway: $out"
+  [ "$rc" -ne 0 ] || fail "a review that could not record its wake reported success"
+  pass "a review that cannot record a wake stays quiet rather than repeat forever"
+}
+
 test_predicates_can_match_on_a_missing_measurement() {
   local home out
   home=$(make_home predicates acme beta)
@@ -639,3 +676,5 @@ test_a_subject_may_be_named_by_absolute_path
 test_a_subject_outside_the_declared_root_is_rejected
 test_measurements_nested_beside_a_label_are_reachable
 test_the_shipped_example_still_matches_the_spec
+test_a_review_that_cannot_record_stays_quiet
+test_a_review_that_cannot_track_its_cadence_does_not_run
