@@ -134,7 +134,7 @@ fm_worktree_owner_retire_pointer() {  # <meta-file> <owner-task-id>
     return 1
   }
   tmp="$meta.forget.$$"
-  if ! { awk '!/^worktree_retired=/' "$meta" && printf 'worktree_retired=%s\n' "$owner"; } > "$tmp" 2>/dev/null; then
+  if ! { cat "$meta" && printf 'worktree_retired=%s\n' "$owner"; } > "$tmp" 2>/dev/null; then
     rm -f "$tmp" 2>/dev/null || true
     echo "error: could not rewrite $meta to retire its stale copy pointer" >&2
     return 1

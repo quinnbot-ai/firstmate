@@ -15,6 +15,7 @@
 #   (r1) unbound copy on another recorded task's branch  -> STALE, pointer retired
 #   (r2) unbound copy still on this lane's own branch    -> quiet (nothing to repair)
 #   (r3) branch names a task this home does not record   -> UNRESOLVED, untouched
+#  (r11) branch's claimant records a different copy      -> UNRESOLVED, untouched
 #   (r4) readable binding disagrees with the branch      -> binding wins, quiet
 #   (r5) default run reports without changing anything   -> dry-run by default
 #   (r6) re-run over an already-retired pointer          -> counted, not rewritten
@@ -132,6 +133,35 @@ test_branch_without_a_matching_record_is_unresolved() {
 
 # (r4) A readable binding is authoritative. A worker that checks out some other
 # task's branch inside its OWN copy must not look reassigned.
+# (r11) The other half of the cross-confirmation: the branch names a task this
+# home DOES record, but that task's record points somewhere else. A branch left
+# behind by an earlier occupant looks exactly like this, and calling it the
+# current owner would retire a live pointer on stale evidence.
+test_branch_whose_claimant_records_another_copy_is_unresolved() {
+  local case_dir out
+  case_dir=$(make_home elsewhere)
+  record_lane "$case_dir" lane-a
+  hand_copy_to_branch "$case_dir" fm/lane-b
+  mkdir -p "$case_dir/other-wt"
+  fm_write_meta "$case_dir/state/lane-b.meta" \
+    "window=firstmate:fm-lane-b" \
+    "endpoint_task_id=lane-b" \
+    "worktree=$case_dir/other-wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+
+  out=$(run_reconcile "$case_dir" --apply)
+
+  assert_contains "$out" "UNRESOLVED: lane-a" \
+    "elsewhere: a claimant that records another copy proves nothing"
+  assert_not_contains "$out" "RETIRED: lane-a" \
+    "elsewhere: lane-a's live pointer must survive"
+  assert_no_grep "worktree_retired" "$case_dir/state/lane-a.meta" \
+    "elsewhere: the record is left untouched"
+  pass "reconcile requires the claimant's own record to name the same copy"
+}
+
 test_binding_outranks_the_checked_out_branch() {
   local case_dir out
   case_dir=$(make_home binding-wins)
@@ -272,6 +302,7 @@ test_help_is_a_pure_read() {
 test_unbound_recycled_slot_is_retired
 test_own_copy_is_not_reassigned
 test_branch_without_a_matching_record_is_unresolved
+test_branch_whose_claimant_records_another_copy_is_unresolved
 test_binding_outranks_the_checked_out_branch
 test_default_run_changes_nothing
 test_rerun_is_idempotent
