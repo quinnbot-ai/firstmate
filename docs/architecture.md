@@ -171,6 +171,11 @@ Only a named non-default branch checked out in `FM_ROOT` is a worktree tangle.
 If another live session holds the fleet lock, both surfaces keep the alarm but switch to read-only wording with no repair command.
 Ship briefs also tell the crewmate to verify `pwd -P` and `git rev-parse --show-toplevel` before creating `fm/<id>`, then stop with a blocked status if it landed in the primary checkout.
 
+The same shared-repository topology creates a second, quieter exposure: firstmate never updates itself, so a change merged to the default branch runs nowhere until the captain approves `/updatefirstmate`.
+Every home reads its tooling from a code root, and the primary home plus each linked-worktree secondmate home follow the same repository, so a code root left behind leaves all of them equally behind at once.
+`fm-code-currency-lib.sh` compares the commit `FM_ROOT` actually has checked out against the remote-tracking ref of the default branch it follows, and `bin/fm-bootstrap.sh` reports the gap as a `CODE_STALE:` line at session start, naming the missing commit count and any guard paths inside the gap.
+The comparison is a local read of an already-fetched ref, so the reported gap is a floor rather than a live query, and the check never fetches, fast-forwards, or otherwise closes the gap it reports: a home may be pinned at an older commit deliberately, and only the captain moves it.
+
 ## No-mistakes gate authority boundary
 
 Firstmate's own no-mistakes gate runs agents inside a checkout that also contains the fleet-captain identity in `AGENTS.md`, so gate execution needs an authority boundary separate from ordinary crewmate worktree isolation.
