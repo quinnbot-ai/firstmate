@@ -53,7 +53,8 @@ land() {
 # older tip. A check that fetches would move that ref; a check that only reads
 # cannot, which is what makes the read-only boundary observable.
 land_elsewhere() {
-  local repo=$1 file=$2 message=$3 side="$repo.side"
+  local repo=$1 file=$2 message=$3
+  local side="$repo.side"
   rm -rf "$side"
   git clone -q "$repo.origin.git" "$side"
   mkdir -p "$side/$(dirname "$file")"
