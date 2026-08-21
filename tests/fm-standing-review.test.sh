@@ -493,6 +493,28 @@ JSON
   pass "measurements nested beside a label are reachable as evidence"
 }
 
+test_the_shipped_example_still_matches_the_spec() {
+  local home out rc
+  home=$(make_home shipped-example acme)
+  # An example config that no longer parses is worse than none: it is the first
+  # thing a spec author copies. Point its two placeholder paths at real files
+  # and hold it to the same validation an operator would get.
+  sed -e "s#/absolute/path/to/the/directory/your/subjects/live/under#$home/subjects#" \
+      -e "s#/absolute/path/to/a/json/file/something/else/keeps/current.json#$home/source.json#" \
+      "$ROOT/docs/examples/standing-review.json" \
+      > "$home/config/standing-reviews/r.json"
+  write_source "$home" '[{"venture":"acme","cost_30d":30,"commits_30d":0,"days_idle":9}]'
+
+  out=$("$SCAN" --home "$home" --id r --validate 2>&1); rc=$?
+  [ "$rc" -eq 0 ] || fail "the shipped example no longer validates: $out"
+  out=$("$SCAN" --home "$home" --id r --dry-run)
+  case "$out" in
+    *acme*) ;;
+    *) fail "the shipped example validates but reviews nothing: [$out]" ;;
+  esac
+  pass "the example a spec author copies still matches the current spec"
+}
+
 test_predicates_can_match_on_a_missing_measurement() {
   local home out
   home=$(make_home predicates acme beta)
@@ -616,3 +638,4 @@ test_blindness_is_reported_before_a_finding_from_elsewhere
 test_a_subject_may_be_named_by_absolute_path
 test_a_subject_outside_the_declared_root_is_rejected
 test_measurements_nested_beside_a_label_are_reachable
+test_the_shipped_example_still_matches_the_spec

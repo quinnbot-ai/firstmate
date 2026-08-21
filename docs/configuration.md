@@ -531,6 +531,7 @@ Each review is one gitignored `config/standing-reviews/<id>.json` spec naming it
 Firstmate ships no conditions: which ones deserve a wake, and how they rank, is a decision about the reviewed surface rather than about firstmate.
 
 `bin/fm-standing-review.sh` owns the spec fields and the admissibility conditions, and `bin/fm-standing-review-arm.sh` owns arming, listing, and disarming; read those headers before writing a spec.
+See [`docs/examples/standing-review.json`](examples/standing-review.json) for the file's shape; its two rules illustrate the format and are not a recommendation about what to review.
 A spec names absolute paths on the machine that reviews them, so it is home-local and is not inherited by secondmate homes.
 Arming registers a check only; nothing here creates or refreshes a schedule, and a review whose evidence stops refreshing reports that instead of going quiet.
 
