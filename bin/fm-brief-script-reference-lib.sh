@@ -57,7 +57,7 @@ while (my $line = <$fh>) {
   }
 
   my $lead = qr/^\s*(?:[-*+]\s+|\d+[.)]\s+)?/;
-  for my $clause (split /\s*(?:;|\bbut\b)\s*/i, $line) {
+  for my $clause (split /\s*(?:;|\bbut\b|[.!?]+(?=\s|$))\s*/i, $line) {
     next if $clause =~ /$lead(?:(?:before|after|once)\b[^,]{0,120},\s*)?(?:(?:you\s+)?(?:must|should|need\s+to)\s+|please\s+)?(?:do\s+not|don't|never)\s+(?:run|call|use|invoke|execute|source|start)\b/i;
     next unless $clause =~ /$lead(?:(?:before|after|once)\b[^,]{0,120},\s*)?(?:(?:first|then|next|finally|instead),?\s+)?(?:(?:you\s+)?(?:must|should|need\s+to)\s+|please\s+)?(?:run|call|use|invoke|execute|source|start)\b/i;
     emit_scripts($clause);

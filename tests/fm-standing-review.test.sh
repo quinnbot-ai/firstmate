@@ -164,6 +164,61 @@ test_cadence_silences_the_sweep_between_reviews() {
   pass "G1: the watcher's sweep cadence is not the review's cadence"
 }
 
+test_concurrent_scans_are_single_flight() {
+  local home first_pid second_pid combined attempt
+  home=$(make_home concurrent acme)
+  write_spec "$home" r '[{"field":"commits_30d","op":"eq","value":0}]' \
+    '["cost_30d","commits_30d"]'
+  mkfifo "$home/source.json"
+
+  scan "$home" --id r > "$home/first.out" 2> "$home/first.err" &
+  first_pid=$!
+  attempt=0
+  while [ ! -e "$home/state/r.standing-review-last" ] && [ "$attempt" -lt 100 ]; do
+    sleep 0.02
+    attempt=$((attempt + 1))
+  done
+  [ -e "$home/state/r.standing-review-last" ] || {
+    printf '{"rows": []}\n' > "$home/source.json"
+    wait "$first_pid" || true
+    fail "the first scan never reached its evidence read"
+  }
+
+  scan "$home" --id r > "$home/second.out" 2> "$home/second.err" &
+  second_pid=$!
+  sleep 0.2
+  if ! kill -0 "$second_pid" 2>/dev/null; then
+    printf '{"rows": []}\n' > "$home/source.json"
+    wait "$first_pid" || true
+    wait "$second_pid" || true
+    fail "a concurrent scan bypassed the in-flight review"
+  fi
+
+  printf '{"rows": [{"venture":"acme","cost_30d":10,"commits_30d":0}]}\n' \
+    > "$home/source.json"
+  wait "$first_pid" || fail "the first concurrent scan failed: $(cat "$home/first.err")"
+  wait "$second_pid" || fail "the second concurrent scan failed: $(cat "$home/second.err")"
+  combined=$(cat "$home/first.out" "$home/second.out")
+  [ "$(printf '%s\n' "$combined" | sed '/^$/d' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "concurrent scans emitted more than one wake: $combined"
+  pass "G1: concurrent scans serialize through wake recording"
+}
+
+test_json_equality_does_not_conflate_booleans_and_numbers() {
+  local home out
+  home=$(make_home typed-equality acme)
+  write_source "$home" '[{"venture":"acme","flag":true,"cost_30d":10}]'
+  write_spec "$home" r '[{"field":"flag","op":"eq","value":1}]' '["cost_30d"]'
+
+  out=$(scan "$home" --id r --dry-run)
+  [ -z "$out" ] || fail "JSON true satisfied a numeric equality predicate: $out"
+
+  write_spec "$home" r '[{"field":"flag","op":"ne","value":1}]' '["cost_30d"]'
+  out=$(scan "$home" --id r --dry-run)
+  assert_contains "$out" "acme" "JSON true did not differ from numeric one"
+  pass "predicate equality preserves JSON boolean and number types"
+}
+
 test_the_same_finding_does_not_wake_twice() {
   local home first second err
   home=$(make_home novelty acme)
@@ -745,6 +800,8 @@ test_quantified_finding_is_emitted_with_its_evidence
 test_classification_without_measurement_is_rejected
 test_subject_with_no_work_location_is_rejected
 test_cadence_silences_the_sweep_between_reviews
+test_concurrent_scans_are_single_flight
+test_json_equality_does_not_conflate_booleans_and_numbers
 test_the_same_finding_does_not_wake_twice
 test_drifting_evidence_does_not_defeat_the_latch
 test_the_latch_expires_so_a_recurrence_can_wake_again

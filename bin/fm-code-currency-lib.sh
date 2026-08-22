@@ -91,15 +91,59 @@ fm_code_currency_guard_files() {
   done
 }
 
-fm_code_currency_untracked_landed_files() {
-  local root=$1 base=$2 path landed
+fm_code_currency_landed_worktree_drift() {
+  local root=$1 base=$2 path landed entry metadata mode type oid actual expected_exec actual_exec
   landed=$(git -C "$root" diff --name-only "HEAD...$base" 2>/dev/null) || return 1
   while IFS= read -r path; do
     [ -n "$path" ] || continue
-    if ! git -C "$root" ls-files --error-unmatch -- "$path" >/dev/null 2>&1 \
-       && { [ -e "$root/$path" ] || [ -L "$root/$path" ]; }; then
-      printf '%s\n' "$path"
+    entry=$(git -C "$root" ls-tree HEAD -- "$path" 2>/dev/null) || return 1
+    if [ -z "$entry" ]; then
+      if [ -e "$root/$path" ] || [ -L "$root/$path" ]; then
+        printf '%s\n' "$path"
+      fi
+      continue
     fi
+    metadata=${entry%%$'\t'*}
+    mode=${metadata%% *}
+    metadata=${metadata#* }
+    type=${metadata%% *}
+    oid=${metadata##* }
+    case "$mode:$type" in
+      100644:blob | 100755:blob)
+        if [ ! -f "$root/$path" ] || [ -L "$root/$path" ]; then
+          printf '%s\n' "$path"
+          continue
+        fi
+        actual=$(git -C "$root" hash-object --no-filters "$root/$path" 2>/dev/null) || return 1
+        expected_exec=0
+        [ "$mode" != 100755 ] || expected_exec=1
+        actual_exec=0
+        [ ! -x "$root/$path" ] || actual_exec=1
+        if [ "$actual" != "$oid" ] || [ "$actual_exec" -ne "$expected_exec" ]; then
+          printf '%s\n' "$path"
+        fi
+        ;;
+      120000:blob)
+        if [ ! -L "$root/$path" ]; then
+          printf '%s\n' "$path"
+          continue
+        fi
+        actual=$(perl -e 'my $v = readlink shift; defined $v or exit 1; print $v' \
+          "$root/$path" | git -C "$root" hash-object --stdin 2>/dev/null) || return 1
+        [ "$actual" = "$oid" ] || printf '%s\n' "$path"
+        ;;
+      160000:commit)
+        if [ ! -d "$root/$path" ]; then
+          printf '%s\n' "$path"
+          continue
+        fi
+        actual=$(git -C "$root/$path" rev-parse HEAD 2>/dev/null) || return 1
+        [ "$actual" = "$oid" ] || printf '%s\n' "$path"
+        ;;
+      *)
+        printf '%s\n' "$path"
+        ;;
+    esac
   done <<EOF
 $landed
 EOF
@@ -111,7 +155,7 @@ EOF
 # unprovable. Echo nothing (returning 1) for other clean states: not a git work
 # tree, nothing to compare against, already current, or ahead only.
 fm_code_currency_line() {
-  local root=$1 base behind head_sha base_sha guard guard_count shown more guard_text tracked_status untracked_landed untracked_shown
+  local root=$1 base behind head_sha base_sha guard guard_count shown more guard_text tracked_status landed_drift landed_drift_shown
   git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
   base=$(fm_code_currency_base_ref "$root") || return 1
   behind=$(git -C "$root" rev-list --count "HEAD..$base" 2>/dev/null) || return 1
@@ -134,11 +178,11 @@ fm_code_currency_line() {
       ;;
     *) return 1 ;;
   esac
-  untracked_landed=$(fm_code_currency_untracked_landed_files "$root" "$base") || return 1
-  if [ -n "$untracked_landed" ]; then
-    untracked_shown=$(printf '%s\n' "$untracked_landed" | head -n 4 | paste -sd, - | sed 's/,/, /g')
-    printf 'CODE_STALE: UNPROVEN live code: landed paths are present as untracked files outside checked-out HEAD %s: %s. HEAD is %s commit(s) behind %s (%s) as last fetched; installed code cannot be proven to match HEAD or the landed branch.\n' \
-      "$head_sha" "$untracked_shown" "$behind" "$base" "$base_sha"
+  landed_drift=$(fm_code_currency_landed_worktree_drift "$root" "$base") || return 1
+  if [ -n "$landed_drift" ]; then
+    landed_drift_shown=$(printf '%s\n' "$landed_drift" | head -n 4 | paste -sd, - | sed 's/,/, /g')
+    printf 'CODE_STALE: UNPROVEN live code: landed paths differ from checked-out HEAD %s in the worktree: %s. HEAD is %s commit(s) behind %s (%s) as last fetched; installed code cannot be proven to match HEAD or the landed branch.\n' \
+      "$head_sha" "$landed_drift_shown" "$behind" "$base" "$base_sha"
     return 0
   fi
   [ "$behind" -gt 0 ] || return 1

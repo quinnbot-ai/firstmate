@@ -594,6 +594,13 @@ hand_worktree_to_other_task() {
   git -C "$case_dir/wt" checkout -q -b "$branch"
   fm_worktree_binding_write "$case_dir/wt" "$owner" \
     || fail "could not bind the recycled copy to $owner"
+  fm_write_meta "$case_dir/state/$owner.meta" \
+    "window=firstmate:fm-$owner" \
+    "endpoint_task_id=$owner" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
 }
 
 # Record task-x1 as the copy's own current owner, the ordinary non-collision case.
@@ -728,6 +735,30 @@ test_forget_worktree_retires_the_stale_pointer_and_spares_the_copy() {
   [ ! -s "$case_dir/treehouse.log" ] \
     || fail "forget-worktree: the live lane's copy was returned to the pool"
   pass "--forget-worktree retires the stale pointer and leaves the live copy alone"
+}
+
+test_forget_worktree_refuses_an_orphan_binding() {
+  local case_dir rc
+  case_dir=$(make_case orphan-binding-forget)
+  write_meta "$case_dir" no-mistakes ship
+  declare_binding_in_meta "$case_dir"
+  log_treehouse_calls "$case_dir"
+  hand_worktree_to_other_task "$case_dir" interrupted-spawn fm/interrupted-spawn
+  rm "$case_dir/state/interrupted-spawn.meta"
+
+  set +e
+  run_teardown "$case_dir" --forget-worktree > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "orphan-binding: a marker without an active claimant must not retire a pointer"
+  assert_contains "$(cat "$case_dir/stderr")" "no active record" \
+    "orphan-binding: the refusal did not identify the missing claimant proof"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "orphan-binding: an unproven owner retired the stale task record"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "orphan-binding: an unproven owner caused the copy to be returned"
+  pass "--forget-worktree requires an active claimant behind a binding"
 }
 
 # The combination a cleanup path actually uses: an authorized discard of this
@@ -3029,6 +3060,7 @@ test_local_only_fork_remote_allows
 test_recycled_slot_refuses_and_names_the_live_owner
 test_recycled_slot_refuses_even_under_force
 test_forget_worktree_retires_the_stale_pointer_and_spares_the_copy
+test_forget_worktree_refuses_an_orphan_binding
 test_force_and_forget_worktree_together_complete
 test_forget_worktree_refuses_without_a_proven_reassignment
 test_unbound_recycled_slot_refuses_and_names_the_live_owner

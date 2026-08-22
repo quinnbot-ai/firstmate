@@ -304,6 +304,30 @@ test_untracked_landed_path_is_unproven() {
   pass "fm_code_currency_line: untracked landed paths make live code unproven"
 }
 
+test_index_hints_cannot_hide_landed_path_drift() {
+  local repo out landed_helper diff_status
+  repo=$(make_repo "$TMP_ROOT/index-hints")
+  land "$repo" bin/fm-hidden-helper.sh "helper version one"
+  land "$repo" bin/fm-hidden-helper.sh "helper version two"
+  landed_helper=$(git -C "$repo" show origin/main:bin/fm-hidden-helper.sh)
+  hold_back "$repo" 1
+  printf '%s\n' "$landed_helper" > "$repo/bin/fm-hidden-helper.sh"
+  git -C "$repo" update-index --assume-unchanged bin/fm-hidden-helper.sh
+
+  git -C "$repo" diff --quiet HEAD --
+  diff_status=$?
+  expect_code 0 "$diff_status" "fixture failed: Git did not hide the changed worktree bytes"
+  out=$(fm_code_currency_line "$repo" || true)
+  assert_contains "$out" "UNPROVEN live code" \
+    "index hints allowed differing landed bytes to be called inactive"
+  assert_contains "$out" "bin/fm-hidden-helper.sh" \
+    "the hidden landed path was not identified"
+  assert_not_contains "$out" "inactive here" \
+    "hidden worktree bytes produced a proven inactivity claim"
+
+  pass "landed path bytes are checked independently of index hints"
+}
+
 # --- SESSION START: the line reaches the digest -----------------------------
 
 # The library is only useful if a session start actually prints it, and only
@@ -336,5 +360,6 @@ test_guard_naming
 test_never_updates
 test_dirty_tracked_checkout_is_unproven
 test_untracked_landed_path_is_unproven
+test_index_hints_cannot_hide_landed_path_drift
 test_ignored_landed_path_is_unproven
 test_bootstrap_line

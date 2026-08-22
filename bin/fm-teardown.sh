@@ -602,7 +602,14 @@ validate_worktree_ownership() {
     owner_branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
     [ -n "$owner_branch" ] || owner_branch='<unreadable>'
     if [ "$FORGET_WORKTREE" = 1 ]; then
-      retire_recycled_worktree_record "$FM_WORKTREE_BINDING_TASK_ID" "$owner_branch" || return 1
+      if ! fm_worktree_owner_resolve "$WT" "$STATE" \
+         || [ "$FM_WORKTREE_OWNER_TASK_ID" != "$FM_WORKTREE_BINDING_TASK_ID" ]; then
+        echo "REFUSED: the isolated copy at $WT is bound to task $FM_WORKTREE_BINDING_TASK_ID, but that task has no active record holding this copy." >&2
+        echo "Cannot retire task $ID's pointer without a positively confirmed current owner." >&2
+        return 1
+      fi
+      retire_recycled_worktree_record "$FM_WORKTREE_OWNER_TASK_ID" \
+        "${FM_WORKTREE_OWNER_BRANCH:-$owner_branch}" || return 1
       return 0
     fi
     echo "REFUSED: the isolated copy at $WT is no longer task $ID's; task $FM_WORKTREE_BINDING_TASK_ID owns it now." >&2

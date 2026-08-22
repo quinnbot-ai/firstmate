@@ -86,11 +86,13 @@ exec python3 - "$@" <<'PY'
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import math
 import os
 import re
+import stat
 import sys
 import tempfile
 import time
@@ -551,10 +553,10 @@ def predicates_hold(predicates, record) -> bool:
         if actual is None:
             return False
         if op == "eq":
-            if actual != value:
+            if not json_equal(actual, value):
                 return False
         elif op == "ne":
-            if actual == value:
+            if json_equal(actual, value):
                 return False
         else:
             if not is_number(actual):
@@ -568,6 +570,34 @@ def predicates_hold(predicates, record) -> bool:
             if op == "ge" and not actual >= value:
                 return False
     return True
+
+
+def json_equal(left, right) -> bool:
+    if is_number(left) and is_number(right):
+        return left == right
+    if type(left) is not type(right):
+        return False
+    return left == right
+
+
+def acquire_cadence_lock(path: Path) -> tuple[int, bool]:
+    created = False
+    flags = os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+        created = True
+    except FileExistsError:
+        fd = os.open(path, flags)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise OSError("cadence marker is not a private regular file")
+        os.fchmod(fd, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd, created
 
 
 # --- gate ------------------------------------------------------------------
@@ -712,6 +742,14 @@ def main() -> int:
     now = int(time.time())
     cadence_path = state_dir / f"{review_id}.standing-review-last"
     latch_path = state_dir / f"{review_id}.standing-review-latch"
+    cadence_lock_fd = None
+    cadence_created = False
+    if not args.dry_run:
+        try:
+            cadence_lock_fd, cadence_created = acquire_cadence_lock(cadence_path)
+        except OSError as exc:
+            sys.stderr.write(f"error: cannot serialize the standing review: {exc}\n")
+            return 1
 
     # G1 cadence. Read the interval from the spec when it parses, so a spec can
     # slow itself down; a broken spec still reports on the default interval
@@ -728,10 +766,7 @@ def main() -> int:
     cooldown = spec["cooldown"] if spec else DEFAULT_SUBJECT_COOLDOWN
 
     if not args.dry_run:
-        try:
-            since = now - int(cadence_path.stat().st_mtime)
-        except OSError:
-            since = interval
+        since = interval if cadence_created else now - int(os.fstat(cadence_lock_fd).st_mtime)
         if since < interval:
             if args.explain:
                 sys.stderr.write(
@@ -741,8 +776,8 @@ def main() -> int:
         # Stamp before the work, so a review that dies partway does not repeat
         # every sweep until it succeeds.
         try:
-            cadence_path.touch()
-            os.chmod(cadence_path, 0o600)
+            os.utime(cadence_lock_fd, None)
+            os.fchmod(cadence_lock_fd, 0o600)
         except OSError as exc:
             sys.stderr.write(f"error: cannot record the review cadence: {exc}\n")
             return 1

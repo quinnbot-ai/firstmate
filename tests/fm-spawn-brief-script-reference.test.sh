@@ -208,6 +208,23 @@ test_mixed_negation_still_refuses_positive_instruction() {
   pass "mixed negation still refuses the positive missing-helper instruction"
 }
 
+test_sentence_after_negation_still_refuses_positive_instruction() {
+  local id=brief-sentence-a11 rec out status
+  rec=$(make_case sentence-negation "$id" 'Do not run bin/fm-old-helper.sh. Instead run bin/fm-sentence-missing.sh.')
+  read_case "$rec"
+
+  set +e
+  out=$(run_spawn "$id" 2>&1)
+  status=$?
+  set -e
+  expect_code 1 "$status" "a positive sentence after a negated sentence dispatched: $out"
+  assert_contains "$out" "fm-sentence-missing.sh" \
+    "the positive sentence's missing helper was not diagnosed"
+  assert_not_contains "$out" "resolves in this task worktree to $POOL_DIR/bin/fm-old-helper.sh" \
+    "the negated sentence was treated as an instruction"
+  pass "a sentence after negation still refuses its missing helper"
+}
+
 test_pool_transition_lock_precedes_allocation() {
   local id=brief-pool-lock-a9 rec lock out_file pid status
   rec=$(make_case pool-lock "$id" 'Proceed with the task.')
@@ -256,6 +273,7 @@ test_prefixed_imperative_reference_refuses
 test_modal_imperative_reference_refuses
 test_negative_modal_reference_does_not_refuse
 test_mixed_negation_still_refuses_positive_instruction
+test_sentence_after_negation_still_refuses_positive_instruction
 test_prose_only_mention_does_not_refuse
 test_pool_transition_lock_precedes_allocation
 
