@@ -86,6 +86,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-gh-ci-fallback.sh`   | Preserve the CI check JSON contract through exact-current-head Actions verification, with typed fail-closed unverifiable evidence |
 | `fm-gh-shim-install.sh`  | Explicitly install, remove, or verify PATH precedence for the no-mistakes CI gh shim |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification          |
+| `fm-code-currency-lib.sh` | Shared local comparison of the commit a code root runs against the default branch it follows |
 | `fm-timeout-lib.sh`      | Single owner of hard-bounded command execution and its fallback watchdog |
 | `fm-timing-lib.sh`       | Single owner of the deferred network stage's per-step elapsed-time records, inert unless a run asks for them |
 | `fm-supervision-lib.sh`  | Shared in-flight-work-without-fresh-watcher-beacon predicate                         |
