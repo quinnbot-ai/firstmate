@@ -216,6 +216,8 @@ CONTROL_LOCK="$STATE/.control-$ID.lock"
 CONTROL_LOCK_HELD=0
 META_LOCK=
 META_LOCK_HELD=0
+WORKTREE_TRANSITION_LOCK=
+WORKTREE_TRANSITION_LOCK_HELD=0
 DESCENDANT_LOCK_PATHS=()
 DESCENDANT_TASK_STATES=()
 DESCENDANT_TASK_IDS=()
@@ -230,6 +232,10 @@ teardown_release_locks() {
     fm_lock_release "${DESCENDANT_LOCK_PATHS[$i]}" || true
   done
   DESCENDANT_LOCK_PATHS=()
+  if [ "$WORKTREE_TRANSITION_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$WORKTREE_TRANSITION_LOCK" || true
+    WORKTREE_TRANSITION_LOCK_HELD=0
+  fi
   if [ "$META_LOCK_HELD" = 1 ]; then
     fm_lock_release "$META_LOCK" || true
     META_LOCK_HELD=0
@@ -492,6 +498,14 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
+if [ "$KIND" != secondmate ] && [ -n "$WT" ] && [ -d "$WT" ]; then
+  WORKTREE_TRANSITION_LOCK=$(fm_worktree_transition_lock_path "$STATE" "$WT") || {
+    echo "error: cannot establish the ownership transition lock for worktree $WT" >&2
+    exit 1
+  }
+  fm_lock_acquire_wait "$WORKTREE_TRANSITION_LOCK"
+  WORKTREE_TRANSITION_LOCK_HELD=1
+fi
 
 # --- current-owner check for a recycled pool slot ---------------------------
 # A state/<id>.meta worktree= value is an ALLOCATION record, not proof that the

@@ -160,13 +160,53 @@ test_default_run_changes_nothing() {
   hand_copy_to_branch "$case_dir" fm/lane-b
   record_lane "$case_dir" lane-b
 
-  out=$(run_reconcile "$case_dir")
+  out=$(run_reconcile "$case_dir" --dry-run)
 
   assert_contains "$out" "STALE: lane-a" "dry-run: the stale pointer is reported"
   assert_contains "$out" "re-run with --apply" "dry-run: the report names the repair"
   assert_no_grep "worktree_retired" "$case_dir/state/lane-a.meta" \
     "dry-run: a default run must not write"
-  pass "reconcile reports without changing anything unless --apply is given"
+  pass "reconcile accepts an explicit dry run without changing anything"
+}
+
+test_apply_revalidates_ownership_inside_the_transition_lock() {
+  local case_dir holder_pid reconcile_pid out i=0 ready switch
+  case_dir=$(make_home ownership-transition)
+  record_lane "$case_dir" lane-a
+  hand_copy_to_branch "$case_dir" fm/lane-b
+  record_lane "$case_dir" lane-b
+  record_lane "$case_dir" lane-c
+  ready="$case_dir/transition-ready"
+  switch="$case_dir/transition-switch"
+  env ROOT="$ROOT" STATE="$case_dir/state" WT="$case_dir/wt" \
+    READY="$ready" SWITCH="$switch" bash -c '
+      . "$ROOT/bin/fm-wake-lib.sh"
+      . "$ROOT/bin/fm-worktree-binding-lib.sh"
+      lock=$(fm_worktree_transition_lock_path "$STATE" "$WT") || exit 1
+      fm_lock_acquire_wait "$lock"
+      : > "$READY"
+      while [ ! -e "$SWITCH" ]; do /bin/sleep 0.01; done
+      git -C "$WT" checkout -q -b fm/lane-c
+      fm_lock_release "$lock"
+    ' &
+  holder_pid=$!
+  while [ ! -e "$ready" ] && [ "$i" -lt 200 ]; do
+    /bin/sleep 0.01
+    i=$((i + 1))
+  done
+  [ -e "$ready" ] || fail "transition lock holder did not start"
+  run_reconcile "$case_dir" --apply > "$case_dir/reconcile.out" &
+  reconcile_pid=$!
+  /bin/sleep 0.2
+  : > "$switch"
+  wait "$holder_pid" || fail "ownership transition failed"
+  wait "$reconcile_pid" || fail "reconcile failed after ownership transition"
+  out=$(cat "$case_dir/reconcile.out")
+
+  assert_contains "$out" "RETIRED: lane-a" "transition: stale claimant is retired"
+  assert_grep "worktree_retired=lane-c" "$case_dir/state/lane-a.meta" \
+    "transition: retirement records the owner proven after the lock was acquired"
+  pass "reconcile revalidates ownership inside the shared transition lock"
 }
 
 # (r6) Re-runnable, because this accumulation is structural and will need
@@ -252,6 +292,7 @@ test_own_copy_is_not_reassigned
 test_branch_without_a_matching_record_is_unresolved
 test_binding_outranks_the_checked_out_branch
 test_default_run_changes_nothing
+test_apply_revalidates_ownership_inside_the_transition_lock
 test_rerun_is_idempotent
 test_detached_head_is_unresolved
 test_secondmate_home_is_skipped

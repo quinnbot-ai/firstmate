@@ -26,7 +26,7 @@
 # happened is the worktree_retired= line in the task record and this script's own
 # output.
 #
-# Usage: fm-reconcile-worktree-pointers.sh [--apply]
+# Usage: fm-reconcile-worktree-pointers.sh [--dry-run|--apply]
 #
 # Reports by default and changes nothing; --apply retires the pointers it
 # reports. Re-runnable: an already-retired pointer is counted and skipped, so the
@@ -62,6 +62,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 APPLY=0
 for arg in "$@"; do
   case "$arg" in
+    --dry-run) APPLY=0 ;;
     --apply) APPLY=1 ;;
     -h|--help)
       sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'
@@ -100,23 +101,58 @@ for meta in "$STATE"/*.meta; do
   # No pointer, or a pointer to something that no longer exists: there is no live
   # copy here to misidentify, and nothing to retire.
   [ -n "$wt" ] && [ -d "$wt" ] || continue
-  if ! fm_worktree_owner_resolve "$wt" "$STATE"; then
-    unresolved=$((unresolved + 1))
-    printf 'UNRESOLVED: %s %s\n' "$id" "$FM_WORKTREE_OWNER_DETAIL"
-    continue
-  fi
-  # Condition 3: the copy still being this lane's own is the healthy case.
-  [ "$FM_WORKTREE_OWNER_TASK_ID" != "$id" ] || continue
-  stale=$((stale + 1))
-  owner=$FM_WORKTREE_OWNER_TASK_ID
-  branch=${FM_WORKTREE_OWNER_BRANCH:-<unreadable>}
   if [ "$APPLY" != 1 ]; then
+    if ! fm_worktree_owner_resolve "$wt" "$STATE"; then
+      unresolved=$((unresolved + 1))
+      printf 'UNRESOLVED: %s %s\n' "$id" "$FM_WORKTREE_OWNER_DETAIL"
+      continue
+    fi
+    [ "$FM_WORKTREE_OWNER_TASK_ID" != "$id" ] || continue
+    stale=$((stale + 1))
+    owner=$FM_WORKTREE_OWNER_TASK_ID
+    branch=${FM_WORKTREE_OWNER_BRANCH:-<unreadable>}
     printf 'STALE: %s copy %s is owned by %s (branch %s, via %s)\n' \
       "$id" "$wt" "$owner" "$branch" "$FM_WORKTREE_OWNER_METHOD"
     continue
   fi
   lock=$(fm_meta_lock_path "$meta") || { failed=$((failed + 1)); continue; }
   fm_lock_acquire_wait "$lock"
+  kind=$(meta_field "$meta" kind)
+  if [ "$kind" = secondmate ]; then
+    fm_lock_release "$lock" || true
+    continue
+  fi
+  if [ -n "$(meta_field "$meta" worktree_retired)" ]; then
+    already=$((already + 1))
+    fm_lock_release "$lock" || true
+    continue
+  fi
+  wt=$(meta_field "$meta" worktree)
+  if [ -z "$wt" ] || [ ! -d "$wt" ]; then
+    fm_lock_release "$lock" || true
+    continue
+  fi
+  transition_lock=$(fm_worktree_transition_lock_path "$STATE" "$wt") || {
+    failed=$((failed + 1))
+    fm_lock_release "$lock" || true
+    continue
+  }
+  fm_lock_acquire_wait "$transition_lock"
+  if ! fm_worktree_owner_resolve "$wt" "$STATE"; then
+    unresolved=$((unresolved + 1))
+    printf 'UNRESOLVED: %s %s\n' "$id" "$FM_WORKTREE_OWNER_DETAIL"
+    fm_lock_release "$transition_lock" || true
+    fm_lock_release "$lock" || true
+    continue
+  fi
+  if [ "$FM_WORKTREE_OWNER_TASK_ID" = "$id" ]; then
+    fm_lock_release "$transition_lock" || true
+    fm_lock_release "$lock" || true
+    continue
+  fi
+  stale=$((stale + 1))
+  owner=$FM_WORKTREE_OWNER_TASK_ID
+  branch=${FM_WORKTREE_OWNER_BRANCH:-<unreadable>}
   if fm_worktree_owner_retire_pointer "$meta" "$owner"; then
     retired_now=$((retired_now + 1))
     printf 'RETIRED: %s copy %s is owned by %s (branch %s, via %s)\n' \
@@ -124,6 +160,7 @@ for meta in "$STATE"/*.meta; do
   else
     failed=$((failed + 1))
   fi
+  fm_lock_release "$transition_lock" || true
   fm_lock_release "$lock" || true
 done
 

@@ -33,6 +33,17 @@
 FM_WORKTREE_BINDING_TASK_ID=
 FM_WORKTREE_BINDING_DETAIL=
 
+fm_worktree_transition_lock_path() {  # <state-dir> <worktree>
+  local state=${1-} worktree=${2-} state_real worktree_real digest
+  [ -n "$state" ] && [ -d "$state" ] || return 1
+  [ -n "$worktree" ] && [ -d "$worktree" ] || return 1
+  state_real=$(CDPATH='' cd -- "$state" 2>/dev/null && pwd -P) || return 1
+  worktree_real=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 1
+  digest=$(printf '%s' "$worktree_real" | git hash-object --stdin 2>/dev/null) || return 1
+  [ -n "$digest" ] || return 1
+  printf '%s/.worktree-transition-%s.lock\n' "$state_real" "$digest"
+}
+
 fm_worktree_binding_detail() {
   printf '%s' "$FM_WORKTREE_BINDING_DETAIL"
 }

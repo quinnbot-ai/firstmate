@@ -139,7 +139,7 @@ new_case() {
 add_ship_task() {
   local dir=$1 id=$2 harness=${3:-claude}
   local home="$dir/home" proj="$dir/proj" wt="$dir/wt"
-  fm_git_worktree "$proj" "$wt" "task-$id"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
   mkdir -p "$home/data/$id"
   printf '# brief for %s\n\nDo the thing.\n' "$id" > "$home/data/$id/brief.md"
   {
@@ -276,6 +276,27 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   assert_grep "/exit" "$dir/fake/literal" "the previous agent should have been exited"
   assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement should have been launched"
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
+}
+
+test_legacy_relaunch_refuses_a_recycled_unbound_worktree() {
+  local dir out rc git_dir
+  dir=$(new_case recycled-legacy rl-recycled)
+  add_ship_task "$dir" rl-recycled claude
+  git -C "$dir/wt" checkout -q -b fm/new-owner
+  cp "$dir/home/state/rl-recycled.meta" "$dir/home/state/new-owner.meta"
+  sed -i.bak 's/endpoint_task_id=rl-recycled/endpoint_task_id=new-owner/' \
+    "$dir/home/state/new-owner.meta"
+  rm -f "$dir/home/state/new-owner.meta.bak"
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(run_spawn "$dir" rl-recycled --relaunch --harness claude); rc=$?
+
+  expect_code 1 "$rc" "legacy relaunch must refuse a worktree proven to belong to another task"
+  assert_contains "$out" "not positively bound" "recycled legacy worktree refusal names the missing proof"
+  git_dir=$(git -C "$dir/wt" rev-parse --absolute-git-dir)
+  assert_absent "$git_dir/firstmate-task-binding" \
+    "a refused legacy relaunch must not claim the recycled worktree"
+  pass "fm-spawn --relaunch refuses an unbound worktree another task owns"
 }
 
 test_relaunch_preserves_durable_task_metadata() {
@@ -1318,6 +1339,7 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
 }
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_legacy_relaunch_refuses_a_recycled_unbound_worktree
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context

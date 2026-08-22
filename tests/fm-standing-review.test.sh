@@ -387,7 +387,7 @@ test_a_review_never_writes_outside_state() {
 }
 
 test_blindness_is_reported_before_a_finding_from_elsewhere() {
-  local home out
+  local home out second
   home=$(make_home precedence acme)
   printf '{"rows":[{"venture":"acme","cost_30d":10,"commits_30d":0}]}\n' > "$home/fresh.json"
   printf '{"rows":[]}\n' > "$home/gone.json"
@@ -417,7 +417,11 @@ JSON
     *source-stale*) ;;
     *) fail "a half-blind review reported a finding instead of its blindness: $out" ;;
   esac
-  pass "a review reports its own blindness ahead of any finding it can still make"
+  expire_cadence "$home" r
+  second=$(scan "$home" --id r)
+  [ -z "$second" ] \
+    || fail "a latched blindness finding let a fresh-source rule escape: $second"
+  pass "a half-blind review suppresses all rule findings on every cadence"
 }
 
 test_a_subject_may_be_named_by_absolute_path() {

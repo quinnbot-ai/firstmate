@@ -58,9 +58,7 @@ while (my $line = <$fh>) {
 
   next unless $line =~ /^\s*(?:[-*+]\s+|\d+[.)]\s+)?(?:please\s+)?(?:(?:then|next)\s+)?(?:run|call|use|invoke|execute|source|start)\b/i;
   next if $line =~ /^\s*(?:[-*+]\s+|\d+[.)]\s+)?(?:please\s+)?(?:do\s+not|don't|never)\s+(?:run|call|use|invoke|execute|source|start)\b/i;
-  while ($line =~ /`([^`]+)`/g) {
-    emit_scripts($1);
-  }
+  emit_scripts($line);
 }
 PERL
 }

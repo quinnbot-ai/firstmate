@@ -204,6 +204,9 @@ def load_spec(path: Path) -> dict:
     subject_root = raw.get("subject_root")
     if not isinstance(subject_root, str) or not subject_root:
         raise SpecError("spec.subject_root must be a non-empty path")
+    subject_path = Path(os.path.expanduser(subject_root))
+    if not subject_path.is_absolute():
+        raise SpecError("spec.subject_root must be an absolute path")
 
     spec = {
         "interval": positive_int(raw, "interval_seconds", DEFAULT_INTERVAL, "spec"),
@@ -213,7 +216,7 @@ def load_spec(path: Path) -> dict:
         "retention": positive_int(
             raw, "latch_retention_seconds", DEFAULT_LATCH_RETENTION, "spec"
         ),
-        "subject_root": Path(os.path.expanduser(subject_root)),
+        "subject_root": subject_path,
         "sources": {},
         "rules": [],
     }
@@ -232,12 +235,15 @@ def load_spec(path: Path) -> dict:
         path_value = source.get("path")
         if not isinstance(path_value, str) or not path_value:
             raise SpecError(f"{where}.path must be a non-empty path")
+        source_path = Path(os.path.expanduser(path_value))
+        if not source_path.is_absolute():
+            raise SpecError(f"{where}.path must be an absolute path")
         records = source.get("records", "")
         if not isinstance(records, str):
             raise SpecError(f"{where}.records must be a dotted key path")
         spec["sources"][name] = {
             "name": name,
-            "path": Path(os.path.expanduser(path_value)),
+            "path": source_path,
             "records": records,
             "max_age": positive_int(
                 source, "max_age_seconds", DEFAULT_SOURCE_MAX_AGE, where
@@ -721,35 +727,43 @@ def main() -> int:
         structural_found, fresh_sources = build_structural(spec, review_id, now)
         candidates.extend(structural_found)
         payloads = {}
-        for name, source in fresh_sources.items():
-            try:
-                payloads[name] = json.loads(source["path"].read_text(encoding="utf-8"))
-            except (OSError, ValueError) as exc:
-                candidates.append(
-                    structural(
-                        "source-invalid",
-                        f"{review_id}.{name}",
-                        [("errors", "1", True)],
-                        f"evidence source '{name}' is unparseable: {exc}",
+        records_by_source = {}
+        if not structural_found:
+            for name, source in fresh_sources.items():
+                try:
+                    payloads[name] = json.loads(
+                        source["path"].read_text(encoding="utf-8")
                     )
-                )
-        for rule in spec["rules"]:
-            if rule["source"] not in payloads:
-                continue
-            source = fresh_sources[rule["source"]]
-            records = walk_records(payloads[rule["source"]], source["records"])
-            if records is None:
-                candidates.append(
-                    structural(
-                        "source-invalid",
-                        f"{review_id}.{rule['source']}",
-                        [("errors", "1", True)],
-                        f"evidence source '{rule['source']}' has no record array at "
-                        f"'{source['records'] or '<root>'}' - {source['path']}",
+                except (OSError, ValueError) as exc:
+                    candidates.append(
+                        structural(
+                            "source-invalid",
+                            f"{review_id}.{name}",
+                            [("errors", "1", True)],
+                            f"evidence source '{name}' is unparseable: {exc}",
+                        )
                     )
-                )
-                continue
-            candidates.extend(rule_candidates(rule, records))
+            if not candidates:
+                for name, payload in payloads.items():
+                    source = fresh_sources[name]
+                    records = walk_records(payload, source["records"])
+                    if records is None:
+                        candidates.append(
+                            structural(
+                                "source-invalid",
+                                f"{review_id}.{name}",
+                                [("errors", "1", True)],
+                                f"evidence source '{name}' has no record array at "
+                                f"'{source['records'] or '<root>'}' - {source['path']}",
+                            )
+                        )
+                    else:
+                        records_by_source[name] = records
+            if not candidates:
+                for rule in spec["rules"]:
+                    candidates.extend(
+                        rule_candidates(rule, records_by_source[rule["source"]])
+                    )
 
     # G8 one line: rank, then decide. Structural findings outrank rule findings
     # because a review must report its own blindness before what it saw blind.

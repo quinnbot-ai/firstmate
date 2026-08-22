@@ -128,6 +128,28 @@ test_an_unusable_spec_is_refused_before_arming() {
   pass "an unusable spec is refused while a human is watching"
 }
 
+test_relative_review_paths_are_refused_before_arming() {
+  local home out rc
+  home=$(make_home relative-subject)
+  sed -i.bak 's#"subject_root": "[^"]*"#"subject_root": "subjects"#' \
+    "$home/config/standing-reviews/r.json"
+  rm -f "$home/config/standing-reviews/r.json.bak"
+  out=$(arm "$home" --id r 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "a relative subject root was armed"
+  assert_contains "$out" "absolute path" "relative subject refusal names the contract"
+  assert_absent "$home/state/r.check.sh" "relative subject refusal left a check behind"
+
+  home=$(make_home relative-source)
+  sed -i.bak 's#"path": "[^"]*source.json"#"path": "source.json"#' \
+    "$home/config/standing-reviews/r.json"
+  rm -f "$home/config/standing-reviews/r.json.bak"
+  out=$(arm "$home" --id r 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "a relative evidence source was armed"
+  assert_contains "$out" "absolute path" "relative source refusal names the contract"
+  assert_absent "$home/state/r.check.sh" "relative source refusal left a check behind"
+  pass "arming refuses relative subject and evidence paths"
+}
+
 test_arming_refuses_an_id_that_names_a_task() {
   local home out rc
   home=$(make_home task-collision)
@@ -200,6 +222,7 @@ test_arming_registers_a_check_the_watcher_accepts
 test_the_check_ignores_the_environment_it_is_run_with
 test_editing_the_check_revokes_it
 test_an_unusable_spec_is_refused_before_arming
+test_relative_review_paths_are_refused_before_arming
 test_arming_refuses_an_id_that_names_a_task
 test_arming_refuses_to_overwrite_a_foreign_check
 test_disarm_stops_the_review_and_keeps_what_it_reported

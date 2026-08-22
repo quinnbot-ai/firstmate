@@ -270,6 +270,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-worktree-binding-lib.sh
 . "$SCRIPT_DIR/fm-worktree-binding-lib.sh"
+# shellcheck source=bin/fm-worktree-owner-lib.sh
+. "$SCRIPT_DIR/fm-worktree-owner-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-brief-script-reference-lib.sh
@@ -677,6 +679,8 @@ SPAWN_META_TMP=
 SPAWN_META_LOCK=
 SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
+SPAWN_WORKTREE_TRANSITION_LOCK=
+SPAWN_WORKTREE_TRANSITION_LOCK_HELD=0
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 RELAUNCH_REPLACEMENT_PENDING=0
@@ -779,6 +783,10 @@ spawn_abort_cleanup() {
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
+  fi
+  if [ "$SPAWN_WORKTREE_TRANSITION_LOCK_HELD" = 1 ]; then
+    SPAWN_WORKTREE_TRANSITION_LOCK_HELD=0
+    fm_lock_release "$SPAWN_WORKTREE_TRANSITION_LOCK" || true
   fi
   if [ "$SPAWN_META_LOCK_HELD" = 1 ]; then
     SPAWN_META_LOCK_HELD=0
@@ -1000,6 +1008,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   RELAUNCH_META="$STATE/$ID.meta"
+  [ -f "$RELAUNCH_META" ] || {
+    echo "error: --relaunch needs an existing task record; no $RELAUNCH_META" >&2
+    exit 1
+  }
+  SPAWN_META_LOCK=$(fm_meta_lock_path "$RELAUNCH_META") || exit 1
+  fm_lock_acquire_wait "$SPAWN_META_LOCK"
+  SPAWN_META_LOCK_HELD=1
   [ -f "$RELAUNCH_META" ] || {
     echo "error: --relaunch needs an existing task record; no $RELAUNCH_META" >&2
     exit 1
@@ -2274,6 +2289,14 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 
   validate_spawn_worktree "treehouse get" "$T"
 fi
+if [ "$KIND" != secondmate ]; then
+  SPAWN_WORKTREE_TRANSITION_LOCK=$(fm_worktree_transition_lock_path "$STATE" "$WT") || {
+    echo "error: cannot establish the ownership transition lock for worktree $WT" >&2
+    exit 1
+  }
+  fm_lock_acquire_wait "$SPAWN_WORKTREE_TRANSITION_LOCK"
+  SPAWN_WORKTREE_TRANSITION_LOCK_HELD=1
+fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
@@ -2306,6 +2329,11 @@ if [ "$KIND" != secondmate ]; then
         exit 1
       fi
     elif fm_worktree_binding_is_absent "$WT"; then
+      if ! fm_worktree_owner_resolve "$WT" "$STATE" \
+         || [ "$FM_WORKTREE_OWNER_TASK_ID" != "$ID" ]; then
+        echo "error: task $ID's legacy worktree ownership is not positively bound to this record; refusing to relaunch" >&2
+        exit 1
+      fi
       fm_worktree_binding_write "$WT" "$ID" || exit 1
     else
       echo "error: task $ID's recorded worktree cannot be reused: $(fm_worktree_binding_detail); refusing to relaunch" >&2
@@ -2675,9 +2703,6 @@ META_WINDOW=$T
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$RELAUNCH" -eq 1 ]; then
-  SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
-  fm_lock_acquire_wait "$SPAWN_META_LOCK"
-  SPAWN_META_LOCK_HELD=1
   SPAWN_META_TMP="$STATE/.$ID.meta.relaunch.${BASHPID:-$$}"
   SPAWN_META_PATH=$SPAWN_META_TMP
 fi
@@ -2746,6 +2771,12 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_PENDING=0
   SPAWN_META_PUBLISH_STARTED=0
   SPAWN_META_TMP=
+fi
+if [ "$SPAWN_WORKTREE_TRANSITION_LOCK_HELD" = 1 ]; then
+  fm_lock_release "$SPAWN_WORKTREE_TRANSITION_LOCK"
+  SPAWN_WORKTREE_TRANSITION_LOCK_HELD=0
+fi
+if [ "$SPAWN_META_LOCK_HELD" = 1 ]; then
   fm_lock_release "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=0
 fi
