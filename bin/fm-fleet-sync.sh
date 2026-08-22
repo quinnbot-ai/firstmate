@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
 # Refresh project clones: fast-forward the checked-out local default branch to
-# origin/<default> when safe, and prune local branches whose upstream tracking
+# the line it tracks when safe, and prune local branches whose upstream tracking
 # branch is gone (the remote branch was deleted, i.e. its PR merged) and that no
 # worktree still needs.
 # Self-heals the one unambiguously safe drift: a clean, detached HEAD that holds
-# no unique commits (it is an ancestor of origin/<default>) and whose <default>
-# branch is free to check out is re-attached and then fast-forwarded ("recovered:").
+# no unique commits (it is an ancestor of the base) and whose <default> branch is
+# free to check out is re-attached and then fast-forwarded ("recovered:").
 # Every other off-default state - a non-default named branch, a detached HEAD with
 # unique commits, a dirty tree, or a diverged default - may hold real work, so it
 # is left untouched and reported as a quantified, loud "STUCK: ... N commits behind
 # ... - needs attention" warning rather than a quiet drift. Nothing is ever forced,
 # stashed, or discarded.
+# The base is the line the clone actually tracks (see resolve_base), not the remote
+# literally named "origin", and a clean detached HEAD that some ref still contains
+# is parked rather than stuck (see head_preserving_ref): both judgements are about
+# what the clone can prove, so the loud warning keeps meaning what it says.
 # Still skips (benignly) local-only/no-origin projects, missing remotes/branches,
 # and fetch failures.
 # Pruning never deletes the checked-out branch or a branch that still has a
@@ -128,6 +132,48 @@ default_branch() {
 
 first_line() {
   printf '%s\n' "$1" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p'
+}
+
+# Set BASE (the remote-tracking ref for the line this clone is actually on) and
+# BASE_REMOTE (the remote that ref lives on).
+# "origin" is a naming convention, not a fact: a clone taken from a third-party
+# upstream can keep that upstream as origin and track the fleet's own remote
+# instead. Every base-keyed judgement here - how far behind the clone is, whether
+# its HEAD left the line, what to fast-forward to - is then measured against a
+# line the clone was never meant to be on. Git records the answer per branch, so
+# take <default>'s configured upstream whenever the config names a real remote,
+# and fall back to origin/<default> when it names none, names the local repo
+# ("."), or names a remote this clone no longer has. The remote is carried out
+# separately rather than cut back off BASE, because a remote name may itself
+# contain a slash.
+resolve_base() {
+  local remote merge
+  BASE_REMOTE=origin
+  BASE="origin/$DEFAULT"
+  remote=$(git -C "$PROJ" config --get "branch.$DEFAULT.remote" 2>/dev/null) || return 0
+  case "$remote" in
+    ''|.) return 0 ;;
+  esac
+  git -C "$PROJ" remote get-url "$remote" >/dev/null 2>&1 || return 0
+  BASE_REMOTE=$remote
+  merge=$(git -C "$PROJ" config --get "branch.$DEFAULT.merge" 2>/dev/null) || merge=""
+  case "$merge" in
+    refs/heads/*) BASE="$remote/${merge#refs/heads/}" ;;
+    *) BASE="$remote/$DEFAULT" ;;
+  esac
+}
+
+# The first ref that still contains HEAD, or empty when none does.
+# A detached HEAD holds "unique commits" - work that exists nowhere else and can
+# be lost - only when nothing else points at it. Being off the base line does not
+# establish that: a line deliberately preserved by a tag, kept on another branch,
+# or already published to a remote is referenced work, and calling it unique
+# teaches readers to ignore the warning that names real unreferenced work.
+# --contains peels annotated tags, so a tagged line matches on its tag ref, and
+# the detached HEAD itself is not a ref so it can never match itself.
+head_preserving_ref() {
+  git -C "$PROJ" for-each-ref --count=1 --format='%(refname:short)' \
+    --contains HEAD refs/heads refs/tags refs/remotes 2>/dev/null
 }
 
 # True when git stderr shows the packed-refs.lock "File exists" race. The lock
@@ -283,8 +329,18 @@ stuck_state() {
   printf '%s\n' "$s"
 }
 
+# Quiet, quantified report for a clean detached HEAD that some ref still holds.
+# Nothing here is at risk, so this is a benign skip that names the ref doing the
+# preserving rather than a "needs attention" alarm; the clone is still left
+# untouched, exactly as a STUCK one is.
+report_parked() {
+  local ref=$1 behind
+  behind=$(git -C "$PROJ" rev-list --count "HEAD..$BASE" 2>/dev/null) || behind="?"
+  echo "$label: skipped: parked on a preserved line (detached HEAD held by $ref, $behind commits behind $BASE)"
+}
+
 # Loud, quantified report for a clone we deliberately leave untouched. Includes
-# how far behind origin/<default> it is, so a chronically-stuck clone is visibly
+# how far behind its tracked base it is, so a chronically-stuck clone is visibly
 # distinct from a benign one-off skip.
 report_stuck() {
   local state=$1 behind
@@ -330,7 +386,13 @@ sync_project() {
     echo "$label: skipped: cannot determine default branch"
     return 0
   }
-  BASE="origin/$DEFAULT"
+  resolve_base
+  # The fetch above refreshed origin. When the tracked line lives on another
+  # remote, refresh that one too, or every judgement below reads whatever stale
+  # refs the last fetch of a different remote happened to leave behind.
+  if [ "$BASE_REMOTE" != origin ]; then
+    git -C "$PROJ" fetch "$BASE_REMOTE" --prune --quiet >/dev/null 2>&1 || true
+  fi
   if ! git -C "$PROJ" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null; then
     echo "$label: skipped: $BASE does not exist"
     return 0
@@ -361,7 +423,18 @@ sync_project() {
       recovered=yes
       cur=$DEFAULT
     else
-      report_stuck "$(stuck_state)"
+      # Off the base line is not the same fact as "holds unique commits". Ask
+      # what still references HEAD before claiming work is at risk here.
+      preserving_ref=""
+      if [ -z "$cur" ] && [ "$dirty" = no ] \
+          && ! git -C "$PROJ" merge-base --is-ancestor HEAD "$BASE" 2>/dev/null; then
+        preserving_ref=$(head_preserving_ref)
+      fi
+      if [ -n "$preserving_ref" ]; then
+        report_parked "$preserving_ref"
+      else
+        report_stuck "$(stuck_state)"
+      fi
       return 0
     fi
   elif [ "$dirty" = yes ]; then

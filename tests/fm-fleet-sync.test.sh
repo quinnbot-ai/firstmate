@@ -12,6 +12,16 @@
 # The pre-existing fast-forward / already-current / local-only / no-origin paths
 # must be unchanged, and bootstrap must relay the new outcomes as FLEET_SYNC lines.
 #
+# It also pins the two facts the STUCK banner must establish before it asserts them:
+#   - "unique commits" means unreferenced, not merely off the base line. A clean
+#     detached HEAD that a tag (or any other ref) still contains is reported as a
+#     benign "skipped: parked on a preserved line" naming that ref, is left
+#     untouched, and is not relayed by bootstrap; a detached HEAD nothing points
+#     at is still the loud STUCK.
+#   - the base is the line the clone tracks, not whatever remote is named
+#     "origin". A clone whose default branch tracks another remote is quantified,
+#     judged, and fast-forwarded against that remote.
+#
 # It also pins the orphaned .git/packed-refs.lock recovery in the fetch step
 # (fetch_with_packed_refs_lock_guard, backed by bin/fm-lock-lib.sh's shared
 # staleness proof): a provably-stale lock is retried then removed and the clone
@@ -82,6 +92,53 @@ advance_origin() {
 }
 
 head_sha() { git -C "$1" rev-parse HEAD; }
+
+# build_forked_pair <home> <name>: a clone whose `origin` is a third-party
+# upstream and whose local main tracks a SECOND remote, `fork` - the shape that
+# makes "origin" a naming convention rather than a fact. Both remotes start from
+# the same C0; the caller advances each independently so an origin-keyed count
+# and a fork-keyed count cannot be confused for one another. Echoes the clone path.
+build_forked_pair() {
+  local home=$1 name=$2 work upstream fork clone upstream_abs fork_abs
+  work="$home/work-$name"
+  upstream="$home/remotes/$name-upstream.git"
+  fork="$home/remotes/$name-fork.git"
+  clone="$home/projects/$name"
+  mkdir -p "$home/remotes"
+
+  git init -q "$work"
+  git -C "$work" symbolic-ref HEAD refs/heads/main
+  commit_file "$work" file.txt v0 C0
+
+  git clone --quiet --bare "$work" "$upstream"
+  git clone --quiet --bare "$work" "$fork"
+  upstream_abs=$(cd "$upstream" && pwd)
+  fork_abs=$(cd "$fork" && pwd)
+  git -C "$work" remote add origin "file://$upstream_abs"
+  git -C "$work" remote add fork "file://$fork_abs"
+
+  git clone --quiet "file://$upstream_abs" "$clone"
+  git -C "$clone" remote add fork "file://$fork_abs"
+  git -C "$clone" fetch -q fork
+  git -C "$clone" branch -q --set-upstream-to=fork/main main
+  printf '%s\n' "$clone"
+}
+
+# advance_forked <home> <name> <remote> <n>: push <n> new commits to one of the
+# two remotes built by build_forked_pair, from a scratch branch so the two lines
+# advance independently.
+advance_forked() {
+  local home=$1 name=$2 remote=$3 n=$4 work i
+  work="$home/work-$name"
+  git -C "$work" checkout -q -B "adv-$remote" "$remote/main" 2>/dev/null \
+    || git -C "$work" checkout -q -B "adv-$remote" main
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    i=$((i + 1))
+    commit_file "$work" "$remote-$i.txt" "$remote$i" "$remote C$i"
+  done
+  git -C "$work" push -q "$remote" "adv-$remote:refs/heads/main"
+}
 
 # run_sync <home> [args...]: run fleet-sync against an isolated home, stdout only.
 run_sync() {
@@ -235,6 +292,91 @@ test_detached_unique_commit_is_stuck_untouched() {
   assert_not_contains "$out" "recovered" "unique-commit case is never recovered"
   [ "$(head_sha "$clone")" = "$before" ] || fail "expected unique-commit detached HEAD left untouched"
   pass "detached HEAD with unique commits is reported STUCK and left untouched"
+}
+
+test_detached_tagged_line_is_parked_not_stuck() {
+  local home clone out before
+  home=$(new_home)
+  clone=$(build_pair "$home" tagged)
+  # A deliberately preserved pre-reset line: a commit off origin/main, kept by an
+  # annotated tag and by nothing else. The commits exist; nothing can lose them.
+  git -C "$clone" checkout --detach --quiet
+  commit_file "$clone" preserved.txt keep "pre-reset line"
+  git -C "$clone" tag -a preserve-line -m "preserved pre-reset line"
+  before=$(head_sha "$clone")
+  advance_origin "$home" tagged C1
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_not_contains "$out" "STUCK" "a tag-preserved detached HEAD is not stuck"
+  assert_not_contains "$out" "unique commits" "tag-preserved commits are not unique commits"
+  assert_contains "$out" "tagged: skipped: parked on a preserved line" \
+    "tag-preserved detached HEAD reports the benign parked skip"
+  assert_contains "$out" "held by preserve-line" "parked report names the ref doing the preserving"
+  assert_contains "$out" "1 commits behind origin/main" "parked report is still quantified"
+  assert_not_contains "$out" "recovered" "parked clone is never re-attached"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "expected parked detached HEAD left untouched"
+  ! git -C "$clone" symbolic-ref -q HEAD >/dev/null || fail "parked clone was re-attached"
+  [ "$(git -C "$clone" rev-parse "preserve-line^{commit}")" = "$before" ] \
+    || fail "preserving tag was moved"
+  pass "detached HEAD preserved by a tag is parked (benign), not STUCK"
+}
+
+test_parked_line_is_not_relayed_by_bootstrap() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_pair "$home" parked-clone)
+  git -C "$clone" checkout --detach --quiet
+  commit_file "$clone" preserved.txt keep "pre-reset line"
+  git -C "$clone" tag -a parked-preserve -m "preserved"
+  advance_origin "$home" parked-clone C1
+
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  assert_not_contains "$out" "FLEET_SYNC: parked-clone" \
+    "a deliberate park was relayed as a bootstrap diagnostic"
+  pass "bootstrap does not relay a parked-on-a-preserved-line skip"
+}
+
+test_stuck_is_quantified_against_the_tracked_remote() {
+  local home clone out before
+  home=$(new_home)
+  clone=$(build_forked_pair "$home" forked-stuck)
+  # Unreferenced work on a detached HEAD: still the loud STUCK. The question this
+  # pins is WHICH line it is measured against.
+  git -C "$clone" checkout --detach --quiet
+  commit_file "$clone" extra.txt unique "local unique work"
+  before=$(head_sha "$clone")
+  advance_forked "$home" forked-stuck fork 2
+  advance_forked "$home" forked-stuck origin 5
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "forked-stuck: STUCK:" "unreferenced detached work still reports STUCK"
+  assert_contains "$out" "unique commits" "STUCK still names the unique-commit state"
+  assert_contains "$out" "2 commits behind fork/main - needs attention" \
+    "STUCK is quantified against the line the clone tracks"
+  assert_not_contains "$out" "origin/main" "STUCK measured against origin instead of the tracked line"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "expected unique-commit detached HEAD left untouched"
+  pass "STUCK counts against the tracked remote, not whatever is named origin"
+}
+
+test_fast_forward_follows_the_tracked_remote() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_forked_pair "$home" forked-sync)
+  advance_forked "$home" forked-sync fork 2
+  advance_forked "$home" forked-sync origin 5
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "forked-sync: synced" "clone tracking a non-origin remote did not sync"
+  assert_not_contains "$out" "STUCK" "a clone on its tracked line is not stuck"
+  [ "$(git -C "$clone" rev-parse main)" = "$(git -C "$clone" rev-parse fork/main)" ] \
+    || fail "expected fast-forward to the tracked fork/main"
+  [ "$(git -C "$clone" rev-parse main)" != "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "fast-forward landed on origin/main, not the tracked line"
+  pass "fast-forward targets the tracked remote, not whatever is named origin"
 }
 
 test_detached_clean_ancestor_with_diverged_local_default_is_stuck_untouched() {
@@ -605,6 +747,10 @@ test_non_signature_fetch_failure_is_not_retried() {
 
 test_detached_clean_ancestor_recovers
 test_detached_unique_commit_is_stuck_untouched
+test_detached_tagged_line_is_parked_not_stuck
+test_parked_line_is_not_relayed_by_bootstrap
+test_stuck_is_quantified_against_the_tracked_remote
+test_fast_forward_follows_the_tracked_remote
 test_detached_clean_ancestor_with_diverged_local_default_is_stuck_untouched
 test_dirty_is_stuck_untouched
 test_non_default_branch_is_stuck_untouched
