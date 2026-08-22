@@ -1887,14 +1887,6 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 }
 
 W="fm-$ID"
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  SPAWN_WORKTREE_POOL_TRANSITION_LOCK=$(fm_worktree_pool_transition_lock_path "$STATE" "$PROJ_ABS") || {
-    echo "error: cannot establish the pool transition lock for project $PROJ_ABS" >&2
-    exit 1
-  }
-  fm_lock_acquire_wait "$SPAWN_WORKTREE_POOL_TRANSITION_LOCK"
-  SPAWN_WORKTREE_POOL_TRANSITION_LOCK_HELD=1
-fi
 if [ "$RELAUNCH" -eq 1 ]; then
   # Adopt the recorded endpoint instead of creating one. This is what keeps a
   # relaunch a REPLACEMENT rather than a second copy of the task: no new
@@ -2261,6 +2253,12 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  SPAWN_WORKTREE_POOL_TRANSITION_LOCK=$(fm_worktree_pool_transition_lock_path "$STATE" "$PROJ_ABS") || {
+    echo "error: cannot establish the pool transition lock for project $PROJ_ABS" >&2
+    exit 1
+  }
+  fm_lock_acquire_wait "$SPAWN_WORKTREE_POOL_TRANSITION_LOCK"
+  SPAWN_WORKTREE_POOL_TRANSITION_LOCK_HELD=1
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -2372,6 +2370,10 @@ if [ "$KIND" != secondmate ]; then
   elif ! fm_worktree_binding_write "$WT" "$ID"; then
     exit 1
   fi
+fi
+if [ "$SPAWN_WORKTREE_POOL_TRANSITION_LOCK_HELD" = 1 ]; then
+  fm_lock_release "$SPAWN_WORKTREE_POOL_TRANSITION_LOCK"
+  SPAWN_WORKTREE_POOL_TRANSITION_LOCK_HELD=0
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't

@@ -57,9 +57,11 @@ while (my $line = <$fh>) {
   }
 
   my $lead = qr/^\s*(?:[-*+]\s+|\d+[.)]\s+)?/;
-  next if $line =~ /$lead(?:(?:before|after|once)\b[^,]{0,120},\s*)?(?:(?:you\s+)?(?:must|should|need\s+to)\s+|please\s+)?(?:do\s+not|don't|never)\s+(?:run|call|use|invoke|execute|source|start)\b/i;
-  next unless $line =~ /$lead(?:(?:before|after|once)\b[^,]{0,120},\s*)?(?:(?:first|then|next|finally),?\s+)?(?:(?:you\s+)?(?:must|should|need\s+to)\s+|please\s+)?(?:run|call|use|invoke|execute|source|start)\b/i;
-  emit_scripts($line);
+  for my $clause (split /\s*(?:;|\bbut\b)\s*/i, $line) {
+    next if $clause =~ /$lead(?:(?:before|after|once)\b[^,]{0,120},\s*)?(?:(?:you\s+)?(?:must|should|need\s+to)\s+|please\s+)?(?:do\s+not|don't|never)\s+(?:run|call|use|invoke|execute|source|start)\b/i;
+    next unless $clause =~ /$lead(?:(?:before|after|once)\b[^,]{0,120},\s*)?(?:(?:first|then|next|finally|instead),?\s+)?(?:(?:you\s+)?(?:must|should|need\s+to)\s+|please\s+)?(?:run|call|use|invoke|execute|source|start)\b/i;
+    emit_scripts($clause);
+  }
 }
 PERL
 }

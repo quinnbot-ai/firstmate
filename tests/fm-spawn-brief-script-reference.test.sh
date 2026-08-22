@@ -192,6 +192,22 @@ test_negative_modal_reference_does_not_refuse() {
   pass "a negative modal helper reference does not refuse dispatch"
 }
 
+test_mixed_negation_still_refuses_positive_instruction() {
+  local id=brief-mixed-a10 rec out status
+  rec=$(make_case mixed-negation "$id" 'Do not run bin/fm-old-helper.sh; instead run bin/fm-mixed-missing.sh.')
+  read_case "$rec"
+
+  set +e
+  out=$(run_spawn "$id" 2>&1)
+  status=$?
+  set -e
+  expect_code 1 "$status" "a positive clause after a negated clause dispatched: $out"
+  assert_contains "$out" "fm-mixed-missing.sh" "the positive missing helper was not diagnosed"
+  assert_not_contains "$out" "resolves in this task worktree to $POOL_DIR/bin/fm-old-helper.sh" \
+    "the negated helper was treated as an instruction"
+  pass "mixed negation still refuses the positive missing-helper instruction"
+}
+
 test_pool_transition_lock_precedes_allocation() {
   local id=brief-pool-lock-a9 rec lock out_file pid status
   rec=$(make_case pool-lock "$id" 'Proceed with the task.')
@@ -208,7 +224,7 @@ test_pool_transition_lock_precedes_allocation() {
     wait "$pid" || true
     fail "spawn did not wait for the held pool transition lock: $(cat "$out_file")"
   fi
-  assert_absent "$HOME_DIR/state/$id.endpoint" "spawn created an endpoint while allocation was locked"
+  assert_present "$HOME_DIR/state/$id.endpoint" "spawn held the pool lock across endpoint creation"
   assert_absent "$HOME_DIR/state/$id.lease" "spawn acquired a pooled worktree while allocation was locked"
   fm_lock_release "$lock"
   wait "$pid"
@@ -239,6 +255,7 @@ test_unquoted_command_reference_refuses
 test_prefixed_imperative_reference_refuses
 test_modal_imperative_reference_refuses
 test_negative_modal_reference_does_not_refuse
+test_mixed_negation_still_refuses_positive_instruction
 test_prose_only_mention_does_not_refuse
 test_pool_transition_lock_precedes_allocation
 

@@ -155,6 +155,9 @@ validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIME
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-timeout-lib.sh"  # fm_run_timed: the shared hard bound
+# shellcheck source=bin/fm-worktree-binding-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-worktree-binding-lib.sh"
 
 usage() {
   cat <<'EOF'
@@ -425,9 +428,9 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 }
 
 task_json_lines() {
-  local meta id kind harness mode yolo project worktree home projects backend target status_log report_path
+  local meta id kind harness mode yolo project worktree retired_worktree worktree_retired_to home projects backend target status_log report_path
   local remote_host remote_root remote_state remote_rc remote_home_present
-  local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
+  local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json retired_worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
 
@@ -441,6 +444,15 @@ task_json_lines() {
     yolo=$(meta_value "$meta" yolo)
     project=$(meta_value "$meta" project)
     worktree=$(meta_value "$meta" worktree)
+    retired_worktree=
+    worktree_retired_to=
+    if fm_worktree_record_resolve "$meta"; then
+      worktree=$FM_WORKTREE_RECORD_ACTIVE_PATH
+    elif [ -n "$FM_WORKTREE_RECORD_RETIRED_OWNER" ]; then
+      retired_worktree=$worktree
+      worktree=
+      worktree_retired_to=$FM_WORKTREE_RECORD_RETIRED_OWNER
+    fi
     home=$(meta_value "$meta" home)
     projects=$(meta_value "$meta" projects)
     remote_host=$(meta_value "$meta" remote_host)
@@ -544,6 +556,7 @@ task_json_lines() {
     status_json=$event_json
     report_json=$(path_present_json "$report_path")
     if [ -n "$worktree" ]; then worktree_json=$(path_present_json "$worktree"); else worktree_json=$(jq -n '{path:null,present:false}'); fi
+    if [ -n "$retired_worktree" ]; then retired_worktree_json=$(path_present_json "$retired_worktree"); else retired_worktree_json=$(jq -n '{path:null,present:false}'); fi
     if [ -n "$home" ] && [ -n "$remote_host" ]; then
       home_json=$(jq -n --arg path "$home" --argjson present "$remote_home_present" '{path:$path,present:$present}')
     elif [ -n "$home" ]; then
@@ -560,6 +573,7 @@ task_json_lines() {
       --arg yolo "$yolo" \
       --arg project "$project" \
       --arg worktree "$worktree" \
+      --arg worktree_retired_to "$worktree_retired_to" \
       --arg home "$home" \
       --arg projects "$projects" \
       --arg backend "$backend" \
@@ -576,6 +590,7 @@ task_json_lines() {
       --argjson status_log "$status_json" \
       --argjson report "$report_json" \
       --argjson worktree_path "$worktree_json" \
+      --argjson retired_worktree_path "$retired_worktree_json" \
       --argjson home_path "$home_json" \
       --argjson endpoint_exists "$endpoint_exists" \
       --argjson open_decisions "$open_decisions_json" \
@@ -595,9 +610,11 @@ task_json_lines() {
           meta:$meta_path,
           status_log:$status_log,
           worktree:$worktree_path,
+          retired_worktree:$retired_worktree_path,
           home:$home_path,
           report:$report
         },
+        worktree_retired_to:($worktree_retired_to | if . == "" then null else . end),
         secondmate_projects:($projects | if . == "" then [] else split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(. != "")) end),
         current_state:($current_state + {observed_at:$observed_at,freshness:"fresh"}),
         endpoint:{target:($target | if . == "" then null else . end),exists:$endpoint_exists,agent_alive:$agent_alive,

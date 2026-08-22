@@ -23,6 +23,8 @@
 #     Resolves only an active worktree pointer; a retired pointer is history.
 #   fm_worktree_binding_write <worktree> <task-id>
 #     Atomically binds a freshly assigned worktree to its current task.
+#   fm_worktree_binding_clear <worktree> <task-id>
+#     Clears only an exact current-task binding before returning the copy.
 #   fm_worktree_binding_matches <worktree> <task-id>
 #     Returns 0 only for an exact, readable binding. Any absent, malformed, or
 #     uninterrogable marker returns non-zero; fm_worktree_binding_detail prints
@@ -203,4 +205,15 @@ fm_worktree_binding_write() {  # <worktree> <task-id>
   fi
   umask "$old_umask"
   return 0
+}
+
+fm_worktree_binding_clear() {  # <worktree> <expected-task-id>
+  local worktree=${1-} expected=${2-} git_dir marker
+  fm_worktree_binding_matches "$worktree" "$expected" || return 1
+  git_dir=$(fm_worktree_binding_git_dir "$worktree") || return 1
+  marker="$git_dir/firstmate-task-binding"
+  rm -f -- "$marker" || {
+    echo "error: could not clear the worktree binding for '$worktree'" >&2
+    return 1
+  }
 }

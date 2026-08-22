@@ -49,9 +49,9 @@
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
-#          A CODE_STALE line means the code root this home runs (FM_ROOT) is
-#          behind the default branch it follows, so changes that are merged are
-#          not yet running here. Firstmate never updates itself, and a home may
+#          A CODE_STALE line either proves the code root this home runs is behind,
+#          or says UNPROVEN when checkout bytes cannot be attributed to HEAD or
+#          the landed branch. The latter makes no live/inactive claim. A home may
 #          be held at an older commit on purpose, so the line reports and never
 #          acts. bin/fm-code-currency-lib.sh owns the comparison: it is a local
 #          read of the already-fetched remote-tracking ref, never a fetch, so the

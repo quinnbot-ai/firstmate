@@ -71,11 +71,11 @@ fm_worktree_owner_branch_task_id() {  # <branch> -> task id on stdout
 # Condition 2: the claimant named by the branch must be a task this home records,
 # and that record must point back at this exact copy.
 fm_worktree_owner_record_confirms() {  # <state-dir> <task-id> <worktree>
-  local state=${1-} id=${2-} worktree=${3-} meta recorded
+  local state=${1-} id=${2-} worktree=${3-} meta
   meta="$state/$id.meta"
   [ -f "$meta" ] || return 1
-  recorded=$(sed -n 's/^worktree=//p' "$meta" | head -n 1)
-  [ -n "$recorded" ] && [ "$recorded" = "$worktree" ]
+  fm_worktree_record_resolve "$meta" || return 1
+  [ "$FM_WORKTREE_RECORD_ACTIVE_PATH" = "$worktree" ]
 }
 
 # These result globals are read by the caller after this sourced helper returns.
@@ -90,8 +90,12 @@ fm_worktree_owner_resolve() {  # <worktree> <state-dir>
     FM_WORKTREE_OWNER_DETAIL="no copy at ${worktree:-<empty>} to read current ownership from"
     return 1
   fi
-  # Condition 1: an authoritative binding ends the question here.
+  # Condition 1: a binding is authoritative only while its active record agrees.
   if fm_worktree_binding_read "$worktree"; then
+    if ! fm_worktree_owner_record_confirms "$state" "$FM_WORKTREE_BINDING_TASK_ID" "$worktree"; then
+      FM_WORKTREE_OWNER_DETAIL="the copy at $worktree is bound to task $FM_WORKTREE_BINDING_TASK_ID, but that task has no active record holding this copy"
+      return 1
+    fi
     FM_WORKTREE_OWNER_TASK_ID=$FM_WORKTREE_BINDING_TASK_ID
     FM_WORKTREE_OWNER_METHOD=binding
     FM_WORKTREE_OWNER_BRANCH=$(git -C "$worktree" rev-parse --abbrev-ref HEAD 2>/dev/null || true)

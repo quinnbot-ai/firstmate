@@ -184,6 +184,30 @@ test_guard_naming() {
   pass "fm_code_currency_line: guard paths are named, bounded, and never claimed when the gap has none"
 }
 
+test_ignored_landed_path_is_unproven() {
+  local repo out side
+  repo=$(make_repo "$TMP_ROOT/ignored-landed")
+  printf '%s\n' 'bin/fm-ignored-helper.sh' > "$repo/.gitignore"
+  git -C "$repo" add .gitignore
+  git -C "$repo" commit -q -m "ignore optional helper"
+  git -C "$repo" push -q origin main
+  side="$repo.side"
+  git clone -q "$repo.origin.git" "$side"
+  mkdir -p "$side/bin"
+  printf '%s\n' '#!/usr/bin/env bash' > "$side/bin/fm-ignored-helper.sh"
+  git -C "$side" add -f bin/fm-ignored-helper.sh
+  git -C "$side" commit -q -m "land ignored helper"
+  git -C "$side" push -q origin HEAD:main
+  git -C "$repo" fetch -q origin
+  mkdir -p "$repo/bin"
+  git -C "$repo" show origin/main:bin/fm-ignored-helper.sh > "$repo/bin/fm-ignored-helper.sh"
+
+  out=$(fm_code_currency_line "$repo" || true)
+  assert_contains "$out" "UNPROVEN live code" "an ignored landed file was treated as provably inactive"
+  assert_contains "$out" "bin/fm-ignored-helper.sh" "the ignored landed path was not identified"
+  pass "ignored landed bytes make live-code status unproven"
+}
+
 # --- BOUNDARY: reports, never updates ---------------------------------------
 
 # Holding at an older commit is a captain decision, so the check must be safe to
@@ -312,4 +336,5 @@ test_guard_naming
 test_never_updates
 test_dirty_tracked_checkout_is_unproven
 test_untracked_landed_path_is_unproven
+test_ignored_landed_path_is_unproven
 test_bootstrap_line

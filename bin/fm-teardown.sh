@@ -2373,13 +2373,19 @@ preflight_firstmate_home_herdr_children() {  # <home>
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_binding_cleared
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
-    child_wt=$(meta_value "$child_meta" worktree)
+    if fm_worktree_record_resolve "$child_meta"; then
+      child_wt=$FM_WORKTREE_RECORD_ACTIVE_PATH
+    elif [ -n "$FM_WORKTREE_RECORD_RETIRED_OWNER" ]; then
+      child_wt=
+    else
+      child_wt=
+    fi
     child_proj=$(meta_value "$child_meta" project)
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
@@ -2430,16 +2436,27 @@ cleanup_firstmate_home_children() {
       fi
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
+      if ! fm_worktree_owner_resolve "$child_wt" "$sub_state" \
+         || [ "$FM_WORKTREE_OWNER_TASK_ID" != "$child_id" ]; then
+        echo "error: child $child_id no longer positively owns worktree $child_wt; refusing forced cleanup" >&2
+        return 1
+      fi
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
         "$child_wt/.opencode/plugins/fm-busy-state.js" \
         "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
+        child_binding_cleared=0
+        if fm_worktree_binding_matches "$child_wt" "$child_id"; then
+          fm_worktree_binding_clear "$child_wt" "$child_id" || return 1
+          child_binding_cleared=1
+        fi
         if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
           :
         else
           child_return_rc=$?
           if [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ]; then
+            [ "$child_binding_cleared" -eq 0 ] || fm_worktree_binding_write "$child_wt" "$child_id" || return 1
             return "$child_return_rc"
           fi
           safe_rm_rf_child_worktree "$child_wt" "$child_proj"
@@ -2659,7 +2676,13 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety
   fi
+  WORKTREE_BINDING_CLEARED=0
+  if fm_worktree_binding_matches "$WT" "$ID"; then
+    fm_worktree_binding_clear "$WT" "$ID" || exit 1
+    WORKTREE_BINDING_CLEARED=1
+  fi
   teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
+    [ "$WORKTREE_BINDING_CLEARED" -eq 0 ] || fm_worktree_binding_write "$WT" "$ID" || exit 1
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
     exit 1
   }

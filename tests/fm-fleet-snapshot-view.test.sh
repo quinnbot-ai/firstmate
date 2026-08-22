@@ -799,6 +799,31 @@ test_parked_scout_decision_stays_pending() {
   pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
 }
 
+test_retired_worktree_is_not_published_as_active() {
+  local home fakebin historical out
+  home=$(make_home retired-worktree)
+  historical="$home/projects/reassigned-copy"
+  mkdir -p "$historical"
+  fm_write_meta "$home/state/retired-task.meta" \
+    "window=firstmate:fm-retired-task" \
+    "worktree=$historical" \
+    "worktree_retired=live-task" \
+    "project=firstmate" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=ship"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e --arg historical "$historical" '
+    .tasks[] | select(.id == "retired-task")
+    | .paths.worktree == {path:null,present:false}
+      and .paths.retired_worktree.path == $historical
+      and .paths.retired_worktree.present == true
+      and .worktree_retired_to == "live-task"
+  ' >/dev/null || fail "a retired historical pointer was published as active: $out"
+  pass "fleet snapshots separate retired worktree history from active ownership"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
@@ -810,6 +835,7 @@ test_open_decision_transfers_to_captain_hold
 test_open_decision_clears_on_keyed_resolution
 test_completed_scout_report_is_pointer_not_pending
 test_parked_scout_decision_stays_pending
+test_retired_worktree_is_not_published_as_active
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot

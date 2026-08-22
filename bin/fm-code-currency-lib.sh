@@ -92,12 +92,12 @@ fm_code_currency_guard_files() {
 }
 
 fm_code_currency_untracked_landed_files() {
-  local root=$1 base=$2 path untracked landed
-  untracked=$(git -C "$root" ls-files --others --exclude-standard 2>/dev/null) || return 1
-  [ -n "$untracked" ] || return 0
+  local root=$1 base=$2 path landed
   landed=$(git -C "$root" diff --name-only "HEAD...$base" 2>/dev/null) || return 1
   while IFS= read -r path; do
-    if printf '%s\n' "$untracked" | grep -Fqx -- "$path"; then
+    [ -n "$path" ] || continue
+    if ! git -C "$root" ls-files --error-unmatch -- "$path" >/dev/null 2>&1 \
+       && { [ -e "$root/$path" ] || [ -L "$root/$path" ]; }; then
       printf '%s\n' "$path"
     fi
   done <<EOF

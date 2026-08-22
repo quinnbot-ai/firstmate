@@ -831,6 +831,8 @@ test_own_binding_tears_down_normally() {
 
   expect_code 0 "$rc" "own-binding: a task that still owns its copy tears down"$'\n'"$(cat "$case_dir/stderr")"
   ! grep -q REFUSED "$case_dir/stderr" || fail "own-binding: teardown printed a REFUSED line"
+  fm_worktree_binding_is_absent "$case_dir/wt" \
+    || fail "own-binding: returned copy retained its authoritative task binding"
   pass "a copy still bound to this task tears down normally"
 }
 
@@ -2167,6 +2169,31 @@ SH
   pass "forced secondmate teardown holds every descendant lifecycle and metadata lock"
 }
 
+test_forced_secondmate_spares_retired_child_worktree() {
+  local case_dir home retired_wt rc
+  case_dir=$(make_case retired-child-copy)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_tmux_children "$case_dir"
+  home="$case_dir/secondmate-home"
+  retired_wt="$case_dir/child-a-wt"
+  printf '%s\n' 'worktree_retired=child-b' >> "$home/state/child-a.meta"
+  : > "$case_dir/treehouse.log"
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "retired-child-copy: forced secondmate teardown failed"
+  [ -d "$retired_wt" ] || fail "retired-child-copy: forced cleanup removed a retired historical copy"
+  assert_not_contains "$(cat "$case_dir/treehouse.log")" "$retired_wt" \
+    "retired-child-copy: forced cleanup returned a retired historical copy"
+  pass "forced secondmate cleanup spares retired child worktree history"
+}
+
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed() {
   local case_dir home log closed rc
   case_dir=$(make_case herdr-child-unconfirmed-close)
@@ -3024,6 +3051,7 @@ test_herdr_flat_teardown_refuses_records_on_unparseable_presence
 test_herdr_flat_teardown_preflight_refuses_before_changes
 test_forced_secondmate_herdr_child_preflight_refuses_before_changes
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks
+test_forced_secondmate_spares_retired_child_worktree
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
 test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
