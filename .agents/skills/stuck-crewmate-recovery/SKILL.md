@@ -43,7 +43,11 @@ If the worktree or ownership cannot be reconciled safely, leave all state intact
 
 Escalate in order:
 
-1. Peek the pane.
+1. Peek the pane, and read it as an ACTIVITY question, not a layout question.
+   A pane's last line is the composer prompt in every harness that has one, and it looks identical whether the worker is idle or thirteen minutes into a turn.
+   The activity indicator sits ABOVE that prompt, so a tail that cuts the pane off at its bottom line has cut off the only part that carries the answer.
+   Capture enough lines to see the region above the composer before concluding anything, and treat "the bottom line is a prompt" as no evidence at all.
+   A pane that still looks idle is a reason to ask `bin/fm-crew-state.sh <id>`, which reads the run-step and busy-signature sources rather than the pane's appearance; a worker running a suite or a long tool call is working, not wedged.
 2. If the crewmate is waiting on a question its brief already answers, answer in one line via `FM_HOME=<this-firstmate-home> bin/fm-send.sh` from an active firstmate session unless `FM_HOME` is already set to the active firstmate home.
 3. If the crewmate is confused or looping, interrupt with `FM_HOME=<this-firstmate-home> bin/fm-control.sh <task-id> interrupt`, then redirect with one corrective line through `fm-send`.
 4. If the crewmate is genuinely wedged after redirection, relaunch it with `FM_HOME=<this-firstmate-home> bin/fm-control.sh <task-id> relaunch --note '<progress so far>'`, which stops the agent, carries the brief plus that note into a replacement in the same local copy, and restores the prior record if the replacement cannot start.

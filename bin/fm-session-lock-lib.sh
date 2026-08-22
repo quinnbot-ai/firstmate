@@ -174,3 +174,149 @@ $pids
 EOF
   return 1
 }
+
+# --- lock-holder classification ---------------------------------------------
+#
+# fm_harness_pid_alive above answers "is this pid a process I can RECOGNIZE as a
+# harness?". That is a name-pattern question, and a name pattern can only ever
+# produce evidence FOR a match. Its no-match result is ambiguous: the pid may be
+# dead, or it may be a perfectly live session this table cannot name - launched
+# through a generated wrapper script, renamed by its installer, or running a
+# harness that has not been added to FM_HARNESS_RE yet. Treating that ambiguity
+# as "dead" is what lets one session reclaim a live session's lock and put two
+# writers on the same home.
+#
+# The reclaim decision therefore does not use the name pattern as its authority.
+# It asks four questions in order of strength - is the pid gone, is it a
+# recognized harness, is it too young to have written this lock, is it our own
+# lineage - and only the strongest available answer decides. When none of them
+# settles the question, the holder is left alone.
+
+# Elapsed seconds for <pid>, or return 1 when it cannot be read.
+#
+# ps etime is used rather than lstart because its [[dd-]hh:]mm:ss form is
+# locale-invariant on both macOS and procps, while lstart's date string is not:
+# an identity written under one locale and re-read under another (ko_KR, say)
+# mismatches and would reject a live holder. Elapsed time answers the only
+# question asked of it below - "did this process exist before that file was
+# written?" - without any date parsing at all.
+fm_process_elapsed_seconds() {  # <pid>
+  local pid=$1 raw days=0 hours=0 mins=0 secs=0 rest
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  raw=$(LC_ALL=C ps -p "$pid" -o etime= 2>/dev/null) || return 1
+  raw=${raw//[[:space:]]/}
+  [ -n "$raw" ] || return 1
+  case "$raw" in
+    *-*) days=${raw%%-*}; rest=${raw#*-} ;;
+    *) rest=$raw ;;
+  esac
+  case "$rest" in
+    *:*:*) hours=${rest%%:*}; rest=${rest#*:}; mins=${rest%%:*}; secs=${rest##*:} ;;
+    *:*) mins=${rest%%:*}; secs=${rest##*:} ;;
+    *) return 1 ;;
+  esac
+  # Strip leading zeros so 08 is not read as an invalid octal literal.
+  days=$((10#${days:-0})); hours=$((10#${hours:-0}))
+  mins=$((10#${mins:-0})); secs=$((10#${secs:-0}))
+  printf '%s\n' "$(( days * 86400 + hours * 3600 + mins * 60 + secs ))"
+}
+
+# True when <pid> is too YOUNG to have written the file <path>: it started after
+# that file was last written, so whatever wrote the file was some other process
+# and this pid is a recycled number.
+#
+# This is the signal that keeps an unrecognized-but-live holder from wedging the
+# home forever. A recycled pid is necessarily younger than the lock, because the
+# process that wrote the lock had to die before its number could be reissued.
+# Unreadable inputs return 1, which keeps the holder protected rather than
+# reclaimed.
+fm_pid_started_after_file() {  # <pid> <path>
+  local pid=$1 path=$2 elapsed now mtime lock_age
+  elapsed=$(fm_process_elapsed_seconds "$pid") || return 1
+  if [ "$(uname)" = Darwin ]; then
+    mtime=$(stat -f %m "$path" 2>/dev/null) || return 1
+  else
+    mtime=$(stat -c %Y "$path" 2>/dev/null) || return 1
+  fi
+  case "$mtime" in ''|*[!0-9]*) return 1 ;; esac
+  now=$(date +%s 2>/dev/null) || return 1
+  lock_age=$(( now - mtime ))
+  # Both clocks are whole seconds, so require a clear margin rather than a bare
+  # inequality: a process that started in the same second the lock was written
+  # stays protected.
+  [ "$lock_age" -gt "$(( elapsed + 1 ))" ]
+}
+
+# True when <pid> appears anywhere in THIS process's parent chain.
+#
+# Unlike fm_harness_ancestry_pids this walk does not stop at the first
+# non-harness hop, because the question is plain lineage, not harness identity:
+# a lock naming an inner shell of our own session must be recognized as ours.
+# A competing session can never satisfy this - if it were our ancestor it would
+# be the session that launched us.
+fm_pid_is_own_ancestor() {  # <pid>
+  local target=$1 walk=$$ hops=0
+  case "$target" in ''|*[!0-9]*) return 1 ;; esac
+  while [ "$hops" -lt 32 ]; do
+    [ "$walk" != "$target" ] || return 0
+    walk=$(ps -o ppid= -p "$walk" 2>/dev/null | tr -d '[:space:]')
+    case "$walk" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$walk" -gt 1 ] || return 1
+    hops=$((hops + 1))
+  done
+  return 1
+}
+
+# Classify the holder recorded in lock file <path>. Prints exactly one of:
+#
+#   free          no lock file, or it records no pid at all
+#   malformed     the lock file exists but does not record a plain pid
+#   live          the pid is alive AND identifiable as a verified harness
+#   unidentified  the pid is ALIVE but no name pattern recognizes it, and it
+#                 belongs to no session we can account for; it may be a live
+#                 session this table cannot name, so it is NOT reclaimable
+#   self-inner    the pid is ALIVE and unrecognized, but it is THIS process's own
+#                 ancestor - an inner shell of our own session that wrote the
+#                 lock under its own pid. Reclaimable: re-pointing the lock at the
+#                 real harness pid is a correction, not a takeover.
+#   stale         the pid is gone, or it is a recycled number too young to have
+#                 written this lock; safe to reclaim
+#
+# `unidentified` is the whole point of this function: it is the case the old
+# single boolean folded into "dead", and it is reported separately so callers
+# refuse and say why, instead of silently taking a live session's home.
+fm_session_lock_holder_state() {  # <lock-path>
+  local lock=$1 pid
+  [ -f "$lock" ] || { printf 'free\n'; return 0; }
+  pid=$(cat "$lock" 2>/dev/null) || { printf 'malformed\n'; return 0; }
+  pid=${pid//[[:space:]]/}
+  [ -n "$pid" ] || { printf 'free\n'; return 0; }
+  case "$pid" in *[!0-9]*) printf 'malformed\n'; return 0 ;; esac
+  if ! kill -0 "$pid" 2>/dev/null; then
+    printf 'stale\n'
+    return 0
+  fi
+  if fm_harness_pid_alive "$pid"; then
+    printf 'live\n'
+    return 0
+  fi
+  # Alive, but unrecognized. Only strictly stronger evidence than the name may
+  # downgrade this to something reclaimable.
+  if fm_pid_started_after_file "$pid" "$lock"; then
+    printf 'stale\n'
+  elif fm_pid_is_own_ancestor "$pid"; then
+    printf 'self-inner\n'
+  else
+    printf 'unidentified\n'
+  fi
+}
+
+# True when the classifier's verdict permits this session to claim the lock.
+# Reclaiming our own session's inner pid is a correction; taking a lock from a
+# process we cannot account for is not.
+fm_session_lock_state_permits_claim() {  # <state>
+  case "$1" in
+    stale|self-inner) return 0 ;;
+    *) return 1 ;;
+  esac
+}

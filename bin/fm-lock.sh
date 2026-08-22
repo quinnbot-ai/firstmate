@@ -29,7 +29,13 @@ if [ "${1:-}" = "status" ]; then
     echo "lock: unreadable"
     exit 0
   }
-  if fm_harness_pid_alive "$old"; then echo "lock: held by live harness pid $old"; else echo "lock: stale (pid $old dead or not a harness)"; fi
+  case "$(fm_session_lock_holder_state "$LOCK")" in
+    live) echo "lock: held by live harness pid $old" ;;
+    unidentified) echo "lock: pid $old is RUNNING but not identifiable as a harness; treated as held, not stale" ;;
+    malformed) echo "lock: malformed" ;;
+    free) echo "lock: free" ;;
+    *) echo "lock: stale (pid $old is gone)" ;;
+  esac
   exit 0
 fi
 
@@ -61,10 +67,16 @@ if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
     echo "lock acquired: harness pid $me"
     exit 0
   fi
-  if fm_harness_pid_alive "$old"; then
-    echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
-    exit 1
-  fi
+  case "$(fm_session_lock_holder_state "$LOCK")" in
+    live)
+      echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
+      exit 1
+      ;;
+    unidentified)
+      echo "error: the session lock names pid $old, which is RUNNING but is not identifiable as a verified harness. It is not treated as stale, because an unrecognized name is not evidence that a session is gone - a wrapped or renamed session reports exactly this. Operate read-only; if that process is genuinely unrelated, stop it or clear $LOCK by hand." >&2
+      exit 1
+      ;;
+  esac
 fi
 
 if ! fm_lock_try_acquire "$CLAIM_LOCK"; then
@@ -86,9 +98,17 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     echo "error: session lock is unreadable; operate read-only until resolved" >&2
     exit 1
   }
-  if [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
-    echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
-    exit 1
+  if [ "$old" != "$me" ]; then
+    case "$(fm_session_lock_holder_state "$LOCK")" in
+      live)
+        echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
+        exit 1
+        ;;
+      unidentified)
+        echo "error: the session lock names pid $old, which is RUNNING but is not identifiable as a verified harness. It is not treated as stale, because an unrecognized name is not evidence that a session is gone - a wrapped or renamed session reports exactly this. Operate read-only; if that process is genuinely unrelated, stop it or clear $LOCK by hand." >&2
+        exit 1
+        ;;
+    esac
   fi
 fi
 if ! { printf '%s\n' "$me" > "$LOCK"; } 2>/dev/null; then
