@@ -57,6 +57,11 @@ die() {
   exit "${2:-1}"
 }
 
+canonical_directory() {
+  [ -d "$1" ] || return 1
+  ( CDPATH= cd -- "$1" && pwd -P )
+}
+
 ID=
 MODE=arm
 PURGE=0
@@ -73,9 +78,13 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
-[ -d "$STATE" ] && [ ! -L "$STATE" ] || die "state directory is unavailable: $STATE"
+HOME_INPUT=$FM_HOME
+FM_HOME=$(canonical_directory "$HOME_INPUT") || die "home directory is unavailable: $HOME_INPUT"
+STATE_INPUT="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG_INPUT="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+[ ! -L "$STATE_INPUT" ] || die "state directory is unavailable: $STATE_INPUT"
+STATE=$(canonical_directory "$STATE_INPUT") || die "state directory is unavailable: $STATE_INPUT"
+CONFIG=$(canonical_directory "$CONFIG_INPUT") || die "config directory is unavailable: $CONFIG_INPUT"
 
 is_review_shim() {  # <path>
   [ -f "$1" ] && [ ! -L "$1" ] && head -n 2 "$1" | grep -qF "$SHIM_MARKER"

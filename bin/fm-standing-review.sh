@@ -141,9 +141,14 @@ class SpecError(Exception):
     """The spec cannot be trusted to produce findings."""
 
 
-def cap(line: str) -> str:
+def cap(line: str, required: str = "") -> str:
     if len(line) <= LINE_CAP:
         return line
+    if required:
+        marker = f" [{required}]"
+        keep = LINE_CAP - len(marker) - len(LINE_CAP_SUFFIX)
+        if keep > 0:
+            return line[:keep].rstrip() + marker + LINE_CAP_SUFFIX
     keep = LINE_CAP - len(LINE_CAP_SUFFIX)
     return line[:keep] + LINE_CAP_SUFFIX
 
@@ -220,6 +225,11 @@ def load_spec(path: Path) -> dict:
         "sources": {},
         "rules": [],
     }
+    if spec["retention"] < spec["cooldown"]:
+        raise SpecError(
+            "spec.latch_retention_seconds must be greater than or equal to "
+            "spec.subject_cooldown_seconds"
+        )
 
     sources = raw.get("sources")
     if not isinstance(sources, list) or not sources:
@@ -446,9 +456,22 @@ class Candidate:
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
     def line(self, review_id: str) -> str:
+        display_evidence = sorted(self.evidence, key=lambda item: not item[2])
+        evidence_text = " ".join(
+            f"{field}={value}" for field, value, _ in display_evidence
+        )
+        numeric = next(
+            (
+                f"{clean(field)[:40]}={clean(value)[:40]}"
+                for field, value, is_numeric in display_evidence
+                if is_numeric
+            ),
+            "",
+        )
         return cap(
             f"review {review_id}: {self.rule} {self.subject} "
-            f"[{self.evidence_text}] -> {self.action}"
+            f"[{evidence_text}] -> {self.action}",
+            numeric,
         )
 
     def sort_key(self):

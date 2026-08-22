@@ -92,23 +92,35 @@ fm_code_currency_guard_files() {
 }
 
 # fm_code_currency_line <root>
-# Echo the single CODE_STALE diagnostic line when the code checked out at <root>
-# is behind the default branch it follows, and echo nothing (returning 1) for
-# every other state: not a git work tree, nothing to compare against, already
-# current, or ahead only. Silence is the common case and must stay cheap - a
-# line that also appeared on a current home would train the reader to skim past
-# the one case it exists for.
+# Echo one CODE_STALE diagnostic when the clean checkout at <root> is behind the
+# default branch it follows, or when tracked checkout drift makes live code
+# unprovable. Echo nothing (returning 1) for other clean states: not a git work
+# tree, nothing to compare against, already current, or ahead only.
 fm_code_currency_line() {
-  local root=$1 base behind head_sha base_sha guard guard_count shown more guard_text
+  local root=$1 base behind head_sha base_sha guard guard_count shown more guard_text tracked_status
   git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
   base=$(fm_code_currency_base_ref "$root") || return 1
   behind=$(git -C "$root" rev-list --count "HEAD..$base" 2>/dev/null) || return 1
   case "$behind" in
     '' | *[!0-9]*) return 1 ;;
   esac
-  [ "$behind" -gt 0 ] || return 1
   head_sha=$(git -C "$root" rev-parse --short=7 HEAD 2>/dev/null) || return 1
   base_sha=$(git -C "$root" rev-parse --short=7 "$base" 2>/dev/null) || return 1
+  if git -C "$root" diff --quiet HEAD -- 2>/dev/null; then
+    tracked_status=0
+  else
+    tracked_status=$?
+  fi
+  case "$tracked_status" in
+    0) ;;
+    1)
+      printf 'CODE_STALE: UNPROVEN live code: tracked files differ from checked-out HEAD (%s), which is %s commit(s) behind %s (%s) as last fetched. Installed code cannot be proven to match HEAD or the landed branch; reconcile the tracked checkout before relying on landed-versus-live status.\n' \
+        "$head_sha" "$behind" "$base" "$base_sha"
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+  [ "$behind" -gt 0 ] || return 1
 
   guard=$(fm_code_currency_guard_files "$root" "$base")
   if [ -n "$guard" ]; then

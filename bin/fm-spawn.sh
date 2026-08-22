@@ -2305,7 +2305,17 @@ fi
 # executable helper references only after the exact worktree is known and, for
 # fresh crewmates, refreshed to the remote default base.  This preserves the
 # per-home contract - a sibling checkout's bin/ is never used as evidence.
-fm_brief_refuse_missing_helper_scripts "$BRIEF_REAL" "$WT" || exit 1
+if ! fm_brief_refuse_missing_helper_scripts "$BRIEF_REAL" "$WT"; then
+  if [ "$RELAUNCH" -eq 0 ] && [ "$BACKEND" != orca ]; then
+    fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "$W" 2>/dev/null || \
+      echo "warning: could not remove refused spawn endpoint $T" >&2
+    if [ "$KIND" != secondmate ]; then
+      ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) >/dev/null 2>&1 || \
+        echo "warning: could not return refused spawn worktree $WT" >&2
+    fi
+  fi
+  exit 1
+fi
 
 # A pooled path is intentionally reusable, so the historical worktree= in an
 # older task's metadata cannot establish ownership. Bind a fresh assignment

@@ -222,6 +222,36 @@ test_never_updates() {
   pass "fm_code_currency_line: reports the gap without advancing HEAD, the tracked branch, or the working tree"
 }
 
+test_dirty_tracked_checkout_is_unproven() {
+  local repo out current_guard
+  repo=$(make_repo "$TMP_ROOT/dirty")
+  land "$repo" bin/fm-guard.sh "guard version one"
+  land "$repo" bin/fm-guard.sh "guard version two"
+
+  printf 'locally reverted\n' > "$repo/bin/fm-guard.sh"
+  out=$(fm_code_currency_line "$repo" || true)
+  assert_contains "$out" "CODE_STALE: UNPROVEN live code" \
+    "a current HEAD with locally changed tracked code was called live"
+  assert_contains "$out" "0 commit(s) behind" \
+    "the unproven current checkout did not separate branch currency from live bytes"
+  assert_not_contains "$out" "running code" \
+    "a dirty checkout was described as proven running code"
+
+  git -C "$repo" reset -q --hard origin/main
+  current_guard=$(git -C "$repo" show origin/main:bin/fm-guard.sh)
+  hold_back "$repo" 1
+  printf '%s\n' "$current_guard" > "$repo/bin/fm-guard.sh"
+  out=$(fm_code_currency_line "$repo" || true)
+  assert_contains "$out" "CODE_STALE: UNPROVEN live code" \
+    "a stale HEAD with locally restored tracked code was called inactive"
+  assert_contains "$out" "1 commit(s) behind" \
+    "the unproven stale checkout lost its branch gap"
+  assert_not_contains "$out" "inactive here" \
+    "a dirty checkout made an unproven inactivity claim"
+
+  pass "fm_code_currency_line: tracked checkout drift is surfaced as unproven"
+}
+
 # --- SESSION START: the line reaches the digest -----------------------------
 
 # The library is only useful if a session start actually prints it, and only
@@ -252,4 +282,5 @@ test_bootstrap_line() {
 test_states
 test_guard_naming
 test_never_updates
+test_dirty_tracked_checkout_is_unproven
 test_bootstrap_line

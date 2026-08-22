@@ -23,12 +23,26 @@ case "$*" in
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows|has-session|new-session|new-window|kill-window|send-keys) exit 0 ;;
+  new-window) : > "${FM_FAKE_ENDPOINT:?FM_FAKE_ENDPOINT unset}"; printf '@1\n'; exit 0 ;;
+  kill-window) rm -f -- "${FM_FAKE_ENDPOINT:?FM_FAKE_ENDPOINT unset}"; exit 0 ;;
+  send-keys)
+    case "$*" in *"treehouse get"*) : > "${FM_FAKE_LEASE:?FM_FAKE_LEASE unset}" ;; esac
+    exit 0
+    ;;
+  list-windows|has-session|new-session) exit 0 ;;
 esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  return) rm -f -- "${FM_FAKE_LEASE:?FM_FAKE_LEASE unset}" ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
@@ -68,6 +82,8 @@ run_spawn() {
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' FM_FAKE_PANE_PATH="$POOL_DIR" \
+    FM_FAKE_ENDPOINT="$HOME_DIR/state/$id.endpoint" \
+    FM_FAKE_LEASE="$HOME_DIR/state/$id.lease" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJECT_DIR" --mode no-mistakes --yolo off 2>&1
 }
@@ -86,6 +102,8 @@ test_absent_variable_expanded_helper_refuses_at_task_worktree() {
   expected="$POOL_DIR/bin/fm-missing-helper.sh"
   assert_contains "$out" "$expected" "refusal did not resolve \$FM_ROOT against the task worktree"
   assert_absent "$HOME_DIR/state/$id.meta" "refused spawn published worker metadata"
+  assert_absent "$HOME_DIR/state/$id.endpoint" "refused spawn leaked its fresh endpoint"
+  assert_absent "$HOME_DIR/state/$id.lease" "refused spawn leaked its pooled worktree lease"
   pass "an absent variable-expanded helper refuses with its task-worktree path"
 }
 

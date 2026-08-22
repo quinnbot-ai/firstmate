@@ -654,6 +654,39 @@ JSON
   pass "a wake line stays bounded and keeps its evidence when cut"
 }
 
+test_a_long_text_field_cannot_truncate_the_measurement() {
+  local home out note
+  home=$(make_home long-evidence acme)
+  note=$(printf 'context%.0s' $(seq 1 80))
+  write_source "$home" "[{\"venture\":\"acme\",\"note\":\"$note\",\"cost_30d\":10}]"
+  write_spec "$home" r '[{"field":"cost_30d","op":"ge","value":1}]' \
+    '["note","cost_30d"]'
+
+  out=$(scan "$home" --id r)
+  assert_contains "$out" "cost_30d=10" \
+    "a long earlier text field truncated the required numeric measurement"
+  assert_contains "$out" "[truncated]" \
+    "the bounded long-evidence wake did not disclose truncation"
+  pass "a bounded wake reserves space for its numeric measurement"
+}
+
+test_retention_cannot_expire_before_subject_cooldown() {
+  local home out rc
+  home=$(make_home invalid-retention acme)
+  write_source "$home" '[{"venture":"acme","cost_30d":10}]'
+  write_spec "$home" r '[{"field":"cost_30d","op":"ge","value":1}]' \
+    '["cost_30d"]' 0 '' \
+    '"subject_cooldown_seconds": 100, "latch_retention_seconds": 10,'
+
+  out=$(scan "$home" --id r --validate 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "a retention shorter than cooldown was accepted"
+  assert_contains "$out" "latch_retention_seconds" \
+    "the invalid retention refusal did not name the broken bound"
+  assert_absent "$home/state/r.standing-review-latch" \
+    "an invalid retention contract wrote latch state"
+  pass "latch retention must cover the full subject cooldown"
+}
+
 test_script_parses
 test_quantified_finding_is_emitted_with_its_evidence
 test_classification_without_measurement_is_rejected
@@ -675,6 +708,8 @@ test_predicates_can_match_on_a_missing_measurement
 test_records_can_be_located_anywhere_in_the_source
 test_a_source_that_changed_shape_is_reported
 test_a_long_finding_is_bounded_for_the_wake_digest
+test_a_long_text_field_cannot_truncate_the_measurement
+test_retention_cannot_expire_before_subject_cooldown
 test_blindness_is_reported_before_a_finding_from_elsewhere
 test_a_subject_may_be_named_by_absolute_path
 test_a_subject_outside_the_declared_root_is_rejected

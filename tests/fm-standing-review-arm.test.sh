@@ -103,6 +103,27 @@ test_the_check_ignores_the_environment_it_is_run_with() {
   pass "an armed check reviews the home it was armed in, whatever the environment"
 }
 
+test_relative_arm_paths_are_canonicalized() {
+  local home parent name other out
+  home=$(make_home relative-arm)
+  other=$(make_home relative-arm-cwd)
+  parent=$(dirname "$home")
+  name=$(basename "$home")
+
+  out=$(
+    cd "$parent" || exit 1
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$name/state" \
+      FM_CONFIG_OVERRIDE="$name/config" "$ARM" --home "$name" --id r 2>&1
+  ) || fail "arming with relative home, state, and config failed: $out"
+  out=$(cd "$other" && bash "$home/state/r.check.sh")
+  [ -n "$out" ] || fail "a relatively armed check failed from a different working directory"
+  assert_present "$home/state/r.standing-review-latch" \
+    "a relatively armed check did not record in its canonical home"
+  assert_absent "$other/state/r.standing-review-latch" \
+    "a relatively armed check resolved state against its runtime directory"
+  pass "relative arm inputs become stable absolute watcher paths"
+}
+
 test_editing_the_check_revokes_it() {
   local home
   home=$(make_home tamper)
@@ -220,6 +241,7 @@ test_list_reports_what_is_armed() {
 test_script_parses
 test_arming_registers_a_check_the_watcher_accepts
 test_the_check_ignores_the_environment_it_is_run_with
+test_relative_arm_paths_are_canonicalized
 test_editing_the_check_revokes_it
 test_an_unusable_spec_is_refused_before_arming
 test_relative_review_paths_are_refused_before_arming
