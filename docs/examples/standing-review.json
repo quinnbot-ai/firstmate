@@ -1,0 +1,41 @@
+{
+  "version": "fm-standing-review-v1",
+  "interval_seconds": 86400,
+  "subject_cooldown_seconds": 604800,
+  "latch_retention_seconds": 7776000,
+  "subject_root": "/absolute/path/to/the/directory/your/subjects/live/under",
+  "sources": [
+    {
+      "name": "scorecard",
+      "path": "/absolute/path/to/a/json/file/something/else/keeps/current.json",
+      "records": "rows",
+      "max_age_seconds": 172800
+    }
+  ],
+  "rules": [
+    {
+      "name": "spend-without-work",
+      "source": "scorecard",
+      "subject_field": "venture",
+      "when": [
+        { "field": "cost_30d", "op": "ge", "value": 25 },
+        { "field": "commits_30d", "op": "eq", "value": 0 }
+      ],
+      "evidence_fields": ["cost_30d", "commits_30d", "days_idle"],
+      "action": "decide whether to dispatch work here or stop the spend",
+      "rank": 30
+    },
+    {
+      "name": "live-but-unowned",
+      "source": "scorecard",
+      "subject_field": "venture",
+      "when": [
+        { "field": "signals.commits90d", "op": "ge", "value": 50 },
+        { "field": "owner", "op": "absent" }
+      ],
+      "evidence_fields": ["signals.commits90d", "signals.daysSinceCommit"],
+      "action": "give this an owner or decline it",
+      "rank": 40
+    }
+  ]
+}
