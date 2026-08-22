@@ -259,7 +259,7 @@ A `https://github.com/<owner>/<repo>/pull/<n>` URL invokes `gh-axi pr merge <n> 
 A `https://<host>/<path>/-/merge_requests/<n>` URL (see [docs/gitlab-merge-watch.md](gitlab-merge-watch.md)) invokes `glab mr merge <n> -R https://<host>/<path>`, so the instance comes from the URL, and adds no merge-method flag because the project's own merge method applies.
 That path merges only after one live read of the merge request confirms it is open, mergeable, conflict-free, with blocking discussions resolved and a successful pipeline at the current head, and it binds the merge to that verified head; recorded metadata is never the authority for those conditions because a rebase leaves it stale.
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
-[`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, and stale-lock recovery procedure.
+[`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, stale-lock recovery procedure, and the current-owner check that refuses a recorded isolated copy a recycled pool slot has since reassigned.
 
 ## Optional Relay
 
