@@ -32,7 +32,6 @@ FM_WORKTREE_BINDING_DETAIL=
 fm_worktree_binding_detail() {
   printf '%s' "$FM_WORKTREE_BINDING_DETAIL"
 }
-
 fm_worktree_binding_task_id_valid() {  # <task-id>
   local id=${1-}
   local LC_ALL=C
@@ -146,4 +145,3 @@ fm_worktree_binding_write() {  # <worktree> <task-id>
   umask "$old_umask"
   return 0
 }
-

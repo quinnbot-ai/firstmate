@@ -161,6 +161,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/protected-branch-adjudication/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/process-event-sources/SKILL.md",
       "audience": "agent-runtime"
     },

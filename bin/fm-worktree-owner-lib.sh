@@ -78,6 +78,8 @@ fm_worktree_owner_record_confirms() {  # <state-dir> <task-id> <worktree>
   [ -n "$recorded" ] && [ "$recorded" = "$worktree" ]
 }
 
+# These result globals are read by the caller after this sourced helper returns.
+# shellcheck disable=SC2034
 fm_worktree_owner_resolve() {  # <worktree> <state-dir>
   local worktree=${1-} state=${2-} branch candidate
   FM_WORKTREE_OWNER_TASK_ID=
