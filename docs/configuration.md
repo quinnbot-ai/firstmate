@@ -600,6 +600,19 @@ Each account, model and voice file above is read as its first line that is not b
 The two read files are parsed differently: `config/voice-read-scope` must hold the bare word and nothing but blank space around it, so a comment header there refuses instead of being skipped, while every line of `config/voice-read-deny` that is not blank and not a `#` comment is one more substring.
 `FM_VOICE_RELAY` and `FM_VOICE_PYTHON` belong to the laptop rather than to a home, so they have no config file: `bin/fm-voice-client.py` requires the relay path as a flag or that variable and carries no default path.
 
+## Standing reviews (config/standing-reviews)
+
+A standing review reads declared JSON evidence sources on its own slow cadence and wakes firstmate at most once for a finding it judges admissible.
+It is an ordinary registered custom watcher check, so it costs nothing while it has nothing to say.
+
+Each review is one gitignored `config/standing-reviews/<id>.json` spec naming its sources, the directory its subjects live under, and the conditions worth waking for.
+Firstmate ships no conditions: which ones deserve a wake, and how they rank, is a decision about the reviewed surface rather than about firstmate.
+
+`bin/fm-standing-review.sh` owns the spec fields and the admissibility conditions, and `bin/fm-standing-review-arm.sh` owns arming, listing, and disarming; read those headers before writing a spec.
+See [`docs/examples/standing-review.json`](examples/standing-review.json) for the file's shape; its two rules illustrate the format and are not a recommendation about what to review.
+A spec names absolute paths on the machine that reviews them, so it is home-local and is not inherited by secondmate homes.
+Arming registers a check only; nothing here creates or refreshes a schedule, and a review whose evidence stops refreshing reports that instead of going quiet.
+
 ## Environment variables
 
 Runtime tuning via environment variables (defaults shown):
