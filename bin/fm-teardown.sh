@@ -80,7 +80,11 @@
 #   worktree_retired=<owner> line; the stale worktree= value is kept as history)
 #   and then cleans up records only. It refuses unless another task provably owns
 #   the recorded copy, so it can never become a way to skip the isolated-copy
-#   checks.
+#   checks. It is still a TEARDOWN: the lane's records go away with the pointer.
+#   A lane that must be preserved rather than cleaned up - which is what every
+#   stale pointer observed so far has belonged to, since a preserved lane is by
+#   definition one that is never torn down - is repaired instead by
+#   bin/fm-reconcile-worktree-pointers.sh, which retires the pointer alone.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -193,6 +197,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
 # shellcheck source=bin/fm-worktree-binding-lib.sh
 . "$SCRIPT_DIR/fm-worktree-binding-lib.sh"
+# shellcheck source=bin/fm-worktree-owner-lib.sh
+. "$SCRIPT_DIR/fm-worktree-owner-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -516,25 +522,15 @@ reject_unwarranted_forget_worktree() {  # <why-it-does-not-apply>
 }
 
 # Mark this task's recorded copy retired so the rest of teardown cleans records
-# only and never touches the copy the other task owns. The stale worktree= value
-# is KEPT: it is still the honest history of what this lane was allocated, and
-# bin/fm-backend.sh's endpoint validation requires it, so deleting it would make
-# the record permanently un-tearable. The added worktree_retired= line names the
-# task that was proven to own the path instead, and it is durable, so a run that
-# fails a later step is re-run idempotently rather than stranded.
-# Deliberately narrow: only reachable once a different task's binding has already
-# been read out of the copy itself.
+# only and never touches the copy the other task owns. The durable record shape,
+# and why the stale worktree= value is kept as history, belong to
+# bin/fm-worktree-owner-lib.sh's fm_worktree_owner_retire_pointer.
+# Deliberately narrow: only reachable once the copy itself has already proven a
+# different task owns it.
 retire_recycled_worktree_record() {  # <owner-task-id> <owner-branch>
-  local owner=$1 owner_branch=$2 stale=$WT tmp
-  tmp="$META.forget.$$"
-  if ! { awk '!/^worktree_retired=/' "$META" && printf 'worktree_retired=%s\n' "$owner"; } > "$tmp" 2>/dev/null; then
-    rm -f "$tmp" 2>/dev/null || true
-    echo "REFUSED: could not rewrite $META to retire task $ID's stale copy pointer." >&2
-    return 1
-  fi
-  if ! mv -f "$tmp" "$META"; then
-    rm -f "$tmp" 2>/dev/null || true
-    echo "REFUSED: could not publish task $ID's retired copy pointer to $META." >&2
+  local owner=$1 owner_branch=$2 stale=$WT
+  if ! fm_worktree_owner_retire_pointer "$META" "$owner"; then
+    echo "REFUSED: could not retire task $ID's stale copy pointer in $META." >&2
     return 1
   fi
   WT=
@@ -587,15 +583,38 @@ validate_worktree_ownership() {
     echo "REFUSED: the isolated copy at $WT is no longer task $ID's; task $FM_WORKTREE_BINDING_TASK_ID owns it now." >&2
     echo "That copy currently has branch $owner_branch checked out, so tearing down $ID here would kill task $FM_WORKTREE_BINDING_TASK_ID's processes, delete its branch, and reset its copy." >&2
     echo "Task $ID's worktree= record is a stale pointer to a recycled pool slot." >&2
-    echo "Retire the stale pointer with: bin/fm-teardown.sh $ID --forget-worktree (add --force as well if task $ID's own work is being discarded)." >&2
+    echo "Retire the stale pointer WITHOUT touching this lane: bin/fm-reconcile-worktree-pointers.sh --apply - it repairs the record only and leaves every lane, branch and copy intact, which is what a preserved lane needs." >&2
+    echo "Only if task $ID is genuinely being cleaned up too: bin/fm-teardown.sh $ID --forget-worktree (add --force as well if task $ID's own work is being discarded) - that retires the pointer AND removes the lane's records." >&2
     echo "--force alone does NOT override this: it authorizes discarding task $ID's work, never task $FM_WORKTREE_BINDING_TASK_ID's." >&2
     return 1
   fi
 
+  # No readable binding in the copy. Ownership can still be proven from the copy
+  # itself - the branch it actually has checked out, cross-confirmed against the
+  # claimant's own record - which is what covers the collisions that already
+  # existed when bindings arrived. bin/fm-worktree-owner-lib.sh owns that proof
+  # and the conditions that keep it quiet; an unprovable copy resolves to nothing
+  # and falls through to the pre-existing behaviour below.
+  if fm_worktree_owner_resolve "$WT" "$STATE" \
+     && [ "$FM_WORKTREE_OWNER_TASK_ID" != "$ID" ]; then
+    owner_branch=${FM_WORKTREE_OWNER_BRANCH:-<unreadable>}
+    if [ "$FORGET_WORKTREE" = 1 ]; then
+      retire_recycled_worktree_record "$FM_WORKTREE_OWNER_TASK_ID" "$owner_branch" || return 1
+      return 0
+    fi
+    echo "REFUSED: the isolated copy at $WT is no longer task $ID's; task $FM_WORKTREE_OWNER_TASK_ID owns it now." >&2
+    echo "That copy currently has branch $owner_branch checked out, so tearing down $ID here would kill task $FM_WORKTREE_OWNER_TASK_ID's processes, delete its branch, and reset its copy." >&2
+    echo "Task $ID's worktree= record is a stale pointer to a recycled pool slot." >&2
+    echo "Retire the stale pointer WITHOUT touching this lane: bin/fm-reconcile-worktree-pointers.sh --apply - it repairs the record only and leaves every lane, branch and copy intact, which is what a preserved lane needs." >&2
+    echo "Only if task $ID is genuinely being cleaned up too: bin/fm-teardown.sh $ID --forget-worktree (add --force as well if task $ID's own work is being discarded) - that retires the pointer AND removes the lane's records." >&2
+    echo "--force alone does NOT override this: it authorizes discarding task $ID's work, never task $FM_WORKTREE_OWNER_TASK_ID's." >&2
+    return 1
+  fi
+
   if [ "$declared" != fm-worktree-binding.v1 ]; then
-    # A record that predates ownership bindings, over a copy that names no owner
-    # at all. Nothing here proves a reassignment, so behave exactly as before and
-    # let the dirty/landed-work checks below protect the copy.
+    # A record that predates ownership bindings, over a copy whose owner could not
+    # be proven either way. Nothing here proves a reassignment, so behave exactly
+    # as before and let the dirty/landed-work checks below protect the copy.
     reject_unwarranted_forget_worktree "the copy at $WT names no other owner" || return 1
     return 0
   fi

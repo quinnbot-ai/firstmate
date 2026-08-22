@@ -52,6 +52,9 @@
 #   (z6) binding declared in meta but missing from the copy    -> REFUSE, --force overrides
 #   (z7) plain re-run over an already-retired pointer          -> ALLOW  (durably idempotent)
 #   (z8) --force with --forget-worktree on a reassigned copy   -> ALLOW  (other copy untouched)
+#   (z9)  reassigned copy with NO binding anywhere             -> REFUSE, names the owner
+#   (z10) same collision with --forget-worktree                -> pointer retired, copy untouched
+#   (z11) unbound copy on a branch this home does not record   -> no verdict (pre-existing behaviour)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -859,6 +862,111 @@ test_missing_binding_refuses_until_forced() {
 
   expect_code 0 "$rc" "binding-missing: --force is the documented discard path"$'\n'"$(cat "$case_dir/stderr2")"
   pass "a declared-but-missing ownership record refuses, and --force overrides it"
+}
+
+# --- pre-binding collisions -------------------------------------------------
+#
+# The collisions a home has ALREADY accumulated look different from the ones
+# above: neither the stale record nor the recycled copy carries an ownership
+# binding, because both predate it. Ownership is then read from the branch the
+# copy actually has checked out, cross-confirmed against that claimant's own
+# record (bin/fm-worktree-owner-lib.sh).
+
+# Hand the copy to another task WITHOUT writing an ownership binding, the way a
+# slot recycled before bindings existed looks. Args: case_dir owner_task_id
+hand_unbound_worktree_to_other_task() {
+  local case_dir=$1 owner=$2
+  git -C "$case_dir/wt" checkout -q -b "fm/$owner"
+  fm_write_meta "$case_dir/state/$owner.meta" \
+    "window=firstmate:fm-$owner" \
+    "endpoint_task_id=$owner" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+}
+
+# (z9) The uncovered case: no binding anywhere, so the pre-fix code let teardown
+# walk straight into a live task's copy.
+test_unbound_recycled_slot_refuses_and_names_the_live_owner() {
+  local case_dir rc
+  case_dir=$(make_case unbound-recycled-refuses)
+  write_meta "$case_dir" no-mistakes ship
+  log_treehouse_calls "$case_dir"
+  hand_unbound_worktree_to_other_task "$case_dir" live-lane
+  wt_commit "$case_dir" "live lane work"
+  push_current_branch_to_fork "$case_dir" fm/live-lane
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "unbound-recycled: teardown must refuse a copy another task owns"
+  assert_contains "$(cat "$case_dir/stderr")" "live-lane" \
+    "unbound-recycled: the refusal names the task that owns the copy"
+  assert_contains "$(cat "$case_dir/stderr")" "fm/live-lane" \
+    "unbound-recycled: the refusal names the branch actually checked out"
+  assert_contains "$(cat "$case_dir/stderr")" "fm-reconcile-worktree-pointers.sh --apply" \
+    "unbound-recycled: the refusal names the repair that leaves the lane intact"
+  git -C "$case_dir/project" rev-parse --verify -q fm/live-lane >/dev/null \
+    || fail "unbound-recycled: the live lane's branch was deleted"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "unbound-recycled: the live lane's copy was returned to the pool"
+  pass "a recycled slot with no ownership binding still refuses teardown"
+}
+
+# (z10) --forget-worktree becomes available on that same proof, so an unbound
+# collision is retirable rather than permanently stuck.
+test_unbound_recycled_slot_is_retirable() {
+  local case_dir rc
+  case_dir=$(make_case unbound-recycled-forget)
+  write_meta "$case_dir" no-mistakes ship
+  log_treehouse_calls "$case_dir"
+  hand_unbound_worktree_to_other_task "$case_dir" live-lane
+  wt_commit "$case_dir" "live lane work"
+
+  set +e
+  run_teardown "$case_dir" --forget-worktree > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "unbound-forget: retiring an unbound stale pointer should complete"$'\n'"$(cat "$case_dir/stderr")"
+  [ ! -f "$case_dir/state/task-x1.meta" ] \
+    || fail "unbound-forget: the stale task's own records were not cleaned up"
+  [ -d "$case_dir/wt" ] || fail "unbound-forget: the live lane's copy was removed"
+  [ "$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)" = fm/live-lane ] \
+    || fail "unbound-forget: the live lane's copy was reset off its branch"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "unbound-forget: the live lane's copy was returned to the pool"
+  pass "an unbound recycled slot can be retired with --forget-worktree"
+}
+
+# (z11) Quiet: a copy carrying some fm/* branch this home has no record of proves
+# nothing. Calling that a reassignment would refuse legitimate cleanups and hand
+# --forget-worktree a bypass, so the pre-existing behaviour must stand.
+test_unconfirmed_branch_is_not_a_reassignment() {
+  local case_dir rc
+  case_dir=$(make_case unbound-unconfirmed)
+  write_meta "$case_dir" local-only ship
+  log_treehouse_calls "$case_dir"
+  git -C "$case_dir/wt" checkout -q -b fm/ghost-lane
+  wt_commit "$case_dir" "this task's own work"
+  add_fork_with_pushed_branch "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" --forget-worktree > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "unbound-unconfirmed: --forget-worktree must refuse without a proven reassignment"
+  assert_contains "$(cat "$case_dir/stderr")" "proven reassignment" \
+    "unbound-unconfirmed: the refusal explains why the flag does not apply"
+  assert_not_contains "$(cat "$case_dir/stderr")" "ghost-lane owns it now" \
+    "unbound-unconfirmed: an unrecorded branch is never called the owner"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "unbound-unconfirmed: records were cleaned up anyway"
+  pass "an unrecorded branch in an unbound copy is not treated as a reassignment"
 }
 
 test_local_only_fork_remote_allows() {
@@ -2993,6 +3101,9 @@ test_recycled_slot_refuses_even_under_force
 test_forget_worktree_retires_the_stale_pointer_and_spares_the_copy
 test_force_and_forget_worktree_together_complete
 test_forget_worktree_refuses_without_a_proven_reassignment
+test_unbound_recycled_slot_refuses_and_names_the_live_owner
+test_unbound_recycled_slot_is_retirable
+test_unconfirmed_branch_is_not_a_reassignment
 test_retired_pointer_is_honoured_on_a_plain_rerun
 test_own_binding_tears_down_normally
 test_missing_binding_refuses_until_forced
