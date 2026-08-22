@@ -18,6 +18,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+# shellcheck source=bin/fm-worktree-binding-lib.sh
+. "$SCRIPT_DIR/fm-worktree-binding-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 usage() {
@@ -42,7 +44,13 @@ esac
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 
-WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
+if ! fm_worktree_record_resolve "$META"; then
+  if [ -n "$FM_WORKTREE_RECORD_RETIRED_OWNER" ]; then
+    echo "error: task $ID's worktree pointer is retired after reassignment to task $FM_WORKTREE_RECORD_RETIRED_OWNER" >&2
+    exit 1
+  fi
+fi
+WT=$FM_WORKTREE_RECORD_ACTIVE_PATH
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 [ -n "$WT" ] || { echo "error: meta for task $ID is missing worktree=" >&2; exit 1; }
 [ -n "$PROJ" ] || { echo "error: meta for task $ID is missing project=" >&2; exit 1; }

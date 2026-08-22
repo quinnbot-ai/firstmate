@@ -8,6 +8,10 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-wake-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-worktree-binding-lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-brief-script-reference)
@@ -148,6 +152,73 @@ test_unquoted_command_reference_refuses() {
   pass "an absent unquoted helper command refuses dispatch"
 }
 
+test_prefixed_imperative_reference_refuses() {
+  local id=brief-prefixed-a6 rec out status expected
+  rec=$(make_case prefixed-command "$id" 'Before editing, run bin/fm-prefixed-missing.sh.')
+  read_case "$rec"
+
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite an absent prefixed helper command"
+  expected="$POOL_DIR/bin/fm-prefixed-missing.sh"
+  assert_contains "$out" "$expected" "prefixed imperative did not resolve against the task worktree"
+  assert_absent "$HOME_DIR/state/$id.meta" "prefixed helper refusal published metadata"
+  pass "a prefixed imperative helper reference refuses dispatch"
+}
+
+test_modal_imperative_reference_refuses() {
+  local id=brief-modal-a7 rec out status expected
+  rec=$(make_case modal-command "$id" 'You must run bin/fm-modal-missing.sh before editing.')
+  read_case "$rec"
+
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite an absent modal helper command"
+  expected="$POOL_DIR/bin/fm-modal-missing.sh"
+  assert_contains "$out" "$expected" "modal imperative did not resolve against the task worktree"
+  assert_absent "$HOME_DIR/state/$id.meta" "modal helper refusal published metadata"
+  pass "a modal imperative helper reference refuses dispatch"
+}
+
+test_negative_modal_reference_does_not_refuse() {
+  local id=brief-negative-modal-a8 rec out status
+  rec=$(make_case negative-modal "$id" 'You must never run bin/fm-negative-only.sh.')
+  read_case "$rec"
+
+  out=$(run_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "a negative helper instruction should not block dispatch: $out"
+  assert_contains "$out" "spawned $id" "negative helper instruction did not reach worker dispatch"
+  pass "a negative modal helper reference does not refuse dispatch"
+}
+
+test_pool_transition_lock_precedes_allocation() {
+  local id=brief-pool-lock-a9 rec lock out_file pid status
+  rec=$(make_case pool-lock "$id" 'Proceed with the task.')
+  read_case "$rec"
+  lock=$(fm_worktree_pool_transition_lock_path "$HOME_DIR/state" "$PROJECT_DIR") || \
+    fail "could not resolve the fixture pool transition lock"
+  fm_lock_acquire_wait "$lock"
+  out_file="$HOME_DIR/state/$id.spawn-output"
+  run_spawn "$id" >"$out_file" &
+  pid=$!
+  sleep 1
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fm_lock_release "$lock"
+    wait "$pid" || true
+    fail "spawn did not wait for the held pool transition lock: $(cat "$out_file")"
+  fi
+  assert_absent "$HOME_DIR/state/$id.endpoint" "spawn created an endpoint while allocation was locked"
+  assert_absent "$HOME_DIR/state/$id.lease" "spawn acquired a pooled worktree while allocation was locked"
+  fm_lock_release "$lock"
+  wait "$pid"
+  status=$?
+  expect_code 0 "$status" "spawn failed after the pool transition lock was released: $(cat "$out_file")"
+  assert_present "$HOME_DIR/state/$id.lease" "spawn never acquired the pooled worktree after lock release"
+  assert_present "$HOME_DIR/state/$id.meta" "spawn never published its binding after lock release"
+  pass "the pool transition lock covers allocation through binding publication"
+}
+
 test_prose_only_mention_does_not_refuse() {
   local id=brief-prose-a4 rec out status
   # shellcheck disable=SC2016 # The literal variable reference exercises the prose parser path.
@@ -165,6 +236,10 @@ test_absent_variable_expanded_helper_refuses_at_task_worktree
 test_present_helper_passes
 test_fenced_command_reference_refuses
 test_unquoted_command_reference_refuses
+test_prefixed_imperative_reference_refuses
+test_modal_imperative_reference_refuses
+test_negative_modal_reference_does_not_refuse
 test_prose_only_mention_does_not_refuse
+test_pool_transition_lock_precedes_allocation
 
 echo "# all fm-spawn-brief-script-reference tests passed"

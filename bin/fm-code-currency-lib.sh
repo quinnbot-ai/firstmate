@@ -91,13 +91,27 @@ fm_code_currency_guard_files() {
   done
 }
 
+fm_code_currency_untracked_landed_files() {
+  local root=$1 base=$2 path untracked landed
+  untracked=$(git -C "$root" ls-files --others --exclude-standard 2>/dev/null) || return 1
+  [ -n "$untracked" ] || return 0
+  landed=$(git -C "$root" diff --name-only "HEAD...$base" 2>/dev/null) || return 1
+  while IFS= read -r path; do
+    if printf '%s\n' "$untracked" | grep -Fqx -- "$path"; then
+      printf '%s\n' "$path"
+    fi
+  done <<EOF
+$landed
+EOF
+}
+
 # fm_code_currency_line <root>
 # Echo one CODE_STALE diagnostic when the clean checkout at <root> is behind the
-# default branch it follows, or when tracked checkout drift makes live code
+# default branch it follows, or when checkout drift makes live code
 # unprovable. Echo nothing (returning 1) for other clean states: not a git work
 # tree, nothing to compare against, already current, or ahead only.
 fm_code_currency_line() {
-  local root=$1 base behind head_sha base_sha guard guard_count shown more guard_text tracked_status
+  local root=$1 base behind head_sha base_sha guard guard_count shown more guard_text tracked_status untracked_landed untracked_shown
   git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
   base=$(fm_code_currency_base_ref "$root") || return 1
   behind=$(git -C "$root" rev-list --count "HEAD..$base" 2>/dev/null) || return 1
@@ -120,6 +134,13 @@ fm_code_currency_line() {
       ;;
     *) return 1 ;;
   esac
+  untracked_landed=$(fm_code_currency_untracked_landed_files "$root" "$base") || return 1
+  if [ -n "$untracked_landed" ]; then
+    untracked_shown=$(printf '%s\n' "$untracked_landed" | head -n 4 | paste -sd, - | sed 's/,/, /g')
+    printf 'CODE_STALE: UNPROVEN live code: landed paths are present as untracked files outside checked-out HEAD %s: %s. HEAD is %s commit(s) behind %s (%s) as last fetched; installed code cannot be proven to match HEAD or the landed branch.\n' \
+      "$head_sha" "$untracked_shown" "$behind" "$base" "$base_sha"
+    return 0
+  fi
   [ "$behind" -gt 0 ] || return 1
 
   guard=$(fm_code_currency_guard_files "$root" "$base")

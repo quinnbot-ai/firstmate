@@ -47,6 +47,8 @@ case $- in *u*) _fm_classify_nounset=on ;; *) _fm_classify_nounset=off ;; esac
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$_FM_CLASSIFY_LIB_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-worktree-binding-lib.sh
+. "$_FM_CLASSIFY_LIB_DIR/fm-worktree-binding-lib.sh"
 [ "$_fm_classify_nounset" = on ] || set +u
 unset _fm_classify_nounset
 
@@ -1290,11 +1292,13 @@ FM_WORKTREE_WRITE_TIMEOUT=${FM_WORKTREE_WRITE_TIMEOUT:-10}
 # worktree's own filesystem rather than descending into a nested network or container
 # mount, so a write that lands only under such a mount is one more negative outcome.
 crew_worktree_written_since() {  # <id> <state> <anchor-file>
-  local id=$1 state=$2 anchor=$3 wt kind name hit bound
+  local id=$1 state=$2 anchor=$3 meta wt kind name hit bound
   local -a names=() prune=()
   [ -n "$id" ] || return 1
   [ -f "$anchor" ] || return 1
-  wt=$(grep '^worktree=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  meta="$state/$id.meta"
+  fm_worktree_record_resolve "$meta" || return 1
+  wt=$FM_WORKTREE_RECORD_ACTIVE_PATH
   [ -n "$wt" ] && [ -d "$wt" ] || return 1
   kind=$(grep '^kind=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
   [ "$kind" != secondmate ] || return 1

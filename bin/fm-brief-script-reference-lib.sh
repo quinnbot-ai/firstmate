@@ -5,8 +5,8 @@
 #
 # A brief can outlive the checkout it was written for.  This detects only helper
 # scripts the worker is directed to execute: any bin/fm-*.sh path in a fenced
-# code block, or one on an inline command-style line beginning with run, call,
-# use, invoke, execute, source, or start.  Plain descriptive mentions
+# code block, or one in an inline imperative clause using run, call, use,
+# invoke, execute, source, or start.  Plain descriptive mentions
 # deliberately do not block dispatch, because a false refusal is worse than an
 # advisory historical reference.  The parser recognizes bin/, ./bin/,
 # $FM_ROOT/bin, and ${FM_ROOT}/bin forms, then resolves every reference to the
@@ -56,8 +56,9 @@ while (my $line = <$fh>) {
     next;
   }
 
-  next unless $line =~ /^\s*(?:[-*+]\s+|\d+[.)]\s+)?(?:please\s+)?(?:(?:then|next)\s+)?(?:run|call|use|invoke|execute|source|start)\b/i;
-  next if $line =~ /^\s*(?:[-*+]\s+|\d+[.)]\s+)?(?:please\s+)?(?:do\s+not|don't|never)\s+(?:run|call|use|invoke|execute|source|start)\b/i;
+  my $lead = qr/^\s*(?:[-*+]\s+|\d+[.)]\s+)?/;
+  next if $line =~ /$lead(?:(?:before|after|once)\b[^,]{0,120},\s*)?(?:(?:you\s+)?(?:must|should|need\s+to)\s+|please\s+)?(?:do\s+not|don't|never)\s+(?:run|call|use|invoke|execute|source|start)\b/i;
+  next unless $line =~ /$lead(?:(?:before|after|once)\b[^,]{0,120},\s*)?(?:(?:first|then|next|finally),?\s+)?(?:(?:you\s+)?(?:must|should|need\s+to)\s+|please\s+)?(?:run|call|use|invoke|execute|source|start)\b/i;
   emit_scripts($line);
 }
 PERL

@@ -1201,6 +1201,29 @@ test_recycled_worktree_binding_refuses_live_lane() {
   pass "recycled worktree binding refuses the live lane"
 }
 
+test_retired_worktree_pointer_is_inactive() {
+  reset_fakes
+  local d out
+  d=$(new_case retired-worktree-pointer)
+  make_repo_on_branch "$d/wt" fm/live-lane
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/dormant-lane.meta" \
+    "window=fm:fm-dormant-lane" "worktree=$d/wt" "worktree_retired=live-lane" \
+    "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=$(run_running fm/live-lane)
+  FM_TEST_BINDING_ID=live-lane
+  out=$(run_crew_state "$d" dormant-lane)
+  assert_contains "$out" "state: unknown" "retired worktree pointer returned live state"
+  assert_contains "$out" "source: none" "retired worktree pointer used an active source"
+  assert_contains "$out" "pointer retired after reassignment to task live-lane" \
+    "retired worktree pointer did not explain its inactive state"
+  assert_not_contains "$out" "source: run-step" \
+    "retired metadata attributed the replacement lane's run"
+  assert_not_contains "$out" "state: working" \
+    "retired metadata returned the replacement lane's active state"
+  pass "retired worktree pointers are inactive state history"
+}
+
 test_unverifiable_worktree_binding_refuses_distinctly() {
   reset_fakes
   local d out
@@ -1555,6 +1578,7 @@ test_scout_skips_run_lookup
 test_torn_down_worktree
 test_exact_worktree_binding_reads_normally
 test_recycled_worktree_binding_refuses_live_lane
+test_retired_worktree_pointer_is_inactive
 test_unverifiable_worktree_binding_refuses_distinctly
 test_legacy_worktree_without_binding_reads_normally
 test_cross_pool_worktree_binding_reads_normally

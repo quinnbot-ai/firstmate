@@ -17,6 +17,10 @@
 # Usage: . bin/fm-worktree-binding-lib.sh
 #
 # Public entry points:
+#   fm_worktree_pool_transition_lock_path <state-dir> <project>
+#     Resolves the shared allocation/return lock for one project's local pool.
+#   fm_worktree_record_resolve <meta-file>
+#     Resolves only an active worktree pointer; a retired pointer is history.
 #   fm_worktree_binding_write <worktree> <task-id>
 #     Atomically binds a freshly assigned worktree to its current task.
 #   fm_worktree_binding_matches <worktree> <task-id>
@@ -42,6 +46,31 @@ fm_worktree_transition_lock_path() {  # <state-dir> <worktree>
   digest=$(printf '%s' "$worktree_real" | git hash-object --stdin 2>/dev/null) || return 1
   [ -n "$digest" ] || return 1
   printf '%s/.worktree-transition-%s.lock\n' "$state_real" "$digest"
+}
+
+fm_worktree_pool_transition_lock_path() {  # <state-dir> <project>
+  local state=${1-} project=${2-} state_real project_real digest
+  [ -n "$state" ] && [ -d "$state" ] || return 1
+  [ -n "$project" ] && [ -d "$project" ] || return 1
+  state_real=$(CDPATH='' cd -- "$state" 2>/dev/null && pwd -P) || return 1
+  project_real=$(CDPATH='' cd -- "$project" 2>/dev/null && pwd -P) || return 1
+  digest=$(printf '%s' "$project_real" | git hash-object --stdin 2>/dev/null) || return 1
+  [ -n "$digest" ] || return 1
+  printf '%s/.worktree-pool-transition-%s.lock\n' "$state_real" "$digest"
+}
+
+FM_WORKTREE_RECORD_ACTIVE_PATH=
+FM_WORKTREE_RECORD_RETIRED_OWNER=
+
+fm_worktree_record_resolve() {  # <meta-file>
+  local meta=${1-}
+  FM_WORKTREE_RECORD_ACTIVE_PATH=
+  FM_WORKTREE_RECORD_RETIRED_OWNER=
+  [ -n "$meta" ] && [ -f "$meta" ] || return 1
+  FM_WORKTREE_RECORD_RETIRED_OWNER=$(sed -n 's/^worktree_retired=//p' "$meta" | tail -1)
+  [ -z "$FM_WORKTREE_RECORD_RETIRED_OWNER" ] || return 1
+  FM_WORKTREE_RECORD_ACTIVE_PATH=$(sed -n 's/^worktree=//p' "$meta" | tail -1)
+  [ -n "$FM_WORKTREE_RECORD_ACTIVE_PATH" ]
 }
 
 fm_worktree_binding_detail() {

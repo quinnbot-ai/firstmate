@@ -88,6 +88,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -110,6 +111,7 @@ LINE_CAP_SUFFIX = " [truncated]"
 
 SUBJECT_RE = re.compile(r"^/?[A-Za-z0-9][A-Za-z0-9._/-]*$")
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+FIELD_RE = re.compile(r"^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$")
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 SPEC_KEYS = {
@@ -159,7 +161,24 @@ def clean(value: str) -> str:
 
 
 def is_number(value) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and (not isinstance(value, float) or math.isfinite(value))
+    )
+
+
+def json_loads_finite(text: str):
+    def reject_constant(value: str):
+        raise ValueError(f"non-finite number {value}")
+
+    def finite_float(value: str) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise ValueError(f"non-finite number {value}")
+        return parsed
+
+    return json.loads(text, parse_constant=reject_constant, parse_float=finite_float)
 
 
 def fmt_number(value) -> str:
@@ -196,7 +215,7 @@ def positive_int(obj, key, default, where):
 
 def load_spec(path: Path) -> dict:
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw = json_loads_finite(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         raise SpecError("spec file is missing") from None
     except (OSError, ValueError) as exc:
@@ -249,7 +268,7 @@ def load_spec(path: Path) -> dict:
         if not source_path.is_absolute():
             raise SpecError(f"{where}.path must be an absolute path")
         records = source.get("records", "")
-        if not isinstance(records, str):
+        if not isinstance(records, str) or (records and not FIELD_RE.match(records)):
             raise SpecError(f"{where}.records must be a dotted key path")
         spec["sources"][name] = {
             "name": name,
@@ -277,7 +296,7 @@ def load_spec(path: Path) -> dict:
         if source not in spec["sources"]:
             raise SpecError(f"{where}.source names no declared source: {source}")
         subject_field = rule.get("subject_field")
-        if not isinstance(subject_field, str) or not subject_field:
+        if not isinstance(subject_field, str) or not FIELD_RE.match(subject_field):
             raise SpecError(f"{where}.subject_field must be a field name")
         action = rule.get("action")
         if not isinstance(action, str) or not clean(action):
@@ -286,7 +305,7 @@ def load_spec(path: Path) -> dict:
         if (
             not isinstance(evidence_fields, list)
             or not evidence_fields
-            or not all(isinstance(f, str) and f for f in evidence_fields)
+            or not all(isinstance(f, str) and FIELD_RE.match(f) for f in evidence_fields)
         ):
             raise SpecError(f"{where}.evidence_fields must be a non-empty field list")
         rank = rule.get("rank", 0)
@@ -300,7 +319,7 @@ def load_spec(path: Path) -> dict:
             pwhere = f"{where}.when[{pindex}]"
             require_keys(predicate, PREDICATE_KEYS, pwhere)
             field = predicate.get("field")
-            if not isinstance(field, str) or not field:
+            if not isinstance(field, str) or not FIELD_RE.match(field):
                 raise SpecError(f"{pwhere}.field must be a field name")
             op = predicate.get("op")
             if op in UNARY_OPS:
@@ -754,7 +773,7 @@ def main() -> int:
         if not structural_found:
             for name, source in fresh_sources.items():
                 try:
-                    payloads[name] = json.loads(
+                    payloads[name] = json_loads_finite(
                         source["path"].read_text(encoding="utf-8")
                     )
                 except (OSError, ValueError) as exc:

@@ -681,6 +681,8 @@ SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
 SPAWN_WORKTREE_TRANSITION_LOCK=
 SPAWN_WORKTREE_TRANSITION_LOCK_HELD=0
+SPAWN_WORKTREE_POOL_TRANSITION_LOCK=
+SPAWN_WORKTREE_POOL_TRANSITION_LOCK_HELD=0
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 RELAUNCH_REPLACEMENT_PENDING=0
@@ -787,6 +789,10 @@ spawn_abort_cleanup() {
   if [ "$SPAWN_WORKTREE_TRANSITION_LOCK_HELD" = 1 ]; then
     SPAWN_WORKTREE_TRANSITION_LOCK_HELD=0
     fm_lock_release "$SPAWN_WORKTREE_TRANSITION_LOCK" || true
+  fi
+  if [ "$SPAWN_WORKTREE_POOL_TRANSITION_LOCK_HELD" = 1 ]; then
+    SPAWN_WORKTREE_POOL_TRANSITION_LOCK_HELD=0
+    fm_lock_release "$SPAWN_WORKTREE_POOL_TRANSITION_LOCK" || true
   fi
   if [ "$SPAWN_META_LOCK_HELD" = 1 ]; then
     SPAWN_META_LOCK_HELD=0
@@ -1041,7 +1047,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
-  RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
+  if ! fm_worktree_record_resolve "$RELAUNCH_META"; then
+    if [ -n "$FM_WORKTREE_RECORD_RETIRED_OWNER" ]; then
+      echo "error: task $ID's recorded worktree was retired after reassignment to task $FM_WORKTREE_RECORD_RETIRED_OWNER; refusing to relaunch against that historical copy" >&2
+      exit 1
+    fi
+  fi
+  RELAUNCH_WT=$FM_WORKTREE_RECORD_ACTIVE_PATH
   [ -n "$RELAUNCH_WT" ] && [ -d "$RELAUNCH_WT" ] || {
     echo "error: task $ID's recorded worktree '${RELAUNCH_WT:-none}' is missing; refusing to relaunch without the local copy its work lives in" >&2
     exit 1
@@ -1875,6 +1887,14 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 }
 
 W="fm-$ID"
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  SPAWN_WORKTREE_POOL_TRANSITION_LOCK=$(fm_worktree_pool_transition_lock_path "$STATE" "$PROJ_ABS") || {
+    echo "error: cannot establish the pool transition lock for project $PROJ_ABS" >&2
+    exit 1
+  }
+  fm_lock_acquire_wait "$SPAWN_WORKTREE_POOL_TRANSITION_LOCK"
+  SPAWN_WORKTREE_POOL_TRANSITION_LOCK_HELD=1
+fi
 if [ "$RELAUNCH" -eq 1 ]; then
   # Adopt the recorded endpoint instead of creating one. This is what keeps a
   # relaunch a REPLACEMENT rather than a second copy of the task: no new
@@ -2785,6 +2805,10 @@ fi
 if [ "$SPAWN_WORKTREE_TRANSITION_LOCK_HELD" = 1 ]; then
   fm_lock_release "$SPAWN_WORKTREE_TRANSITION_LOCK"
   SPAWN_WORKTREE_TRANSITION_LOCK_HELD=0
+fi
+if [ "$SPAWN_WORKTREE_POOL_TRANSITION_LOCK_HELD" = 1 ]; then
+  fm_lock_release "$SPAWN_WORKTREE_POOL_TRANSITION_LOCK"
+  SPAWN_WORKTREE_POOL_TRANSITION_LOCK_HELD=0
 fi
 if [ "$SPAWN_META_LOCK_HELD" = 1 ]; then
   fm_lock_release "$SPAWN_META_LOCK"

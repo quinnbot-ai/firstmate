@@ -687,6 +687,59 @@ test_retention_cannot_expire_before_subject_cooldown() {
   pass "latch retention must cover the full subject cooldown"
 }
 
+test_nonfinite_source_measurement_is_structural_error() {
+  local home out
+  home=$(make_home nonfinite-source acme)
+  write_source "$home" '[{"venture":"acme","flag":"review","cost_30d":NaN}]'
+  write_spec "$home" r '[{"field":"flag","op":"eq","value":"review"}]' \
+    '["cost_30d"]'
+
+  out=$(scan "$home" --id r)
+  assert_contains "$out" "source-invalid" \
+    "a non-finite source measurement was admitted as quantified evidence"
+  assert_contains "$out" "non-finite number" \
+    "the invalid source diagnostic did not identify the non-finite number"
+  assert_not_contains "$out" "cost_30d=nan" \
+    "NaN escaped into a supposedly quantified wake"
+  [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the non-finite source diagnostic broke the one-line wake contract: $out"
+  pass "non-finite source measurements are structural errors"
+}
+
+test_nonfinite_spec_number_is_rejected() {
+  local home out rc
+  home=$(make_home nonfinite-spec acme)
+  write_source "$home" '[{"venture":"acme","cost_30d":10}]'
+  write_spec "$home" r '[{"field":"cost_30d","op":"ge","value":Infinity}]' \
+    '["cost_30d"]'
+
+  out=$(scan "$home" --id r --validate 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a non-finite predicate number was accepted"
+  assert_contains "$out" "non-finite number" \
+    "the invalid spec diagnostic did not identify the non-finite number"
+  assert_absent "$home/state/r.standing-review-latch" \
+    "an invalid non-finite spec wrote latch state"
+  pass "non-finite predicate numbers are rejected"
+}
+
+test_unsafe_evidence_field_is_rejected_on_one_line() {
+  local home out
+  home=$(make_home unsafe-evidence-field acme)
+  write_source "$home" '[{"venture":"acme","cost\nbreak":10}]'
+  write_spec "$home" r '[{"field":"venture","op":"eq","value":"acme"}]' \
+    '["cost\nbreak"]'
+
+  out=$(scan "$home" --id r)
+  assert_contains "$out" "spec-invalid" \
+    "an evidence field with a control character was accepted"
+  assert_contains "$out" "evidence_fields" \
+    "the unsafe-field diagnostic did not identify the rejected contract"
+  [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = 1 ] \
+    || fail "an unsafe field label broke the one-line wake contract: $out"
+  pass "unsafe evidence field labels are rejected on one line"
+}
+
 test_script_parses
 test_quantified_finding_is_emitted_with_its_evidence
 test_classification_without_measurement_is_rejected
@@ -710,6 +763,9 @@ test_a_source_that_changed_shape_is_reported
 test_a_long_finding_is_bounded_for_the_wake_digest
 test_a_long_text_field_cannot_truncate_the_measurement
 test_retention_cannot_expire_before_subject_cooldown
+test_nonfinite_source_measurement_is_structural_error
+test_nonfinite_spec_number_is_rejected
+test_unsafe_evidence_field_is_rejected_on_one_line
 test_blindness_is_reported_before_a_finding_from_elsewhere
 test_a_subject_may_be_named_by_absolute_path
 test_a_subject_outside_the_declared_root_is_rejected

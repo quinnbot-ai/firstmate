@@ -252,6 +252,34 @@ test_dirty_tracked_checkout_is_unproven() {
   pass "fm_code_currency_line: tracked checkout drift is surfaced as unproven"
 }
 
+test_untracked_landed_path_is_unproven() {
+  local repo out landed_helper
+  repo=$(make_repo "$TMP_ROOT/untracked-landed")
+  land "$repo" bin/fm-new-helper.sh "landed helper"
+  landed_helper=$(git -C "$repo" show origin/main:bin/fm-new-helper.sh)
+  hold_back "$repo" 1
+  mkdir -p "$repo/bin"
+  printf '%s\n' "$landed_helper" > "$repo/bin/fm-new-helper.sh"
+
+  out=$(fm_code_currency_line "$repo" || true)
+  assert_contains "$out" "CODE_STALE: UNPROVEN live code" \
+    "an untracked landed helper was called inactive"
+  assert_contains "$out" "bin/fm-new-helper.sh" \
+    "the unproven diagnostic did not name the untracked landed path"
+  assert_not_contains "$out" "inactive here" \
+    "an untracked landed helper made an unproven inactivity claim"
+
+  rm "$repo/bin/fm-new-helper.sh"
+  printf 'scratch\n' > "$repo/unrelated.tmp"
+  out=$(fm_code_currency_line "$repo" || true)
+  assert_contains "$out" "running code" \
+    "an unrelated untracked scratch file made the checkout unproven"
+  assert_not_contains "$out" "UNPROVEN" \
+    "unrelated untracked scratch was treated as landed runtime drift"
+
+  pass "fm_code_currency_line: untracked landed paths make live code unproven"
+}
+
 # --- SESSION START: the line reaches the digest -----------------------------
 
 # The library is only useful if a session start actually prints it, and only
@@ -283,4 +311,5 @@ test_states
 test_guard_naming
 test_never_updates
 test_dirty_tracked_checkout_is_unproven
+test_untracked_landed_path_is_unproven
 test_bootstrap_line

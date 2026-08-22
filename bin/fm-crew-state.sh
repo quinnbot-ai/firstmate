@@ -115,12 +115,17 @@ meta_value() {  # <key>
   grep "^$1=" "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
-WT=$(meta_value worktree)
 KIND=$(meta_value kind)
 HARNESS=$(meta_value harness)
 REMOTE_HOST=$(meta_value remote_host)
 BINDING_SCHEMA=$(meta_value worktree_binding)
 [ -n "$KIND" ] || KIND=ship
+if ! fm_worktree_record_resolve "$META"; then
+  if [ -n "$FM_WORKTREE_RECORD_RETIRED_OWNER" ] && [ "$KIND" != secondmate ]; then
+    emit unknown none "worktree pointer retired after reassignment to task $FM_WORKTREE_RECORD_RETIRED_OWNER"
+  fi
+fi
+WT=$FM_WORKTREE_RECORD_ACTIVE_PATH
 
 # A torn-down (or never-created) worktree has no current state to read. A
 # remote secondmate's recorded worktree is a path on ITS host, so the local

@@ -70,6 +70,8 @@ stale_and_pr_commits() {
 run_review_diff() {
   local case_dir=$1
   shift
+  GIT_CONFIG_GLOBAL=/dev/null \
+  GIT_CONFIG_SYSTEM=/dev/null \
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
     "$REVIEW_DIFF" "$@"
@@ -169,8 +171,27 @@ test_unreachable_pr_head_falls_back_with_warning() {
   pass "fm-review-diff falls back to local branch with a warning when PR head is unreachable"
 }
 
+test_retired_pointer_refuses_replacement_lane_diff() {
+  local case_dir out status
+  case_dir=$(make_case retired-pointer)
+  stale_and_pr_commits "$case_dir"
+  write_task_meta "$case_dir" "worktree_retired=live-task"
+
+  set +e
+  out=$(run_review_diff "$case_dir" task-x1 --stat 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "retired-pointer: review used a historical worktree pointer"
+  assert_contains "$out" "retired after reassignment to task live-task" \
+    "retired-pointer: refusal did not identify the replacement owner"
+  assert_not_contains "$out" "feature.txt" \
+    "retired-pointer: review exposed a diff from the replacement lane"
+  pass "fm-review-diff refuses a retired worktree pointer"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
+test_retired_pointer_refuses_replacement_lane_diff

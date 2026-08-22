@@ -218,6 +218,8 @@ META_LOCK=
 META_LOCK_HELD=0
 WORKTREE_TRANSITION_LOCK=
 WORKTREE_TRANSITION_LOCK_HELD=0
+WORKTREE_POOL_TRANSITION_LOCK=
+WORKTREE_POOL_TRANSITION_LOCK_HELD=0
 DESCENDANT_LOCK_PATHS=()
 DESCENDANT_TASK_STATES=()
 DESCENDANT_TASK_IDS=()
@@ -235,6 +237,10 @@ teardown_release_locks() {
   if [ "$WORKTREE_TRANSITION_LOCK_HELD" = 1 ]; then
     fm_lock_release "$WORKTREE_TRANSITION_LOCK" || true
     WORKTREE_TRANSITION_LOCK_HELD=0
+  fi
+  if [ "$WORKTREE_POOL_TRANSITION_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$WORKTREE_POOL_TRANSITION_LOCK" || true
+    WORKTREE_POOL_TRANSITION_LOCK_HELD=0
   fi
   if [ "$META_LOCK_HELD" = 1 ]; then
     fm_lock_release "$META_LOCK" || true
@@ -498,6 +504,16 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
+   && [ -n "$WT" ] && [ -d "$WT" ] \
+   && [ -z "$(fm_meta_get "$META" worktree_retired)" ]; then
+  WORKTREE_POOL_TRANSITION_LOCK=$(fm_worktree_pool_transition_lock_path "$STATE" "$PROJ") || {
+    echo "error: cannot establish the pool transition lock for project $PROJ" >&2
+    exit 1
+  }
+  fm_lock_acquire_wait "$WORKTREE_POOL_TRANSITION_LOCK"
+  WORKTREE_POOL_TRANSITION_LOCK_HELD=1
+fi
 if [ "$KIND" != secondmate ] && [ -n "$WT" ] && [ -d "$WT" ]; then
   WORKTREE_TRANSITION_LOCK=$(fm_worktree_transition_lock_path "$STATE" "$WT") || {
     echo "error: cannot establish the ownership transition lock for worktree $WT" >&2

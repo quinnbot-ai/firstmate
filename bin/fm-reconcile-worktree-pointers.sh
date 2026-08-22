@@ -132,8 +132,16 @@ for meta in "$STATE"/*.meta; do
     fm_lock_release "$lock" || true
     continue
   fi
+  project=$(meta_field "$meta" project)
+  pool_lock=$(fm_worktree_pool_transition_lock_path "$STATE" "$project") || {
+    failed=$((failed + 1))
+    fm_lock_release "$lock" || true
+    continue
+  }
+  fm_lock_acquire_wait "$pool_lock"
   transition_lock=$(fm_worktree_transition_lock_path "$STATE" "$wt") || {
     failed=$((failed + 1))
+    fm_lock_release "$pool_lock" || true
     fm_lock_release "$lock" || true
     continue
   }
@@ -142,11 +150,13 @@ for meta in "$STATE"/*.meta; do
     unresolved=$((unresolved + 1))
     printf 'UNRESOLVED: %s %s\n' "$id" "$FM_WORKTREE_OWNER_DETAIL"
     fm_lock_release "$transition_lock" || true
+    fm_lock_release "$pool_lock" || true
     fm_lock_release "$lock" || true
     continue
   fi
   if [ "$FM_WORKTREE_OWNER_TASK_ID" = "$id" ]; then
     fm_lock_release "$transition_lock" || true
+    fm_lock_release "$pool_lock" || true
     fm_lock_release "$lock" || true
     continue
   fi
@@ -161,6 +171,7 @@ for meta in "$STATE"/*.meta; do
     failed=$((failed + 1))
   fi
   fm_lock_release "$transition_lock" || true
+  fm_lock_release "$pool_lock" || true
   fm_lock_release "$lock" || true
 done
 

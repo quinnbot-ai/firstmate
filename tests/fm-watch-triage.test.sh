@@ -415,6 +415,9 @@ test_crew_worktree_written_since_classifier() {
   printf 'new\n' > "$wt/src/new.c"
   crew_worktree_written_since c "$state" "$anchor" \
     || fail "a file written after the anchor was not reported as write evidence"
+  printf 'window=test:fm-c\nkind=ship\nworktree=%s\nworktree_retired=live-c\n' "$wt" > "$state/c.meta"
+  ! crew_worktree_written_since c "$state" "$anchor" \
+    || fail "a retired pointer attributed the replacement lane's writes to the old task"
   # An empty id is never evidence.
   ! crew_worktree_written_since "" "$state" "$anchor" || fail "an empty id reported write evidence"
 

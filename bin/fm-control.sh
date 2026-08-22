@@ -134,6 +134,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-worktree-binding-lib.sh
+. "$SCRIPT_DIR/fm-worktree-binding-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
@@ -857,6 +859,13 @@ case "$VERB" in
     echo "$result $ID harness=$HARNESS backend=$BACKEND endpoint=$T worktree=$WT"
     ;;
   relaunch)
+    if ! fm_worktree_record_resolve "$META"; then
+      if [ -n "$FM_WORKTREE_RECORD_RETIRED_OWNER" ]; then
+        die "task $ID's worktree pointer was retired after reassignment to task $FM_WORKTREE_RECORD_RETIRED_OWNER; refusing to relaunch against that historical copy"
+      fi
+      die "task $ID has no active recorded worktree; refusing to relaunch without a local copy to preserve"
+    fi
+    WT=$FM_WORKTREE_RECORD_ACTIVE_PATH
     do_relaunch
     ;;
 esac
