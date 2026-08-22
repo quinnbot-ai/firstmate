@@ -13,6 +13,7 @@
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "PR_CHECK_MIGRATION: <private remediation>",
 #                 "TANGLE: <remediation>",
+#                 "CODE_STALE: <gap between running code and the branch it follows>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
@@ -48,6 +49,13 @@
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
+#          A CODE_STALE line means the code root this home runs (FM_ROOT) is
+#          behind the default branch it follows, so changes that are merged are
+#          not yet running here. Firstmate never updates itself, and a home may
+#          be held at an older commit on purpose, so the line reports and never
+#          acts. bin/fm-code-currency-lib.sh owns the comparison: it is a local
+#          read of the already-fetched remote-tracking ref, never a fetch, so the
+#          reported gap is a floor rather than a live remote query.
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
@@ -136,6 +144,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 # shellcheck source=bin/fm-tangle-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
+# shellcheck source=bin/fm-code-currency-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-code-currency-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh disable=SC1091
@@ -1173,6 +1183,11 @@ detect_local_config() {
       echo "TANGLE: primary checkout on feature branch '$tangle_branch' (expected '$tangle_default'); the work is safe on that ref - restore the primary with: git -C $FM_ROOT checkout $tangle_default, then re-validate the branch in a proper worktree"
     fi
   fi
+  # Landed-is-not-running check: the code root this home runs must not be quietly
+  # older than the default branch it follows (see fm-code-currency-lib.sh). A
+  # local read only - it never fetches and never updates, because holding at an
+  # older commit is a captain decision.
+  fm_code_currency_line "$FM_ROOT" || true
   crew=
   [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] && [ -n "$crew" ] && [ "$crew" != "default" ]; then
