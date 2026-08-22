@@ -328,6 +328,31 @@ test_index_hints_cannot_hide_landed_path_drift() {
   pass "landed path bytes are checked independently of index hints"
 }
 
+test_unrelated_index_hint_prevents_running_claim() {
+  local repo out diff_status
+  repo=$(make_repo "$TMP_ROOT/unrelated-index-hint")
+  land "$repo" bin/fm-runtime.sh "runtime version one"
+  land "$repo" docs/landed.md "landed documentation"
+  hold_back "$repo" 1
+  printf '%s\n' "locally changed runtime" > "$repo/bin/fm-runtime.sh"
+  git -C "$repo" update-index --assume-unchanged bin/fm-runtime.sh
+
+  git -C "$repo" diff --quiet HEAD --
+  diff_status=$?
+  expect_code 0 "$diff_status" "fixture failed: Git did not hide the unrelated runtime change"
+  out=$(fm_code_currency_line "$repo" || true)
+  assert_contains "$out" "UNPROVEN live code" \
+    "an unrelated index hint allowed worktree bytes to be called running code"
+  assert_contains "$out" "bin/fm-runtime.sh" \
+    "the unproven diagnostic did not identify the hinted runtime path"
+  assert_not_contains "$out" "CODE_STALE: running code" \
+    "hidden unrelated runtime bytes produced a running-code claim"
+  assert_not_contains "$out" "inactive here" \
+    "hidden unrelated runtime bytes produced an inactivity claim"
+
+  pass "index hints anywhere make checked-out runtime bytes unproven"
+}
+
 # --- SESSION START: the line reaches the digest -----------------------------
 
 # The library is only useful if a session start actually prints it, and only
@@ -361,5 +386,6 @@ test_never_updates
 test_dirty_tracked_checkout_is_unproven
 test_untracked_landed_path_is_unproven
 test_index_hints_cannot_hide_landed_path_drift
+test_unrelated_index_hint_prevents_running_claim
 test_ignored_landed_path_is_unproven
 test_bootstrap_line

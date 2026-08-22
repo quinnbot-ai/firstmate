@@ -32,6 +32,9 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `TANGLE: <remediation>` - the primary checkout is stranded on a feature branch instead of its default branch; `AGENTS.md` section 8 explains why this guard exists and what it protects.
   The work is safe on that branch ref; restore the primary to its default branch with the printed `git -C <root> checkout <default>`, then re-validate that branch in a proper worktree.
   This is the only sanctioned firstmate-initiated git write to the primary, and it is a non-destructive branch switch that strands nothing.
+- `CODE_STALE: UNPROVEN live code: ...` - tracked drift, landed-path bytes, or index hints prevent the checkout from proving which code is installed.
+  Do not call landed changes active or inactive, do not tell the captain a named guard is absent, and do not offer `/updatefirstmate` as remediation while this form remains.
+  Reconcile the reported checkout condition and rerun the diagnostic before applying the proven `running code` procedure below.
 - `CODE_STALE: running code (<sha>) is at least <n> commit(s) behind <branch> (<sha>) as last fetched...` - work that is merged is not running here, and nothing else in the digest separates those two facts.
   Read it as a correction to the assumption a merged fix invites: the named guard paths are changes this home does NOT currently have, however recently they landed.
   It is never an instruction to update, and it is not a fault report - a home can be held at an older commit deliberately, for instance while a change waits on the captain's decision.

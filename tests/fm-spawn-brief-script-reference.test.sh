@@ -180,6 +180,20 @@ test_modal_imperative_reference_refuses() {
   pass "a modal imperative helper reference refuses dispatch"
 }
 
+test_infinitive_imperative_reference_refuses() {
+  local id=brief-infinitive-a12 rec out status expected
+  rec=$(make_case infinitive-command "$id" 'Make sure to run bin/fm-infinitive-missing.sh before editing.')
+  read_case "$rec"
+
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite an absent infinitive helper command"
+  expected="$POOL_DIR/bin/fm-infinitive-missing.sh"
+  assert_contains "$out" "$expected" "infinitive imperative did not resolve against the task worktree"
+  assert_absent "$HOME_DIR/state/$id.meta" "infinitive helper refusal published metadata"
+  pass "an infinitive imperative helper reference refuses dispatch"
+}
+
 test_negative_modal_reference_does_not_refuse() {
   local id=brief-negative-modal-a8 rec out status
   rec=$(make_case negative-modal "$id" 'You must never run bin/fm-negative-only.sh.')
@@ -255,7 +269,7 @@ test_pool_transition_lock_precedes_allocation() {
 test_prose_only_mention_does_not_refuse() {
   local id=brief-prose-a4 rec out status
   # shellcheck disable=SC2016 # The literal variable reference exercises the prose parser path.
-  rec=$(make_case prose-only "$id" 'The dispatcher uses `$FM_ROOT/bin/fm-prose-only.sh` only as historical context.')
+  rec=$(make_case prose-only "$id" 'The historical examples run `$FM_ROOT/bin/fm-prose-only.sh` only as background context.')
   read_case "$rec"
 
   out=$(run_spawn "$id")
@@ -271,6 +285,7 @@ test_fenced_command_reference_refuses
 test_unquoted_command_reference_refuses
 test_prefixed_imperative_reference_refuses
 test_modal_imperative_reference_refuses
+test_infinitive_imperative_reference_refuses
 test_negative_modal_reference_does_not_refuse
 test_mixed_negation_still_refuses_positive_instruction
 test_sentence_after_negation_still_refuses_positive_instruction

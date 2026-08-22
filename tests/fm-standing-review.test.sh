@@ -77,6 +77,21 @@ expire_cadence() {  # <home> <id>
   touch -t 200001010000 "$1/state/$2.standing-review-last"
 }
 
+hold_cadence_lock() {  # <cadence-path> <ready-path> <release-path>
+  python3 - "$1" "$2" "$3" <<'PY'
+import fcntl
+import sys
+import time
+from pathlib import Path
+
+with open(sys.argv[1], "r+b") as handle:
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    Path(sys.argv[2]).touch()
+    while not Path(sys.argv[3]).exists():
+        time.sleep(0.01)
+PY
+}
+
 test_script_parses() {
   local out rc
   out=$(bash -n "$SCAN" 2>&1); rc=$?
@@ -165,43 +180,82 @@ test_cadence_silences_the_sweep_between_reviews() {
 }
 
 test_concurrent_scans_are_single_flight() {
-  local home first_pid second_pid combined attempt
+  local home first_pid second_pid holder_pid combined attempt cadence ready release
   home=$(make_home concurrent acme)
+  write_source "$home" '[{"venture":"acme","cost_30d":10,"commits_30d":0}]'
   write_spec "$home" r '[{"field":"commits_30d","op":"eq","value":0}]' \
     '["cost_30d","commits_30d"]'
-  mkfifo "$home/source.json"
-
-  scan "$home" --id r > "$home/first.out" 2> "$home/first.err" &
-  first_pid=$!
+  cadence="$home/state/r.standing-review-last"
+  ready="$home/state/r.lock-ready"
+  release="$home/state/r.lock-release"
+  touch "$cadence"
+  expire_cadence "$home" r
+  hold_cadence_lock "$cadence" "$ready" "$release" &
+  holder_pid=$!
   attempt=0
-  while [ ! -e "$home/state/r.standing-review-last" ] && [ "$attempt" -lt 100 ]; do
+  while [ ! -e "$ready" ] && [ "$attempt" -lt 100 ]; do
     sleep 0.02
     attempt=$((attempt + 1))
   done
-  [ -e "$home/state/r.standing-review-last" ] || {
-    printf '{"rows": []}\n' > "$home/source.json"
-    wait "$first_pid" || true
-    fail "the first scan never reached its evidence read"
+  [ -e "$ready" ] || {
+    touch "$release"
+    wait "$holder_pid" || true
+    fail "the fixture never acquired the cadence lock"
   }
 
+  scan "$home" --id r > "$home/first.out" 2> "$home/first.err" &
+  first_pid=$!
   scan "$home" --id r > "$home/second.out" 2> "$home/second.err" &
   second_pid=$!
   sleep 0.2
-  if ! kill -0 "$second_pid" 2>/dev/null; then
-    printf '{"rows": []}\n' > "$home/source.json"
+  if ! kill -0 "$first_pid" 2>/dev/null || ! kill -0 "$second_pid" 2>/dev/null; then
+    touch "$release"
+    wait "$holder_pid" || true
     wait "$first_pid" || true
     wait "$second_pid" || true
     fail "a concurrent scan bypassed the in-flight review"
   fi
 
-  printf '{"rows": [{"venture":"acme","cost_30d":10,"commits_30d":0}]}\n' \
-    > "$home/source.json"
+  touch "$release"
+  wait "$holder_pid" || fail "the cadence-lock fixture failed"
   wait "$first_pid" || fail "the first concurrent scan failed: $(cat "$home/first.err")"
   wait "$second_pid" || fail "the second concurrent scan failed: $(cat "$home/second.err")"
   combined=$(cat "$home/first.out" "$home/second.out")
   [ "$(printf '%s\n' "$combined" | sed '/^$/d' | wc -l | tr -d ' ')" = 1 ] \
     || fail "concurrent scans emitted more than one wake: $combined"
   pass "G1: concurrent scans serialize through wake recording"
+}
+
+test_special_evidence_file_fails_without_blocking() {
+  local home pid attempt out rc
+  home=$(make_home special-source acme)
+  write_spec "$home" r '[{"field":"commits_30d","op":"eq","value":0}]' \
+    '["cost_30d","commits_30d"]'
+  mkfifo "$home/source.json"
+
+  scan "$home" --id r > "$home/out" 2> "$home/err" &
+  pid=$!
+  attempt=0
+  while kill -0 "$pid" 2>/dev/null && [ "$attempt" -lt 100 ]; do
+    sleep 0.02
+    attempt=$((attempt + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" || true
+    fail "a special evidence file blocked the standing review"
+  fi
+  wait "$pid"
+  rc=$?
+  expect_code 0 "$rc" "a special evidence file failed without a structural wake: $(cat "$home/err")"
+  out=$(cat "$home/out")
+  assert_contains "$out" "source-invalid" \
+    "a special evidence file did not emit a structural finding"
+  assert_contains "$out" "not a regular file" \
+    "the structural finding did not identify the unsafe evidence type"
+  [ "$(printf '%s\n' "$out" | sed '/^$/d' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "a special evidence file broke the one-line wake contract: $out"
+  pass "special evidence files fail loudly without blocking"
 }
 
 test_json_equality_does_not_conflate_booleans_and_numbers() {
@@ -801,6 +855,7 @@ test_classification_without_measurement_is_rejected
 test_subject_with_no_work_location_is_rejected
 test_cadence_silences_the_sweep_between_reviews
 test_concurrent_scans_are_single_flight
+test_special_evidence_file_fails_without_blocking
 test_json_equality_does_not_conflate_booleans_and_numbers
 test_the_same_finding_does_not_wake_twice
 test_drifting_evidence_does_not_defeat_the_latch

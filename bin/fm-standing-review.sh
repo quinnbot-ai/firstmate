@@ -183,6 +183,20 @@ def json_loads_finite(text: str):
     return json.loads(text, parse_constant=reject_constant, parse_float=finite_float)
 
 
+def read_regular_text(path: Path) -> str:
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError(f"not a regular file: {path}")
+        handle = os.fdopen(fd, "r", encoding="utf-8")
+        fd = -1
+        with handle:
+            return handle.read()
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
 def fmt_number(value) -> str:
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
@@ -809,7 +823,7 @@ def main() -> int:
             for name, source in fresh_sources.items():
                 try:
                     payloads[name] = json_loads_finite(
-                        source["path"].read_text(encoding="utf-8")
+                        read_regular_text(source["path"])
                     )
                 except (OSError, ValueError) as exc:
                     candidates.append(

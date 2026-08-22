@@ -149,13 +149,27 @@ $landed
 EOF
 }
 
+fm_code_currency_index_hints() {
+  local root=$1 entry tag path
+  git -C "$root" ls-files -v -z >/dev/null 2>&1 || return 1
+  while IFS= read -r -d '' entry; do
+    tag=${entry%% *}
+    case "$tag" in
+      [a-z] | S)
+        path=${entry#? }
+        printf '%s\n' "$path"
+        ;;
+    esac
+  done < <(git -C "$root" ls-files -v -z 2>/dev/null)
+}
+
 # fm_code_currency_line <root>
 # Echo one CODE_STALE diagnostic when the clean checkout at <root> is behind the
 # default branch it follows, or when checkout drift makes live code
 # unprovable. Echo nothing (returning 1) for other clean states: not a git work
 # tree, nothing to compare against, already current, or ahead only.
 fm_code_currency_line() {
-  local root=$1 base behind head_sha base_sha guard guard_count shown more guard_text tracked_status landed_drift landed_drift_shown
+  local root=$1 base behind head_sha base_sha guard guard_count shown more guard_text tracked_status landed_drift landed_drift_shown index_hints index_hints_shown
   git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
   base=$(fm_code_currency_base_ref "$root") || return 1
   behind=$(git -C "$root" rev-list --count "HEAD..$base" 2>/dev/null) || return 1
@@ -183,6 +197,13 @@ fm_code_currency_line() {
     landed_drift_shown=$(printf '%s\n' "$landed_drift" | head -n 4 | paste -sd, - | sed 's/,/, /g')
     printf 'CODE_STALE: UNPROVEN live code: landed paths differ from checked-out HEAD %s in the worktree: %s. HEAD is %s commit(s) behind %s (%s) as last fetched; installed code cannot be proven to match HEAD or the landed branch.\n' \
       "$head_sha" "$landed_drift_shown" "$behind" "$base" "$base_sha"
+    return 0
+  fi
+  index_hints=$(fm_code_currency_index_hints "$root") || return 1
+  if [ -n "$index_hints" ]; then
+    index_hints_shown=$(printf '%s\n' "$index_hints" | head -n 4 | paste -sd, - | sed 's/,/, /g')
+    printf 'CODE_STALE: UNPROVEN live code: tracked index hints prevent checked-out HEAD %s from proving worktree bytes: %s. HEAD is %s commit(s) behind %s (%s) as last fetched; reconcile assume-unchanged or skip-worktree state before relying on landed-versus-live status.\n' \
+      "$head_sha" "$index_hints_shown" "$behind" "$base" "$base_sha"
     return 0
   fi
   [ "$behind" -gt 0 ] || return 1
