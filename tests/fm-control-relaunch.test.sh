@@ -249,7 +249,7 @@ SH
 # --- 1. same-harness relaunch -----------------------------------------------
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
-  local dir out rc gen_before gen_after
+  local dir out rc gen_before gen_after git_dir
   dir=$(new_case same rl1)
   add_ship_task "$dir" rl1 claude
   gen_before=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" rl1)
@@ -261,6 +261,11 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
     || fail "the endpoint must be reused, not recreated"
   [ "$(meta_field "$dir" rl1 worktree)" = "$dir/wt" ] \
     || fail "the worktree must be reused, not reallocated"
+  git_dir=$(git -C "$dir/wt" rev-parse --absolute-git-dir)
+  assert_grep 'schema=fm-worktree-binding.v1' "$git_dir/firstmate-task-binding" \
+    "a legacy relaunch must backfill its verified worktree binding"
+  assert_grep 'task_id=rl1' "$git_dir/firstmate-task-binding" \
+    "the backfilled worktree binding must name the relaunched task"
   [ "$(meta_field "$dir" rl1 kind)" = ship ] || fail "kind must survive the relaunch"
   [ "$(meta_field "$dir" rl1 project)" = "$dir/proj" ] || fail "project must survive the relaunch"
   gen_after=$(meta_field "$dir" rl1 busy_gen)

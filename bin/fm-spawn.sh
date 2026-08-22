@@ -2286,11 +2286,28 @@ fm_brief_refuse_missing_helper_scripts "$BRIEF_REAL" "$WT" || exit 1
 
 # A pooled path is intentionally reusable, so the historical worktree= in an
 # older task's metadata cannot establish ownership. Bind a fresh assignment
-# before it publishes its metadata; a relaunch only proves that its recorded
-# binding remains exact and must never overwrite a newer task's binding.
+# before it publishes its metadata. A relaunch verifies an established binding,
+# while a legacy record can backfill an absent marker only after its dead
+# endpoint has positively proved it is still in this exact copy. It never
+# overwrites a present, malformed, or mismatched binding.
 if [ "$KIND" != secondmate ]; then
   if [ "$RELAUNCH" -eq 1 ]; then
-    if ! fm_worktree_binding_matches "$WT" "$ID"; then
+    if [ "$(fm_meta_get "$RELAUNCH_META" worktree_binding)" = fm-worktree-binding.v1 ]; then
+      if ! fm_worktree_binding_matches "$WT" "$ID"; then
+        echo "error: task $ID's recorded worktree cannot be reused: $(fm_worktree_binding_detail); refusing to relaunch" >&2
+        exit 1
+      fi
+    elif [ -n "$(fm_meta_get "$RELAUNCH_META" worktree_binding)" ]; then
+      echo "error: task $ID's recorded worktree binding contract is unrecognized; refusing to relaunch" >&2
+      exit 1
+    elif fm_worktree_binding_read "$WT"; then
+      if ! fm_worktree_binding_matches "$WT" "$ID"; then
+        echo "error: task $ID's recorded worktree cannot be reused: $(fm_worktree_binding_detail); refusing to relaunch" >&2
+        exit 1
+      fi
+    elif fm_worktree_binding_is_absent "$WT"; then
+      fm_worktree_binding_write "$WT" "$ID" || exit 1
+    else
       echo "error: task $ID's recorded worktree cannot be reused: $(fm_worktree_binding_detail); refusing to relaunch" >&2
       exit 1
     fi

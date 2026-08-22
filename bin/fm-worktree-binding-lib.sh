@@ -23,6 +23,10 @@
 #     Returns 0 only for an exact, readable binding. Any absent, malformed, or
 #     uninterrogable marker returns non-zero; fm_worktree_binding_detail prints
 #     its reason, while an exact but different task id reports a mismatch.
+#   fm_worktree_binding_is_absent <worktree>
+#     Returns 0 only when the private marker is definitely absent. This lets a
+#     relaunch backfill a pre-binding record after its endpoint has proved the
+#     exact copy, without overwriting a malformed or unreadable marker.
 #   fm_worktree_binding_detail
 #     Prints the diagnostic for the latest failed read or comparison.
 
@@ -113,6 +117,21 @@ fm_worktree_binding_matches() {  # <worktree> <expected-task-id>
     return 1
   fi
   return 0
+}
+
+fm_worktree_binding_is_absent() {  # <worktree>
+  local worktree=${1-} git_dir marker
+  FM_WORKTREE_BINDING_DETAIL=
+  git_dir=$(fm_worktree_binding_git_dir "$worktree") || {
+    FM_WORKTREE_BINDING_DETAIL="worktree binding unverifiable: cannot inspect Git metadata for $worktree"
+    return 1
+  }
+  marker="$git_dir/firstmate-task-binding"
+  if [ ! -e "$marker" ]; then
+    return 0
+  fi
+  FM_WORKTREE_BINDING_DETAIL="worktree binding is present for $worktree"
+  return 1
 }
 
 fm_worktree_binding_write() {  # <worktree> <task-id>
