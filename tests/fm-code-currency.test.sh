@@ -746,6 +746,52 @@ SH
   pass "currency reporting refuses a checkout snapshot that changes mid-inspection"
 }
 
+test_changed_snapshot_resolution_failure_is_unproven() {
+  local repo out real_git shim marker
+  repo=$(make_repo "$TMP_ROOT/changed-snapshot-resolution-failure")
+  mkdir -p "$repo/bin"
+  printf '%s\n' runtime > "$repo/bin/fm-runtime.sh"
+  git -C "$repo" add bin/fm-runtime.sh
+  git -C "$repo" commit -q -m "add runtime"
+  git -C "$repo" push -q origin main
+  land "$repo" docs/landed.md landed
+  hold_back "$repo" 1
+
+  real_git=$(command -v git)
+  shim="$TMP_ROOT/changed-snapshot-resolution-failure-bin"
+  marker="$TMP_ROOT/changed-snapshot-resolution-failure-triggered"
+  mkdir -p "$shim"
+  cat > "$shim/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" diff --cached --quiet "*)
+    if [ ! -e "$FM_MUTATE_MARKER" ]; then
+      : > "$FM_MUTATE_MARKER"
+      "$FM_REAL_GIT" -C "$FM_MUTATE_REPO" reset -q --hard origin/main
+    fi
+    ;;
+  *" rev-parse --verify HEAD^{commit} "*)
+    [ ! -e "$FM_MUTATE_MARKER" ] || exit 7
+    ;;
+esac
+exec "$FM_REAL_GIT" "$@"
+SH
+  chmod +x "$shim/git"
+
+  out=$(PATH="$shim:$PATH" FM_REAL_GIT="$real_git" FM_MUTATE_REPO="$repo" \
+    FM_MUTATE_MARKER="$marker" fm_code_currency_line "$repo" || true)
+  assert_present "$marker" "fixture did not invalidate the inspected snapshot"
+  assert_contains "$out" "CODE_CURRENCY: UNPROVEN live code" \
+    "failed changed-snapshot resolution suppressed code-currency uncertainty"
+  assert_contains "$out" "current commit relation could not be resolved" \
+    "failed changed-snapshot resolution was not identified"
+  assert_not_contains "$out" "CODE_STALE:" \
+    "an unresolved current relation was mislabeled stale"
+  assert_not_contains "$out" "CODE_DRIFT:" \
+    "an unresolved current relation was mislabeled current drift"
+  pass "unresolved changed snapshots retain neutral live-code uncertainty"
+}
+
 test_byte_inspection_failure_is_unproven() {
   local repo out real_git shim
   repo=$(make_repo "$TMP_ROOT/inspection-failure")
@@ -877,6 +923,7 @@ test_changing_worktree_snapshot_is_unproven
 test_worktree_change_after_inspection_is_unproven
 test_diverged_equivalent_landed_bytes_are_unproven
 test_ref_change_during_inspection_is_unproven
+test_changed_snapshot_resolution_failure_is_unproven
 test_byte_inspection_failure_is_unproven
 test_dirty_submodule_checkout_is_unproven
 test_ignored_landed_path_is_unproven

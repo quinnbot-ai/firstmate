@@ -326,11 +326,23 @@ fm_code_currency_snapshot_matches() {
 
 fm_code_currency_changed_snapshot_line() {
   local root=$1 base=$2 head_sha=$3 base_sha=$4 inspection=$5 current_head current_base current_behind current_head_sha current_base_sha
-  current_head=$(git -C "$root" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) || return 1
-  current_base=$(git -C "$root" rev-parse --verify "$base^{commit}" 2>/dev/null) || return 1
-  current_behind=$(git -C "$root" rev-list --count "$current_head..$current_base" 2>/dev/null) || return 1
+  current_head=$(git -C "$root" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) || {
+    fm_code_currency_unresolved_snapshot_line "$base" "$head_sha" "$base_sha" "$inspection"
+    return 0
+  }
+  current_base=$(git -C "$root" rev-parse --verify "$base^{commit}" 2>/dev/null) || {
+    fm_code_currency_unresolved_snapshot_line "$base" "$head_sha" "$base_sha" "$inspection"
+    return 0
+  }
+  current_behind=$(git -C "$root" rev-list --count "$current_head..$current_base" 2>/dev/null) || {
+    fm_code_currency_unresolved_snapshot_line "$base" "$head_sha" "$base_sha" "$inspection"
+    return 0
+  }
   case "$current_behind" in
-    '' | *[!0-9]*) return 1 ;;
+    '' | *[!0-9]*)
+      fm_code_currency_unresolved_snapshot_line "$base" "$head_sha" "$base_sha" "$inspection"
+      return 0
+      ;;
   esac
   current_head_sha=${current_head:0:7}
   current_base_sha=${current_base:0:7}
@@ -341,6 +353,12 @@ fm_code_currency_changed_snapshot_line() {
     printf 'CODE_DRIFT: UNPROVEN live code: checked-out HEAD or %s changed during %s inspection from snapshot %s/%s. The current snapshot %s/%s is not behind; retry session-start status before relying on code currency.\n' \
       "$base" "$inspection" "$head_sha" "$base_sha" "$current_head_sha" "$current_base_sha"
   fi
+}
+
+fm_code_currency_unresolved_snapshot_line() {
+  local base=$1 head_sha=$2 base_sha=$3 inspection=$4
+  printf 'CODE_CURRENCY: UNPROVEN live code: checked-out HEAD or %s changed during %s inspection from snapshot %s/%s, and the current commit relation could not be resolved. Retry session-start status before relying on code currency.\n' \
+    "$base" "$inspection" "$head_sha" "$base_sha"
 }
 
 fm_code_currency_snapshot_changed_line() {
@@ -377,8 +395,9 @@ fm_code_currency_current_inspection_failed_line() {
 
 # fm_code_currency_line <root>
 # Echo one CODE_STALE diagnostic when the checkout at <root> is behind the
-# default branch it follows, or CODE_DRIFT when a current commit has unproven
-# tracked worktree bytes. Echo nothing (returning 1) for other clean states.
+# default branch it follows, CODE_DRIFT when a current commit has unproven
+# tracked worktree bytes, or CODE_CURRENCY when a changed snapshot's relation
+# cannot be resolved. Echo nothing (returning 1) for other clean states.
 fm_code_currency_line() {
   local root=$1 base behind ahead head_oid base_oid head_sha base_sha guard guard_count shown more guard_text tracked_status head_drift head_drift_confirm head_drift_shown landed_drift landed_drift_shown index_hints index_hints_shown
   git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1

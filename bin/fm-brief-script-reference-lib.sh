@@ -74,18 +74,16 @@ sub is_directive_prefix {
   my $directed_subject = qr/(?:you|the\s+(?:agent|operator|worker))/i;
   my $commission = qr/(?:i|we)\s+(?:ask|expect|need|require|want)\s+$directed_subject\s+to/i;
   my $request = qr/(?:can|could|would|will)\s+$directed_subject(?:\s+please)?/i;
+  my $declaration = qr/it\s+is\s+(?:critical|essential|imperative|mandatory|necessary|required)\s+that\s+$directed_subject/i;
+  my $directed_lead = qr/(?:$directed_subject\s+(?:are|will\s+be)\s+to|$commission|$request|$declaration)/i;
   my $assurance = qr/(?:(?:make|be)\s+(?:sure|certain)\s+to|ensure(?:\s+that)?(?:\s+you)?|remember\s+to)/i;
   my $directive_verb = qr/(?:apply|begin|call|check|complete|consult|deploy|execute|follow|inspect|invoke|launch|load|open|perform|read|reference|rerun|retry|review|run|source|start|use|validate|verify)/i;
   my $executable_object = qr/(?:(?:the|a|an|this|that)\s+)?(?:$word\s+)*(?:helper|script|command|tool|utility|preflight|check|workflow)/i;
   my $path_modifier = qr/(?:$word\s+)*(?:at|in|under|within|from)/i;
   return 1 if $prefix =~ /^(?:$ordering\s+)*$word(?:\s+$link\s+$word)*$/i;
   return 1 if $prefix =~ /^$assurance\s+$word(?:\s+$link\s+$word)*$/i;
-  return 1 if $prefix =~ /^$directed_subject\s+(?:are|will\s+be)\s+to\s+$word(?:\s+$link\s+$word)*$/i;
-  return 1 if $prefix =~ /^$commission\s+$directive_verb(?:\s+$link\s+$word)*$/i;
-  return 1 if $prefix =~ /^$request\s+$directive_verb(?:\s+$link\s+$word)*$/i;
-  return 1 if $prefix =~ /^$directed_subject\s+(?:are|will\s+be)\s+to\s+$directive_verb(?:\s+$link\s+$word)*\s+$executable_object(?:\s+$path_modifier)?\s*:?$/i;
-  return 1 if $prefix =~ /^$commission\s+$directive_verb(?:\s+$link\s+$word)*\s+$executable_object(?:\s+$path_modifier)?\s*:?$/i;
-  return 1 if $prefix =~ /^$request\s+$directive_verb(?:\s+$link\s+$word)*\s+$executable_object(?:\s+$path_modifier)?\s*:?$/i;
+  return 1 if $prefix =~ /^$directed_lead\s+$word(?:\s+$link\s+$word)*$/i;
+  return 1 if $prefix =~ /^$directed_lead\s+$directive_verb(?:\s+$link\s+$word)*\s+$executable_object(?:\s+$path_modifier)?\s*:?$/i;
   return $prefix =~ /^(?:$ordering\s+)*$directive_verb(?:\s+$link\s+$word)*\s+$executable_object(?:\s+$path_modifier)?\s*:?$/i;
 }
 

@@ -15,6 +15,7 @@
 #                 "TANGLE: <remediation>",
 #                 "CODE_STALE: <gap between checked-out and fetched code>",
 #                 "CODE_DRIFT: <unproven current checkout drift>",
+#                 "CODE_CURRENCY: <unresolved changed-checkout relation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
@@ -57,6 +58,8 @@
 #          A CODE_DRIFT line means checked-out HEAD is current but tracked
 #          worktree inspection found drift or could not prove stable bytes.
 #          It never claims which code a running process has engaged.
+#          A CODE_CURRENCY line means the checked-out or fetched commit changed
+#          during inspection and its current relation could not be resolved.
 #          bin/fm-code-currency-lib.sh owns the comparison: it is a local
 #          read of the already-fetched remote-tracking ref, never a fetch, so the
 #          reported gap is a floor rather than a live remote query.
