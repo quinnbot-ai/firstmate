@@ -358,6 +358,21 @@ test_second_person_imperative_reference_refuses() {
   pass "a second-person imperative helper reference refuses dispatch"
 }
 
+test_directed_subject_reference_refuses() {
+  local id=brief-directed-subject-a33 rec out status expected
+  rec=$(make_case directed-subject-command "$id" \
+    'Before editing, you are to run bin/fm-directed-subject-missing.sh.')
+  read_case "$rec"
+
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite an absent helper in a directed-subject instruction"
+  expected="$POOL_DIR/bin/fm-directed-subject-missing.sh"
+  assert_contains "$out" "$expected" "directed-subject instruction did not resolve against the task worktree"
+  assert_absent "$HOME_DIR/state/$id.meta" "directed-subject helper refusal published metadata"
+  pass "a directed-subject helper instruction refuses dispatch"
+}
+
 test_unenumerated_imperative_reference_refuses() {
   local id=brief-unenumerated-a18 rec out status expected
   rec=$(make_case unenumerated-command "$id" 'Launch bin/fm-launch-missing.sh before editing.')
@@ -847,6 +862,7 @@ test_modal_imperative_reference_refuses
 test_bare_modal_imperative_reference_refuses
 test_infinitive_imperative_reference_refuses
 test_second_person_imperative_reference_refuses
+test_directed_subject_reference_refuses
 test_unenumerated_imperative_reference_refuses
 test_ordered_imperative_reference_refuses
 test_linked_imperative_reference_refuses
