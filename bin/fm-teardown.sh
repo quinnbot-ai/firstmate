@@ -226,6 +226,9 @@ DESCENDANT_TASK_STATES=()
 DESCENDANT_TASK_IDS=()
 DESCENDANT_TASK_KINDS=()
 DESCENDANT_TASK_HOMES=()
+DESCENDANT_OWNER_STATES=()
+DESCENDANT_OWNER_TASKS=()
+DESCENDANT_OWNER_WORKTREES=()
 teardown_release_locks() {
   local status=$? i
   if declare -F teardown_release_herdr_locks >/dev/null 2>&1; then
@@ -635,6 +638,13 @@ validate_worktree_ownership() {
     fi
     owner_branch=${FM_WORKTREE_OWNER_BRANCH:-<unreadable>}
     if [ "$FORGET_WORKTREE" = 1 ]; then
+      if [ "$FM_WORKTREE_OWNER_METHOD" != binding ] \
+         && ! fm_worktree_owner_bind_resolved_legacy "$WT"; then
+        echo "REFUSED: the proven current owner of $WT could not be durably bound before retiring task $ID's pointer." >&2
+        printf '%s\n' "$FM_WORKTREE_OWNER_DETAIL" >&2
+        return 1
+      fi
+      owner_branch=${FM_WORKTREE_OWNER_BRANCH:-$owner_branch}
       retire_recycled_worktree_record "$FM_WORKTREE_OWNER_STATE" "$FM_WORKTREE_OWNER_TASK_ID" "$owner_branch" || return 1
       return 0
     fi
@@ -2210,6 +2220,9 @@ preflight_descendant_worktree_ownership() {
   local -a pool_locks transition_locks
   pool_locks=()
   transition_locks=()
+  DESCENDANT_OWNER_STATES=()
+  DESCENDANT_OWNER_TASKS=()
+  DESCENDANT_OWNER_WORKTREES=()
   for ((i=0; i < ${#DESCENDANT_TASK_IDS[@]}; i++)); do
     state=${DESCENDANT_TASK_STATES[$i]}
     task_id=${DESCENDANT_TASK_IDS[$i]}
@@ -2275,7 +2288,25 @@ preflight_descendant_worktree_ownership() {
       echo "REFUSED: descendant task $task_id does not positively own worktree $worktree; $owner_detail; forced teardown changed nothing" >&2
       return 1
     fi
+    DESCENDANT_OWNER_STATES[$i]=$FM_WORKTREE_OWNER_STATE
+    DESCENDANT_OWNER_TASKS[$i]=$FM_WORKTREE_OWNER_TASK_ID
+    DESCENDANT_OWNER_WORKTREES[$i]=$worktree
   done
+}
+
+descendant_worktree_preflight_confirms() {  # <state-dir> <task-id> <worktree>
+  local state_real task_id=$2 worktree=$3 i recorded_state
+  state_real=$(fm_worktree_binding_state_resolve "$1" 2>/dev/null) || return 1
+  for ((i=0; i < ${#DESCENDANT_TASK_IDS[@]}; i++)); do
+    [ "${DESCENDANT_TASK_IDS[$i]}" = "$task_id" ] || continue
+    recorded_state=$(fm_worktree_binding_state_resolve "${DESCENDANT_TASK_STATES[$i]}" 2>/dev/null) || continue
+    [ "$recorded_state" = "$state_real" ] || continue
+    [ "${DESCENDANT_OWNER_STATES[$i]:-}" = "$state_real" ] || return 1
+    [ "${DESCENDANT_OWNER_TASKS[$i]:-}" = "$task_id" ] || return 1
+    [ "${DESCENDANT_OWNER_WORKTREES[$i]:-}" = "$worktree" ] || return 1
+    return 0
+  done
+  return 1
 }
 
 validate_firstmate_home_children_removal() {
@@ -2509,9 +2540,7 @@ cleanup_firstmate_home_children() {
       fi
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
-      if ! fm_worktree_owner_resolve "$child_wt" "$sub_state" \
-         || [ "$FM_WORKTREE_OWNER_STATE" != "$(fm_worktree_binding_state_resolve "$sub_state")" ] \
-         || [ "$FM_WORKTREE_OWNER_TASK_ID" != "$child_id" ]; then
+      if ! descendant_worktree_preflight_confirms "$sub_state" "$child_id" "$child_wt"; then
         echo "error: child $child_id no longer positively owns worktree $child_wt; refusing forced cleanup" >&2
         return 1
       fi

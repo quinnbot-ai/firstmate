@@ -96,9 +96,16 @@ run_reconcile() {
     PATH="$case_dir/fake/fakebin:$PATH" "$RECONCILE" "$@"
 }
 
+run_reconcile_owner() {
+  local case_dir=$1 owner_state=$2 owner_task=$3
+  shift 3
+  run_reconcile "$case_dir" --owner-state "$owner_state" --owner-task "$owner_task" "$@"
+}
+
 # (r1) The reproduction: lane-a's record still names a slot the pool has since
 # handed to lane-b. Neither side carries a binding, so lane-b's live endpoint
-# and durable record must independently settle it.
+# and durable record must match the supervisor-supplied owner identity before
+# reconciliation establishes an authoritative binding.
 test_unbound_recycled_slot_is_retired() {
   local case_dir out state_real
   case_dir=$(make_home unbound-recycled)
@@ -107,12 +114,14 @@ test_unbound_recycled_slot_is_retired() {
   record_lane "$case_dir" lane-b
   place_endpoint "$case_dir" lane-b
 
-  out=$(run_reconcile "$case_dir" --apply)
+  out=$(run_reconcile_owner "$case_dir" "$case_dir/state" lane-b --apply)
   state_real=$(CDPATH='' cd -- "$case_dir/state" && pwd -P)
 
   assert_contains "$out" "RETIRED: lane-a" "unbound: the stale pointer is retired"
   assert_contains "$out" "owned by lane-b" "unbound: the report names the owning task"
-  assert_contains "$out" "via endpoint" "unbound: the report names the proof it used"
+  assert_contains "$out" "via binding" "unbound: the report names the durable proof it established"
+  fm_worktree_binding_matches "$case_dir/wt" "$case_dir/state" lane-b \
+    || fail "unbound: the asserted owner was not bound before retirement"
   assert_grep "worktree_retired=lane-b" "$case_dir/state/lane-a.meta" \
     "unbound: the durable retirement names the proven owner"
   assert_grep "worktree_retired_state=$state_real" "$case_dir/state/lane-a.meta" \
@@ -223,7 +232,7 @@ test_default_run_changes_nothing() {
   record_lane "$case_dir" lane-b
   place_endpoint "$case_dir" lane-b
 
-  out=$(run_reconcile "$case_dir" --dry-run)
+  out=$(run_reconcile_owner "$case_dir" "$case_dir/state" lane-b --dry-run)
 
   assert_contains "$out" "STALE: lane-a" "dry-run: the stale pointer is reported"
   assert_contains "$out" "re-run with --apply" "dry-run: the report names the repair"
@@ -260,7 +269,7 @@ test_apply_revalidates_ownership_inside_the_transition_lock() {
     i=$((i + 1))
   done
   [ -e "$ready" ] || fail "transition lock holder did not start"
-  run_reconcile "$case_dir" --apply > "$case_dir/reconcile.out" &
+  run_reconcile_owner "$case_dir" "$case_dir/state" lane-c --apply > "$case_dir/reconcile.out" &
   reconcile_pid=$!
   /bin/sleep 0.2
   : > "$switch"
@@ -283,10 +292,10 @@ test_rerun_is_idempotent() {
   hand_copy_to_branch "$case_dir" fm/lane-b
   record_lane "$case_dir" lane-b
   place_endpoint "$case_dir" lane-b
-  run_reconcile "$case_dir" --apply >/dev/null
+  run_reconcile_owner "$case_dir" "$case_dir/state" lane-b --apply >/dev/null
   before=$(cat "$case_dir/state/lane-a.meta")
 
-  out=$(run_reconcile "$case_dir" --apply)
+  out=$(run_reconcile_owner "$case_dir" "$case_dir/state" lane-b --apply)
 
   assert_contains "$out" "1 already retired" "rerun: an already-retired pointer is counted"
   assert_not_contains "$out" "RETIRED: lane-a" "rerun: it is not retired twice"
@@ -303,7 +312,7 @@ test_copy_without_live_endpoint_is_unresolved() {
   record_lane "$case_dir" lane-a
   git -C "$case_dir/wt" checkout -q --detach
 
-  out=$(run_reconcile "$case_dir" --apply)
+  out=$(run_reconcile_owner "$case_dir" "$case_dir/state" lane-a --apply)
 
   assert_contains "$out" "UNRESOLVED: lane-a" "detached: ownership is unprovable"
   assert_no_grep "worktree_retired" "$case_dir/state/lane-a.meta" \
@@ -319,7 +328,7 @@ test_branch_name_cannot_override_live_endpoint_owner() {
   record_lane "$case_dir" lane-b
   place_endpoint "$case_dir" lane-a
 
-  out=$(run_reconcile "$case_dir" --apply)
+  out=$(run_reconcile_owner "$case_dir" "$case_dir/state" lane-a --apply)
 
   assert_no_grep "worktree_retired" "$case_dir/state/lane-a.meta" \
     "branch-deception: mutable branch content cannot retire the live owner's pointer"
@@ -366,13 +375,85 @@ test_repair_never_touches_the_status_log() {
   place_endpoint "$case_dir" lane-b
   printf 'paused [key=preserved]: do not clean up\n' > "$case_dir/state/lane-a.status"
 
-  run_reconcile "$case_dir" --apply >/dev/null
+  run_reconcile_owner "$case_dir" "$case_dir/state" lane-b --apply >/dev/null
 
   [ "$(cat "$case_dir/state/lane-a.status")" = 'paused [key=preserved]: do not clean up' ] \
     || fail "quiet-status: the repair must not append to a paused lane's status log"
   assert_absent "$case_dir/state/lane-b.status" \
     "quiet-status: the repair must not create a status log for the live lane"
   pass "reconcile repairs records without waking any paused lane"
+}
+
+test_ambiguous_legacy_claimants_require_an_explicit_owner() {
+  local case_dir out
+  case_dir=$(make_home ambiguous-claimants)
+  record_lane "$case_dir" lane-a
+  record_lane "$case_dir" lane-b
+  place_endpoint "$case_dir" lane-a
+
+  out=$(run_reconcile "$case_dir" --apply)
+
+  assert_contains "$out" "UNRESOLVED:" "ambiguous: automatic legacy ownership fails closed"
+  assert_no_grep "worktree_retired" "$case_dir/state/lane-a.meta" \
+    "ambiguous: lane-a's live pointer was retired"
+  assert_no_grep "worktree_retired" "$case_dir/state/lane-b.meta" \
+    "ambiguous: lane-b's pointer was retired"
+  pass "reconcile requires an explicit owner when legacy records collide"
+}
+
+test_legacy_claimant_inventory_spans_linked_homes() {
+  local case_dir mate out
+  case_dir=$(make_home linked-home-claimants)
+  mate="$case_dir/mate"
+  mkdir -p "$case_dir/data" "$mate/state" "$mate/data"
+  printf '%s\n' '- mate - fixture (home: '"$mate"'; scope: fixture; projects: sample; added 2026-08-22)' \
+    > "$case_dir/data/secondmates.md"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$case_dir" \
+    > "$mate/.fm-secondmate-parent"
+  record_lane "$case_dir" lane-a
+  fm_write_meta "$mate/state/lane-b.meta" \
+    "window=firstmate:fm-lane-b" \
+    "endpoint_task_id=lane-b" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  place_endpoint "$case_dir" lane-a
+
+  out=$(run_reconcile "$case_dir" --apply)
+
+  assert_contains "$out" "UNRESOLVED:" "linked-home: the remote claimant prevents a local verdict"
+  assert_no_grep "worktree_retired" "$case_dir/state/lane-a.meta" \
+    "linked-home: the local pointer was retired despite the linked-home claimant"
+  pass "legacy ownership inventories every linked local Firstmate home"
+}
+
+test_legacy_endpoint_proof_supports_every_flat_backend() {
+  local case_dir backend
+  case_dir=$(make_home flat-backends)
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-backend.sh"
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-worktree-owner-lib.sh"
+  fm_backend_validate_task_endpoint() {
+    FM_BACKEND_VALIDATED_BACKEND=$(fm_meta_get "$1" backend)
+    [ -n "$FM_BACKEND_VALIDATED_BACKEND" ] || FM_BACKEND_VALIDATED_BACKEND=tmux
+    FM_BACKEND_VALIDATED_TARGET=fixture
+  }
+  fm_backend_source() { return 0; }
+  fm_backend_tmux_current_path() { printf '%s\n' "$case_dir/wt"; }
+  fm_backend_herdr_current_path() { printf '%s\n' "$case_dir/wt"; }
+  fm_backend_zellij_current_path() { printf '%s\n' "$case_dir/wt"; }
+  fm_backend_cmux_current_path() { printf '%s\n' "$case_dir/wt"; }
+  for backend in tmux herdr zellij cmux; do
+    rm -f "$case_dir/state"/*.meta
+    record_lane "$case_dir" lane-a "backend=$backend"
+    fm_worktree_owner_resolve "$case_dir/wt" "$case_dir/state" \
+      || fail "$backend: legacy ownership proof rejected a supported flat backend"
+    [ "$FM_WORKTREE_OWNER_TASK_ID" = lane-a ] \
+      || fail "$backend: legacy ownership proof selected the wrong owner"
+  done
+  pass "legacy ownership proof supports every flat runtime backend"
 }
 
 test_unbound_recycled_slot_is_retired
@@ -387,3 +468,6 @@ test_copy_without_live_endpoint_is_unresolved
 test_branch_name_cannot_override_live_endpoint_owner
 test_secondmate_home_is_skipped
 test_repair_never_touches_the_status_log
+test_ambiguous_legacy_claimants_require_an_explicit_owner
+test_legacy_claimant_inventory_spans_linked_homes
+test_legacy_endpoint_proof_supports_every_flat_backend

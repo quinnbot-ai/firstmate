@@ -27,17 +27,22 @@
 # output.
 #
 # Usage: fm-reconcile-worktree-pointers.sh [--dry-run|--apply]
+#          [--owner-state <state-dir> --owner-task <task-id>]
 #
 # Reports by default and changes nothing; --apply retires the pointers it
 # reports. Re-runnable: an already-retired pointer is counted and skipped, so the
 # accumulation this fixes can be drained again later rather than needing to be
 # caught in one pass.
+# When multiple legacy records claim one unbound copy, automatic resolution
+# fails closed. The paired owner options let a supervisor name the live endpoint
+# owner; --apply writes and revalidates its binding before retiring any pointer.
 #
 # Ownership is resolved by bin/fm-worktree-owner-lib.sh, from the copy itself -
 # its ownership binding when it has one, otherwise one exact task record and a
-# live, read-only endpoint path that independently agree on the physical copy.
-# The checked-out branch is diagnostic context, never ownership authority. A copy whose
-# owner cannot be proven is reported as unresolved and left completely alone:
+# live endpoint path that independently agrees on the physical copy across all
+# linked local homes. The checked-out branch is diagnostic context, never
+# ownership authority. A copy whose owner cannot be proven is reported as
+# unresolved and left completely alone:
 # "cannot tell" is never treated as "reassigned".
 #
 # Output lines, one per task record:
@@ -63,17 +68,35 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-worktree-owner-lib.sh"
 
 APPLY=0
-for arg in "$@"; do
-  case "$arg" in
+ASSERTED_OWNER_STATE=
+ASSERTED_OWNER_TASK=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
     --dry-run) APPLY=0 ;;
     --apply) APPLY=1 ;;
+    --owner-state)
+      [ "$#" -ge 2 ] || { echo "error: --owner-state requires a state directory" >&2; exit 2; }
+      ASSERTED_OWNER_STATE=$2
+      shift
+      ;;
+    --owner-task)
+      [ "$#" -ge 2 ] || { echo "error: --owner-task requires a task id" >&2; exit 2; }
+      ASSERTED_OWNER_TASK=$2
+      shift
+      ;;
     -h|--help)
-      sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,50p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
-    *) echo "error: unknown option: $arg" >&2; exit 2 ;;
+    *) echo "error: unknown option: $1" >&2; exit 2 ;;
   esac
+  shift
 done
+
+if [ -n "$ASSERTED_OWNER_STATE" ] || [ -n "$ASSERTED_OWNER_TASK" ]; then
+  [ -n "$ASSERTED_OWNER_STATE" ] && fm_worktree_binding_task_id_valid "$ASSERTED_OWNER_TASK" \
+    || { echo "error: --owner-state and --owner-task must be supplied together" >&2; exit 2; }
+fi
 
 [ -d "$STATE" ] || { echo "error: no state directory at $STATE" >&2; exit 2; }
 
@@ -105,7 +128,7 @@ for meta in "$STATE"/*.meta; do
   # copy here to misidentify, and nothing to retire.
   [ -n "$wt" ] && [ -d "$wt" ] || continue
   if [ "$APPLY" != 1 ]; then
-    if ! fm_worktree_owner_resolve "$wt" "$STATE"; then
+    if ! fm_worktree_owner_resolve "$wt" "$STATE" "$ASSERTED_OWNER_STATE" "$ASSERTED_OWNER_TASK"; then
       unresolved=$((unresolved + 1))
       printf 'UNRESOLVED: %s %s\n' "$id" "$FM_WORKTREE_OWNER_DETAIL"
       continue
@@ -152,7 +175,7 @@ for meta in "$STATE"/*.meta; do
     continue
   }
   fm_lock_acquire_wait "$transition_lock"
-  if ! fm_worktree_owner_resolve "$wt" "$STATE"; then
+  if ! fm_worktree_owner_resolve "$wt" "$STATE" "$ASSERTED_OWNER_STATE" "$ASSERTED_OWNER_TASK"; then
     unresolved=$((unresolved + 1))
     printf 'UNRESOLVED: %s %s\n' "$id" "$FM_WORKTREE_OWNER_DETAIL"
     fm_lock_release "$transition_lock" || true
@@ -168,6 +191,16 @@ for meta in "$STATE"/*.meta; do
     continue
   fi
   stale=$((stale + 1))
+  if [ "$FM_WORKTREE_OWNER_METHOD" != binding ]; then
+    if ! fm_worktree_owner_bind_resolved_legacy "$wt"; then
+      failed=$((failed + 1))
+      printf 'UNRESOLVED: %s %s\n' "$id" "$FM_WORKTREE_OWNER_DETAIL"
+      fm_lock_release "$transition_lock" || true
+      fm_lock_release "$pool_lock" || true
+      fm_lock_release "$lock" || true
+      continue
+    fi
+  fi
   owner=$FM_WORKTREE_OWNER_TASK_ID
   branch=${FM_WORKTREE_OWNER_BRANCH:-<unreadable>}
   if fm_worktree_owner_retire_pointer "$meta" "$FM_WORKTREE_OWNER_STATE" "$owner"; then

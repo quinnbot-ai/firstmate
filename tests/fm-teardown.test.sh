@@ -998,7 +998,7 @@ hand_unbound_worktree_to_other_task() {
 
 # (z9) The uncovered case: no binding anywhere, so the pre-fix code let teardown
 # walk straight into a live task's copy.
-test_unbound_recycled_slot_refuses_and_names_the_live_owner() {
+test_unbound_recycled_slot_refuses_ambiguous_legacy_ownership() {
   local case_dir rc
   case_dir=$(make_case unbound-recycled-refuses)
   write_meta "$case_dir" no-mistakes ship
@@ -1013,23 +1013,21 @@ test_unbound_recycled_slot_refuses_and_names_the_live_owner() {
   set -e
 
   expect_code 1 "$rc" "unbound-recycled: teardown must refuse a copy another task owns"
-  assert_contains "$(cat "$case_dir/stderr")" "live-lane" \
-    "unbound-recycled: the refusal names the task that owns the copy"
-  assert_contains "$(cat "$case_dir/stderr")" "fm/live-lane" \
-    "unbound-recycled: the refusal names the branch actually checked out"
-  assert_contains "$(cat "$case_dir/stderr")" "fm-reconcile-worktree-pointers.sh --apply" \
-    "unbound-recycled: the refusal names the repair that leaves the lane intact"
+  assert_contains "$(cat "$case_dir/stderr")" "multiple active task records" \
+    "unbound-recycled: the refusal identifies ambiguous legacy claimants"
+  assert_not_contains "$(cat "$case_dir/stderr")" "live-lane owns it now" \
+    "unbound-recycled: a mutable endpoint path was treated as ownership authority"
   git -C "$case_dir/project" rev-parse --verify -q fm/live-lane >/dev/null \
     || fail "unbound-recycled: the live lane's branch was deleted"
   [ ! -s "$case_dir/treehouse.log" ] \
     || fail "unbound-recycled: the live lane's copy was returned to the pool"
-  pass "a recycled slot with no ownership binding still refuses teardown"
+  pass "a recycled slot with ambiguous legacy claimants refuses teardown"
 }
 
 # (z10) --forget-worktree becomes available on that same proof, so an unbound
 # collision is retirable rather than permanently stuck.
 test_unbound_recycled_slot_is_retirable() {
-  local case_dir rc
+  local case_dir rc reconcile_out
   case_dir=$(make_case unbound-recycled-forget)
   write_meta "$case_dir" no-mistakes ship
   log_treehouse_calls "$case_dir"
@@ -1041,7 +1039,23 @@ test_unbound_recycled_slot_is_retirable() {
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "unbound-forget: retiring an unbound stale pointer should complete"$'\n'"$(cat "$case_dir/stderr")"
+  expect_code 1 "$rc" "unbound-forget: ambiguous legacy ownership must refuse before reconciliation"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "unbound-forget: ambiguous refusal removed the stale task's records"
+
+  reconcile_out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_FAKE_ENDPOINT_ROOT="$case_dir/endpoints" PATH="$case_dir/fakebin:$PATH" \
+    "$ROOT/bin/fm-reconcile-worktree-pointers.sh" \
+      --owner-state "$case_dir/state" --owner-task live-lane --apply)
+  assert_contains "$reconcile_out" "RETIRED: task-x1" \
+    "unbound-forget: explicit reconciliation did not retire the stale pointer"
+  fm_worktree_binding_matches "$case_dir/wt" "$case_dir/state" live-lane \
+    || fail "unbound-forget: reconciliation did not durably bind the asserted owner"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" || rc=$?
+
+  expect_code 0 "$rc" "unbound-forget: ordinary teardown should honor the reconciled pointer"$'\n'"$(cat "$case_dir/retry.stderr")"
   [ ! -f "$case_dir/state/task-x1.meta" ] \
     || fail "unbound-forget: the stale task's own records were not cleaned up"
   [ -d "$case_dir/wt" ] || fail "unbound-forget: the live lane's copy was removed"
@@ -1049,7 +1063,7 @@ test_unbound_recycled_slot_is_retirable() {
     || fail "unbound-forget: the live lane's copy was reset off its branch"
   [ ! -s "$case_dir/treehouse.log" ] \
     || fail "unbound-forget: the live lane's copy was returned to the pool"
-  pass "an unbound recycled slot can be retired with --forget-worktree"
+  pass "explicit reconciliation lets ordinary teardown close a legacy record"
 }
 
 # (z11) Quiet: a copy carrying some fm/* branch this home has no record of proves
@@ -2340,6 +2354,56 @@ SH
   pass "forced secondmate teardown proves child ownership before endpoint mutation"
 }
 
+test_forced_secondmate_legacy_child_uses_locked_preflight_proof() {
+  local case_dir home child_wt rc
+  case_dir=$(make_case legacy-child-preflight-proof)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_tmux_children "$case_dir"
+  home="$case_dir/secondmate-home"
+  child_wt="$case_dir/child-a-wt"
+  fm_worktree_binding_clear "$child_wt" "$home/state" child-a \
+    || fail "legacy-child-preflight-proof: could not clear the fixture binding"
+  awk '!/^worktree_binding=/' "$home/state/child-a.meta" > "$home/state/child-a.meta.tmp"
+  mv "$home/state/child-a.meta.tmp" "$home/state/child-a.meta"
+  : > "$case_dir/treehouse.log"
+  cat > "$case_dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+target=
+for arg in "\$@"; do
+  case "\$arg" in firstmate:fm-*) target=\$arg ;; esac
+done
+case "\${1:-}" in
+  display-message)
+    [ ! -e "$case_dir/endpoints-killed" ] || exit 1
+    case "\$target" in
+      firstmate:fm-child-a) printf '%s\n' "$case_dir/child-a-wt" ;;
+      firstmate:fm-child-b) printf '%s\n' "$case_dir/child-b-wt" ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  kill-window)
+    : > "$case_dir/endpoints-killed"
+    ;;
+esac
+SH
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux" "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "legacy-child-preflight-proof: forced teardown should complete"
+  assert_grep "$child_wt" "$case_dir/treehouse.log" \
+    "legacy-child-preflight-proof: the preflight-proven legacy copy was not returned"
+  [ ! -e "$case_dir/state/task-x1.meta" ] && [ ! -d "$home" ] \
+    || fail "legacy-child-preflight-proof: teardown retained completed parent state"
+  pass "forced cleanup preserves locked legacy ownership proof after endpoint close"
+}
+
 test_forced_secondmate_spares_retired_child_worktree() {
   local case_dir home retired_wt rc
   case_dir=$(make_case retired-child-copy)
@@ -3212,7 +3276,7 @@ test_forget_worktree_retires_the_stale_pointer_and_spares_the_copy
 test_forget_worktree_refuses_an_orphan_binding
 test_force_and_forget_worktree_together_complete
 test_forget_worktree_refuses_without_a_proven_reassignment
-test_unbound_recycled_slot_refuses_and_names_the_live_owner
+test_unbound_recycled_slot_refuses_ambiguous_legacy_ownership
 test_unbound_recycled_slot_is_retirable
 test_unconfirmed_branch_is_not_a_reassignment
 test_retired_pointer_is_honoured_on_a_plain_rerun
@@ -3234,6 +3298,7 @@ test_herdr_flat_teardown_preflight_refuses_before_changes
 test_forced_secondmate_herdr_child_preflight_refuses_before_changes
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks
 test_forced_secondmate_refuses_misdirected_child_before_endpoint_kill
+test_forced_secondmate_legacy_child_uses_locked_preflight_proof
 test_forced_secondmate_spares_retired_child_worktree
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
 test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed
