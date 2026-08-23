@@ -427,7 +427,11 @@ fm_code_currency_line() {
   head_drift=$head_drift_confirm
   if [ -n "$head_drift" ]; then
     if ! fm_code_currency_snapshot_matches "$root" "$base" "$head_oid" "$base_oid"; then
-      fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+      if [ "$behind" -gt 0 ]; then
+        fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+      else
+        fm_code_currency_current_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+      fi
       return 0
     fi
     head_drift_shown=$(printf '%s\n' "$head_drift" | head -n 4 | paste -sd, - | sed 's/,/, /g')

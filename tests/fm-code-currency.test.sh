@@ -275,6 +275,56 @@ test_dirty_tracked_checkout_is_unproven() {
   pass "fm_code_currency_line: tracked checkout drift is surfaced as unproven"
 }
 
+test_current_snapshot_change_uses_drift_diagnostic() {
+  local repo out real_git shim count_file current_head current_base
+  repo=$(make_repo "$TMP_ROOT/current-snapshot-change")
+  land "$repo" bin/fm-runtime.sh "current runtime"
+  printf 'local drift\n' > "$repo/bin/fm-runtime.sh"
+
+  real_git=$(command -v git)
+  shim="$TMP_ROOT/current-snapshot-change-bin"
+  count_file="$TMP_ROOT/current-snapshot-change.count"
+  mkdir -p "$shim"
+  cat > "$shim/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" hash-object --no-filters -- "*)
+    output=$("$FM_REAL_GIT" "$@")
+    status=$?
+    printf '%s\n' "$output"
+    [ "$status" -eq 0 ] || exit "$status"
+    count=0
+    [ ! -f "$FM_RACE_COUNT" ] || read -r count < "$FM_RACE_COUNT"
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$FM_RACE_COUNT"
+    if [ "$count" -eq 2 ]; then
+      "$FM_REAL_GIT" -C "$FM_RACE_REPO" commit -q --allow-empty -m "advance current snapshot"
+      new_oid=$("$FM_REAL_GIT" -C "$FM_RACE_REPO" rev-parse HEAD)
+      "$FM_REAL_GIT" -C "$FM_RACE_REPO" update-ref refs/remotes/origin/main "$new_oid"
+    fi
+    exit 0
+    ;;
+esac
+exec "$FM_REAL_GIT" "$@"
+SH
+  chmod +x "$shim/git"
+
+  out=$(PATH="$shim:$PATH" FM_REAL_GIT="$real_git" FM_RACE_REPO="$repo" \
+    FM_RACE_COUNT="$count_file" fm_code_currency_line "$repo" || true)
+  current_head=$(git -C "$repo" rev-parse HEAD)
+  current_base=$(git -C "$repo" rev-parse origin/main)
+  [ "$current_head" = "$current_base" ] \
+    || fail "fixture failed: HEAD and origin/main did not advance together"
+  assert_contains "$out" "CODE_DRIFT: UNPROVEN live code" \
+    "a changing current snapshot did not retain the current-checkout diagnostic"
+  assert_contains "$out" "changed during current-checkout inspection" \
+    "the current snapshot race did not explain its uncertainty"
+  assert_not_contains "$out" "CODE_STALE:" \
+    "a changing current snapshot was mislabeled stale"
+
+  pass "current snapshot races remain checkout drift"
+}
+
 test_untracked_landed_path_is_unproven() {
   local repo out landed_helper
   repo=$(make_repo "$TMP_ROOT/untracked-landed")
@@ -761,6 +811,7 @@ test_states
 test_guard_naming
 test_never_updates
 test_dirty_tracked_checkout_is_unproven
+test_current_snapshot_change_uses_drift_diagnostic
 test_untracked_landed_path_is_unproven
 test_non_ascii_untracked_landed_path_is_unproven
 test_index_hints_cannot_hide_landed_path_drift
