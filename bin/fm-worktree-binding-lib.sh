@@ -22,7 +22,11 @@
 #     Resolves the repository-scoped allocation/return lock shared by linked
 #     Firstmate homes using one local pool.
 #   fm_worktree_record_resolve <meta-file>
-#     Resolves only an active worktree pointer; a retired pointer is history.
+#     Resolves the raw, unretired allocation record for ownership transitions.
+#   fm_worktree_record_active_resolve <meta-file>
+#     Resolves an operational worktree only when its current binding permits
+#     this record to use it; legacy records remain active only while no marker
+#     has been published for a newer owner.
 #   fm_worktree_binding_write <worktree> <state-dir> <task-id>
 #     Atomically binds a freshly assigned worktree to its current task.
 #   fm_worktree_binding_clear <worktree> <state-dir> <task-id>
@@ -66,18 +70,61 @@ fm_worktree_pool_transition_lock_path() {  # <state-dir> <project>
 FM_WORKTREE_RECORD_ACTIVE_PATH=
 FM_WORKTREE_RECORD_RETIRED_OWNER=
 FM_WORKTREE_RECORD_RETIRED_STATE=
+FM_WORKTREE_RECORD_DETAIL=
 
 fm_worktree_record_resolve() {  # <meta-file>
   local meta=${1-}
   FM_WORKTREE_RECORD_ACTIVE_PATH=
   FM_WORKTREE_RECORD_RETIRED_OWNER=
   FM_WORKTREE_RECORD_RETIRED_STATE=
+  FM_WORKTREE_RECORD_DETAIL=
   [ -n "$meta" ] && [ -f "$meta" ] || return 1
   FM_WORKTREE_RECORD_RETIRED_OWNER=$(sed -n 's/^worktree_retired=//p' "$meta" | tail -1)
   FM_WORKTREE_RECORD_RETIRED_STATE=$(sed -n 's/^worktree_retired_state=//p' "$meta" | tail -1)
   [ -z "$FM_WORKTREE_RECORD_RETIRED_OWNER" ] || return 1
   FM_WORKTREE_RECORD_ACTIVE_PATH=$(sed -n 's/^worktree=//p' "$meta" | tail -1)
   [ -n "$FM_WORKTREE_RECORD_ACTIVE_PATH" ]
+}
+
+fm_worktree_record_active_resolve() {  # <meta-file>
+  local meta=${1-} schema state task_id read_detail kind
+  fm_worktree_record_resolve "$meta" || return 1
+  [ -d "$FM_WORKTREE_RECORD_ACTIVE_PATH" ] || return 0
+  schema=$(sed -n 's/^worktree_binding=//p' "$meta" | tail -1)
+  kind=$(sed -n 's/^kind=//p' "$meta" | tail -1)
+  [ "$kind" != secondmate ] || return 0
+  state=$(dirname -- "$meta")
+  task_id=$(basename -- "$meta" .meta)
+  case "$schema" in
+    fm-worktree-binding.v2)
+      if fm_worktree_binding_matches "$FM_WORKTREE_RECORD_ACTIVE_PATH" "$state" "$task_id"; then
+        return 0
+      fi
+      FM_WORKTREE_RECORD_DETAIL=$FM_WORKTREE_BINDING_DETAIL
+      ;;
+    '')
+      if fm_worktree_binding_read "$FM_WORKTREE_RECORD_ACTIVE_PATH"; then
+        if fm_worktree_binding_matches "$FM_WORKTREE_RECORD_ACTIVE_PATH" "$state" "$task_id"; then
+          return 0
+        fi
+        FM_WORKTREE_RECORD_DETAIL=$FM_WORKTREE_BINDING_DETAIL
+      else
+        read_detail=$FM_WORKTREE_BINDING_DETAIL
+        if fm_worktree_binding_is_absent "$FM_WORKTREE_RECORD_ACTIVE_PATH"; then
+          return 0
+        fi
+        if ! fm_worktree_binding_git_dir "$FM_WORKTREE_RECORD_ACTIVE_PATH" >/dev/null 2>&1; then
+          return 0
+        fi
+        FM_WORKTREE_RECORD_DETAIL=$read_detail
+      fi
+      ;;
+    *)
+      FM_WORKTREE_RECORD_DETAIL="worktree binding unverifiable: unsupported metadata binding for $FM_WORKTREE_RECORD_ACTIVE_PATH"
+      ;;
+  esac
+  FM_WORKTREE_RECORD_ACTIVE_PATH=
+  return 1
 }
 
 fm_worktree_binding_detail() {
@@ -221,6 +268,11 @@ fm_worktree_binding_write() {  # <worktree> <state-dir> <task-id>
     return 1
   }
   marker="$git_dir/firstmate-task-binding"
+  if { [ -e "$marker" ] || [ -L "$marker" ]; } \
+     && { [ ! -f "$marker" ] || [ -L "$marker" ]; }; then
+    echo "error: refusing to replace a non-regular worktree binding for '$worktree'" >&2
+    return 1
+  fi
   old_umask=$(umask)
   umask 077
   tmp=$(mktemp "$git_dir/.firstmate-task-binding.XXXXXX") || {
@@ -232,7 +284,8 @@ fm_worktree_binding_write() {  # <worktree> <state-dir> <task-id>
     printf '%s\n' 'schema=fm-worktree-binding.v2'
     printf 'state=%s\n' "$state_real"
     printf 'task_id=%s\n' "$task_id"
-  } > "$tmp" || ! mv -f "$tmp" "$marker"; then
+  } > "$tmp" || ! mv -f "$tmp" "$marker" \
+    || ! fm_worktree_binding_matches "$worktree" "$state_real" "$task_id"; then
     rm -f "$tmp" 2>/dev/null || true
     umask "$old_umask"
     echo "error: could not publish the worktree binding for '$worktree'" >&2

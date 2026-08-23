@@ -23,7 +23,16 @@ make_fakebin() {
 #!/usr/bin/env bash
 set -u
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:?FM_FAKE_PANE_PATH unset}"; exit 0 ;;
+  *"#{pane_current_path}"*)
+    if [ -n "${FM_FAKE_PANE_BLOCK_ENTERED:-}" ] && [ -s "${FM_FAKE_LEASE:?FM_FAKE_LEASE unset}" ]; then
+      : > "$FM_FAKE_PANE_BLOCK_ENTERED"
+      while [ ! -e "${FM_FAKE_PANE_BLOCK_RELEASE:?FM_FAKE_PANE_BLOCK_RELEASE unset}" ]; do
+        /bin/sleep 0.05
+      done
+    fi
+    printf '%s\n' "${FM_FAKE_PANE_PATH:?FM_FAKE_PANE_PATH unset}"
+    exit 0
+    ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
@@ -102,6 +111,8 @@ run_spawn() {
     FM_BUSY_LOCK_STALE_SECS="${FM_TEST_BUSY_LOCK_STALE_SECS:-5}" \
     FM_FAKE_ENDPOINT="$HOME_DIR/state/$id.endpoint" \
     FM_FAKE_LEASE="$HOME_DIR/state/$id.lease" \
+    FM_FAKE_PANE_BLOCK_ENTERED="${FM_FAKE_PANE_BLOCK_ENTERED:-}" \
+    FM_FAKE_PANE_BLOCK_RELEASE="${FM_FAKE_PANE_BLOCK_RELEASE:-}" \
     FM_FAKE_TREEHOUSE_PATH="${FM_FAKE_TREEHOUSE_PATH_OVERRIDE:-$POOL_DIR}" \
     FM_FAKE_TREEHOUSE_LEASE_ID="lease-$id" \
     PATH="$FAKEBIN_DIR:$PATH" \
@@ -324,6 +335,52 @@ test_pool_transition_lock_precedes_allocation() {
   pass "the pool transition lock covers allocation through binding publication"
 }
 
+test_pool_transition_lock_releases_before_endpoint_settle() {
+  local id=brief-pool-release-a21 rec lock out_file entered release pid status i
+  rec=$(make_case pool-release "$id" 'Proceed with the task.')
+  read_case "$rec"
+  lock=$(fm_worktree_pool_transition_lock_path "$HOME_DIR/state" "$PROJECT_DIR") || \
+    fail "could not resolve the fixture pool transition lock"
+  entered="$HOME_DIR/state/$id.pane-block-entered"
+  release="$HOME_DIR/state/$id.pane-block-release"
+  out_file="$HOME_DIR/state/$id.spawn-output"
+  FM_FAKE_PANE_BLOCK_ENTERED=$entered
+  FM_FAKE_PANE_BLOCK_RELEASE=$release
+  run_spawn "$id" >"$out_file" &
+  pid=$!
+  i=0
+  while [ ! -e "$entered" ] && kill -0 "$pid" 2>/dev/null && [ "$i" -lt 100 ]; do
+    /bin/sleep 0.05
+    i=$((i + 1))
+  done
+  if [ ! -e "$entered" ]; then
+    : > "$release"
+    wait "$pid" || true
+    unset FM_FAKE_PANE_BLOCK_ENTERED FM_FAKE_PANE_BLOCK_RELEASE
+    fail "spawn did not reach the blocked endpoint-settle read: $(cat "$out_file")"
+  fi
+  if ! fm_worktree_binding_matches "$POOL_DIR" "$HOME_DIR/state" "$id"; then
+    : > "$release"
+    wait "$pid" || true
+    unset FM_FAKE_PANE_BLOCK_ENTERED FM_FAKE_PANE_BLOCK_RELEASE
+    fail "spawn did not publish ownership before endpoint settling"
+  fi
+  if ! fm_lock_try_acquire "$lock"; then
+    : > "$release"
+    wait "$pid" || true
+    unset FM_FAKE_PANE_BLOCK_ENTERED FM_FAKE_PANE_BLOCK_RELEASE
+    fail "pool transition lock remained held during endpoint settling"
+  fi
+  fm_lock_release "$lock"
+  : > "$release"
+  wait "$pid"
+  status=$?
+  unset FM_FAKE_PANE_BLOCK_ENTERED FM_FAKE_PANE_BLOCK_RELEASE
+  expect_code 0 "$status" "spawn failed after endpoint settling resumed: $(cat "$out_file")"
+  assert_present "$HOME_DIR/state/$id.meta" "spawn did not publish metadata after settling"
+  pass "the pool transition lock releases after binding and before endpoint settling"
+}
+
 test_prepublication_failure_rolls_back_fresh_resources() {
   local id=brief-abort-a14 rec out status
   rec=$(make_case prepublication-abort "$id" 'Proceed with the task.')
@@ -472,6 +529,7 @@ test_dont_forget_reference_refuses
 test_brief_parser_failure_refuses_and_rolls_back
 test_linked_homes_share_pool_transition_lock
 test_pool_transition_lock_precedes_allocation
+test_pool_transition_lock_releases_before_endpoint_settle
 test_prepublication_failure_rolls_back_fresh_resources
 test_invalid_allocated_worktree_returns_exact_lease
 test_conditional_prose_reference_refuses

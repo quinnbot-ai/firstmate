@@ -447,13 +447,15 @@ task_json_lines() {
     retired_worktree=
     worktree_retired_to=
     worktree_retired_state=
-    if fm_worktree_record_resolve "$meta"; then
+    if fm_worktree_record_active_resolve "$meta"; then
       worktree=$FM_WORKTREE_RECORD_ACTIVE_PATH
     elif [ -n "$FM_WORKTREE_RECORD_RETIRED_OWNER" ]; then
       retired_worktree=$worktree
       worktree=
       worktree_retired_to=$FM_WORKTREE_RECORD_RETIRED_OWNER
       worktree_retired_state=$FM_WORKTREE_RECORD_RETIRED_STATE
+    elif [ -n "$FM_WORKTREE_RECORD_DETAIL" ]; then
+      worktree=
     fi
     home=$(meta_value "$meta" home)
     projects=$(meta_value "$meta" projects)

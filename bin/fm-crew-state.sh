@@ -118,11 +118,13 @@ meta_value() {  # <key>
 KIND=$(meta_value kind)
 HARNESS=$(meta_value harness)
 REMOTE_HOST=$(meta_value remote_host)
-BINDING_SCHEMA=$(meta_value worktree_binding)
 [ -n "$KIND" ] || KIND=ship
-if ! fm_worktree_record_resolve "$META"; then
+if ! fm_worktree_record_active_resolve "$META"; then
   if [ -n "$FM_WORKTREE_RECORD_RETIRED_OWNER" ] && [ "$KIND" != secondmate ]; then
     emit unknown none "worktree pointer retired after reassignment to task $FM_WORKTREE_RECORD_RETIRED_OWNER"
+  fi
+  if [ -n "$FM_WORKTREE_RECORD_DETAIL" ] && [ "$KIND" != secondmate ]; then
+    emit unknown none "$FM_WORKTREE_RECORD_DETAIL"
   fi
 fi
 WT=$FM_WORKTREE_RECORD_ACTIVE_PATH
@@ -133,21 +135,6 @@ WT=$FM_WORKTREE_RECORD_ACTIVE_PATH
 if [ -z "$REMOTE_HOST" ] && { [ -z "$WT" ] || [ ! -d "$WT" ]; }; then
   emit unknown none "worktree gone (torn down?)"
 fi
-if [ -z "$REMOTE_HOST" ] && [ "$KIND" != secondmate ]; then
-  if [ -n "$BINDING_SCHEMA" ] && [ "$BINDING_SCHEMA" != fm-worktree-binding.v2 ]; then
-    emit unknown none "worktree binding unverifiable: unsupported metadata binding for $WT"
-  fi
-  if [ "$BINDING_SCHEMA" = fm-worktree-binding.v2 ]; then
-    if ! fm_worktree_binding_matches "$WT" "$STATE" "$ID"; then
-      emit unknown none "$(fm_worktree_binding_detail)"
-    fi
-  elif fm_worktree_binding_read "$WT"; then
-    if ! fm_worktree_binding_matches "$WT" "$STATE" "$ID"; then
-      emit unknown none "$(fm_worktree_binding_detail)"
-    fi
-  fi
-fi
-
 # --- status log ------------------------------------------------------------
 
 # Last non-empty status line, and its leading verb (the word before the colon).

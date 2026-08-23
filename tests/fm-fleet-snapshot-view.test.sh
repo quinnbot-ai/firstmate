@@ -5,6 +5,8 @@ set -u
 # shellcheck source=tests/lib.sh
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-worktree-binding-lib.sh"
 
 SNAPSHOT="$ROOT/bin/fm-fleet-snapshot.sh"
 VIEW="$ROOT/bin/fm-fleet-view.sh"
@@ -826,6 +828,32 @@ test_retired_worktree_is_not_published_as_active() {
   pass "fleet snapshots separate retired worktree history from active ownership"
 }
 
+test_mismatched_binding_is_not_published_as_active() {
+  local home fakebin project worktree out
+  home=$(make_home mismatched-worktree)
+  project="$home/project"
+  worktree="$home/projects/reassigned-copy"
+  fm_git_worktree "$project" "$worktree" mismatched-worktree
+  fm_write_meta "$home/state/stale-task.meta" \
+    "window=firstmate:fm-stale-task" \
+    "worktree=$worktree" \
+    "worktree_binding=fm-worktree-binding.v2" \
+    "project=firstmate" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=ship"
+  fm_worktree_binding_write "$worktree" "$home/state" live-task \
+    || fail "could not publish the replacement owner's binding"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "stale-task")
+    | .paths.worktree == {path:null,present:false}
+      and .current_state.state == "unknown"
+  ' >/dev/null || fail "a mismatched pointer was published as active: $out"
+  pass "fleet snapshots hide positively mismatched worktree pointers"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
@@ -838,6 +866,7 @@ test_open_decision_clears_on_keyed_resolution
 test_completed_scout_report_is_pointer_not_pending
 test_parked_scout_decision_stays_pending
 test_retired_worktree_is_not_published_as_active
+test_mismatched_binding_is_not_published_as_active
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot

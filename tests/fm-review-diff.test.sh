@@ -15,6 +15,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-worktree-binding-lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
 REVIEW_DIFF="$ROOT/bin/fm-review-diff.sh"
@@ -189,9 +191,32 @@ test_retired_pointer_refuses_replacement_lane_diff() {
   pass "fm-review-diff refuses a retired worktree pointer"
 }
 
+test_mismatched_binding_refuses_recycled_worktree_diff() {
+  local case_dir out status
+  case_dir=$(make_case mismatched-binding)
+  stale_and_pr_commits "$case_dir"
+  write_task_meta "$case_dir" "worktree_binding=fm-worktree-binding.v2"
+  fm_worktree_binding_write "$case_dir/wt" "$case_dir/state" live-task \
+    || fail "mismatched-binding: could not publish the replacement owner's binding"
+
+  set +e
+  out=$(run_review_diff "$case_dir" task-x1 --stat 2>&1)
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "mismatched-binding: review used another task's live worktree"
+  assert_contains "$out" "worktree binding mismatch" \
+    "mismatched-binding: refusal did not identify the ownership mismatch"
+  assert_contains "$out" "live-task" \
+    "mismatched-binding: refusal did not identify the current owner"
+  assert_not_contains "$out" "feature.txt" \
+    "mismatched-binding: review exposed a diff from the replacement lane"
+  pass "fm-review-diff refuses a positively mismatched active pointer"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
 test_retired_pointer_refuses_replacement_lane_diff
+test_mismatched_binding_refuses_recycled_worktree_diff

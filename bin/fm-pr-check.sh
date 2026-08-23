@@ -75,7 +75,7 @@ fi
 # bin/fm-review-diff.sh resolves the head from the remote when none is recorded.
 # bin/fm-pr-merge.sh reads a GitLab head live at merge time for the same reason,
 # and treats a recorded value that disagrees as stale rather than authoritative.
-fm_worktree_record_resolve "$META" || true
+fm_worktree_record_active_resolve "$META" || true
 WT=$FM_WORKTREE_RECORD_ACTIVE_PATH
 PR_HEAD=
 if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then

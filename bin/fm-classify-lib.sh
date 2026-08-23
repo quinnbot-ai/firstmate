@@ -1297,7 +1297,7 @@ crew_worktree_written_since() {  # <id> <state> <anchor-file>
   [ -n "$id" ] || return 1
   [ -f "$anchor" ] || return 1
   meta="$state/$id.meta"
-  fm_worktree_record_resolve "$meta" || return 1
+  fm_worktree_record_active_resolve "$meta" || return 1
   wt=$FM_WORKTREE_RECORD_ACTIVE_PATH
   [ -n "$wt" ] && [ -d "$wt" ] || return 1
   kind=$(grep '^kind=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)

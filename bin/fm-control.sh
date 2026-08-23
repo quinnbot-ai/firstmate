@@ -859,9 +859,12 @@ case "$VERB" in
     echo "$result $ID harness=$HARNESS backend=$BACKEND endpoint=$T worktree=$WT"
     ;;
   relaunch)
-    if ! fm_worktree_record_resolve "$META"; then
+    if ! fm_worktree_record_active_resolve "$META"; then
       if [ -n "$FM_WORKTREE_RECORD_RETIRED_OWNER" ]; then
         die "task $ID's worktree pointer was retired after reassignment to task $FM_WORKTREE_RECORD_RETIRED_OWNER; refusing to relaunch against that historical copy"
+      fi
+      if [ -n "$FM_WORKTREE_RECORD_DETAIL" ]; then
+        die "task $ID's worktree pointer is not active: $FM_WORKTREE_RECORD_DETAIL; refusing to relaunch"
       fi
       die "task $ID has no active recorded worktree; refusing to relaunch without a local copy to preserve"
     fi

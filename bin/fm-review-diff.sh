@@ -44,9 +44,13 @@ esac
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 
-if ! fm_worktree_record_resolve "$META"; then
+if ! fm_worktree_record_active_resolve "$META"; then
   if [ -n "$FM_WORKTREE_RECORD_RETIRED_OWNER" ]; then
     echo "error: task $ID's worktree pointer is retired after reassignment to task $FM_WORKTREE_RECORD_RETIRED_OWNER" >&2
+    exit 1
+  fi
+  if [ -n "$FM_WORKTREE_RECORD_DETAIL" ]; then
+    echo "error: task $ID's worktree pointer is not active: $FM_WORKTREE_RECORD_DETAIL" >&2
     exit 1
   fi
 fi

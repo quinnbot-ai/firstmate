@@ -681,6 +681,7 @@ SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
 SPAWN_WORKTREE_TRANSITION_LOCK=
 SPAWN_WORKTREE_TRANSITION_LOCK_HELD=0
+SPAWN_WORKTREE_BINDING_PUBLISHED=0
 SPAWN_WORKTREE_POOL_TRANSITION_LOCK=
 SPAWN_WORKTREE_POOL_TRANSITION_LOCK_HELD=0
 SPAWN_FRESH_ENDPOINT_PENDING=0
@@ -2344,6 +2345,16 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   }
   SPAWN_FRESH_WORKTREE_PENDING=1
   validate_spawn_worktree "treehouse get --lease" "$T"
+  SPAWN_WORKTREE_TRANSITION_LOCK=$(fm_worktree_transition_lock_path "$STATE" "$WT") || {
+    echo "error: cannot establish the ownership transition lock for worktree $WT" >&2
+    exit 1
+  }
+  fm_lock_acquire_wait "$SPAWN_WORKTREE_TRANSITION_LOCK"
+  SPAWN_WORKTREE_TRANSITION_LOCK_HELD=1
+  fm_worktree_binding_write "$WT" "$STATE" "$ID" || exit 1
+  SPAWN_WORKTREE_BINDING_PUBLISHED=1
+  fm_lock_release "$SPAWN_WORKTREE_POOL_TRANSITION_LOCK"
+  SPAWN_WORKTREE_POOL_TRANSITION_LOCK_HELD=0
   spawn_send_text_line "$WT_TARGET" "cd -- $(shell_quote "$WT")"
 
   # Wait for the pane's cwd to move from the project to the leased worktree.
@@ -2391,27 +2402,13 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     exit 1
   fi
 fi
-if [ "$KIND" != secondmate ]; then
+if [ "$KIND" != secondmate ] && [ "$SPAWN_WORKTREE_TRANSITION_LOCK_HELD" != 1 ]; then
   SPAWN_WORKTREE_TRANSITION_LOCK=$(fm_worktree_transition_lock_path "$STATE" "$WT") || {
     echo "error: cannot establish the ownership transition lock for worktree $WT" >&2
     exit 1
   }
   fm_lock_acquire_wait "$SPAWN_WORKTREE_TRANSITION_LOCK"
   SPAWN_WORKTREE_TRANSITION_LOCK_HELD=1
-fi
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
-  freshen_spawn_worktree_base "$WT" || exit 1
-fi
-
-# Briefs can be generated long before a worker is dispatched, so check their
-# executable helper references only after the exact worktree is known and, for
-# fresh crewmates, refreshed to the remote default base.  This preserves the
-# per-home contract - a sibling checkout's bin/ is never used as evidence.
-if ! fm_brief_refuse_missing_helper_scripts "$BRIEF_REAL" "$WT"; then
-  if [ "$RELAUNCH" -eq 0 ] && [ "$BACKEND" != orca ]; then
-    spawn_fresh_resources_rollback || true
-  fi
-  exit 1
 fi
 
 # A pooled path is intentionally reusable, so the historical worktree= in an
@@ -2447,9 +2444,28 @@ if [ "$KIND" != secondmate ]; then
       echo "error: task $ID's recorded worktree cannot be reused: $(fm_worktree_binding_detail); refusing to relaunch" >&2
       exit 1
     fi
-  elif ! fm_worktree_binding_write "$WT" "$STATE" "$ID"; then
+  elif [ "$SPAWN_WORKTREE_BINDING_PUBLISHED" != 1 ] \
+       && ! fm_worktree_binding_write "$WT" "$STATE" "$ID"; then
     exit 1
   fi
+fi
+if [ "$SPAWN_WORKTREE_POOL_TRANSITION_LOCK_HELD" = 1 ]; then
+  fm_lock_release "$SPAWN_WORKTREE_POOL_TRANSITION_LOCK"
+  SPAWN_WORKTREE_POOL_TRANSITION_LOCK_HELD=0
+fi
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+  freshen_spawn_worktree_base "$WT" || exit 1
+fi
+
+# Briefs can be generated long before a worker is dispatched, so check their
+# executable helper references only after the exact worktree is known and, for
+# fresh crewmates, refreshed to the remote default base.  This preserves the
+# per-home contract - a sibling checkout's bin/ is never used as evidence.
+if ! fm_brief_refuse_missing_helper_scripts "$BRIEF_REAL" "$WT"; then
+  if [ "$RELAUNCH" -eq 0 ] && [ "$BACKEND" != orca ]; then
+    spawn_fresh_resources_rollback || true
+  fi
+  exit 1
 fi
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
