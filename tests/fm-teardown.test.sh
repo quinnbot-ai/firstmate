@@ -72,6 +72,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-worktree-binding-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-wake-lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
@@ -159,6 +161,12 @@ case "${1:-}" in
     case "${1:-}" in
       status)
         shift
+        if [ -n "${FM_FAKE_NM_STARTED:-}" ]; then
+          : > "$FM_FAKE_NM_STARTED"
+          while [ -n "${FM_FAKE_NM_RELEASE:-}" ] && [ ! -e "$FM_FAKE_NM_RELEASE" ]; do
+            sleep 0.02
+          done
+        fi
         run_id=""
         if [ "${1:-}" = --run ]; then run_id=${2:-}; fi
         if [ -n "${FM_FAKE_NM_ABORT_LOG:-}" ] \
@@ -1386,6 +1394,7 @@ test_pr_check_does_not_refresh_stale_pr_head() {
 
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_FAKE_ENDPOINT_ROOT="$case_dir/endpoints" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_CHECK" task-x1 https://github.com/example/repo/pull/7 >/dev/null
 
@@ -1394,6 +1403,7 @@ test_pr_check_does_not_refresh_stale_pr_head() {
 
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_FAKE_ENDPOINT_ROOT="$case_dir/endpoints" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_CHECK" task-x1 https://github.com/example/repo/pull/7 >/dev/null
 
@@ -1423,6 +1433,7 @@ test_pr_check_records_remote_head_when_local_lags() {
 
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_FAKE_ENDPOINT_ROOT="$case_dir/endpoints" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_CHECK" task-x1 https://github.com/example/repo/pull/7 >/dev/null
 
@@ -3291,6 +3302,66 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
+test_network_query_releases_pool_lock_and_revalidates_owner() {
+  local case_dir started release pid attempt pool_lock worktree_lock rc=0
+  case_dir=$(make_case network-query-lock-scope)
+  write_meta "$case_dir" no-mistakes ship
+  declare_binding_in_meta "$case_dir"
+  bind_worktree_to_task_x1 "$case_dir"
+  log_treehouse_calls "$case_dir"
+  started="$case_dir/no-mistakes.started"
+  release="$case_dir/no-mistakes.release"
+
+  FM_FAKE_NM_STARTED="$started" FM_FAKE_NM_RELEASE="$release" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" &
+  pid=$!
+  attempt=0
+  while [ ! -e "$started" ] && kill -0 "$pid" 2>/dev/null \
+    && [ "$attempt" -lt 100 ]; do
+    sleep 0.02
+    attempt=$((attempt + 1))
+  done
+  if [ ! -e "$started" ]; then
+    : > "$release"
+    wait "$pid" || true
+    fail "network-query-lock-scope: teardown did not reach no-mistakes status"
+  fi
+
+  pool_lock=$(fm_worktree_pool_transition_lock_path "$case_dir/state" "$case_dir/project") \
+    || fail "network-query-lock-scope: could not resolve the pool lock"
+  worktree_lock=$(fm_worktree_transition_lock_path "$case_dir/state" "$case_dir/wt") \
+    || fail "network-query-lock-scope: could not resolve the worktree lock"
+  fm_lock_try_acquire "$pool_lock" \
+    || { : > "$release"; wait "$pid" || true; fail "network-query-lock-scope: network status held the pool lock"; }
+  fm_lock_try_acquire "$worktree_lock" \
+    || { fm_lock_release "$pool_lock"; : > "$release"; wait "$pid" || true; fail "network-query-lock-scope: network status held the worktree lock"; }
+  fm_worktree_binding_clear "$case_dir/wt" "$case_dir/state" task-x1 \
+    || fail "network-query-lock-scope: could not clear the original binding"
+  fm_write_meta "$case_dir/state/live-lane.meta" \
+    "window=firstmate:fm-live-lane" \
+    "endpoint_task_id=live-lane" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "worktree_binding=fm-worktree-binding.v2"
+  fm_worktree_binding_write "$case_dir/wt" "$case_dir/state" live-lane \
+    || fail "network-query-lock-scope: could not publish the replacement binding"
+  fm_lock_release "$worktree_lock"
+  fm_lock_release "$pool_lock"
+
+  : > "$release"
+  wait "$pid" || rc=$?
+  expect_code 1 "$rc" "network-query-lock-scope: changed ownership must refuse teardown"
+  assert_grep "live-lane" "$case_dir/stderr" \
+    "network-query-lock-scope: final ownership proof did not identify the replacement owner"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "network-query-lock-scope: teardown returned a copy whose ownership changed"
+  fm_worktree_binding_matches "$case_dir/wt" "$case_dir/state" live-lane \
+    || fail "network-query-lock-scope: teardown disturbed the replacement binding"
+  pass "teardown releases transition locks for network queries and revalidates before return"
+}
+
 test_local_only_fork_remote_allows
 test_recycled_slot_refuses_and_names_the_live_owner
 test_recycled_slot_refuses_even_under_force
@@ -3367,3 +3438,4 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+test_network_query_releases_pool_lock_and_revalidates_owner

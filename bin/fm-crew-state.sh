@@ -128,6 +128,7 @@ meta_value() {  # <key>
 KIND=$(meta_value kind)
 HARNESS=$(meta_value harness)
 REMOTE_HOST=$(meta_value remote_host)
+PROJ=$(meta_value project)
 [ -n "$KIND" ] || KIND=ship
 if ! fm_worktree_record_active_guard_acquire "$META"; then
   if [ -n "$FM_WORKTREE_RECORD_RETIRED_OWNER" ] && [ "$KIND" != secondmate ]; then
@@ -146,6 +147,14 @@ WT=$FM_WORKTREE_RECORD_ACTIVE_PATH
 if [ -z "$REMOTE_HOST" ] && { [ -z "$WT" ] || [ ! -d "$WT" ]; }; then
   emit unknown none "worktree gone (torn down?)"
 fi
+CREW_BRANCH=
+CREW_HEAD=
+if [ -z "$REMOTE_HOST" ]; then
+  CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  CREW_HEAD=$(git -C "$WT" rev-parse HEAD 2>/dev/null || true)
+  [ -n "$PROJ" ] || PROJ=$WT
+fi
+crew_state_cleanup
 # --- status log ------------------------------------------------------------
 
 # Last non-empty status line, and its leading verb (the word before the colon).
@@ -438,24 +447,20 @@ nm_runs_status_for_branch() {  # <branch>
   return 0
 }
 
-# CREW_BRANCH is empty at detached HEAD (a just-spawned crew, or a scout's
-# scratch worktree); with no branch there is no run to attribute to this crew.
-CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
-
 # 0 if the active axi-status run's head field matches this worktree's code
 # identity. Branch match is a precondition (caller). Rule owned by
-# fm_nm_head_matches_worktree in bin/fm-nm-run-lib.sh.
+# fm_nm_head_matches_oid in bin/fm-nm-run-lib.sh.
 nm_run_head_matches_worktree() {
   local run_head
   run_head=$(strip_quotes "$(nm_field head)")
-  fm_nm_head_matches_worktree "$WT" "$run_head"
+  fm_nm_head_matches_oid "$PROJ" "$CREW_HEAD" "$run_head"
 }
 
 # Coarse runs-list rows are "<status> <branch> <short-sha> ...". 0 if the short
 # sha for this branch row matches the worktree head under the same rules as
 # nm_run_head_matches_worktree (equal, or local is ancestor of run tip).
 nm_coarse_head_matches_worktree() {  # <short-sha>
-  fm_nm_head_matches_worktree "$WT" "$1"
+  fm_nm_head_matches_oid "$PROJ" "$CREW_HEAD" "$1"
 }
 
 HAVE_RUN=0

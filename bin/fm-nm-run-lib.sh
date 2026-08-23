@@ -63,11 +63,18 @@ fm_nm_field() {  # <toon-output> <key>
 #     the same history advanced the run tip past local HEAD)
 #   - run head is a strict ancestor of worktree HEAD, or diverged: no match
 #     (local work advanced outside the run, or the branch tip was rewritten)
-fm_nm_head_matches_worktree() {  # <worktree> <run_head>
-  local wt=$1 run_head=$2 local_full run_full
+fm_nm_head_matches_oid() {  # <repository> <local_oid> <run_head>
+  local repo=$1 local_full=$2 run_head=$3 run_full
+  [ -n "$local_full" ] || return 1
   [ -n "$run_head" ] || return 1
-  local_full=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || return 1
-  run_full=$(git -C "$wt" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 1
+  local_full=$(git -C "$repo" rev-parse --verify "${local_full}^{commit}" 2>/dev/null) || return 1
+  run_full=$(git -C "$repo" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 1
   [ "$run_full" = "$local_full" ] && return 0
-  git -C "$wt" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null
+  git -C "$repo" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null
+}
+
+fm_nm_head_matches_worktree() {  # <worktree> <run_head>
+  local wt=$1 run_head=$2 local_full
+  local_full=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || return 1
+  fm_nm_head_matches_oid "$wt" "$local_full" "$run_head"
 }

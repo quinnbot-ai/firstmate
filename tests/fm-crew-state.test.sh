@@ -1146,7 +1146,7 @@ SH
   pass "no timeout command uses perl bound"
 }
 
-test_worktree_guard_covers_run_identity_reads() {
+test_worktree_guard_releases_before_run_identity_query() {
   reset_fakes
   local d out_file err_file pid attempt pool_lock out
   d=$(new_case guarded-run-read)
@@ -1179,21 +1179,22 @@ test_worktree_guard_covers_run_identity_reads() {
   fi
   pool_lock=$(fm_worktree_pool_transition_lock_path "$d/state" "$d/wt") \
     || fail "could not resolve the guarded-read pool lock"
-  if fm_lock_try_acquire "$pool_lock"; then
-    fm_lock_release "$pool_lock"
+  if ! fm_lock_try_acquire "$pool_lock"; then
     : > "$FM_FAKE_NM_RELEASE"
     wait "$pid" || true
-    fail "crew-state released ownership before its run-identity read completed"
+    fail "crew-state held ownership during its run-identity query"
   fi
+  git -C "$d/wt" commit -q --allow-empty -m "advance while status is blocked"
+  fm_lock_release "$pool_lock"
   : > "$FM_FAKE_NM_RELEASE"
-  wait "$pid" || fail "guarded crew-state read failed: $(cat "$err_file")"
+  wait "$pid" || fail "snapshotted crew-state read failed: $(cat "$err_file")"
   out=$(cat "$out_file")
   assert_contains "$out" "source: run-step" \
-    "the guarded run-identity read did not complete normally"
+    "the snapshotted run identity was not retained across the query"
   fm_lock_try_acquire "$pool_lock" \
     || fail "crew-state did not release its ownership guard on exit"
   fm_lock_release "$pool_lock"
-  pass "crew-state holds active ownership through run-identity reads"
+  pass "crew-state releases ownership before run queries and keeps its identity snapshot"
 }
 
 # (i) kind=scout skips the run lookup entirely (its deliverable is a report).
@@ -1643,7 +1644,7 @@ test_dead_window_ignores_stale_status_log
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step
 test_no_timeout_uses_perl_bound
-test_worktree_guard_covers_run_identity_reads
+test_worktree_guard_releases_before_run_identity_query
 test_scout_skips_run_lookup
 test_torn_down_worktree
 test_exact_worktree_binding_reads_normally

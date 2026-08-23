@@ -229,6 +229,38 @@ DESCENDANT_TASK_HOMES=()
 DESCENDANT_OWNER_STATES=()
 DESCENDANT_OWNER_TASKS=()
 DESCENDANT_OWNER_WORKTREES=()
+teardown_release_worktree_transition_locks() {
+  if [ "$WORKTREE_TRANSITION_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$WORKTREE_TRANSITION_LOCK"
+    WORKTREE_TRANSITION_LOCK_HELD=0
+  fi
+  if [ "$WORKTREE_POOL_TRANSITION_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$WORKTREE_POOL_TRANSITION_LOCK"
+    WORKTREE_POOL_TRANSITION_LOCK_HELD=0
+  fi
+}
+
+teardown_acquire_worktree_transition_locks() {
+  if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
+     && [ -n "$WT" ] && [ -d "$WT" ] \
+     && [ -z "$(fm_meta_get "$META" worktree_retired)" ]; then
+    WORKTREE_POOL_TRANSITION_LOCK=$(fm_worktree_pool_transition_lock_path "$STATE" "$PROJ") || {
+      echo "error: cannot establish the pool transition lock for project $PROJ" >&2
+      return 1
+    }
+    fm_lock_acquire_wait "$WORKTREE_POOL_TRANSITION_LOCK"
+    WORKTREE_POOL_TRANSITION_LOCK_HELD=1
+  fi
+  if [ "$KIND" != secondmate ] && [ -n "$WT" ] && [ -d "$WT" ]; then
+    WORKTREE_TRANSITION_LOCK=$(fm_worktree_transition_lock_path "$STATE" "$WT") || {
+      echo "error: cannot establish the ownership transition lock for worktree $WT" >&2
+      return 1
+    }
+    fm_lock_acquire_wait "$WORKTREE_TRANSITION_LOCK"
+    WORKTREE_TRANSITION_LOCK_HELD=1
+  fi
+}
+
 teardown_release_locks() {
   local status=$? i
   if declare -F teardown_release_herdr_locks >/dev/null 2>&1; then
@@ -238,14 +270,7 @@ teardown_release_locks() {
     fm_lock_release "${DESCENDANT_LOCK_PATHS[$i]}" || true
   done
   DESCENDANT_LOCK_PATHS=()
-  if [ "$WORKTREE_TRANSITION_LOCK_HELD" = 1 ]; then
-    fm_lock_release "$WORKTREE_TRANSITION_LOCK" || true
-    WORKTREE_TRANSITION_LOCK_HELD=0
-  fi
-  if [ "$WORKTREE_POOL_TRANSITION_LOCK_HELD" = 1 ]; then
-    fm_lock_release "$WORKTREE_POOL_TRANSITION_LOCK" || true
-    WORKTREE_POOL_TRANSITION_LOCK_HELD=0
-  fi
+  teardown_release_worktree_transition_locks || true
   if [ "$META_LOCK_HELD" = 1 ]; then
     fm_lock_release "$META_LOCK" || true
     META_LOCK_HELD=0
@@ -508,24 +533,7 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
-if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
-   && [ -n "$WT" ] && [ -d "$WT" ] \
-   && [ -z "$(fm_meta_get "$META" worktree_retired)" ]; then
-  WORKTREE_POOL_TRANSITION_LOCK=$(fm_worktree_pool_transition_lock_path "$STATE" "$PROJ") || {
-    echo "error: cannot establish the pool transition lock for project $PROJ" >&2
-    exit 1
-  }
-  fm_lock_acquire_wait "$WORKTREE_POOL_TRANSITION_LOCK"
-  WORKTREE_POOL_TRANSITION_LOCK_HELD=1
-fi
-if [ "$KIND" != secondmate ] && [ -n "$WT" ] && [ -d "$WT" ]; then
-  WORKTREE_TRANSITION_LOCK=$(fm_worktree_transition_lock_path "$STATE" "$WT") || {
-    echo "error: cannot establish the ownership transition lock for worktree $WT" >&2
-    exit 1
-  }
-  fm_lock_acquire_wait "$WORKTREE_TRANSITION_LOCK"
-  WORKTREE_TRANSITION_LOCK_HELD=1
-fi
+teardown_acquire_worktree_transition_locks || exit 1
 
 # --- current-owner check for a recycled pool slot ---------------------------
 # A state/<id>.meta worktree= value is an ALLOCATION record, not proof that the
@@ -667,6 +675,7 @@ validate_worktree_ownership() {
 }
 
 validate_worktree_ownership || exit 1
+teardown_release_worktree_transition_locks
 PUBLIC_FOLLOWUP_HOME=$FM_HOME
 PUBLIC_FOLLOWUP_STATE=$STATE
 PUBLIC_FOLLOWUP_WORK_HOME=main
@@ -2722,7 +2731,6 @@ fi
 # not by task-worktree cleanup.
 if [ "$KIND" != secondmate ]; then
   conclude_task_no_mistakes_run "$WT"
-  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 fi
 
 # Fix 3 (see script header): sweep remote job workers abandoned by an already
@@ -2736,6 +2744,9 @@ fi
 # every durable record, and the endpoint are all still intact for a plain
 # rerun. An unresolvable lock path (for example an unreachable server) also
 # refuses before any destructive step.
+teardown_acquire_worktree_transition_locks || exit 1
+validate_worktree_ownership || exit 1
+
 TEARDOWN_HERDR_SESSION=
 TEARDOWN_HERDR_PANE=
 if [ "$BACKEND" = herdr ]; then
@@ -2743,6 +2754,10 @@ if [ "$BACKEND" = herdr ]; then
   fm_backend_herdr_parse_target "$T" || exit 1
   TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
   TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
+fi
+
+if [ "$KIND" != secondmate ]; then
+  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
@@ -2793,6 +2808,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     exit 1
   }
 fi
+teardown_release_worktree_transition_locks
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
 HERDR_PRESENTATION_RETIRE_CANDIDATE=0
