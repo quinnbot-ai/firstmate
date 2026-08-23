@@ -48,10 +48,12 @@ sub is_directive_prefix {
   my $word = qr/[A-Za-z][A-Za-z0-9'’_-]*/;
   my $link = qr/(?:and|then|by|to|ahead\s+and)/i;
   my $directed_subject = qr/(?:you|the\s+(?:agent|operator|worker))/i;
+  my $assurance = qr/(?:(?:make|be)\s+(?:sure|certain)\s+to|ensure(?:\s+that)?(?:\s+you)?|remember\s+to)/i;
   my $directive_verb = qr/(?:apply|begin|call|check|complete|consult|deploy|execute|follow|inspect|invoke|launch|load|open|perform|read|reference|rerun|retry|review|run|source|start|use|validate|verify)/i;
   my $executable_object = qr/(?:(?:the|a|an|this|that)\s+)?(?:$word\s+)*(?:helper|script|command|tool|utility|preflight|check|workflow)/i;
   my $path_modifier = qr/(?:$word\s+)*(?:at|in|under|within|from)/i;
   return 1 if $prefix =~ /^(?:$ordering\s+)*$word(?:\s+$link\s+$word)*$/i;
+  return 1 if $prefix =~ /^$assurance\s+$word(?:\s+$link\s+$word)*$/i;
   return 1 if $prefix =~ /^$directed_subject\s+(?:are|will\s+be)\s+to\s+$word(?:\s+$link\s+$word)*$/i;
   return 1 if $prefix =~ /^$directed_subject\s+(?:are|will\s+be)\s+to\s+$directive_verb(?:\s+$link\s+$word)*\s+$executable_object(?:\s+$path_modifier)?\s*:?$/i;
   return $prefix =~ /^(?:$ordering\s+)*$directive_verb(?:\s+$link\s+$word)*\s+$executable_object(?:\s+$path_modifier)?\s*:?$/i;
@@ -69,7 +71,6 @@ sub is_instruction {
   return 1 if $prefix =~ /\bdon['’]t\s+forget\b/i;
   return 0 if $prefix =~ /\b(?:do\s+not|don['’]t|must\s+not|must\s+never|should\s+not|never|avoid)\b/i;
   return 1 if $prefix =~ /\b(?:must|shall|should|need(?:s)?\s+to|required\s+to|have\s+to)\b/i;
-  return 1 if $prefix =~ /\b(?:make\s+sure\s+to|ensure\s+you)\b/i;
   return 1 if $prefix =~ /^(?:your|the)\s+(?:(?:first|next|initial|required)\s+)?(?:action|step|task|instruction)\s+(?:is|will\s+be|must\s+be)\s+to\s+\S+(?:\s+\S+)*$/i;
   return 1 if is_directive_prefix($prefix);
   return 0;

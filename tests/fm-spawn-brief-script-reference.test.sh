@@ -344,6 +344,20 @@ test_infinitive_imperative_reference_refuses() {
   pass "an infinitive imperative helper reference refuses dispatch"
 }
 
+test_assurance_imperative_reference_refuses() {
+  local id=brief-assurance-a34 rec out status expected
+  rec=$(make_case assurance-command "$id" 'Be sure to run bin/fm-assurance-missing.sh before editing.')
+  read_case "$rec"
+
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite an absent helper in an assurance instruction"
+  expected="$POOL_DIR/bin/fm-assurance-missing.sh"
+  assert_contains "$out" "$expected" "assurance instruction did not resolve against the task worktree"
+  assert_absent "$HOME_DIR/state/$id.meta" "assurance helper refusal published metadata"
+  pass "an assurance helper instruction refuses dispatch"
+}
+
 test_second_person_imperative_reference_refuses() {
   local id=brief-second-person-a13 rec out status expected
   rec=$(make_case second-person-command "$id" 'Ensure you run bin/fm-second-person-missing.sh before editing.')
@@ -861,6 +875,7 @@ test_prefixed_imperative_reference_refuses
 test_modal_imperative_reference_refuses
 test_bare_modal_imperative_reference_refuses
 test_infinitive_imperative_reference_refuses
+test_assurance_imperative_reference_refuses
 test_second_person_imperative_reference_refuses
 test_directed_subject_reference_refuses
 test_unenumerated_imperative_reference_refuses
