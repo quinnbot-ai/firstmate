@@ -18,7 +18,8 @@
 #
 # Public entry points:
 #   fm_worktree_pool_transition_lock_path <state-dir> <project>
-#     Resolves the shared allocation/return lock for one project's local pool.
+#     Resolves the repository-scoped allocation/return lock shared by linked
+#     Firstmate homes using one local pool.
 #   fm_worktree_record_resolve <meta-file>
 #     Resolves only an active worktree pointer; a retired pointer is history.
 #   fm_worktree_binding_write <worktree> <task-id>
@@ -51,14 +52,13 @@ fm_worktree_transition_lock_path() {  # <state-dir> <worktree>
 }
 
 fm_worktree_pool_transition_lock_path() {  # <state-dir> <project>
-  local state=${1-} project=${2-} state_real project_real digest
+  local state=${1-} project=${2-} project_real common_dir
   [ -n "$state" ] && [ -d "$state" ] || return 1
   [ -n "$project" ] && [ -d "$project" ] || return 1
-  state_real=$(CDPATH='' cd -- "$state" 2>/dev/null && pwd -P) || return 1
   project_real=$(CDPATH='' cd -- "$project" 2>/dev/null && pwd -P) || return 1
-  digest=$(printf '%s' "$project_real" | git hash-object --stdin 2>/dev/null) || return 1
-  [ -n "$digest" ] || return 1
-  printf '%s/.worktree-pool-transition-%s.lock\n' "$state_real" "$digest"
+  common_dir=$(git -C "$project_real" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  [ -n "$common_dir" ] && [ -d "$common_dir" ] || return 1
+  printf '%s/firstmate-worktree-pool-transition.lock\n' "$common_dir"
 }
 
 FM_WORKTREE_RECORD_ACTIVE_PATH=

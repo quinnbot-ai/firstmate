@@ -2063,14 +2063,15 @@ test_herdr_flat_teardown_preflight_refuses_before_changes() {
 }
 
 configure_secondmate_with_herdr_child() {  # <case-dir>
-  local case_dir=$1 home="$1/secondmate-home"
+  local case_dir=$1 home="$1/secondmate-home" child_wt="$1/child-herdr-wt"
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
   printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
   printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+  git -C "$case_dir/project" worktree add -q -b fm/child-herdr "$child_wt" main
   fm_write_meta "$home/state/child-herdr.meta" \
     "window=childsession:wC:p1" \
     "endpoint_task_id=child-herdr" \
-    "worktree=$case_dir/wt" \
+    "worktree=$child_wt" \
     "project=$case_dir/project" \
     "kind=ship" \
     "mode=local-only" \
@@ -2235,6 +2236,46 @@ SH
   pass "forced secondmate teardown holds every descendant lifecycle and metadata lock"
 }
 
+test_forced_secondmate_refuses_misdirected_child_before_endpoint_kill() {
+  local case_dir home child_b_wt rc
+  case_dir=$(make_case misdirected-child-preflight)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_tmux_children "$case_dir"
+  home="$case_dir/secondmate-home"
+  child_b_wt="$case_dir/child-b-wt"
+  awk -v replacement="worktree=$child_b_wt" '
+    /^worktree=/ { print replacement; next }
+    { print }
+  ' "$home/state/child-a.meta" > "$home/state/child-a.meta.tmp"
+  mv "$home/state/child-a.meta.tmp" "$home/state/child-a.meta"
+  : > "$case_dir/kill.log"
+  : > "$case_dir/treehouse.log"
+  cat > "$case_dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/kill.log"
+exit 0
+SH
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux" "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "misdirected-child-preflight: teardown accepted another task's worktree"
+  assert_grep "descendant task child-a does not positively own worktree" "$case_dir/stderr" \
+    "misdirected-child-preflight: refusal did not identify the ownership mismatch"
+  [ ! -s "$case_dir/kill.log" ] \
+    || fail "misdirected-child-preflight: teardown killed an endpoint before ownership validation"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "misdirected-child-preflight: teardown returned a worktree before ownership validation"
+  [ -d "$home" ] && [ -e "$home/state/child-a.meta" ] && [ -e "$home/state/child-b.meta" ] \
+    || fail "misdirected-child-preflight: ownership refusal mutated descendant records"
+  pass "forced secondmate teardown proves child ownership before endpoint mutation"
+}
+
 test_forced_secondmate_spares_retired_child_worktree() {
   local case_dir home retired_wt rc
   case_dir=$(make_case retired-child-copy)
@@ -2282,7 +2323,7 @@ test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed() {
 }
 
 configure_nested_secondmate_with_herdr_grandchild() {  # <case-dir>
-  local case_dir=$1 home="$1/secondmate-home" nested_home="$1/secondmate-home/nested-home"
+  local case_dir=$1 home="$1/secondmate-home" nested_home="$1/secondmate-home/nested-home" grandchild_wt="$1/grandchild-herdr-wt"
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
   mkdir -p "$nested_home/state" "$nested_home/data" "$nested_home/config" "$nested_home/projects"
   printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
@@ -2296,10 +2337,11 @@ configure_nested_secondmate_with_herdr_grandchild() {  # <case-dir>
     "kind=secondmate" \
     "mode=local-only" \
     "home=$nested_home"
+  git -C "$case_dir/project" worktree add -q -b fm/grandchild-herdr "$grandchild_wt" main
   fm_write_meta "$nested_home/state/grandchild-herdr.meta" \
     "window=grandchildsession:wG:p1" \
     "endpoint_task_id=grandchild-herdr" \
-    "worktree=$case_dir/wt" \
+    "worktree=$grandchild_wt" \
     "project=$case_dir/project" \
     "kind=ship" \
     "mode=local-only" \
@@ -3119,6 +3161,7 @@ test_herdr_flat_teardown_refuses_records_on_unparseable_presence
 test_herdr_flat_teardown_preflight_refuses_before_changes
 test_forced_secondmate_herdr_child_preflight_refuses_before_changes
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks
+test_forced_secondmate_refuses_misdirected_child_before_endpoint_kill
 test_forced_secondmate_spares_retired_child_worktree
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
 test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed

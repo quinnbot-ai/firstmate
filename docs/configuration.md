@@ -612,6 +612,7 @@ Firstmate ships no conditions: which ones deserve a wake, and how they rank, is 
 See [`docs/examples/standing-review.json`](examples/standing-review.json) for the file's shape; its two rules illustrate the format and are not a recommendation about what to review.
 A spec names absolute paths on the machine that reviews them, so it is home-local and is not inherited by secondmate homes.
 Arming registers a check only; nothing here creates or refreshes a schedule, and a review whose evidence stops refreshing reports that instead of going quiet.
+Evidence dated materially in the future is a structural failure, while future timestamps in the review's owned cadence and latch state are normalized so clock rollback cannot extend suppression.
 
 ## Environment variables
 

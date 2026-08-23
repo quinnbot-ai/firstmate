@@ -3,11 +3,10 @@
 #
 # Usage after sourcing: fm_brief_refuse_missing_helper_scripts <brief> <worktree>
 #
-# A brief can outlive the checkout it was written for.  This detects only helper
-# scripts the worker is directed to execute: any bin/fm-*.sh path in a fenced
-# code block or an affirmative directive clause.  Explicitly negated,
-# conditional, and descriptive mentions remain advisory rather than blocking
-# dispatch.  The parser recognizes bin/, ./bin/,
+# A brief can outlive the checkout it was written for.  This detects every
+# syntactic bin/fm-*.sh helper reference rather than interpreting open-ended
+# natural language to decide which mentions are executable.  The parser
+# recognizes bin/, ./bin/,
 # $FM_ROOT/bin, and ${FM_ROOT}/bin forms, then resolves every reference to the
 # task worktree's bin/ directory.  It never evaluates arbitrary brief text as
 # shell code.
@@ -19,8 +18,8 @@ use warnings;
 
 my $brief = shift;
 open my $fh, '<', $brief or die "$brief: $!\n";
-my $fence = '';
 my $script = qr{
+  (?<![A-Za-z0-9_.-])
   (
     (?:
       \$FM_ROOT/ |
@@ -42,32 +41,7 @@ sub emit_scripts {
 }
 
 while (my $line = <$fh>) {
-  if ($fence ne '') {
-    if ($line =~ /^\s*\Q$fence\E/) {
-      $fence = '';
-    } else {
-      emit_scripts($line);
-    }
-    next;
-  }
-  if ($line =~ /^\s*(`{3,}|~{3,})/) {
-    $fence = $1;
-    next;
-  }
-
-  my $lead = qr/^\s*(?:[-*+]\s+|\d+[.)]\s+)?/;
-  for my $clause (split /\s*(?:;|\b(?:and|but|first|then|next|finally|instead)\b|[.!?]+(?=\s|$))\s*/i, $line) {
-    while ($clause =~ /$script/g) {
-      my ($raw, $basename, $reference_start) = ($1, $2, $-[1]);
-      my $prefix = substr($clause, 0, $reference_start);
-      $prefix =~ s/$lead//;
-      next if $prefix =~ /\b(?:do\s+not|don't|never|not\s+to)\b/i;
-      next if $prefix =~ /^\s*(?:if|when|whenever|whether)\b[^,:]*$/i;
-      next if $prefix =~ /^\s*(?:the|a|an|this|that|these|those|it|he|she|they|we|i)\b/i;
-      next if $prefix =~ /^\s*(?:for\s+example|e\.g\.|historically|in\s+(?:older|previous)\s+releases?)\b/i;
-      print "$raw\t$basename\n";
-    }
-  }
+  emit_scripts($line);
 }
 PERL
 }

@@ -77,6 +77,28 @@ expire_cadence() {  # <home> <id>
   touch -t 200001010000 "$1/state/$2.standing-review-last"
 }
 
+set_future_mtime() {  # <path> <seconds-ahead>
+  python3 - "$1" "$2" <<'PY'
+import os
+import sys
+import time
+
+stamp = int(time.time()) + int(sys.argv[2])
+os.utime(sys.argv[1], (stamp, stamp))
+PY
+}
+
+write_future_subject_latch() {  # <home> <id> <subject> <seconds-ahead>
+  python3 - "$1/state/$2.standing-review-latch" "$3" "$4" <<'PY'
+import sys
+import time
+from pathlib import Path
+
+stamp = int(time.time()) + int(sys.argv[3])
+Path(sys.argv[1]).write_text(f"{stamp}\tsubject\t{sys.argv[2]}\n", encoding="utf-8")
+PY
+}
+
 hold_cadence_lock() {  # <cadence-path> <ready-path> <release-path>
   python3 - "$1" "$2" "$3" <<'PY'
 import fcntl
@@ -177,6 +199,65 @@ test_cadence_silences_the_sweep_between_reviews() {
   second=$(scan "$home" --id r)
   [ -z "$second" ] || fail "the review ran again inside its interval: $second"
   pass "G1: the watcher's sweep cadence is not the review's cadence"
+}
+
+test_future_source_timestamp_is_structural_failure() {
+  local home out
+  home=$(make_home future-source acme)
+  write_source "$home" '[{"venture":"acme","cost_30d":10,"commits_30d":0}]'
+  write_spec "$home" r '[{"field":"commits_30d","op":"eq","value":0}]' \
+    '["cost_30d","commits_30d"]'
+  set_future_mtime "$home/source.json" 3600
+
+  out=$(scan "$home" --id r --dry-run)
+  assert_contains "$out" "source-future" \
+    "a future-dated source was allowed to drive an actionable review"
+  assert_contains "$out" "ahead_seconds=" \
+    "the future-source diagnostic omitted its measured clock skew"
+  assert_not_contains "$out" "dispatch a worker" \
+    "a future-dated source emitted its ordinary rule finding"
+  pass "future-dated evidence fails structurally"
+}
+
+test_future_cadence_timestamp_is_normalized() {
+  local home first second
+  home=$(make_home future-cadence acme)
+  write_source "$home" '[{"venture":"acme","cost_30d":10,"commits_30d":0}]'
+  write_spec "$home" r '[{"field":"commits_30d","op":"eq","value":0}]' \
+    '["cost_30d","commits_30d"]' 0 '' \
+    '"interval_seconds": 1, "subject_cooldown_seconds": 1, "latch_retention_seconds": 2,'
+  touch "$home/state/r.standing-review-last"
+  set_future_mtime "$home/state/r.standing-review-last" 3600
+
+  first=$(scan "$home" --id r)
+  [ -z "$first" ] || fail "normalizing a future cadence marker ran the review immediately: $first"
+  sleep 2
+  second=$(scan "$home" --id r)
+  assert_contains "$second" "acme" \
+    "a future cadence marker suppressed reviews until its original timestamp"
+  pass "future cadence state is normalized to the current clock"
+}
+
+test_future_latch_timestamp_is_normalized() {
+  local home first second normalized now
+  home=$(make_home future-latch acme)
+  write_source "$home" '[{"venture":"acme","cost_30d":10,"commits_30d":0}]'
+  write_spec "$home" r '[{"field":"commits_30d","op":"eq","value":0}]' \
+    '["cost_30d","commits_30d"]' 0 '' \
+    '"interval_seconds": 1, "subject_cooldown_seconds": 1, "latch_retention_seconds": 2,'
+  write_future_subject_latch "$home" r acme 3600
+
+  first=$(scan "$home" --id r)
+  [ -z "$first" ] || fail "a future subject latch failed to preserve its ordinary cooldown: $first"
+  normalized=$(cut -f1 "$home/state/r.standing-review-latch")
+  now=$(date +%s)
+  [ "$normalized" -le "$now" ] \
+    || fail "the persisted subject latch retained its future timestamp: $normalized"
+  sleep 2
+  second=$(scan "$home" --id r)
+  assert_contains "$second" "acme" \
+    "a future subject latch extended suppression beyond the configured cooldown"
+  pass "future latch state is normalized to the current clock"
 }
 
 test_concurrent_scans_are_single_flight() {
@@ -939,6 +1020,9 @@ test_quantified_finding_is_emitted_with_its_evidence
 test_classification_without_measurement_is_rejected
 test_subject_with_no_work_location_is_rejected
 test_cadence_silences_the_sweep_between_reviews
+test_future_source_timestamp_is_structural_failure
+test_future_cadence_timestamp_is_normalized
+test_future_latch_timestamp_is_normalized
 test_concurrent_scans_are_single_flight
 test_special_evidence_file_fails_without_blocking
 test_special_control_files_fail_without_blocking

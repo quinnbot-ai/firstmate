@@ -74,10 +74,11 @@
 # decision belonging to whoever owns the reviewed surface; the spec is where
 # they say so. This script owns only whether a stated finding is admissible.
 #
-# Structural findings - a missing or invalid spec, a missing or stale source -
-# skip G5, because their subject is the review's own plumbing rather than a
-# reviewed surface, and they outrank rule findings so a review reports its own
-# blindness before reporting anything it saw while blind.
+# Structural findings - a missing or invalid spec, or a missing, stale, or
+# materially future-dated source - skip G5, because their subject is the
+# review's own plumbing rather than a reviewed surface, and they outrank rule
+# findings so a review reports its own blindness before reporting anything it
+# saw while blind.
 set -eu
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -104,6 +105,7 @@ DEFAULT_INTERVAL = 86400            # daily
 DEFAULT_SUBJECT_COOLDOWN = 604800   # 7 days
 DEFAULT_LATCH_RETENTION = 7776000   # 90 days
 DEFAULT_SOURCE_MAX_AGE = 172800     # 2 days
+FUTURE_SKEW_SECONDS = 5
 
 # The watcher composes "check: <path>: <out>" into a wake reason that is read
 # in a digest, so a long line costs more than it carries. The marker matches
@@ -411,6 +413,7 @@ class Latch:
         self.now = now
         self.findings: dict[str, int] = {}
         self.subjects: dict[str, int] = {}
+        self.dirty = False
         self._load()
 
     def _load(self):
@@ -429,6 +432,9 @@ class Latch:
                 when = int(stamp)
             except ValueError:
                 continue
+            if when > self.now:
+                when = self.now
+                self.dirty = True
             if self.now - when >= self.retention:
                 continue
             if kind == "finding":
@@ -446,9 +452,7 @@ class Latch:
         remaining = cooldown - (self.now - when)
         return remaining if remaining > 0 else 0
 
-    def record(self, identity: str, subject: str):
-        self.findings[identity] = self.now
-        self.subjects[subject] = self.now
+    def save(self):
         lines = [f"{when}\tfinding\t{key}" for key, when in sorted(self.findings.items())]
         lines += [f"{when}\tsubject\t{key}" for key, when in sorted(self.subjects.items())]
         body = "".join(f"{line}\n" for line in lines)
@@ -468,6 +472,12 @@ class Latch:
             except OSError:
                 pass
             raise
+        self.dirty = False
+
+    def record(self, identity: str, subject: str):
+        self.findings[identity] = self.now
+        self.subjects[subject] = self.now
+        self.save()
 
 
 # --- candidates ------------------------------------------------------------
@@ -683,6 +693,17 @@ def build_structural(spec, review_id, now):
                 )
             )
             continue
+        ahead = mtime - now
+        if ahead > FUTURE_SKEW_SECONDS:
+            out.append(
+                structural(
+                    "source-future",
+                    f"{review_id}.{name}",
+                    [("ahead_seconds", str(ahead), True)],
+                    f"evidence source '{name}' is future-dated - {source['path']}",
+                )
+            )
+            continue
         age = max(now - mtime, 0)
         if age >= source["max_age"]:
             out.append(
@@ -786,7 +807,15 @@ def main() -> int:
     cooldown = spec["cooldown"] if spec else DEFAULT_SUBJECT_COOLDOWN
 
     if not args.dry_run:
-        since = interval if cadence_created else now - int(os.fstat(cadence_lock_fd).st_mtime)
+        cadence_mtime = int(os.fstat(cadence_lock_fd).st_mtime)
+        if not cadence_created and cadence_mtime > now:
+            try:
+                os.utime(cadence_lock_fd, (now, now))
+            except OSError as exc:
+                sys.stderr.write(f"error: cannot normalize the review cadence: {exc}\n")
+                return 1
+            cadence_mtime = now
+        since = interval if cadence_created else now - cadence_mtime
         if since < interval:
             if args.explain:
                 sys.stderr.write(
@@ -807,6 +836,12 @@ def main() -> int:
     except LatchError as exc:
         sys.stderr.write(f"error: {exc}\n")
         return 1
+    if latch.dirty and not args.dry_run:
+        try:
+            latch.save()
+        except OSError as exc:
+            sys.stderr.write(f"error: cannot normalize the review latch: {exc}\n")
+            return 1
     effective = spec or {
         "subject_root": Path("/"),
         "cooldown": cooldown,

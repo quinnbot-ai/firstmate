@@ -2204,6 +2204,78 @@ preflight_descendant_task_locks() {
   done
 }
 
+preflight_descendant_worktree_ownership() {
+  local i state task_id kind meta worktree project backend lock owner_detail
+  local -a pool_locks transition_locks
+  pool_locks=()
+  transition_locks=()
+  for ((i=0; i < ${#DESCENDANT_TASK_IDS[@]}; i++)); do
+    state=${DESCENDANT_TASK_STATES[$i]}
+    task_id=${DESCENDANT_TASK_IDS[$i]}
+    kind=${DESCENDANT_TASK_KINDS[$i]}
+    meta="$state/$task_id.meta"
+    [ "$kind" != secondmate ] || continue
+    backend=$(fm_backend_of_meta "$meta")
+    [ "$backend" != orca ] || continue
+    fm_worktree_record_resolve "$meta" || continue
+    worktree=$FM_WORKTREE_RECORD_ACTIVE_PATH
+    [ -n "$worktree" ] && [ -d "$worktree" ] || continue
+    project=$(meta_value "$meta" project)
+    if [ -n "$project" ] && [ -d "$project" ]; then
+      lock=$(fm_worktree_pool_transition_lock_path "$state" "$project") || {
+        echo "REFUSED: cannot establish the shared pool lock for descendant task $task_id; forced teardown changed nothing" >&2
+        return 1
+      }
+      pool_locks+=("$lock")
+    fi
+    lock=$(fm_worktree_transition_lock_path "$state" "$worktree") || {
+      echo "REFUSED: cannot establish the ownership lock for descendant task $task_id; forced teardown changed nothing" >&2
+      return 1
+    }
+    transition_locks+=("$lock")
+  done
+
+  if [ "${#pool_locks[@]}" -gt 0 ]; then
+    while IFS= read -r lock; do
+      [ -n "$lock" ] || continue
+      if ! fm_lock_try_acquire "$lock"; then
+        echo "REFUSED: a descendant worktree pool transition is in flight; forced teardown changed nothing" >&2
+        return 1
+      fi
+      DESCENDANT_LOCK_PATHS+=("$lock")
+    done < <(printf '%s\n' "${pool_locks[@]}" | LC_ALL=C sort -u)
+  fi
+  if [ "${#transition_locks[@]}" -gt 0 ]; then
+    while IFS= read -r lock; do
+      [ -n "$lock" ] || continue
+      if ! fm_lock_try_acquire "$lock"; then
+        echo "REFUSED: a descendant worktree ownership transition is in flight; forced teardown changed nothing" >&2
+        return 1
+      fi
+      DESCENDANT_LOCK_PATHS+=("$lock")
+    done < <(printf '%s\n' "${transition_locks[@]}" | LC_ALL=C sort -u)
+  fi
+
+  for ((i=0; i < ${#DESCENDANT_TASK_IDS[@]}; i++)); do
+    state=${DESCENDANT_TASK_STATES[$i]}
+    task_id=${DESCENDANT_TASK_IDS[$i]}
+    kind=${DESCENDANT_TASK_KINDS[$i]}
+    meta="$state/$task_id.meta"
+    [ "$kind" != secondmate ] || continue
+    backend=$(fm_backend_of_meta "$meta")
+    [ "$backend" != orca ] || continue
+    fm_worktree_record_resolve "$meta" || continue
+    worktree=$FM_WORKTREE_RECORD_ACTIVE_PATH
+    [ -n "$worktree" ] && [ -d "$worktree" ] || continue
+    if ! fm_worktree_owner_resolve "$worktree" "$state" \
+       || [ "$FM_WORKTREE_OWNER_TASK_ID" != "$task_id" ]; then
+      owner_detail=${FM_WORKTREE_OWNER_DETAIL:-the current owner does not match this record}
+      echo "REFUSED: descendant task $task_id does not positively own worktree $worktree; $owner_detail; forced teardown changed nothing" >&2
+      return 1
+    fi
+  done
+}
+
 validate_firstmate_home_children_removal() {
   local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home child_backend child_orca_worktree_id
   sub_state="$home/state"
@@ -2502,6 +2574,7 @@ if [ "$KIND" = secondmate ]; then
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
     preflight_descendant_task_locks "$HOME_PATH" || exit 1
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
+    preflight_descendant_worktree_ownership || exit 1
     if [ "$BACKEND" = herdr ]; then
       teardown_herdr_preflight_target "$T" "$ID" || exit 1
     fi

@@ -252,16 +252,18 @@ test_unenumerated_imperative_reference_refuses() {
   pass "an affirmative helper directive does not depend on an execution-verb allowlist"
 }
 
-test_negative_modal_reference_does_not_refuse() {
+test_negative_modal_reference_refuses() {
   local id=brief-negative-modal-a8 rec out status
   rec=$(make_case negative-modal "$id" 'You must never run bin/fm-negative-only.sh.')
   read_case "$rec"
 
+  set +e
   out=$(run_spawn "$id")
   status=$?
-  expect_code 0 "$status" "a negative helper instruction should not block dispatch: $out"
-  assert_contains "$out" "spawned $id" "negative helper instruction did not reach worker dispatch"
-  pass "a negative modal helper reference does not refuse dispatch"
+  set -e
+  expect_code 1 "$status" "an absent helper in a negative instruction dispatched: $out"
+  assert_contains "$out" "fm-negative-only.sh" "the negative helper reference was not diagnosed"
+  pass "a syntactic helper reference refuses without natural-language inference"
 }
 
 test_mixed_negation_still_refuses_positive_instruction() {
@@ -275,9 +277,8 @@ test_mixed_negation_still_refuses_positive_instruction() {
   set -e
   expect_code 1 "$status" "a positive clause after a negated clause dispatched: $out"
   assert_contains "$out" "fm-mixed-missing.sh" "the positive missing helper was not diagnosed"
-  assert_not_contains "$out" "resolves in this task worktree to $POOL_DIR/bin/fm-old-helper.sh" \
-    "the negated helper was treated as an instruction"
-  pass "mixed negation still refuses the positive missing-helper instruction"
+  assert_contains "$out" "fm-old-helper.sh" "the first syntactic helper reference was not diagnosed"
+  pass "mixed clauses validate every syntactic helper reference"
 }
 
 test_sentence_after_negation_still_refuses_positive_instruction() {
@@ -292,9 +293,8 @@ test_sentence_after_negation_still_refuses_positive_instruction() {
   expect_code 1 "$status" "a positive sentence after a negated sentence dispatched: $out"
   assert_contains "$out" "fm-sentence-missing.sh" \
     "the positive sentence's missing helper was not diagnosed"
-  assert_not_contains "$out" "resolves in this task worktree to $POOL_DIR/bin/fm-old-helper.sh" \
-    "the negated sentence was treated as an instruction"
-  pass "a sentence after negation still refuses its missing helper"
+  assert_contains "$out" "fm-old-helper.sh" "the negated sentence's helper reference was not diagnosed"
+  pass "separate sentences validate every syntactic helper reference"
 }
 
 test_pool_transition_lock_precedes_allocation() {
@@ -367,30 +367,67 @@ test_invalid_allocated_worktree_returns_exact_lease() {
   pass "an invalid allocation returns only its exact durable lease"
 }
 
-test_conditional_prose_reference_does_not_refuse() {
+test_conditional_prose_reference_refuses() {
   local id=brief-conditional-prose-a15 rec out status
   rec=$(make_case conditional-prose "$id" \
     'If you run bin/fm-conditional-example.sh in older releases, it prints a legacy report.')
   read_case "$rec"
 
+  set +e
   out=$(run_spawn "$id")
   status=$?
-  expect_code 0 "$status" "conditional prose should not block dispatch: $out"
-  assert_contains "$out" "spawned $id" "conditional prose did not reach worker dispatch"
-  pass "a conditional prose helper reference remains advisory"
+  set -e
+  expect_code 1 "$status" "an absent helper in conditional prose dispatched: $out"
+  assert_contains "$out" "fm-conditional-example.sh" "the conditional helper reference was not diagnosed"
+  pass "conditional prose cannot bypass syntactic helper validation"
 }
 
-test_prose_only_mention_does_not_refuse() {
+test_prose_only_mention_refuses() {
   local id=brief-prose-a4 rec out status
   # shellcheck disable=SC2016 # The literal variable reference exercises the prose parser path.
   rec=$(make_case prose-only "$id" 'The historical examples run `$FM_ROOT/bin/fm-prose-only.sh` only as background context.')
   read_case "$rec"
 
+  set +e
   out=$(run_spawn "$id")
   status=$?
-  expect_code 0 "$status" "a prose-only helper mention should not block dispatch: $out"
-  assert_contains "$out" "spawned $id" "prose-only mention did not reach worker dispatch"
-  pass "a prose-only helper mention is advisory context, not an invocation"
+  set -e
+  expect_code 1 "$status" "an absent helper in prose dispatched: $out"
+  assert_contains "$out" "fm-prose-only.sh" "the prose helper reference was not diagnosed"
+  pass "prose cannot bypass syntactic helper validation"
+}
+
+test_dont_forget_reference_refuses() {
+  local id=brief-dont-forget-a19 rec out status
+  rec=$(make_case dont-forget "$id" "Don't forget to run bin/fm-dont-forget-missing.sh before editing.")
+  read_case "$rec"
+
+  set +e
+  out=$(run_spawn "$id")
+  status=$?
+  set -e
+  expect_code 1 "$status" "an affirmative don't-forget helper instruction dispatched: $out"
+  assert_contains "$out" "fm-dont-forget-missing.sh" "the don't-forget helper was not diagnosed"
+  pass "don't-forget instructions cannot bypass helper validation"
+}
+
+test_linked_homes_share_pool_transition_lock() {
+  local rec linked state_a state_b lock_a lock_b
+  rec=$(make_case cross-home-pool-lock brief-cross-home-a20 'Proceed with the task.')
+  read_case "$rec"
+  linked="${PROJECT_DIR}-linked"
+  state_a="$HOME_DIR/state"
+  state_b="${HOME_DIR}-peer/state"
+  mkdir -p "$state_b"
+  git -C "$PROJECT_DIR" worktree add -q -b fm/cross-home-lock "$linked" main
+
+  lock_a=$(fm_worktree_pool_transition_lock_path "$state_a" "$PROJECT_DIR") \
+    || fail "could not resolve the primary home's pool lock"
+  lock_b=$(fm_worktree_pool_transition_lock_path "$state_b" "$linked") \
+    || fail "could not resolve the linked home's pool lock"
+  [ "$lock_a" = "$lock_b" ] \
+    || fail "linked Firstmate homes resolved different pool locks: $lock_a != $lock_b"
+  pass "linked Firstmate homes share one repository pool lock"
 }
 
 test_absent_variable_expanded_helper_refuses_at_task_worktree
@@ -403,13 +440,15 @@ test_bare_modal_imperative_reference_refuses
 test_infinitive_imperative_reference_refuses
 test_second_person_imperative_reference_refuses
 test_unenumerated_imperative_reference_refuses
-test_negative_modal_reference_does_not_refuse
+test_negative_modal_reference_refuses
 test_mixed_negation_still_refuses_positive_instruction
 test_sentence_after_negation_still_refuses_positive_instruction
-test_prose_only_mention_does_not_refuse
+test_prose_only_mention_refuses
+test_dont_forget_reference_refuses
+test_linked_homes_share_pool_transition_lock
 test_pool_transition_lock_precedes_allocation
 test_prepublication_failure_rolls_back_fresh_resources
 test_invalid_allocated_worktree_returns_exact_lease
-test_conditional_prose_reference_does_not_refuse
+test_conditional_prose_reference_refuses
 
 echo "# all fm-spawn-brief-script-reference tests passed"
