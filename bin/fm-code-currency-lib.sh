@@ -342,11 +342,28 @@ fm_code_currency_inspection_failed_line() {
     "$head_sha" "$behind" "$base" "$base_sha"
 }
 
+fm_code_currency_current_snapshot_changed_line() {
+  local base=$1 head_sha=$2 base_sha=$3
+  printf 'CODE_DRIFT: UNPROVEN live code: checked-out HEAD or %s changed during current-checkout inspection from snapshot %s/%s; retry session-start status before relying on code currency.\n' \
+    "$base" "$head_sha" "$base_sha"
+}
+
+fm_code_currency_current_worktree_changed_line() {
+  local base=$1 head_sha=$2 base_sha=$3
+  printf 'CODE_DRIFT: UNPROVEN live code: tracked worktree bytes changed during current-checkout inspection of snapshot %s/%s (%s); reconcile the tracked checkout and retry session-start status before relying on code currency.\n' \
+    "$head_sha" "$base_sha" "$base"
+}
+
+fm_code_currency_current_inspection_failed_line() {
+  local base=$1 head_sha=$2 base_sha=$3
+  printf 'CODE_DRIFT: UNPROVEN live code: current tracked checkout at %s could not be inspected against %s (%s); repair the checkout inspection failure before relying on code currency.\n' \
+    "$head_sha" "$base" "$base_sha"
+}
+
 # fm_code_currency_line <root>
 # Echo one CODE_STALE diagnostic when the checkout at <root> is behind the
-# default branch it follows and report whether inspected bytes expose drift.
-# Echo nothing (returning 1) for other clean states: not a git work tree,
-# nothing to compare against, already current, or ahead only.
+# default branch it follows, or CODE_DRIFT when a current commit has unproven
+# tracked worktree bytes. Echo nothing (returning 1) for other clean states.
 fm_code_currency_line() {
   local root=$1 base behind ahead head_oid base_oid head_sha base_sha guard guard_count shown more guard_text tracked_status head_drift head_drift_confirm head_drift_shown landed_drift landed_drift_shown index_hints index_hints_shown
   git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
@@ -359,28 +376,51 @@ fm_code_currency_line() {
   esac
   head_sha=${head_oid:0:7}
   base_sha=${base_oid:0:7}
-  [ "$behind" -gt 0 ] || return 1
   if ! head_drift=$(fm_code_currency_head_worktree_drift "$root" "$head_oid"); then
     if fm_code_currency_snapshot_matches "$root" "$base" "$head_oid" "$base_oid"; then
-      fm_code_currency_inspection_failed_line "$base" "$head_sha" "$base_sha" "$behind"
+      if [ "$behind" -gt 0 ]; then
+        fm_code_currency_inspection_failed_line "$base" "$head_sha" "$base_sha" "$behind"
+      else
+        fm_code_currency_current_inspection_failed_line "$base" "$head_sha" "$base_sha"
+      fi
     else
-      fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+      if [ "$behind" -gt 0 ]; then
+        fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+      else
+        fm_code_currency_current_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+      fi
     fi
     return 0
   fi
   if ! head_drift_confirm=$(fm_code_currency_head_worktree_drift "$root" "$head_oid"); then
     if fm_code_currency_snapshot_matches "$root" "$base" "$head_oid" "$base_oid"; then
-      fm_code_currency_inspection_failed_line "$base" "$head_sha" "$base_sha" "$behind"
+      if [ "$behind" -gt 0 ]; then
+        fm_code_currency_inspection_failed_line "$base" "$head_sha" "$base_sha" "$behind"
+      else
+        fm_code_currency_current_inspection_failed_line "$base" "$head_sha" "$base_sha"
+      fi
     else
-      fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+      if [ "$behind" -gt 0 ]; then
+        fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+      else
+        fm_code_currency_current_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+      fi
     fi
     return 0
   fi
   if [ "$head_drift" != "$head_drift_confirm" ]; then
     if fm_code_currency_snapshot_matches "$root" "$base" "$head_oid" "$base_oid"; then
-      fm_code_currency_worktree_changed_line "$base" "$head_sha" "$base_sha"
+      if [ "$behind" -gt 0 ]; then
+        fm_code_currency_worktree_changed_line "$base" "$head_sha" "$base_sha"
+      else
+        fm_code_currency_current_worktree_changed_line "$base" "$head_sha" "$base_sha"
+      fi
     else
-      fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+      if [ "$behind" -gt 0 ]; then
+        fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+      else
+        fm_code_currency_current_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+      fi
     fi
     return 0
   fi
@@ -391,10 +431,16 @@ fm_code_currency_line() {
       return 0
     fi
     head_drift_shown=$(printf '%s\n' "$head_drift" | head -n 4 | paste -sd, - | sed 's/,/, /g')
-    printf 'CODE_STALE: UNPROVEN live code: tracked worktree bytes differ from checked-out HEAD %s: %s. HEAD is %s commit(s) behind %s (%s) as last fetched; reconcile the tracked checkout before relying on landed-versus-live status.\n' \
-      "$head_sha" "$head_drift_shown" "$behind" "$base" "$base_sha"
+    if [ "$behind" -gt 0 ]; then
+      printf 'CODE_STALE: UNPROVEN live code: tracked worktree bytes differ from checked-out HEAD %s: %s. HEAD is %s commit(s) behind %s (%s) as last fetched; reconcile the tracked checkout before relying on landed-versus-live status.\n' \
+        "$head_sha" "$head_drift_shown" "$behind" "$base" "$base_sha"
+    else
+      printf 'CODE_DRIFT: UNPROVEN live code: tracked worktree bytes differ from current checked-out HEAD %s: %s. Reconcile the tracked checkout before relying on landed-versus-live status.\n' \
+        "$head_sha" "$head_drift_shown"
+    fi
     return 0
   fi
+  [ "$behind" -gt 0 ] || return 1
   if git -C "$root" diff --cached --quiet "$head_oid" -- 2>/dev/null; then
     tracked_status=0
   else

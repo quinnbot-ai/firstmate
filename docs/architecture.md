@@ -178,9 +178,9 @@ Ship briefs also tell the crewmate to verify `pwd -P` and `git rev-parse --show-
 
 The same shared-repository topology creates a second, quieter exposure: firstmate never updates itself, so a change merged to the default branch does not reach a home's checked-out commit until the captain approves `/updatefirstmate`.
 Every home reads its tooling from a code root, and the primary home plus each linked-worktree secondmate home follow the same repository, so a code root left behind leaves all of them equally behind at once.
-`fm-code-currency-lib.sh` compares the commit `FM_ROOT` actually has checked out against the remote-tracking ref of the default branch it follows, and `bin/fm-bootstrap.sh` reports the gap as a `CODE_STALE:` line at session start, naming the missing commit count and any guard paths inside the gap.
+`fm-code-currency-lib.sh` compares the commit `FM_ROOT` actually has checked out against the remote-tracking ref of the default branch it follows, and `bin/fm-bootstrap.sh` reports a commit gap as `CODE_STALE:` or unproven tracked drift at a current commit as `CODE_DRIFT:` during session start.
 The comparison is a local read of an already-fetched ref, so the reported gap is a floor rather than a live query, and the check never fetches, fast-forwards, or otherwise closes the gap it reports: a home may be pinned at an older commit deliberately, and only the captain moves it.
-Because the checkout is unlocked, the diagnostic treats installed code as unproven even when inspected worktree bytes match that commit.
+Because the checkout is unlocked, both diagnostics avoid claiming which code a running process has engaged, even when inspected worktree bytes match a commit.
 
 ## No-mistakes gate authority boundary
 

@@ -14,6 +14,7 @@
 #                 "PR_CHECK_MIGRATION: <private remediation>",
 #                 "TANGLE: <remediation>",
 #                 "CODE_STALE: <gap between checked-out and fetched code>",
+#                 "CODE_DRIFT: <unproven current checkout drift>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
@@ -53,6 +54,9 @@
 #          UNPROVEN for live code because an unlocked checkout can change after
 #          inspection. It makes no live/inactive claim. A home may be held at an
 #          older commit on purpose, so the line reports and never acts.
+#          A CODE_DRIFT line means checked-out HEAD is current but tracked
+#          worktree inspection found drift or could not prove stable bytes.
+#          It never claims which code a running process has engaged.
 #          bin/fm-code-currency-lib.sh owns the comparison: it is a local
 #          read of the already-fetched remote-tracking ref, never a fetch, so the
 #          reported gap is a floor rather than a live remote query.
@@ -1183,10 +1187,10 @@ detect_local_config() {
       echo "TANGLE: primary checkout on feature branch '$tangle_branch' (expected '$tangle_default'); the work is safe on that ref - restore the primary with: git -C $FM_ROOT checkout $tangle_default, then re-validate the branch in a proper worktree"
     fi
   fi
-  # Landed-is-not-running check: the code root this home runs must not be quietly
-  # older than the default branch it follows (see fm-code-currency-lib.sh). A
-  # local read only - it never fetches and never updates, because holding at an
-  # older commit is a captain decision.
+  # Checked-out-versus-landed check: report a commit gap or unproven tracked
+  # drift without claiming which code a running process has engaged. A local
+  # read only - it never fetches and never updates, because holding at an older
+  # commit is a captain decision.
   fm_code_currency_line "$FM_ROOT" || true
   crew=
   [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)

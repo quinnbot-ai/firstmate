@@ -8,7 +8,7 @@
 #
 # Three things are pinned here, because they fail for different reasons:
 #   SIGNAL  - a code root behind the branch it follows reports the gap.
-#   SILENCE - every other state stays quiet, so the line keeps its meaning.
+#   SILENCE - clean non-behind states stay quiet, so each line keeps its meaning.
 #   NAMING  - the gap names guard paths when it carries them, and says so plainly
 #             when it does not.
 # Plus the boundary that makes the signal safe to run unattended: it reports and
@@ -253,8 +253,12 @@ test_dirty_tracked_checkout_is_unproven() {
 
   printf 'locally reverted\n' > "$repo/bin/fm-guard.sh"
   out=$(fm_code_currency_line "$repo" || true)
-  [ -z "$out" ] \
-    || fail "a current dirty checkout was mislabeled stale: $out"
+  assert_contains "$out" "CODE_DRIFT: UNPROVEN live code" \
+    "a current dirty checkout produced no live-code uncertainty"
+  assert_contains "$out" "bin/fm-guard.sh" \
+    "the current checkout-drift diagnostic did not name the changed guard"
+  assert_not_contains "$out" "CODE_STALE:" \
+    "a current dirty checkout was mislabeled stale"
 
   git -C "$repo" reset -q --hard origin/main
   current_guard=$(git -C "$repo" show origin/main:bin/fm-guard.sh)
@@ -718,7 +722,7 @@ test_dirty_submodule_checkout_is_unproven() {
 # --- SESSION START: the line reaches the digest -----------------------------
 
 # The library is only useful if a session start actually prints it, and only
-# trustworthy if a current home still starts silent.
+# trustworthy if a clean current home still starts silent.
 run_bootstrap() {
   FM_ROOT_OVERRIDE="$1" FM_HOME="$1" FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
@@ -728,8 +732,19 @@ test_bootstrap_line() {
   local repo out
   repo=$(make_repo "$TMP_ROOT/bootstrap")
 
-  out=$(run_bootstrap "$repo" | grep '^CODE_STALE:' || true)
-  [ -z "$out" ] || fail "session start reported a gap for a current home: $out"
+  out=$(run_bootstrap "$repo" | grep -E '^CODE_(STALE|DRIFT):' || true)
+  [ -z "$out" ] || fail "session start reported code drift for a clean current home: $out"
+
+  land "$repo" bin/fm-current-guard.sh "current guard"
+  printf 'locally changed\n' > "$repo/bin/fm-current-guard.sh"
+  out=$(run_bootstrap "$repo" | grep -E '^CODE_(STALE|DRIFT):' || true)
+  assert_contains "$out" "CODE_DRIFT: UNPROVEN live code" \
+    "session start did not surface current tracked checkout drift"
+  assert_contains "$out" "bin/fm-current-guard.sh" \
+    "session-start checkout drift did not name the changed tracked path"
+  assert_not_contains "$out" "CODE_STALE:" \
+    "session start mislabeled a current dirty checkout as stale"
+  git -C "$repo" reset -q --hard origin/main
 
   land "$repo" bin/fm-pr-merge.sh "refuse an untested pull request"
   hold_back "$repo" 1
@@ -739,7 +754,7 @@ test_bootstrap_line() {
   assert_contains "$out" "installed code cannot be proven" \
     "session start overclaimed the live bytes in an unlocked checkout"
 
-  pass "fm-bootstrap: CODE_STALE reaches session start for a stale code root and stays silent for a current one"
+  pass "fm-bootstrap: code gaps and current checkout drift reach session start distinctly"
 }
 
 test_states

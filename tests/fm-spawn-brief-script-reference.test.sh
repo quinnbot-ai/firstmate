@@ -243,6 +243,23 @@ test_object_bearing_directive_reference_refuses() {
   pass "an object-bearing helper command refuses dispatch"
 }
 
+test_prepositional_object_directive_reference_refuses() {
+  local id=brief-prepositional-command-a32 rec out status expected
+  rec=$(make_case prepositional-command "$id" \
+    'Run the command located at bin/fm-prepositional-missing.sh before editing.')
+  read_case "$rec"
+
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite a prepositional helper command"
+  expected="$POOL_DIR/bin/fm-prepositional-missing.sh"
+  assert_contains "$out" "$expected" \
+    "prepositional command did not resolve against the task worktree"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "prepositional helper refusal published metadata"
+  pass "a prepositional helper command refuses dispatch"
+}
+
 test_dotted_helper_reference_refuses() {
   local id=brief-dotted-a18 rec out status expected
   rec=$(make_case dotted-command "$id" 'Run bin/fm-dotted-missing.v2.sh before editing.')
@@ -619,7 +636,7 @@ test_historical_prose_mention_passes() {
 test_descriptive_prose_mention_passes() {
   local id=brief-descriptive-prose-a24 rec out status
   rec=$(make_case descriptive-prose "$id" \
-    'Documentation for the helper bin/fm-retired.sh describes the old workflow.')
+    'Documentation for the command located at bin/fm-retired.sh describes the old workflow.')
   read_case "$rec"
 
   out=$(run_spawn "$id")
@@ -822,6 +839,7 @@ test_present_helper_passes
 test_fenced_command_reference_refuses
 test_unquoted_command_reference_refuses
 test_object_bearing_directive_reference_refuses
+test_prepositional_object_directive_reference_refuses
 test_dotted_helper_reference_refuses
 test_punctuated_helper_reference_refuses
 test_prefixed_imperative_reference_refuses
