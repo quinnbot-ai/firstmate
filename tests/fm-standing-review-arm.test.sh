@@ -215,6 +215,31 @@ test_arming_refuses_to_overwrite_a_foreign_check() {
   pass "arming refuses to overwrite a check it did not generate"
 }
 
+test_failed_rearm_preserves_the_registered_review() {
+  local home fakebin out rc check_hash trust_bytes
+  home=$(make_home failed-rearm)
+  arm "$home" --id r >/dev/null 2>&1 || fail "initial arming failed"
+  check_hash=$(fm_custom_check_sha256 "$home/state/r.check.sh")
+  trust_bytes=$(cat "$home/state/r.check-trust")
+  fakebin=$(fm_fakebin "$home/rearm-failure")
+  cat > "$fakebin/shasum" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/shasum"
+
+  out=$(PATH="$fakebin:$PATH" arm "$home" --id r 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "re-arming succeeded despite registration failure"
+  [ "$(fm_custom_check_sha256 "$home/state/r.check.sh")" = "$check_hash" ] \
+    || fail "failed re-arm did not restore the prior check bytes"
+  [ "$(cat "$home/state/r.check-trust")" = "$trust_bytes" ] \
+    || fail "failed re-arm did not restore the prior trust record"
+  fm_custom_check_registered "$home/state" r \
+    || fail "failed re-arm disabled the previously registered review"
+  assert_contains "$out" "registration failed" "failed re-arm did not report its failure"
+  pass "a failed re-arm preserves the previously registered review"
+}
+
 test_disarm_stops_the_review_and_keeps_what_it_reported() {
   local home
   home=$(make_home disarm)
@@ -289,6 +314,7 @@ test_relative_review_paths_are_refused_before_arming
 test_arming_refuses_an_id_that_names_a_task
 test_spawning_refuses_an_id_reserved_by_a_review
 test_arming_refuses_to_overwrite_a_foreign_check
+test_failed_rearm_preserves_the_registered_review
 test_disarm_stops_the_review_and_keeps_what_it_reported
 test_disarm_refuses_a_foreign_check
 test_list_reports_what_is_armed

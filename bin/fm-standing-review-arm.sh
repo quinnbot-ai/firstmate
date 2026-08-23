@@ -68,11 +68,15 @@ PURGE=0
 DISARM_REQUESTED=0
 LIST_REQUESTED=0
 TMP=
+PRIOR_CHECK=
+PRIOR_TRUST=
 TASK_SET_LOCK=
 TASK_SET_LOCK_HELD=0
 
 cleanup() {
   [ -z "$TMP" ] || rm -f -- "$TMP"
+  [ -z "$PRIOR_CHECK" ] || rm -f -- "$PRIOR_CHECK"
+  [ -z "$PRIOR_TRUST" ] || rm -f -- "$PRIOR_TRUST"
   if [ "$TASK_SET_LOCK_HELD" -eq 1 ]; then
     TASK_SET_LOCK_HELD=0
     fm_lock_release "$TASK_SET_LOCK"
@@ -177,6 +181,16 @@ if [ -e "$CHECK" ] && ! is_review_shim "$CHECK"; then
 fi
 
 umask 077
+STATE_DEVICE=$(fm_pr_file_device "$STATE") || die "cannot inspect the state directory"
+if fm_pr_private_file_valid "$CHECK" 700 "$STATE_DEVICE" \
+  && fm_pr_private_file_valid "$TRUST" 600 "$STATE_DEVICE"; then
+  PRIOR_CHECK=$(mktemp "$STATE/.fm-standing-review-prior-check.XXXXXX") \
+    || die "cannot preserve the current check shim"
+  cp -p -- "$CHECK" "$PRIOR_CHECK" || die "cannot preserve the current check shim"
+  PRIOR_TRUST=$(mktemp "$STATE/.fm-standing-review-prior-trust.XXXXXX") \
+    || die "cannot preserve the current check registration"
+  cp -p -- "$TRUST" "$PRIOR_TRUST" || die "cannot preserve the current check registration"
+fi
 TMP=$(mktemp "$STATE/.fm-standing-review-shim.XXXXXX") || die "cannot stage the check shim"
 {
   printf '#!/usr/bin/env bash\n'
@@ -193,7 +207,20 @@ TMP=
 
 if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
   "$SCRIPT_DIR/fm-check-register.sh" "$ID"; then
-  rm -f -- "$CHECK" "$TRUST"
+  if [ -n "$PRIOR_CHECK" ] && [ -n "$PRIOR_TRUST" ]; then
+    mv -f -- "$PRIOR_TRUST" "$TRUST" \
+      || die "check registration failed for $ID and the prior registration could not be restored"
+    PRIOR_TRUST=
+    mv -f -- "$PRIOR_CHECK" "$CHECK" \
+      || die "check registration failed for $ID and the prior shim could not be restored"
+    PRIOR_CHECK=
+  else
+    rm -f -- "$CHECK" "$TRUST"
+  fi
   die "check registration failed for $ID"
 fi
+[ -z "$PRIOR_CHECK" ] || rm -f -- "$PRIOR_CHECK"
+[ -z "$PRIOR_TRUST" ] || rm -f -- "$PRIOR_TRUST"
+PRIOR_CHECK=
+PRIOR_TRUST=
 printf 'armed: standing review %s\n' "$ID"

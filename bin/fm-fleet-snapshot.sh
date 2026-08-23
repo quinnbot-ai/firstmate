@@ -159,6 +159,18 @@ validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIME
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-worktree-binding-lib.sh"
 
+FLEET_WORKTREE_GUARD_HELD=0
+
+fleet_snapshot_cleanup() {
+  if [ "$FLEET_WORKTREE_GUARD_HELD" -eq 1 ]; then
+    FLEET_WORKTREE_GUARD_HELD=0
+    fm_worktree_record_active_guard_release
+  fi
+}
+
+trap fleet_snapshot_cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
 usage() {
   cat <<'EOF'
 usage: fm-fleet-snapshot.sh --json
@@ -228,7 +240,7 @@ crew_state_json() {  # <id>
       FM_DATA_OVERRIDE="$DATA" \
       FM_PROJECTS_OVERRIDE="$PROJECTS" \
       FM_CONFIG_OVERRIDE="$CONFIG" \
-      "$SCRIPT_DIR/fm-crew-state.sh" "$id" 2>/dev/null || true
+      "$FM_CREW_STATE_BIN" "$id" 2>/dev/null || true
   )
   raw=$(printf '%s\n' "$raw" | head -1)
   sep=' · '
@@ -431,7 +443,7 @@ task_json_lines() {
   local meta id kind harness mode yolo project worktree retired_worktree worktree_retired_to worktree_retired_state home projects backend target status_log report_path
   local remote_host remote_root remote_state remote_rc remote_home_present
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json retired_worktree_json home_json
-  local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
+  local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status worktree_present
   local open_decisions_tsv open_decisions_json
 
   for meta in "$STATE"/*.meta; do
@@ -447,8 +459,13 @@ task_json_lines() {
     retired_worktree=
     worktree_retired_to=
     worktree_retired_state=
-    if fm_worktree_record_active_resolve "$meta"; then
+    worktree_present=0
+    if fm_worktree_record_active_guard_acquire "$meta"; then
+      [ "$FM_WORKTREE_RECORD_ACTIVE_GUARD_HELD" -eq 0 ] || FLEET_WORKTREE_GUARD_HELD=1
       worktree=$FM_WORKTREE_RECORD_ACTIVE_PATH
+      [ ! -e "$worktree" ] || worktree_present=1
+      fm_worktree_record_active_guard_release
+      FLEET_WORKTREE_GUARD_HELD=0
     elif [ -n "$FM_WORKTREE_RECORD_RETIRED_OWNER" ]; then
       retired_worktree=$worktree
       worktree=
@@ -559,7 +576,12 @@ task_json_lines() {
     meta_json=$(path_present_json "$meta")
     status_json=$event_json
     report_json=$(path_present_json "$report_path")
-    if [ -n "$worktree" ]; then worktree_json=$(path_present_json "$worktree"); else worktree_json=$(jq -n '{path:null,present:false}'); fi
+    if [ -n "$worktree" ]; then
+      worktree_json=$(jq -n --arg path "$worktree" --argjson present "$(bool_json "$worktree_present")" \
+        '{path:$path,present:$present}')
+    else
+      worktree_json=$(jq -n '{path:null,present:false}')
+    fi
     if [ -n "$retired_worktree" ]; then retired_worktree_json=$(path_present_json "$retired_worktree"); else retired_worktree_json=$(jq -n '{path:null,present:false}'); fi
     if [ -n "$home" ] && [ -n "$remote_host" ]; then
       home_json=$(jq -n --arg path "$home" --argjson present "$remote_home_present" '{path:$path,present:$present}')
