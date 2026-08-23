@@ -66,6 +66,12 @@ make_fakebin() {  # <dir> -> echoes fakebin path
 set -u
 case "${1:-}" in
   axi)
+    if [ -n "${FM_FAKE_NM_STARTED:-}" ]; then
+      : > "$FM_FAKE_NM_STARTED"
+      while [ -n "${FM_FAKE_NM_RELEASE:-}" ] && [ ! -e "$FM_FAKE_NM_RELEASE" ]; do
+        sleep 0.02
+      done
+    fi
     shift
     case "${1:-}" in
       status)
@@ -87,7 +93,7 @@ set -u
 case "${1:-}" in
   display-message)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
-    printf '%%1\n' ;;
+    printf '%s\n' "${FM_FAKE_TMUX_CURRENT_PATH:-%1}" ;;
   capture-pane)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
     if [ "${FM_FAKE_BUSY:-0}" = 1 ]; then printf 'work in progress\n%s\n' "${FM_FAKE_BUSY_TEXT:-esc to interrupt}"
@@ -131,7 +137,8 @@ SH
 make_no_timeout_toolbin() {  # <dir> -> echoes toolbin path
   local dir=$1 tb="$1/notimeoutbin" tool real
   mkdir -p "$tb"
-  for tool in bash git grep sed head cut tail dirname perl; do
+  for tool in bash git grep sed head cut tail dirname basename perl mkdir mktemp \
+    cat readlink rm rmdir sleep ln date stat ps awk tr uname od; do
     real=$(command -v "$tool" || true)
     [ -n "$real" ] || fail "missing tool for no-timeout path: $tool"
     ln -s "$real" "$tb/$tool"
@@ -142,8 +149,12 @@ make_no_timeout_toolbin() {  # <dir> -> echoes toolbin path
 # Run the helper for one case dir. FM_FAKE_* env (run output, busy flag) are read
 # from the caller's environment by the fakes above.
 run_crew_state() {  # <case-dir> <id>
-  local case_dir=$1 id=$2 wt binding_id
+  local case_dir=$1 id=$2 wt binding_id meta
+  meta="$case_dir/state/$id.meta"
   wt=$(grep '^worktree=' "$case_dir/state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  if [ -n "$wt" ] && [ -d "$wt" ] && ! grep -q '^project=' "$meta"; then
+    printf 'project=%s\n' "$wt" >> "$meta"
+  fi
   if [ -n "$wt" ] && [ -d "$wt" ] \
      && git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
      && [ "${FM_TEST_BINDING_MODE:-normal}" != absent ]; then
@@ -176,14 +187,19 @@ reset_fakes() {
   FM_FAKE_BUSY=0
   FM_FAKE_BUSY_TEXT=
   FM_FAKE_TMUX_MISSING=0
+  FM_FAKE_TMUX_CURRENT_PATH=""
   FM_FAKE_HERDR_BUSY=0
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
+  FM_FAKE_NM_STARTED=""
+  FM_FAKE_NM_RELEASE=""
   FM_TEST_BINDING_ID=""
   FM_TEST_BINDING_MODE=normal
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
+  export FM_FAKE_TMUX_CURRENT_PATH
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
+  export FM_FAKE_NM_STARTED FM_FAKE_NM_RELEASE
   export FM_TEST_BINDING_ID FM_TEST_BINDING_MODE
 }
 
@@ -1113,7 +1129,7 @@ SH
   chmod +x "$d/fakebin/no-mistakes"
   toolbin=$(make_no_timeout_toolbin "$d")
   fm_write_meta "$d/state/feat-timeout.meta" "window=fm:fm-feat-timeout" "worktree=$d/wt" "kind=ship" \
-    "harness=claude"
+    "harness=claude" "project=$d/wt"
   fm_worktree_binding_write "$d/wt" "$d/state" feat-timeout || fail "could not bind no-timeout fixture worktree"
   FM_FAKE_BUSY=1
   local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-timeout)
@@ -1128,6 +1144,56 @@ SH
   calls=$(awk 'END { print NR + 0 }' "$calls_file" 2>/dev/null || echo 0)
   [ "$calls" -eq 1 ] || fail "empty no-mistakes status triggered extra lookups ($calls calls)"
   pass "no timeout command uses perl bound"
+}
+
+test_worktree_guard_covers_run_identity_reads() {
+  reset_fakes
+  local d out_file err_file pid attempt pool_lock out
+  d=$(new_case guarded-run-read)
+  make_repo_on_branch "$d/wt" fm/guarded-run-read
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/guarded.meta" "window=fm:fm-guarded" \
+    "worktree=$d/wt" "project=$d/wt" "kind=ship"
+  fm_worktree_binding_write "$d/wt" "$d/state" guarded \
+    || fail "could not bind guarded-read fixture worktree"
+  FM_FAKE_AXI_STATUS="$(run_running fm/guarded-run-read)"
+  FM_FAKE_NM_STARTED="$d/no-mistakes.started"
+  FM_FAKE_NM_RELEASE="$d/no-mistakes.release"
+  export FM_FAKE_AXI_STATUS FM_FAKE_NM_STARTED FM_FAKE_NM_RELEASE
+  out_file="$d/crew-state.out"
+  err_file="$d/crew-state.err"
+
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" \
+    "$CREW_STATE" guarded > "$out_file" 2> "$err_file" &
+  pid=$!
+  attempt=0
+  while [ ! -e "$FM_FAKE_NM_STARTED" ] && kill -0 "$pid" 2>/dev/null \
+    && [ "$attempt" -lt 100 ]; do
+    sleep 0.02
+    attempt=$((attempt + 1))
+  done
+  if [ ! -e "$FM_FAKE_NM_STARTED" ]; then
+    : > "$FM_FAKE_NM_RELEASE"
+    wait "$pid" || true
+    fail "crew-state did not reach the guarded run-identity read: $(cat "$err_file")"
+  fi
+  pool_lock=$(fm_worktree_pool_transition_lock_path "$d/state" "$d/wt") \
+    || fail "could not resolve the guarded-read pool lock"
+  if fm_lock_try_acquire "$pool_lock"; then
+    fm_lock_release "$pool_lock"
+    : > "$FM_FAKE_NM_RELEASE"
+    wait "$pid" || true
+    fail "crew-state released ownership before its run-identity read completed"
+  fi
+  : > "$FM_FAKE_NM_RELEASE"
+  wait "$pid" || fail "guarded crew-state read failed: $(cat "$err_file")"
+  out=$(cat "$out_file")
+  assert_contains "$out" "source: run-step" \
+    "the guarded run-identity read did not complete normally"
+  fm_lock_try_acquire "$pool_lock" \
+    || fail "crew-state did not release its ownership guard on exit"
+  fm_lock_release "$pool_lock"
+  pass "crew-state holds active ownership through run-identity reads"
 }
 
 # (i) kind=scout skips the run lookup entirely (its deliverable is a report).
@@ -1252,6 +1318,7 @@ test_legacy_worktree_without_binding_reads_normally() {
   fm_write_meta "$d/state/legacy-unbound.meta" \
     "window=fm:fm-legacy-unbound" "worktree=$d/wt" "kind=ship" "harness=claude"
   FM_FAKE_AXI_STATUS=$(run_running fm/legacy-unbound)
+  FM_FAKE_TMUX_CURRENT_PATH=$d/wt
   FM_TEST_BINDING_MODE=absent
   out=$(run_crew_state "$d" legacy-unbound)
   assert_contains "$out" "state: working" "legacy unbound worktree preserves normal state reads"
@@ -1399,7 +1466,8 @@ test_provably_working_via_runs_list_fallback() {
   make_repo_on_branch "$d/wt" fm/feat-provable
   short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
   make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-provable.meta" "window=fm:fm-feat-provable" "worktree=$d/wt" "kind=ship"
+  fm_write_meta "$d/state/feat-provable.meta" "window=fm:fm-feat-provable" "worktree=$d/wt" \
+    "project=$d/wt" "kind=ship"
   fm_worktree_binding_write "$d/wt" "$d/state" feat-provable || fail "could not bind provable-work fixture worktree"
   FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
   FM_FAKE_RUNS_LIST="$(cat <<EOF
@@ -1417,7 +1485,8 @@ test_not_provably_working_when_stopped() {
   local d; d=$(new_case provably-working-stopped)
   make_repo_on_branch "$d/wt" fm/feat-stopped
   make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-stopped.meta" "window=fm:fm-feat-stopped" "worktree=$d/wt" "kind=ship"
+  fm_write_meta "$d/state/feat-stopped.meta" "window=fm:fm-feat-stopped" "worktree=$d/wt" \
+    "project=$d/wt" "kind=ship"
   fm_worktree_binding_write "$d/wt" "$d/state" feat-stopped || fail "could not bind stopped-work fixture worktree"
   # Repo-wide run belongs to someone else, and this branch has no row in the
   # runs list either (it never validated, or genuinely finished/stopped) - the
@@ -1574,6 +1643,7 @@ test_dead_window_ignores_stale_status_log
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step
 test_no_timeout_uses_perl_bound
+test_worktree_guard_covers_run_identity_reads
 test_scout_skips_run_lookup
 test_torn_down_worktree
 test_exact_worktree_binding_reads_normally

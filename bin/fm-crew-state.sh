@@ -98,6 +98,16 @@ case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
 FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
 SEP=' · '
+CREW_WORKTREE_GUARD_HELD=0
+
+crew_state_cleanup() {
+  if [ "$CREW_WORKTREE_GUARD_HELD" -eq 1 ]; then
+    CREW_WORKTREE_GUARD_HELD=0
+    fm_worktree_record_active_guard_release
+  fi
+}
+
+trap crew_state_cleanup EXIT
 
 # Emit the one canonical line and exit 0. Detail is optional.
 emit() {  # <state> <source> [detail]
@@ -119,7 +129,7 @@ KIND=$(meta_value kind)
 HARNESS=$(meta_value harness)
 REMOTE_HOST=$(meta_value remote_host)
 [ -n "$KIND" ] || KIND=ship
-if ! fm_worktree_record_active_resolve "$META"; then
+if ! fm_worktree_record_active_guard_acquire "$META"; then
   if [ -n "$FM_WORKTREE_RECORD_RETIRED_OWNER" ] && [ "$KIND" != secondmate ]; then
     emit unknown none "worktree pointer retired after reassignment to task $FM_WORKTREE_RECORD_RETIRED_OWNER"
   fi
@@ -127,6 +137,7 @@ if ! fm_worktree_record_active_resolve "$META"; then
     emit unknown none "$FM_WORKTREE_RECORD_DETAIL"
   fi
 fi
+[ "$FM_WORKTREE_RECORD_ACTIVE_GUARD_HELD" -eq 0 ] || CREW_WORKTREE_GUARD_HELD=1
 WT=$FM_WORKTREE_RECORD_ACTIVE_PATH
 
 # A torn-down (or never-created) worktree has no current state to read. A

@@ -447,6 +447,8 @@ class Latch:
             return
         except (OSError, ValueError) as exc:
             raise LatchError(f"cannot read review latch {self.path}: {exc}") from None
+        if not text:
+            raise LatchError(f"empty review latch {self.path}")
         for line_number, line in enumerate(text.splitlines(), start=1):
             parts = line.split("\t")
             if len(parts) != 3:

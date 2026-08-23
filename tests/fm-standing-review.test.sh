@@ -419,6 +419,28 @@ test_malformed_latch_fails_closed() {
   pass "malformed latch rows fail closed without emitting a wake"
 }
 
+test_empty_latch_fails_closed() {
+  local home out rc latch
+  home=$(make_home empty-latch acme)
+  write_source "$home" '[{"venture":"acme","cost_30d":10,"commits_30d":0}]'
+  write_spec "$home" r '[{"field":"commits_30d","op":"eq","value":0}]' \
+    '["cost_30d","commits_30d"]'
+  latch="$home/state/r.standing-review-latch"
+  : > "$latch"
+
+  if out=$(scan "$home" --id r 2> "$home/err"); then
+    rc=0
+  else
+    rc=$?
+  fi
+  [ "$rc" -ne 0 ] || fail "an empty latch reported success"
+  [ -z "$out" ] || fail "a review with empty suppression state emitted a wake: $out"
+  assert_contains "$(cat "$home/err")" "empty review latch" \
+    "the empty latch was not diagnosed"
+  [ ! -s "$latch" ] || fail "the empty latch was silently rewritten"
+  pass "an existing empty latch fails closed without emitting a wake"
+}
+
 test_structural_paths_cannot_break_the_wake_line() {
   local home source_path out
   home=$(make_home structural-path acme)
@@ -1093,6 +1115,7 @@ test_concurrent_scans_are_single_flight
 test_special_evidence_file_fails_without_blocking
 test_special_control_files_fail_without_blocking
 test_malformed_latch_fails_closed
+test_empty_latch_fails_closed
 test_structural_paths_cannot_break_the_wake_line
 test_json_equality_does_not_conflate_booleans_and_numbers
 test_the_same_finding_does_not_wake_twice

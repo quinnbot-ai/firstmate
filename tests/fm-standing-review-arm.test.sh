@@ -22,6 +22,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 ARM="$ROOT/bin/fm-standing-review-arm.sh"
+SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-standing-review-arm)
 
 # shellcheck source=bin/fm-pr-lib.sh disable=SC1091
@@ -181,6 +182,26 @@ test_arming_refuses_an_id_that_names_a_task() {
   pass "arming refuses an id a task already owns"
 }
 
+test_spawning_refuses_an_id_reserved_by_a_review() {
+  local home out rc before
+  home=$(make_home reverse-task-collision)
+  arm "$home" --id r >/dev/null 2>&1 || fail "arming failed"
+  before=$(fm_custom_check_sha256 "$home/state/r.check.sh")
+
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$SPAWN" r "$ROOT" --scout --harness codex 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a task was spawned onto an armed review id"
+  assert_contains "$out" "reserved by an armed standing review" \
+    "the reverse namespace collision refusal was not actionable"
+  assert_absent "$home/state/r.meta" "the refused spawn published task metadata"
+  [ "$(fm_custom_check_sha256 "$home/state/r.check.sh")" = "$before" ] \
+    || fail "the refused spawn modified the armed review"
+  fm_custom_check_registered "$home/state" r \
+    || fail "the refused spawn invalidated the review registration"
+  pass "spawning refuses an id an armed standing review owns"
+}
+
 test_arming_refuses_to_overwrite_a_foreign_check() {
   local home out rc before
   home=$(make_home foreign-check)
@@ -266,6 +287,7 @@ test_editing_the_check_revokes_it
 test_an_unusable_spec_is_refused_before_arming
 test_relative_review_paths_are_refused_before_arming
 test_arming_refuses_an_id_that_names_a_task
+test_spawning_refuses_an_id_reserved_by_a_review
 test_arming_refuses_to_overwrite_a_foreign_check
 test_disarm_stops_the_review_and_keeps_what_it_reported
 test_disarm_refuses_a_foreign_check
