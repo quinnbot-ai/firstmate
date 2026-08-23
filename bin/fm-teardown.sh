@@ -588,14 +588,14 @@ validate_worktree_ownership() {
   fi
 
   declared=$(fm_meta_get "$META" worktree_binding)
-  if [ -n "$declared" ] && [ "$declared" != fm-worktree-binding.v1 ]; then
+  if [ -n "$declared" ] && [ "$declared" != fm-worktree-binding.v2 ]; then
     echo "REFUSED: task $ID records an unsupported isolated-copy ownership binding: $declared." >&2
     echo "Cannot prove the copy at $WT still belongs to this task; refusing before any cleanup step." >&2
     return 1
   fi
 
   if fm_worktree_binding_read "$WT"; then
-    if [ "$FM_WORKTREE_BINDING_TASK_ID" = "$ID" ]; then
+    if fm_worktree_binding_matches "$WT" "$STATE" "$ID"; then
       reject_unwarranted_forget_worktree "the copy at $WT still belongs to task $ID" || return 1
       return 0
     fi
@@ -603,6 +603,7 @@ validate_worktree_ownership() {
     [ -n "$owner_branch" ] || owner_branch='<unreadable>'
     if [ "$FORGET_WORKTREE" = 1 ]; then
       if ! fm_worktree_owner_resolve "$WT" "$STATE" \
+         || [ "$FM_WORKTREE_OWNER_STATE" != "$FM_WORKTREE_BINDING_STATE" ] \
          || [ "$FM_WORKTREE_OWNER_TASK_ID" != "$FM_WORKTREE_BINDING_TASK_ID" ]; then
         echo "REFUSED: the isolated copy at $WT is bound to task $FM_WORKTREE_BINDING_TASK_ID, but that task has no active record holding this copy." >&2
         echo "Cannot retire task $ID's pointer without a positively confirmed current owner." >&2
@@ -612,12 +613,12 @@ validate_worktree_ownership() {
         "${FM_WORKTREE_OWNER_BRANCH:-$owner_branch}" || return 1
       return 0
     fi
-    echo "REFUSED: the isolated copy at $WT is no longer task $ID's; task $FM_WORKTREE_BINDING_TASK_ID owns it now." >&2
-    echo "That copy currently has branch $owner_branch checked out, so tearing down $ID here would kill task $FM_WORKTREE_BINDING_TASK_ID's processes, delete its branch, and reset its copy." >&2
+    echo "REFUSED: the isolated copy at $WT is no longer task $ID's in $STATE; task $FM_WORKTREE_BINDING_TASK_ID in $FM_WORKTREE_BINDING_STATE owns it now." >&2
+    echo "That copy currently has branch $owner_branch checked out, so tearing down $ID here would kill task $FM_WORKTREE_BINDING_TASK_ID in $FM_WORKTREE_BINDING_STATE, delete its branch, and reset its copy." >&2
     echo "Task $ID's worktree= record is a stale pointer to a recycled pool slot." >&2
     echo "Retire the stale pointer WITHOUT touching this lane: bin/fm-reconcile-worktree-pointers.sh --apply - it repairs the record only and leaves every lane, branch and copy intact, which is what a preserved lane needs." >&2
     echo "Only if task $ID is genuinely being cleaned up too: bin/fm-teardown.sh $ID --forget-worktree (add --force as well if task $ID's own work is being discarded) - that retires the pointer AND removes the lane's records." >&2
-    echo "--force alone does NOT override this: it authorizes discarding task $ID's work, never task $FM_WORKTREE_BINDING_TASK_ID's." >&2
+    echo "--force alone does NOT override this: it authorizes discarding task $ID's work in $STATE, never task $FM_WORKTREE_BINDING_TASK_ID's work in $FM_WORKTREE_BINDING_STATE." >&2
     return 1
   fi
 
@@ -628,7 +629,8 @@ validate_worktree_ownership() {
   # and the conditions that keep it quiet; an unprovable copy resolves to nothing
   # and must remain untouched.
   if fm_worktree_owner_resolve "$WT" "$STATE"; then
-    if [ "$FM_WORKTREE_OWNER_TASK_ID" = "$ID" ]; then
+    if [ "$FM_WORKTREE_OWNER_STATE" = "$(fm_worktree_binding_state_resolve "$STATE")" ] \
+       && [ "$FM_WORKTREE_OWNER_TASK_ID" = "$ID" ]; then
       reject_unwarranted_forget_worktree "the copy at $WT still belongs to task $ID" || return 1
       return 0
     fi
@@ -637,12 +639,12 @@ validate_worktree_ownership() {
       retire_recycled_worktree_record "$FM_WORKTREE_OWNER_TASK_ID" "$owner_branch" || return 1
       return 0
     fi
-    echo "REFUSED: the isolated copy at $WT is no longer task $ID's; task $FM_WORKTREE_OWNER_TASK_ID owns it now." >&2
-    echo "That copy currently has branch $owner_branch checked out, so tearing down $ID here would kill task $FM_WORKTREE_OWNER_TASK_ID's processes, delete its branch, and reset its copy." >&2
+    echo "REFUSED: the isolated copy at $WT is no longer task $ID's in $STATE; task $FM_WORKTREE_OWNER_TASK_ID in $FM_WORKTREE_OWNER_STATE owns it now." >&2
+    echo "That copy currently has branch $owner_branch checked out, so tearing down $ID here would kill task $FM_WORKTREE_OWNER_TASK_ID in $FM_WORKTREE_OWNER_STATE, delete its branch, and reset its copy." >&2
     echo "Task $ID's worktree= record is a stale pointer to a recycled pool slot." >&2
     echo "Retire the stale pointer WITHOUT touching this lane: bin/fm-reconcile-worktree-pointers.sh --apply - it repairs the record only and leaves every lane, branch and copy intact, which is what a preserved lane needs." >&2
     echo "Only if task $ID is genuinely being cleaned up too: bin/fm-teardown.sh $ID --forget-worktree (add --force as well if task $ID's own work is being discarded) - that retires the pointer AND removes the lane's records." >&2
-    echo "--force alone does NOT override this: it authorizes discarding task $ID's work, never task $FM_WORKTREE_OWNER_TASK_ID's." >&2
+    echo "--force alone does NOT override this: it authorizes discarding task $ID's work in $STATE, never task $FM_WORKTREE_OWNER_TASK_ID's work in $FM_WORKTREE_OWNER_STATE." >&2
     return 1
   fi
 
@@ -2268,6 +2270,7 @@ preflight_descendant_worktree_ownership() {
     worktree=$FM_WORKTREE_RECORD_ACTIVE_PATH
     [ -n "$worktree" ] && [ -d "$worktree" ] || continue
     if ! fm_worktree_owner_resolve "$worktree" "$state" \
+       || [ "$FM_WORKTREE_OWNER_STATE" != "$(fm_worktree_binding_state_resolve "$state")" ] \
        || [ "$FM_WORKTREE_OWNER_TASK_ID" != "$task_id" ]; then
       owner_detail=${FM_WORKTREE_OWNER_DETAIL:-the current owner does not match this record}
       echo "REFUSED: descendant task $task_id does not positively own worktree $worktree; $owner_detail; forced teardown changed nothing" >&2
@@ -2508,6 +2511,7 @@ cleanup_firstmate_home_children() {
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       if ! fm_worktree_owner_resolve "$child_wt" "$sub_state" \
+         || [ "$FM_WORKTREE_OWNER_STATE" != "$(fm_worktree_binding_state_resolve "$sub_state")" ] \
          || [ "$FM_WORKTREE_OWNER_TASK_ID" != "$child_id" ]; then
         echo "error: child $child_id no longer positively owns worktree $child_wt; refusing forced cleanup" >&2
         return 1
@@ -2518,8 +2522,8 @@ cleanup_firstmate_home_children() {
         "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
         child_binding_cleared=0
-        if fm_worktree_binding_matches "$child_wt" "$child_id"; then
-          fm_worktree_binding_clear "$child_wt" "$child_id" || return 1
+        if fm_worktree_binding_matches "$child_wt" "$sub_state" "$child_id"; then
+          fm_worktree_binding_clear "$child_wt" "$sub_state" "$child_id" || return 1
           child_binding_cleared=1
         fi
         if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
@@ -2527,7 +2531,7 @@ cleanup_firstmate_home_children() {
         else
           child_return_rc=$?
           if [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ]; then
-            [ "$child_binding_cleared" -eq 0 ] || fm_worktree_binding_write "$child_wt" "$child_id" || return 1
+            [ "$child_binding_cleared" -eq 0 ] || fm_worktree_binding_write "$child_wt" "$sub_state" "$child_id" || return 1
             return "$child_return_rc"
           fi
           safe_rm_rf_child_worktree "$child_wt" "$child_proj"
@@ -2749,12 +2753,12 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety
   fi
   WORKTREE_BINDING_CLEARED=0
-  if fm_worktree_binding_matches "$WT" "$ID"; then
-    fm_worktree_binding_clear "$WT" "$ID" || exit 1
+  if fm_worktree_binding_matches "$WT" "$STATE" "$ID"; then
+    fm_worktree_binding_clear "$WT" "$STATE" "$ID" || exit 1
     WORKTREE_BINDING_CLEARED=1
   fi
   teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
-    [ "$WORKTREE_BINDING_CLEARED" -eq 0 ] || fm_worktree_binding_write "$WT" "$ID" || exit 1
+    [ "$WORKTREE_BINDING_CLEARED" -eq 0 ] || fm_worktree_binding_write "$WT" "$STATE" "$ID" || exit 1
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
     exit 1
   }

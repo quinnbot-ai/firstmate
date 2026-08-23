@@ -592,7 +592,7 @@ make_path_without_lsof() {  # <case-dir>
 hand_worktree_to_other_task() {
   local case_dir=$1 owner=$2 branch=$3
   git -C "$case_dir/wt" checkout -q -b "$branch"
-  fm_worktree_binding_write "$case_dir/wt" "$owner" \
+  fm_worktree_binding_write "$case_dir/wt" "$case_dir/state" "$owner" \
     || fail "could not bind the recycled copy to $owner"
   fm_write_meta "$case_dir/state/$owner.meta" \
     "window=firstmate:fm-$owner" \
@@ -606,7 +606,7 @@ hand_worktree_to_other_task() {
 # Record task-x1 as the copy's own current owner, the ordinary non-collision case.
 bind_worktree_to_task_x1() {
   local case_dir=$1
-  fm_worktree_binding_write "$case_dir/wt" task-x1 \
+  fm_worktree_binding_write "$case_dir/wt" "$case_dir/state" task-x1 \
     || fail "could not bind the copy to task-x1"
 }
 
@@ -614,7 +614,7 @@ bind_worktree_to_task_x1() {
 # ship or scout task it launches.
 declare_binding_in_meta() {
   local case_dir=$1
-  printf '%s\n' 'worktree_binding=fm-worktree-binding.v1' >> "$case_dir/state/task-x1.meta"
+  printf '%s\n' 'worktree_binding=fm-worktree-binding.v2' >> "$case_dir/state/task-x1.meta"
 }
 
 # Replace the treehouse mock with one that records every invocation, so a test
@@ -703,6 +703,39 @@ test_recycled_slot_refuses_even_under_force() {
   [ ! -s "$case_dir/treehouse.log" ] \
     || fail "recycled-slot-force: the live lane's copy was returned to the pool"
   pass "--force never redirects teardown onto a copy another task owns"
+}
+
+test_equal_task_id_in_another_home_is_not_local_ownership() {
+  local case_dir other_state rc
+  case_dir=$(make_case cross-home-equal-task-id)
+  write_meta "$case_dir" no-mistakes ship
+  declare_binding_in_meta "$case_dir"
+  log_treehouse_calls "$case_dir"
+  other_state="$case_dir/other-state"
+  mkdir -p "$other_state"
+  fm_write_meta "$other_state/task-x1.meta" \
+    "window=other:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  fm_worktree_binding_write "$case_dir/wt" "$other_state" task-x1 \
+    || fail "cross-home-equal-id: could not bind the copy to the other home"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "cross-home-equal-id: teardown must refuse another home's equal task id"
+  assert_contains "$(cat "$case_dir/stderr")" "REFUSED" \
+    "cross-home-equal-id: ownership collision is refused loudly"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "cross-home-equal-id: another home's live lease was returned"
+  [ -f "$other_state/task-x1.meta" ] \
+    || fail "cross-home-equal-id: the live owner's record was removed"
+  pass "equal task ids in different homes cannot authorize teardown"
 }
 
 # The supported way out: retire the stale pointer, then clean up records only.
@@ -3136,6 +3169,7 @@ EOF
 test_local_only_fork_remote_allows
 test_recycled_slot_refuses_and_names_the_live_owner
 test_recycled_slot_refuses_even_under_force
+test_equal_task_id_in_another_home_is_not_local_ownership
 test_forget_worktree_retires_the_stale_pointer_and_spares_the_copy
 test_forget_worktree_refuses_an_orphan_binding
 test_force_and_forget_worktree_together_complete

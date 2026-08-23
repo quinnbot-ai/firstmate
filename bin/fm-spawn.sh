@@ -756,8 +756,8 @@ spawn_fresh_resources_rollback() {
     }
     SPAWN_WORKTREE_TRANSITION_LOCK_HELD=1
   fi
-  if fm_worktree_binding_matches "$WT" "$ID"; then
-    fm_worktree_binding_clear "$WT" "$ID" || {
+  if fm_worktree_binding_matches "$WT" "$STATE" "$ID"; then
+    fm_worktree_binding_clear "$WT" "$STATE" "$ID" || {
       echo "warning: could not clear the exact worktree binding after aborted spawn of $ID" >&2
       return 1
     }
@@ -768,7 +768,7 @@ spawn_fresh_resources_rollback() {
   fi
   if ! ( cd "$PROJ_ABS" && treehouse return --force \
       --if-lease-id "$SPAWN_TREEHOUSE_LEASE_ID" "$WT" ) >/dev/null 2>&1; then
-    [ "$binding_cleared" -eq 0 ] || fm_worktree_binding_write "$WT" "$ID" || true
+    [ "$binding_cleared" -eq 0 ] || fm_worktree_binding_write "$WT" "$STATE" "$ID" || true
     echo "warning: could not return aborted spawn worktree $WT" >&2
     return 1
   fi
@@ -2304,6 +2304,14 @@ kimi_spawn_fail() {  # <detail>
   echo "error: $1; inspect window $T" >&2
 }
 
+if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  SPAWN_WORKTREE_POOL_TRANSITION_LOCK=$(fm_worktree_pool_transition_lock_path "$STATE" "$PROJ_ABS") || {
+    echo "error: cannot establish the pool transition lock for project $PROJ_ABS" >&2
+    exit 1
+  }
+  fm_lock_acquire_wait "$SPAWN_WORKTREE_POOL_TRANSITION_LOCK"
+  SPAWN_WORKTREE_POOL_TRANSITION_LOCK_HELD=1
+fi
 if [ "$RELAUNCH" -eq 1 ]; then
   # No worktree is acquired: the recorded one is reused as-is. What must be
   # proven instead is that the adopted endpoint's shell is actually sitting in
@@ -2322,12 +2330,6 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  SPAWN_WORKTREE_POOL_TRANSITION_LOCK=$(fm_worktree_pool_transition_lock_path "$STATE" "$PROJ_ABS") || {
-    echo "error: cannot establish the pool transition lock for project $PROJ_ABS" >&2
-    exit 1
-  }
-  fm_lock_acquire_wait "$SPAWN_WORKTREE_POOL_TRANSITION_LOCK"
-  SPAWN_WORKTREE_POOL_TRANSITION_LOCK_HELD=1
   lease_json=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID" --json) || {
     echo "error: treehouse could not allocate a durable worktree lease for $ID" >&2
     exit 1
@@ -2420,8 +2422,8 @@ fi
 # overwrites a present, malformed, or mismatched binding.
 if [ "$KIND" != secondmate ]; then
   if [ "$RELAUNCH" -eq 1 ]; then
-    if [ "$(fm_meta_get "$RELAUNCH_META" worktree_binding)" = fm-worktree-binding.v1 ]; then
-      if ! fm_worktree_binding_matches "$WT" "$ID"; then
+    if [ "$(fm_meta_get "$RELAUNCH_META" worktree_binding)" = fm-worktree-binding.v2 ]; then
+      if ! fm_worktree_binding_matches "$WT" "$STATE" "$ID"; then
         echo "error: task $ID's recorded worktree cannot be reused: $(fm_worktree_binding_detail); refusing to relaunch" >&2
         exit 1
       fi
@@ -2429,30 +2431,26 @@ if [ "$KIND" != secondmate ]; then
       echo "error: task $ID's recorded worktree binding contract is unrecognized; refusing to relaunch" >&2
       exit 1
     elif fm_worktree_binding_read "$WT"; then
-      if ! fm_worktree_binding_matches "$WT" "$ID"; then
+      if ! fm_worktree_binding_matches "$WT" "$STATE" "$ID"; then
         echo "error: task $ID's recorded worktree cannot be reused: $(fm_worktree_binding_detail); refusing to relaunch" >&2
         exit 1
       fi
     elif fm_worktree_binding_is_absent "$WT"; then
       if ! fm_worktree_owner_resolve "$WT" "$STATE" \
+         || [ "$FM_WORKTREE_OWNER_STATE" != "$(fm_worktree_binding_state_resolve "$STATE")" ] \
          || [ "$FM_WORKTREE_OWNER_TASK_ID" != "$ID" ]; then
         echo "error: task $ID's legacy worktree ownership is not positively bound to this record; refusing to relaunch" >&2
         exit 1
       fi
-      fm_worktree_binding_write "$WT" "$ID" || exit 1
+      fm_worktree_binding_write "$WT" "$STATE" "$ID" || exit 1
     else
       echo "error: task $ID's recorded worktree cannot be reused: $(fm_worktree_binding_detail); refusing to relaunch" >&2
       exit 1
     fi
-  elif ! fm_worktree_binding_write "$WT" "$ID"; then
+  elif ! fm_worktree_binding_write "$WT" "$STATE" "$ID"; then
     exit 1
   fi
 fi
-if [ "$SPAWN_WORKTREE_POOL_TRANSITION_LOCK_HELD" = 1 ]; then
-  fm_lock_release "$SPAWN_WORKTREE_POOL_TRANSITION_LOCK"
-  SPAWN_WORKTREE_POOL_TRANSITION_LOCK_HELD=0
-fi
-
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
@@ -2836,7 +2834,7 @@ preserve_relaunch_meta() {
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
-  [ "$KIND" = secondmate ] || echo "worktree_binding=fm-worktree-binding.v1"
+  [ "$KIND" = secondmate ] || echo "worktree_binding=fm-worktree-binding.v2"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.

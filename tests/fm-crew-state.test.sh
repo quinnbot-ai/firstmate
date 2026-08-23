@@ -148,7 +148,7 @@ run_crew_state() {  # <case-dir> <id>
      && git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
      && [ "${FM_TEST_BINDING_MODE:-normal}" != absent ]; then
     binding_id=${FM_TEST_BINDING_ID:-$id}
-    fm_worktree_binding_write "$wt" "$binding_id" || fail "could not bind fixture worktree for $id"
+    fm_worktree_binding_write "$wt" "$case_dir/state" "$binding_id" || fail "could not bind fixture worktree for $id"
   fi
   PATH="$case_dir/fakebin:$PATH" FM_STATE_OVERRIDE="$case_dir/state" "$CREW_STATE" "$id"
 }
@@ -1114,7 +1114,7 @@ SH
   toolbin=$(make_no_timeout_toolbin "$d")
   fm_write_meta "$d/state/feat-timeout.meta" "window=fm:fm-feat-timeout" "worktree=$d/wt" "kind=ship" \
     "harness=claude"
-  fm_worktree_binding_write "$d/wt" feat-timeout || fail "could not bind no-timeout fixture worktree"
+  fm_worktree_binding_write "$d/wt" "$d/state" feat-timeout || fail "could not bind no-timeout fixture worktree"
   FM_FAKE_BUSY=1
   local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-timeout)
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-timeout busy --gen "$gen" \
@@ -1232,7 +1232,7 @@ test_unverifiable_worktree_binding_refuses_distinctly() {
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/unverifiable-binding.meta" \
     "window=fm:fm-unverifiable-binding" "worktree=$d/wt" "kind=ship" "harness=claude" \
-    "worktree_binding=fm-worktree-binding.v1"
+    "worktree_binding=fm-worktree-binding.v2"
   FM_FAKE_AXI_STATUS=$(run_running fm/unverifiable-binding)
   FM_TEST_BINDING_MODE=absent
   out=$(run_crew_state "$d" unverifiable-binding)
@@ -1400,7 +1400,7 @@ test_provably_working_via_runs_list_fallback() {
   short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-provable.meta" "window=fm:fm-feat-provable" "worktree=$d/wt" "kind=ship"
-  fm_worktree_binding_write "$d/wt" feat-provable || fail "could not bind provable-work fixture worktree"
+  fm_worktree_binding_write "$d/wt" "$d/state" feat-provable || fail "could not bind provable-work fixture worktree"
   FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
   FM_FAKE_RUNS_LIST="$(cat <<EOF
   running    fm/other-crew aaaaaaa  2026-07-02 22:10
@@ -1418,7 +1418,7 @@ test_not_provably_working_when_stopped() {
   make_repo_on_branch "$d/wt" fm/feat-stopped
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-stopped.meta" "window=fm:fm-feat-stopped" "worktree=$d/wt" "kind=ship"
-  fm_worktree_binding_write "$d/wt" feat-stopped || fail "could not bind stopped-work fixture worktree"
+  fm_worktree_binding_write "$d/wt" "$d/state" feat-stopped || fail "could not bind stopped-work fixture worktree"
   # Repo-wide run belongs to someone else, and this branch has no row in the
   # runs list either (it never validated, or genuinely finished/stopped) - the
   # only remaining signal is the pane, which is idle.

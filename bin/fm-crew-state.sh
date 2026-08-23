@@ -20,7 +20,7 @@
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A local
-#      ship or scout record that declares worktree_binding=fm-worktree-binding.v1
+#      ship or scout record that declares worktree_binding=fm-worktree-binding.v2
 #      must prove its private current-task binding before any worktree read.
 #      A missing, unreadable, or mismatched declared binding is unknown/none
 #      rather than a plausible verdict about another recycled lane. Legacy
@@ -134,16 +134,16 @@ if [ -z "$REMOTE_HOST" ] && { [ -z "$WT" ] || [ ! -d "$WT" ]; }; then
   emit unknown none "worktree gone (torn down?)"
 fi
 if [ -z "$REMOTE_HOST" ] && [ "$KIND" != secondmate ]; then
-  if [ -n "$BINDING_SCHEMA" ] && [ "$BINDING_SCHEMA" != fm-worktree-binding.v1 ]; then
+  if [ -n "$BINDING_SCHEMA" ] && [ "$BINDING_SCHEMA" != fm-worktree-binding.v2 ]; then
     emit unknown none "worktree binding unverifiable: unsupported metadata binding for $WT"
   fi
-  if [ "$BINDING_SCHEMA" = fm-worktree-binding.v1 ]; then
-    if ! fm_worktree_binding_matches "$WT" "$ID"; then
+  if [ "$BINDING_SCHEMA" = fm-worktree-binding.v2 ]; then
+    if ! fm_worktree_binding_matches "$WT" "$STATE" "$ID"; then
       emit unknown none "$(fm_worktree_binding_detail)"
     fi
   elif fm_worktree_binding_read "$WT"; then
-    if [ "$FM_WORKTREE_BINDING_TASK_ID" != "$ID" ]; then
-      emit unknown none "worktree binding mismatch: meta task $ID but worktree is bound to $FM_WORKTREE_BINDING_TASK_ID"
+    if ! fm_worktree_binding_matches "$WT" "$STATE" "$ID"; then
+      emit unknown none "$(fm_worktree_binding_detail)"
     fi
   fi
 fi

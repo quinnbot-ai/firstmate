@@ -10,8 +10,9 @@
 # never rewrite it, because doing so could claim a worktree already reassigned
 # to another task.
 #
-# The marker is exactly two lines, atomically replaced by fresh assignment:
-#   schema=fm-worktree-binding.v1
+# The marker is exactly three lines, atomically replaced by fresh assignment:
+#   schema=fm-worktree-binding.v2
+#   state=<canonical-state-directory>
 #   task_id=<task-id>
 #
 # Usage: . bin/fm-worktree-binding-lib.sh
@@ -22,14 +23,14 @@
 #     Firstmate homes using one local pool.
 #   fm_worktree_record_resolve <meta-file>
 #     Resolves only an active worktree pointer; a retired pointer is history.
-#   fm_worktree_binding_write <worktree> <task-id>
+#   fm_worktree_binding_write <worktree> <state-dir> <task-id>
 #     Atomically binds a freshly assigned worktree to its current task.
-#   fm_worktree_binding_clear <worktree> <task-id>
+#   fm_worktree_binding_clear <worktree> <state-dir> <task-id>
 #     Clears only an exact current-task binding before returning the copy.
-#   fm_worktree_binding_matches <worktree> <task-id>
+#   fm_worktree_binding_matches <worktree> <state-dir> <task-id>
 #     Returns 0 only for an exact, readable binding. Any absent, malformed, or
 #     uninterrogable marker returns non-zero; fm_worktree_binding_detail prints
-#     its reason, while an exact but different task id reports a mismatch.
+#     its reason, while a different state/task owner reports a mismatch.
 #   fm_worktree_binding_is_absent <worktree>
 #     Returns 0 only when the private marker is definitely absent. This lets a
 #     relaunch backfill a pre-binding record after its endpoint has proved the
@@ -38,6 +39,7 @@
 #     Prints the diagnostic for the latest failed read or comparison.
 
 FM_WORKTREE_BINDING_TASK_ID=
+FM_WORKTREE_BINDING_STATE=
 FM_WORKTREE_BINDING_DETAIL=
 
 fm_worktree_transition_lock_path() {  # <state-dir> <worktree>
@@ -87,6 +89,12 @@ fm_worktree_binding_task_id_valid() {  # <task-id>
   [ "${#id}" -le 64 ]
 }
 
+fm_worktree_binding_state_resolve() {  # <state-dir>
+  local state=${1-}
+  [ -n "$state" ] && [ -d "$state" ] || return 1
+  CDPATH='' cd -- "$state" 2>/dev/null && pwd -P
+}
+
 fm_worktree_binding_git_dir() {  # <worktree> -> absolute per-worktree git dir
   local worktree=${1-} git_dir
   [ -n "$worktree" ] && [ -d "$worktree" ] || return 1
@@ -96,9 +104,10 @@ fm_worktree_binding_git_dir() {  # <worktree> -> absolute per-worktree git dir
 }
 
 fm_worktree_binding_read() {  # <worktree>
-  local worktree=${1-} git_dir marker line schema='' task_id=''
-  local saw_schema=0 saw_task_id=0
+  local worktree=${1-} git_dir marker line schema='' state='' state_real task_id=''
+  local saw_schema=0 saw_state=0 saw_task_id=0
   FM_WORKTREE_BINDING_TASK_ID=
+  FM_WORKTREE_BINDING_STATE=
   FM_WORKTREE_BINDING_DETAIL=
   git_dir=$(fm_worktree_binding_git_dir "$worktree") || {
     FM_WORKTREE_BINDING_DETAIL="worktree binding unverifiable: cannot inspect Git metadata for $worktree"
@@ -119,6 +128,14 @@ fm_worktree_binding_read() {  # <worktree>
         schema=${line#schema=}
         saw_schema=1
         ;;
+      state=*)
+        [ "$saw_state" -eq 0 ] || {
+          FM_WORKTREE_BINDING_DETAIL="worktree binding unverifiable: malformed current-task binding for $worktree"
+          return 1
+        }
+        state=${line#state=}
+        saw_state=1
+        ;;
       task_id=*)
         [ "$saw_task_id" -eq 0 ] || {
           FM_WORKTREE_BINDING_DETAIL="worktree binding unverifiable: malformed current-task binding for $worktree"
@@ -136,26 +153,36 @@ fm_worktree_binding_read() {  # <worktree>
     FM_WORKTREE_BINDING_DETAIL="worktree binding unverifiable: unreadable current-task binding for $worktree"
     return 1
   }
-  if [ "$schema" != fm-worktree-binding.v1 ] \
+  state_real=$(fm_worktree_binding_state_resolve "$state" 2>/dev/null || true)
+  if [ "$schema" != fm-worktree-binding.v2 ] \
      || [ "$saw_schema" -ne 1 ] \
+     || [ "$saw_state" -ne 1 ] \
      || [ "$saw_task_id" -ne 1 ] \
+     || [ -z "$state_real" ] \
+     || [ "$state" != "$state_real" ] \
      || ! fm_worktree_binding_task_id_valid "$task_id"; then
     FM_WORKTREE_BINDING_DETAIL="worktree binding unverifiable: malformed current-task binding for $worktree"
     return 1
   fi
+  FM_WORKTREE_BINDING_STATE=$state_real
   FM_WORKTREE_BINDING_TASK_ID=$task_id
   return 0
 }
 
-fm_worktree_binding_matches() {  # <worktree> <expected-task-id>
-  local worktree=${1-} expected=${2-}
+fm_worktree_binding_matches() {  # <worktree> <expected-state-dir> <expected-task-id>
+  local worktree=${1-} expected_state=${2-} expected=${3-} expected_state_real
+  expected_state_real=$(fm_worktree_binding_state_resolve "$expected_state" 2>/dev/null) || {
+    FM_WORKTREE_BINDING_DETAIL="worktree binding unverifiable: invalid expected state identity"
+    return 1
+  }
   fm_worktree_binding_task_id_valid "$expected" || {
     FM_WORKTREE_BINDING_DETAIL="worktree binding unverifiable: invalid expected task identity"
     return 1
   }
   fm_worktree_binding_read "$worktree" || return 1
-  if [ "$FM_WORKTREE_BINDING_TASK_ID" != "$expected" ]; then
-    FM_WORKTREE_BINDING_DETAIL="worktree binding mismatch: meta task $expected but worktree is bound to $FM_WORKTREE_BINDING_TASK_ID"
+  if [ "$FM_WORKTREE_BINDING_STATE" != "$expected_state_real" ] \
+     || [ "$FM_WORKTREE_BINDING_TASK_ID" != "$expected" ]; then
+    FM_WORKTREE_BINDING_DETAIL="worktree binding mismatch: meta task $expected in $expected_state_real but worktree is bound to $FM_WORKTREE_BINDING_TASK_ID in $FM_WORKTREE_BINDING_STATE"
     return 1
   fi
   return 0
@@ -176,8 +203,12 @@ fm_worktree_binding_is_absent() {  # <worktree>
   return 1
 }
 
-fm_worktree_binding_write() {  # <worktree> <task-id>
-  local worktree=${1-} task_id=${2-} git_dir marker tmp old_umask
+fm_worktree_binding_write() {  # <worktree> <state-dir> <task-id>
+  local worktree=${1-} state=${2-} task_id=${3-} state_real git_dir marker tmp old_umask
+  state_real=$(fm_worktree_binding_state_resolve "$state" 2>/dev/null) || {
+    echo "error: refusing to write a worktree binding for an invalid state directory" >&2
+    return 1
+  }
   fm_worktree_binding_task_id_valid "$task_id" || {
     echo "error: refusing to write a worktree binding for an invalid task id" >&2
     return 1
@@ -195,7 +226,8 @@ fm_worktree_binding_write() {  # <worktree> <task-id>
     return 1
   }
   if ! {
-    printf '%s\n' 'schema=fm-worktree-binding.v1'
+    printf '%s\n' 'schema=fm-worktree-binding.v2'
+    printf 'state=%s\n' "$state_real"
     printf 'task_id=%s\n' "$task_id"
   } > "$tmp" || ! mv -f "$tmp" "$marker"; then
     rm -f "$tmp" 2>/dev/null || true
@@ -207,9 +239,9 @@ fm_worktree_binding_write() {  # <worktree> <task-id>
   return 0
 }
 
-fm_worktree_binding_clear() {  # <worktree> <expected-task-id>
-  local worktree=${1-} expected=${2-} git_dir marker
-  fm_worktree_binding_matches "$worktree" "$expected" || return 1
+fm_worktree_binding_clear() {  # <worktree> <expected-state-dir> <expected-task-id>
+  local worktree=${1-} expected_state=${2-} expected=${3-} git_dir marker
+  fm_worktree_binding_matches "$worktree" "$expected_state" "$expected" || return 1
   git_dir=$(fm_worktree_binding_git_dir "$worktree") || return 1
   marker="$git_dir/firstmate-task-binding"
   rm -f -- "$marker" || {

@@ -107,7 +107,10 @@ for meta in "$STATE"/*.meta; do
       printf 'UNRESOLVED: %s %s\n' "$id" "$FM_WORKTREE_OWNER_DETAIL"
       continue
     fi
-    [ "$FM_WORKTREE_OWNER_TASK_ID" != "$id" ] || continue
+    if [ "$FM_WORKTREE_OWNER_STATE" = "$(fm_worktree_binding_state_resolve "$STATE")" ] \
+       && [ "$FM_WORKTREE_OWNER_TASK_ID" = "$id" ]; then
+      continue
+    fi
     stale=$((stale + 1))
     owner=$FM_WORKTREE_OWNER_TASK_ID
     branch=${FM_WORKTREE_OWNER_BRANCH:-<unreadable>}
@@ -154,7 +157,8 @@ for meta in "$STATE"/*.meta; do
     fm_lock_release "$lock" || true
     continue
   fi
-  if [ "$FM_WORKTREE_OWNER_TASK_ID" = "$id" ]; then
+  if [ "$FM_WORKTREE_OWNER_STATE" = "$(fm_worktree_binding_state_resolve "$STATE")" ] \
+     && [ "$FM_WORKTREE_OWNER_TASK_ID" = "$id" ]; then
     fm_lock_release "$transition_lock" || true
     fm_lock_release "$pool_lock" || true
     fm_lock_release "$lock" || true

@@ -44,7 +44,8 @@
 #
 # Public entry points:
 #   fm_worktree_owner_resolve <worktree> <state-dir>
-#     Sets FM_WORKTREE_OWNER_TASK_ID / _METHOD (binding|branch) / _BRANCH and
+#     Sets FM_WORKTREE_OWNER_STATE / _TASK_ID / _METHOD (binding|branch) /
+#     _BRANCH and
 #     returns 0 when the copy's current owner is proven. Returns non-zero with
 #     FM_WORKTREE_OWNER_DETAIL when it is not; unprovable is never a verdict.
 #   fm_worktree_owner_retire_pointer <meta-file> <owner-task-id>
@@ -53,6 +54,7 @@
 #     this function does not take one.
 
 FM_WORKTREE_OWNER_TASK_ID=
+FM_WORKTREE_OWNER_STATE=
 FM_WORKTREE_OWNER_METHOD=
 FM_WORKTREE_OWNER_BRANCH=
 FM_WORKTREE_OWNER_DETAIL=
@@ -71,8 +73,9 @@ fm_worktree_owner_branch_task_id() {  # <branch> -> task id on stdout
 # Condition 2: the claimant named by the branch must be a task this home records,
 # and that record must point back at this exact copy.
 fm_worktree_owner_record_confirms() {  # <state-dir> <task-id> <worktree>
-  local state=${1-} id=${2-} worktree=${3-} meta
-  meta="$state/$id.meta"
+  local state=${1-} id=${2-} worktree=${3-} state_real meta
+  state_real=$(fm_worktree_binding_state_resolve "$state" 2>/dev/null) || return 1
+  meta="$state_real/$id.meta"
   [ -f "$meta" ] || return 1
   fm_worktree_record_resolve "$meta" || return 1
   [ "$FM_WORKTREE_RECORD_ACTIVE_PATH" = "$worktree" ]
@@ -81,8 +84,9 @@ fm_worktree_owner_record_confirms() {  # <state-dir> <task-id> <worktree>
 # These result globals are read by the caller after this sourced helper returns.
 # shellcheck disable=SC2034
 fm_worktree_owner_resolve() {  # <worktree> <state-dir>
-  local worktree=${1-} state=${2-} branch candidate
+  local worktree=${1-} state=${2-} state_real branch candidate
   FM_WORKTREE_OWNER_TASK_ID=
+  FM_WORKTREE_OWNER_STATE=
   FM_WORKTREE_OWNER_METHOD=
   FM_WORKTREE_OWNER_BRANCH=
   FM_WORKTREE_OWNER_DETAIL=
@@ -90,16 +94,25 @@ fm_worktree_owner_resolve() {  # <worktree> <state-dir>
     FM_WORKTREE_OWNER_DETAIL="no copy at ${worktree:-<empty>} to read current ownership from"
     return 1
   fi
+  state_real=$(fm_worktree_binding_state_resolve "$state" 2>/dev/null) || {
+    FM_WORKTREE_OWNER_DETAIL="cannot establish the calling home's state identity"
+    return 1
+  }
   # Condition 1: a binding is authoritative only while its active record agrees.
   if fm_worktree_binding_read "$worktree"; then
-    if ! fm_worktree_owner_record_confirms "$state" "$FM_WORKTREE_BINDING_TASK_ID" "$worktree"; then
-      FM_WORKTREE_OWNER_DETAIL="the copy at $worktree is bound to task $FM_WORKTREE_BINDING_TASK_ID, but that task has no active record holding this copy"
+    if ! fm_worktree_owner_record_confirms "$FM_WORKTREE_BINDING_STATE" "$FM_WORKTREE_BINDING_TASK_ID" "$worktree"; then
+      FM_WORKTREE_OWNER_DETAIL="the copy at $worktree is bound to task $FM_WORKTREE_BINDING_TASK_ID in $FM_WORKTREE_BINDING_STATE, but that task has no active record holding this copy"
       return 1
     fi
+    FM_WORKTREE_OWNER_STATE=$FM_WORKTREE_BINDING_STATE
     FM_WORKTREE_OWNER_TASK_ID=$FM_WORKTREE_BINDING_TASK_ID
     FM_WORKTREE_OWNER_METHOD=binding
     FM_WORKTREE_OWNER_BRANCH=$(git -C "$worktree" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
     return 0
+  fi
+  if ! fm_worktree_binding_is_absent "$worktree"; then
+    FM_WORKTREE_OWNER_DETAIL=$(fm_worktree_binding_detail)
+    return 1
   fi
   branch=$(git -C "$worktree" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
   FM_WORKTREE_OWNER_BRANCH=$branch
@@ -111,10 +124,11 @@ fm_worktree_owner_resolve() {  # <worktree> <state-dir>
     FM_WORKTREE_OWNER_DETAIL="the copy at $worktree names no owner and its branch '$branch' is not a task branch"
     return 1
   fi
-  if ! fm_worktree_owner_record_confirms "$state" "$candidate" "$worktree"; then
+  if ! fm_worktree_owner_record_confirms "$state_real" "$candidate" "$worktree"; then
     FM_WORKTREE_OWNER_DETAIL="the copy at $worktree has branch '$branch' checked out, but this home has no record of task $candidate holding that copy"
     return 1
   fi
+  FM_WORKTREE_OWNER_STATE=$state_real
   FM_WORKTREE_OWNER_TASK_ID=$candidate
   FM_WORKTREE_OWNER_METHOD=branch
   return 0

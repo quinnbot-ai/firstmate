@@ -25,6 +25,10 @@ set -u
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-wake-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-worktree-binding-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -249,7 +253,7 @@ SH
 # --- 1. same-harness relaunch -----------------------------------------------
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
-  local dir out rc gen_before gen_after git_dir
+  local dir out rc gen_before gen_after git_dir state_real
   dir=$(new_case same rl1)
   add_ship_task "$dir" rl1 claude
   gen_before=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" rl1)
@@ -262,8 +266,11 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   [ "$(meta_field "$dir" rl1 worktree)" = "$dir/wt" ] \
     || fail "the worktree must be reused, not reallocated"
   git_dir=$(git -C "$dir/wt" rev-parse --absolute-git-dir)
-  assert_grep 'schema=fm-worktree-binding.v1' "$git_dir/firstmate-task-binding" \
+  state_real=$(cd "$dir/home/state" && pwd -P)
+  assert_grep 'schema=fm-worktree-binding.v2' "$git_dir/firstmate-task-binding" \
     "a legacy relaunch must backfill its verified worktree binding"
+  assert_grep "state=$state_real" "$git_dir/firstmate-task-binding" \
+    "the backfilled worktree binding must name the owning home"
   assert_grep 'task_id=rl1' "$git_dir/firstmate-task-binding" \
     "the backfilled worktree binding must name the relaunched task"
   [ "$(meta_field "$dir" rl1 kind)" = ship ] || fail "kind must survive the relaunch"
@@ -276,6 +283,34 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   assert_grep "/exit" "$dir/fake/literal" "the previous agent should have been exited"
   assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement should have been launched"
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
+}
+
+test_direct_relaunch_waits_for_the_shared_pool_lock() {
+  local dir lock out pid rc
+  dir=$(new_case relaunch-pool-lock rlpool)
+  add_ship_task "$dir" rlpool claude
+  printf 'zsh' > "$dir/fake/command"
+  lock=$(fm_worktree_pool_transition_lock_path "$dir/home/state" "$dir/proj") \
+    || fail "relaunch-pool-lock: could not resolve the shared pool lock"
+  fm_lock_acquire_wait "$lock"
+  out="$dir/relaunch.out"
+  run_spawn "$dir" rlpool --relaunch --harness claude > "$out" &
+  pid=$!
+  /bin/sleep 0.2
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fm_lock_release "$lock"
+    wait "$pid" || true
+    fail "relaunch-pool-lock: relaunch bypassed the held pool lock: $(cat "$out")"
+  fi
+  fm_worktree_binding_is_absent "$dir/wt" \
+    || fail "relaunch-pool-lock: relaunch changed ownership before acquiring the pool lock"
+  fm_lock_release "$lock"
+  wait "$pid"
+  rc=$?
+  expect_code 0 "$rc" "relaunch-pool-lock: relaunch failed after lock release: $(cat "$out")"
+  fm_worktree_binding_matches "$dir/wt" "$dir/home/state" rlpool \
+    || fail "relaunch-pool-lock: relaunch did not publish the exact home-scoped binding"
+  pass "direct relaunch serializes ownership through the shared pool lock"
 }
 
 test_legacy_relaunch_refuses_a_recycled_unbound_worktree() {
@@ -1339,6 +1374,7 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
 }
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_direct_relaunch_waits_for_the_shared_pool_lock
 test_legacy_relaunch_refuses_a_recycled_unbound_worktree
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication

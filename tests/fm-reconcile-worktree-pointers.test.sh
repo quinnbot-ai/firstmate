@@ -137,7 +137,7 @@ test_binding_outranks_the_checked_out_branch() {
   record_lane "$case_dir" lane-a
   hand_copy_to_branch "$case_dir" fm/lane-b
   record_lane "$case_dir" lane-b
-  fm_worktree_binding_write "$case_dir/wt" lane-a \
+  fm_worktree_binding_write "$case_dir/wt" "$case_dir/state" lane-a \
     || fail "binding-wins: could not bind the copy to lane-a"
 
   out=$(run_reconcile "$case_dir" --apply)
@@ -149,6 +149,33 @@ test_binding_outranks_the_checked_out_branch() {
   assert_contains "$out" "RETIRED: lane-b" \
     "binding-wins: the other claimant is the stale one here"
   pass "reconcile trusts the copy's ownership binding over its checked-out branch"
+}
+
+test_binding_distinguishes_same_task_id_across_homes() {
+  local case_dir other_state out
+  case_dir=$(make_home cross-home-same-id)
+  other_state="$case_dir/other-state"
+  mkdir -p "$other_state"
+  record_lane "$case_dir" lane-a
+  fm_write_meta "$other_state/lane-a.meta" \
+    "window=other:fm-lane-a" \
+    "endpoint_task_id=lane-a" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  fm_worktree_binding_write "$case_dir/wt" "$other_state" lane-a \
+    || fail "cross-home: could not bind the copy to the other home"
+
+  out=$(run_reconcile "$case_dir" --apply)
+
+  assert_contains "$out" "RETIRED: lane-a" \
+    "cross-home: an equal task id in another home is still a different owner"
+  assert_grep "worktree_retired=lane-a" "$case_dir/state/lane-a.meta" \
+    "cross-home: the stale local pointer is retired"
+  assert_no_grep "worktree_retired" "$other_state/lane-a.meta" \
+    "cross-home: the live owner's record is untouched"
+  pass "bindings distinguish equal task ids in different Firstmate homes"
 }
 
 # (r5) Reporting must be the default; a repair tool that mutates on a bare
@@ -291,6 +318,7 @@ test_unbound_recycled_slot_is_retired
 test_own_copy_is_not_reassigned
 test_branch_without_a_matching_record_is_unresolved
 test_binding_outranks_the_checked_out_branch
+test_binding_distinguishes_same_task_id_across_homes
 test_default_run_changes_nothing
 test_apply_revalidates_ownership_inside_the_transition_lock
 test_rerun_is_idempotent
