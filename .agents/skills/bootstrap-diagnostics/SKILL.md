@@ -32,14 +32,10 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `TANGLE: <remediation>` - the primary checkout is stranded on a feature branch instead of its default branch; `AGENTS.md` section 8 explains why this guard exists and what it protects.
   The work is safe on that branch ref; restore the primary to its default branch with the printed `git -C <root> checkout <default>`, then re-validate that branch in a proper worktree.
   This is the only sanctioned firstmate-initiated git write to the primary, and it is a non-destructive branch switch that strands nothing.
-- `CODE_STALE: UNPROVEN live code: ...` - tracked drift, landed-path bytes, or index hints prevent the checkout from proving which code is installed.
+- `CODE_STALE: UNPROVEN live code: ...` - checked-out HEAD is behind, but tracked drift, landed-path bytes, index hints, inspection failure, or the unlocked checkout boundary prevents proving which code is installed.
   Do not call landed changes active or inactive, do not tell the captain a named guard is absent, and do not offer `/updatefirstmate` as remediation while this form remains.
-  Reconcile the reported checkout condition and rerun the diagnostic before applying the proven `running code` procedure below.
-- `CODE_STALE: running code (<sha>) is at least <n> commit(s) behind <branch> (<sha>) as last fetched...` - work that is merged is not running here, and nothing else in the digest separates those two facts.
-  Read it as a correction to the assumption a merged fix invites: the named guard paths are changes this home does NOT currently have, however recently they landed.
-  It is never an instruction to update, and it is not a fault report - a home can be held at an older commit deliberately, for instance while a change waits on the captain's decision.
-  The primary home and its linked-worktree secondmates read their tooling from the same repository, so this is one condition about one code root, not a per-home condition: diagnose it once, and expect a single approved update to move every one of those homes together.
-  When the gap matters to work in flight - a guard path in the gap covers something this session is about to do, or the captain believes a landed fix is already protecting the fleet - tell the captain what is not running and offer `/updatefirstmate`, then let them choose; otherwise carry the gap as context and do not raise it as its own escalation.
+  Named guard paths describe the commit gap only; do not claim they are absent from live bytes.
+  Reconcile any reported checkout condition and rerun the diagnostic, but retain the live-code uncertainty while the checkout remains unlocked.
   The reported count is a floor taken from the last fetch, so treat it as "at least this far behind" rather than an exact distance.
 - `STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>` - the visible startup-memory budget is not a safe one-line positive decimal file; do not infer the default or propagate it.
   Correct the local primary file, then rerun session start so the normal convergence path can deliver the validated value to secondmate homes.

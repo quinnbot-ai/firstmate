@@ -343,10 +343,10 @@ fm_code_currency_inspection_failed_line() {
 }
 
 # fm_code_currency_line <root>
-# Echo one CODE_STALE diagnostic when the clean checkout at <root> is behind the
-# default branch it follows, or when checkout drift makes live code
-# unprovable. Echo nothing (returning 1) for other clean states: not a git work
-# tree, nothing to compare against, already current, or ahead only.
+# Echo one CODE_STALE diagnostic when the checkout at <root> is behind the
+# default branch it follows and report whether inspected bytes expose drift.
+# Echo nothing (returning 1) for other clean states: not a git work tree,
+# nothing to compare against, already current, or ahead only.
 fm_code_currency_line() {
   local root=$1 base behind ahead head_oid base_oid head_sha base_sha guard guard_count shown more guard_text tracked_status head_drift head_drift_confirm head_drift_shown landed_drift landed_drift_shown index_hints index_hints_shown
   git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
@@ -508,6 +508,6 @@ fm_code_currency_line() {
     fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
     return 0
   fi
-  printf 'CODE_STALE: running code (%s) is at least %s commit(s) behind %s (%s) as last fetched%s. Landed is not running - firstmate never updates itself, so those changes are inactive here until the captain approves an update.\n' \
+  printf 'CODE_STALE: UNPROVEN live code: checked-out HEAD %s is at least %s commit(s) behind %s (%s) as last fetched%s. Tracked bytes matched HEAD during inspection, but the unlocked checkout can change before use, so installed code cannot be proven to exclude landed changes.\n' \
     "$head_sha" "$behind" "$base" "$base_sha" "$guard_text"
 }

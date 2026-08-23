@@ -396,6 +396,17 @@ test_colon_labeled_directive_reference_refuses() {
   assert_contains "$out" "$expected" "colon-labeled directive did not resolve against the task worktree"
   assert_absent "$HOME_DIR/state/$id.meta" "colon-labeled helper refusal published metadata"
 
+  id=brief-step-label-a30
+  rec=$(make_case step-label-command "$id" \
+    'Step 1: run bin/fm-step-label-missing.sh before editing.')
+  read_case "$rec"
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite a step-labeled helper instruction"
+  expected="$POOL_DIR/bin/fm-step-label-missing.sh"
+  assert_contains "$out" "$expected" "step-labeled directive did not resolve against the task worktree"
+  assert_absent "$HOME_DIR/state/$id.meta" "step-labeled helper refusal published metadata"
+
   id=brief-colon-prose-a29
   rec=$(make_case colon-label-prose "$id" \
     'Documentation: bin/fm-retired.sh describes the old workflow.')
@@ -404,7 +415,7 @@ test_colon_labeled_directive_reference_refuses() {
   status=$?
   expect_code 0 "$status" "colon-labeled prose was treated as a helper instruction: $out"
   assert_contains "$out" "spawned $id" "colon-labeled prose did not reach worker dispatch"
-  pass "a colon-labeled helper directive refuses dispatch"
+  pass "colon and step-labeled helper directives refuse dispatch"
 }
 
 test_negative_modal_reference_passes() {

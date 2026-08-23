@@ -56,6 +56,7 @@ sub is_instruction {
   my $prefix = clause_prefix($text, $start);
   $prefix =~ s/`+\s*$//;
   $prefix =~ s/^\s+|\s+$//g;
+  $prefix =~ s/^(?:step|phase|stage|task|action|instruction)\s+[^:\s]+\s*:\s*//i;
   $prefix =~ s/^((?:please\s+)?(?:run|execute|launch|invoke|call|use|start|begin|check)):\s*$/$1/i;
   return 1 if $prefix eq '' || $prefix =~ /^\$\s*$/;
   return 1 if $prefix =~ /\bdon['’]t\s+forget\b/i;

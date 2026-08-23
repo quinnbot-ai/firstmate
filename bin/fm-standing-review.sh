@@ -99,6 +99,9 @@ for STANDING_REVIEW_ARG in "$@"; do
     continue
   fi
   case "$STANDING_REVIEW_ARG" in
+    --home=*) STANDING_REVIEW_HOME=${STANDING_REVIEW_ARG#--home=} ;;
+    --state=*) STANDING_REVIEW_STATE=${STANDING_REVIEW_ARG#--state=} ;;
+    --id=*) STANDING_REVIEW_ID=${STANDING_REVIEW_ARG#--id=} ;;
     --home) STANDING_REVIEW_PREV=home ;;
     --state) STANDING_REVIEW_PREV=state ;;
     --id) STANDING_REVIEW_PREV=id ;;

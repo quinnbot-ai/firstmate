@@ -446,7 +446,7 @@ SH
   chmod +x "$fakebin/python3"
   PATH="$fakebin:$PATH" FM_DIRECT_SCAN_STARTED="$started" \
     FM_DIRECT_SCAN_RELEASE="$release" FM_REAL_PYTHON="$real_python" \
-    "$ROOT/bin/fm-standing-review.sh" --home "$home" --id r \
+    "$ROOT/bin/fm-standing-review.sh" --home="$home" --id=r \
     > "$home/direct-scan.out" 2> "$home/direct-scan.err" &
   scan_pid=$!
   i=0
@@ -470,7 +470,7 @@ SH
   [ "$rc" -eq 0 ] || fail "disarm failed after direct scan: $(cat "$home/direct-disarm.out")"
   assert_absent "$home/state/r.standing-review-latch" \
     "direct scan recreated durable review state after purge"
-  pass "disarm serializes with direct review scans"
+  pass "disarm serializes with direct review scans using equals-form options"
 }
 
 test_purge_refuses_unremovable_state_without_partial_disarm() {

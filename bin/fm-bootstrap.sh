@@ -13,7 +13,7 @@
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "PR_CHECK_MIGRATION: <private remediation>",
 #                 "TANGLE: <remediation>",
-#                 "CODE_STALE: <gap between running code and the branch it follows>",
+#                 "CODE_STALE: <gap between checked-out and fetched code>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
@@ -49,11 +49,11 @@
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
-#          A CODE_STALE line either proves the code root this home runs is behind,
-#          or says UNPROVEN when checkout bytes cannot be attributed to HEAD or
-#          the landed branch. The latter makes no live/inactive claim. A home may
-#          be held at an older commit on purpose, so the line reports and never
-#          acts. bin/fm-code-currency-lib.sh owns the comparison: it is a local
+#          A CODE_STALE line proves that checked-out HEAD is behind but says
+#          UNPROVEN for live code because an unlocked checkout can change after
+#          inspection. It makes no live/inactive claim. A home may be held at an
+#          older commit on purpose, so the line reports and never acts.
+#          bin/fm-code-currency-lib.sh owns the comparison: it is a local
 #          read of the already-fetched remote-tracking ref, never a fetch, so the
 #          reported gap is a floor rather than a live remote query.
 #          treehouse is also MISSING when its installed version lacks

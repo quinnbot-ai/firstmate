@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# Behavior tests for the "landed is not running" currency signal.
+# Behavior tests for the landed-versus-live currency signal.
 #
 # Merging a change to the default branch does not make it run: firstmate never
-# updates itself, so a home keeps executing whatever commit its code root is
-# checked out at until the captain approves an update. Nothing else in the
-# session-start digest separates "merged" from "running here", which is exactly
-# how a merged refusal can read as protection it is not yet providing.
+# updates itself, so a home keeps its checked-out commit until the captain
+# approves an update. The unlocked worktree can still differ from that commit,
+# so the signal reports the commit gap without claiming which bytes are live.
 #
 # Three things are pinned here, because they fail for different reasons:
 #   SIGNAL  - a code root behind the branch it follows reports the gap.
@@ -296,10 +295,12 @@ test_untracked_landed_path_is_unproven() {
   rm "$repo/bin/fm-new-helper.sh"
   printf 'scratch\n' > "$repo/unrelated.tmp"
   out=$(fm_code_currency_line "$repo" || true)
-  assert_contains "$out" "running code" \
-    "an unrelated untracked scratch file made the checkout unproven"
-  assert_not_contains "$out" "UNPROVEN" \
-    "unrelated untracked scratch was treated as landed runtime drift"
+  assert_contains "$out" "UNPROVEN live code" \
+    "an unlocked checkout was called proven after an unrelated scratch file"
+  assert_contains "$out" "Tracked bytes matched HEAD during inspection" \
+    "unrelated scratch state was confused with tracked runtime drift"
+  assert_not_contains "$out" "inactive here" \
+    "an unlocked checkout produced an inactivity claim"
 
   pass "fm_code_currency_line: untracked landed paths make live code unproven"
 }
@@ -531,6 +532,49 @@ SH
   pass "currency reporting requires two stable worktree byte snapshots"
 }
 
+test_worktree_change_after_inspection_is_unproven() {
+  local repo out real_git shim count_file runtime
+  repo=$(make_repo "$TMP_ROOT/worktree-post-inspection-change")
+  runtime="$repo/bin/fm-runtime.sh"
+  land "$repo" bin/fm-runtime.sh old
+  land "$repo" bin/fm-runtime.sh landed
+  hold_back "$repo" 1
+
+  real_git=$(command -v git)
+  shim="$TMP_ROOT/worktree-post-inspection-change-bin"
+  count_file="$TMP_ROOT/worktree-post-inspection-change.count"
+  mkdir -p "$shim"
+  cat > "$shim/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" rev-list --count "*)
+    count=0
+    [ ! -f "$FM_REV_LIST_COUNT" ] || count=$(cat "$FM_REV_LIST_COUNT")
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$FM_REV_LIST_COUNT"
+    if [ "$count" -eq 2 ]; then
+      "$FM_REAL_GIT" -C "$FM_MUTATE_REPO" show origin/main:bin/fm-runtime.sh > "$FM_RUNTIME_PATH"
+    fi
+    ;;
+esac
+exec "$FM_REAL_GIT" "$@"
+SH
+  chmod +x "$shim/git"
+
+  out=$(PATH="$shim:$PATH" FM_REAL_GIT="$real_git" FM_REV_LIST_COUNT="$count_file" \
+    FM_MUTATE_REPO="$repo" FM_RUNTIME_PATH="$runtime" \
+    fm_code_currency_line "$repo" || true)
+  assert_contains "$(cat "$runtime")" "landed" \
+    "fixture did not change the worktree after byte inspection"
+  assert_contains "$out" "CODE_STALE: UNPROVEN live code" \
+    "a post-inspection worktree change produced no live-code uncertainty"
+  assert_not_contains "$out" "CODE_STALE: running code" \
+    "a post-inspection worktree change produced a running-code claim"
+  assert_not_contains "$out" "inactive here" \
+    "a post-inspection worktree change produced an inactivity claim"
+  pass "unlocked post-inspection changes keep live-code status unproven"
+}
+
 test_diverged_equivalent_landed_bytes_are_unproven() {
   local repo out
   repo=$(make_repo "$TMP_ROOT/diverged-equivalent")
@@ -693,8 +737,8 @@ test_bootstrap_line() {
   out=$(run_bootstrap "$repo" | grep '^CODE_STALE:' || true)
   assert_contains "$out" "1 commit(s) behind" "session start did not report the gap on a stale home"
   assert_contains "$out" "bin/fm-pr-merge.sh" "session start did not name the guard path in the gap"
-  assert_contains "$out" "until the captain approves an update" \
-    "session start did not say the gap stays until the captain approves an update"
+  assert_contains "$out" "installed code cannot be proven" \
+    "session start overclaimed the live bytes in an unlocked checkout"
 
   pass "fm-bootstrap: CODE_STALE reaches session start for a stale code root and stays silent for a current one"
 }
@@ -711,6 +755,7 @@ test_stat_cache_cannot_hide_tracked_runtime_drift
 test_tracked_byte_proof_batches_regular_files
 test_tree_inventory_failure_is_unproven
 test_changing_worktree_snapshot_is_unproven
+test_worktree_change_after_inspection_is_unproven
 test_diverged_equivalent_landed_bytes_are_unproven
 test_ref_change_during_inspection_is_unproven
 test_byte_inspection_failure_is_unproven
