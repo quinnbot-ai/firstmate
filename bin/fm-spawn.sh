@@ -688,6 +688,8 @@ SPAWN_WORKTREE_POOL_TRANSITION_LOCK=
 SPAWN_WORKTREE_POOL_TRANSITION_LOCK_HELD=0
 SPAWN_FRESH_ENDPOINT_PENDING=0
 SPAWN_FRESH_WORKTREE_PENDING=0
+SPAWN_FRESH_META_ROLLBACK_PENDING=0
+SPAWN_FRESH_COMMITTED=0
 SPAWN_TREEHOUSE_ALLOCATION_PENDING=0
 SPAWN_TREEHOUSE_LEASE_ID=
 SPAWN_TREEHOUSE_LEASES_BEFORE=
@@ -775,6 +777,7 @@ spawn_treehouse_rollback_unparsed_allocation() {  # [known-lease-id]
 spawn_fresh_resources_rollback() {
   local binding_cleared=0
   local -a treehouse_return_guard
+  [ "$SPAWN_FRESH_COMMITTED" != 1 ] || return 0
   [ "$SPAWN_FRESH_ENDPOINT_PENDING" = 1 ] \
     || [ "$SPAWN_FRESH_WORKTREE_PENDING" = 1 ] \
     || [ "$SPAWN_TREEHOUSE_ALLOCATION_PENDING" = 1 ] \
@@ -851,8 +854,50 @@ spawn_fresh_resources_rollback() {
   SPAWN_TREEHOUSE_ALLOCATION_PENDING=0
 }
 
+spawn_fresh_metadata_rollback() {
+  local meta rollback_lock published_gen
+  [ "$SPAWN_FRESH_META_ROLLBACK_PENDING" = 1 ] || return 0
+  meta="$STATE/$ID.meta"
+  rollback_lock=$(fm_meta_lock_path "$meta") || {
+    echo "warning: could not resolve the metadata lock after aborted spawn of $ID; retaining its resources" >&2
+    return 1
+  }
+  fm_lock_acquire_wait "$rollback_lock" || {
+    echo "warning: could not acquire the metadata lock after aborted spawn of $ID; retaining its resources" >&2
+    return 1
+  }
+  if [ ! -e "$meta" ] && [ ! -L "$meta" ]; then
+    SPAWN_FRESH_META_ROLLBACK_PENDING=0
+    fm_lock_release "$rollback_lock" || true
+    return 0
+  fi
+  if [ ! -f "$meta" ] || [ -L "$meta" ]; then
+    fm_lock_release "$rollback_lock" || true
+    echo "warning: aborted spawn metadata for $ID is not a regular owned record; retaining its resources" >&2
+    return 1
+  fi
+  published_gen=$(fm_meta_get "$meta" spawn_gen)
+  if [ -z "${SPAWN_GEN:-}" ] || [ "$published_gen" != "$SPAWN_GEN" ]; then
+    fm_lock_release "$rollback_lock" || true
+    echo "warning: task metadata changed during aborted spawn of $ID; retaining its resources" >&2
+    return 1
+  fi
+  if ! rm -f -- "$meta" || [ -e "$meta" ] || [ -L "$meta" ]; then
+    fm_lock_release "$rollback_lock" || true
+    echo "warning: could not remove exact aborted spawn metadata for $ID; retaining its resources" >&2
+    return 1
+  fi
+  SPAWN_FRESH_META_ROLLBACK_PENDING=0
+  fm_lock_release "$rollback_lock" || true
+}
+
 spawn_abort_cleanup() {
-  local status=$?
+  local status=$? fresh_cleanup_allowed=0
+  if [ "${RELAUNCH:-0}" -eq 0 ] && [ "$SPAWN_FRESH_COMMITTED" != 1 ]; then
+    if spawn_fresh_metadata_rollback; then
+      fresh_cleanup_allowed=1
+    fi
+  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
      && [ -n "$SPAWN_META_TMP" ] \
@@ -878,13 +923,15 @@ spawn_abort_cleanup() {
     fi
   fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
+     && { [ "${RELAUNCH:-0}" -eq 1 ] || [ "$fresh_cleanup_allowed" = 1 ]; } \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
     if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
       echo "warning: herdr presentation focus lock unavailable; retaining the projection journal and refusing concurrent abort cleanup" >&2
       HERDR_PROJECTION_ABORT_CLEANUP=0
     fi
   fi
-  if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ]; then
+  if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
+     && { [ "${RELAUNCH:-0}" -eq 1 ] || [ "$fresh_cleanup_allowed" = 1 ]; }; then
     HERDR_PROJECTION_ABORT_CLEANUP=0
     fm_backend_herdr_projection_cleanup_exact \
       "$HERDR_PROJECTION_ABORT_SESSION" \
@@ -895,7 +942,7 @@ spawn_abort_cleanup() {
     HERDR_PRESENTATION_ORDER_LOCK_HELD=0
     fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
   fi
-  if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
+  if [ "$ORCA_ABORT_CLEANUP" = 1 ] && [ "$fresh_cleanup_allowed" = 1 ]; then
     ORCA_ABORT_CLEANUP=0
     if [ -n "${ORCA_TERMINAL:-}" ]; then
       fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
@@ -923,7 +970,7 @@ spawn_abort_cleanup() {
       fi
     fi
   fi
-  spawn_fresh_resources_rollback || true
+  [ "$fresh_cleanup_allowed" = 0 ] || spawn_fresh_resources_rollback || true
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -2915,7 +2962,8 @@ fi
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
-SPAWN_META_PATH="$STATE/$ID.meta"
+SPAWN_META_TMP="$STATE/.$ID.meta.spawn.${BASHPID:-$$}"
+SPAWN_META_PATH=$SPAWN_META_TMP
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_TMP="$STATE/.$ID.meta.relaunch.${BASHPID:-$$}"
   SPAWN_META_PATH=$SPAWN_META_TMP
@@ -2980,8 +3028,13 @@ preserve_relaunch_meta() {
   fi
 } > "$SPAWN_META_PATH"
 if [ "$RELAUNCH" -eq 0 ]; then
+  SPAWN_FRESH_META_ROLLBACK_PENDING=1
+  mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"
+  SPAWN_FRESH_COMMITTED=1
+  SPAWN_FRESH_META_ROLLBACK_PENDING=0
   SPAWN_FRESH_ENDPOINT_PENDING=0
   SPAWN_FRESH_WORKTREE_PENDING=0
+  SPAWN_META_TMP=
 fi
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_PUBLISH_STARTED=1

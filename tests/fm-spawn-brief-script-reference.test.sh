@@ -708,6 +708,48 @@ test_allocation_interruption_rolls_back_the_exact_lease() {
   pass "an allocation interruption rolls back its exact lease"
 }
 
+test_metadata_publication_interruption_rolls_back_the_exact_incarnation() {
+  local id=brief-metadata-interrupt-a27 rec hook out status
+  rec=$(make_case metadata-interrupt "$id" 'Proceed with the task.')
+  read_case "$rec"
+  hook="$HOME_DIR/state/$id.bash-env"
+  cat > "$hook" <<'SH'
+if [ "${0:-}" = "${FM_TEST_SIGNAL_SPAWN_SCRIPT:-}" ]; then
+  fm_test_signal_after_metadata() {
+    trap - DEBUG
+    if [ -f "${FM_TEST_SIGNAL_META:?FM_TEST_SIGNAL_META unset}" ] \
+       && grep -q '^spawn_gen=' "$FM_TEST_SIGNAL_META"; then
+      : > "${FM_TEST_SIGNAL_MARKER:?FM_TEST_SIGNAL_MARKER unset}"
+      kill -TERM "${BASHPID:-$$}"
+      return
+    fi
+    trap fm_test_signal_after_metadata DEBUG
+  }
+  trap fm_test_signal_after_metadata DEBUG
+fi
+SH
+
+  set +e
+  out=$(BASH_ENV="$hook" \
+    FM_TEST_SIGNAL_SPAWN_SCRIPT="$SPAWN" \
+    FM_TEST_SIGNAL_META="$HOME_DIR/state/$id.meta" \
+    FM_TEST_SIGNAL_MARKER="$HOME_DIR/state/$id.signal-fired" \
+    run_spawn "$id")
+  status=$?
+  set -e
+
+  expect_code 143 "$status" "metadata-interrupted spawn exited unexpectedly: $out"
+  assert_present "$HOME_DIR/state/$id.signal-fired" "metadata publication interruption did not fire"
+  assert_absent "$HOME_DIR/state/$id.meta" "interrupted spawn retained its published metadata"
+  assert_absent "$HOME_DIR/state/$id.endpoint" "metadata interruption leaked its endpoint"
+  assert_absent "$HOME_DIR/state/$id.lease" "metadata interruption leaked its exact lease"
+  assert_absent "$HOME_DIR/state/$id.treehouse-allocation" \
+    "metadata interruption remained in pool status"
+  fm_worktree_binding_is_absent "$POOL_DIR" \
+    || fail "metadata interruption left an orphan worktree binding"
+  pass "metadata publication interruption rolls back its exact incarnation"
+}
+
 test_linked_homes_share_pool_transition_lock() {
   local rec linked state_a state_b lock_a lock_b
   rec=$(make_case cross-home-pool-lock brief-cross-home-a20 'Proceed with the task.')
@@ -753,6 +795,7 @@ test_missing_lease_identity_rolls_back_the_holder_allocation
 test_missing_lease_path_recovers_and_returns_the_exact_allocation
 test_missing_lease_path_retries_status_recovery
 test_allocation_interruption_rolls_back_the_exact_lease
+test_metadata_publication_interruption_rolls_back_the_exact_incarnation
 test_linked_homes_share_pool_transition_lock
 test_pool_transition_lock_precedes_allocation
 test_pool_transition_lock_releases_before_endpoint_settle
