@@ -229,6 +229,58 @@ DESCENDANT_TASK_HOMES=()
 DESCENDANT_OWNER_STATES=()
 DESCENDANT_OWNER_TASKS=()
 DESCENDANT_OWNER_WORKTREES=()
+
+teardown_worktree_return_receipt_path() {
+  printf '%s/%s.worktree-return\n' "$1" "$2"
+}
+
+teardown_worktree_return_receipt_matches() {
+  local state=$1 task_id=$2 worktree=$3 project=$4 receipt state_real state_device spawn_gen
+  receipt=$(teardown_worktree_return_receipt_path "$state" "$task_id")
+  state_device=$(fm_pr_file_device "$state") || return 1
+  fm_pr_private_file_valid "$receipt" 600 "$state_device" || return 1
+  state_real=$(fm_worktree_binding_state_resolve "$state") || return 1
+  spawn_gen=$(fm_meta_get "$state/$task_id.meta" spawn_gen)
+  [ "$(fm_meta_get "$receipt" schema)" = fm-worktree-return-v1 ] \
+    && [ "$(fm_meta_get "$receipt" state)" = "$state_real" ] \
+    && [ "$(fm_meta_get "$receipt" task_id)" = "$task_id" ] \
+    && [ "$(fm_meta_get "$receipt" spawn_gen)" = "$spawn_gen" ] \
+    && [ "$(fm_meta_get "$receipt" worktree)" = "$worktree" ] \
+    && [ "$(fm_meta_get "$receipt" project)" = "$project" ]
+}
+
+teardown_worktree_return_receipt_write() {
+  local state=$1 task_id=$2 worktree=$3 project=$4 receipt state_real spawn_gen tmp value
+  spawn_gen=$(fm_meta_get "$state/$task_id.meta" spawn_gen)
+  for value in "$state" "$task_id" "$spawn_gen" "$worktree" "$project"; do
+    case "$value" in *$'\n'*) return 1 ;; esac
+  done
+  receipt=$(teardown_worktree_return_receipt_path "$state" "$task_id")
+  if [ -e "$receipt" ] || [ -L "$receipt" ]; then
+    teardown_worktree_return_receipt_matches "$state" "$task_id" "$worktree" "$project"
+    return
+  fi
+  state_real=$(fm_worktree_binding_state_resolve "$state") || return 1
+  tmp=$(mktemp "$state/.$task_id.worktree-return.XXXXXX") || return 1
+  {
+    printf 'schema=fm-worktree-return-v1\n'
+    printf 'state=%s\n' "$state_real"
+    printf 'task_id=%s\n' "$task_id"
+    printf 'spawn_gen=%s\n' "$spawn_gen"
+    printf 'worktree=%s\n' "$worktree"
+    printf 'project=%s\n' "$project"
+  } > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$receipt" || { rm -f -- "$tmp"; return 1; }
+  teardown_worktree_return_receipt_matches "$state" "$task_id" "$worktree" "$project"
+}
+
+teardown_worktree_return_receipt_remove() {
+  local receipt
+  receipt=$(teardown_worktree_return_receipt_path "$1" "$2")
+  rm -f -- "$receipt"
+  [ ! -e "$receipt" ] && [ ! -L "$receipt" ]
+}
 teardown_release_worktree_transition_locks() {
   if [ "$WORKTREE_TRANSITION_LOCK_HELD" = 1 ]; then
     fm_lock_release "$WORKTREE_TRANSITION_LOCK"
@@ -242,7 +294,7 @@ teardown_release_worktree_transition_locks() {
 
 teardown_acquire_worktree_transition_locks() {
   if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
-     && [ -n "$WT" ] && [ -d "$WT" ] \
+     && [ -n "$WT" ] \
      && [ -z "$(fm_meta_get "$META" worktree_retired)" ]; then
     WORKTREE_POOL_TRANSITION_LOCK=$(fm_worktree_pool_transition_lock_path "$STATE" "$PROJ") || {
       echo "error: cannot establish the pool transition lock for project $PROJ" >&2
@@ -596,12 +648,18 @@ validate_worktree_ownership() {
     reject_unwarranted_forget_worktree "task $ID has no recorded copy to prove reassigned" || return 1
     return 0
   fi
+  declared=$(fm_meta_get "$META" worktree_binding)
+  if [ "$declared" = fm-worktree-binding.v2 ] \
+     && teardown_worktree_return_receipt_matches "$STATE" "$ID" "$WT" "$PROJ" \
+     && { [ ! -d "$WT" ] || fm_worktree_binding_is_absent "$WT"; }; then
+    reject_unwarranted_forget_worktree "task $ID has an in-progress exact worktree return" || return 1
+    return 0
+  fi
   if [ ! -d "$WT" ]; then
     reject_unwarranted_forget_worktree "the recorded copy at $WT is unavailable and has no proven current owner" || return 1
     return 0
   fi
 
-  declared=$(fm_meta_get "$META" worktree_binding)
   if [ -n "$declared" ] && [ "$declared" != fm-worktree-binding.v2 ]; then
     echo "REFUSED: task $ID records an unsupported isolated-copy ownership binding: $declared." >&2
     echo "Cannot prove the copy at $WT still belongs to this task; refusing before any cleanup step." >&2
@@ -2292,9 +2350,17 @@ preflight_descendant_worktree_ownership() {
     fm_worktree_record_resolve "$meta" || continue
     worktree=$FM_WORKTREE_RECORD_ACTIVE_PATH
     [ -n "$worktree" ] && [ -d "$worktree" ] || continue
-    if ! fm_worktree_owner_resolve "$worktree" "$state" \
-       || [ "$FM_WORKTREE_OWNER_STATE" != "$(fm_worktree_binding_state_resolve "$state")" ] \
-       || [ "$FM_WORKTREE_OWNER_TASK_ID" != "$task_id" ]; then
+    if fm_worktree_owner_resolve "$worktree" "$state" \
+       && [ "$FM_WORKTREE_OWNER_STATE" = "$(fm_worktree_binding_state_resolve "$state")" ] \
+       && [ "$FM_WORKTREE_OWNER_TASK_ID" = "$task_id" ]; then
+      :
+    elif [ "$(fm_meta_get "$meta" worktree_binding)" = fm-worktree-binding.v2 ] \
+         && teardown_worktree_return_receipt_matches "$state" "$task_id" "$worktree" \
+              "$(fm_meta_get "$meta" project)" \
+         && fm_worktree_binding_is_absent "$worktree"; then
+      FM_WORKTREE_OWNER_STATE=$(fm_worktree_binding_state_resolve "$state")
+      FM_WORKTREE_OWNER_TASK_ID=$task_id
+    else
       owner_detail=${FM_WORKTREE_OWNER_DETAIL:-the current owner does not match this record}
       echo "REFUSED: descendant task $task_id does not positively own worktree $worktree; $owner_detail; forced teardown changed nothing" >&2
       return 1
@@ -2562,15 +2628,17 @@ cleanup_firstmate_home_children() {
       if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
         child_binding_cleared=0
         if fm_worktree_binding_matches "$child_wt" "$sub_state" "$child_id"; then
+          teardown_worktree_return_receipt_write "$sub_state" "$child_id" "$child_wt" "$child_proj" || return 1
           fm_worktree_binding_clear "$child_wt" "$sub_state" "$child_id" || return 1
           child_binding_cleared=1
         fi
         if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
-          :
+          teardown_worktree_return_receipt_remove "$sub_state" "$child_id" || return 1
         else
           child_return_rc=$?
           if [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ]; then
             [ "$child_binding_cleared" -eq 0 ] || fm_worktree_binding_write "$child_wt" "$sub_state" "$child_id" || return 1
+            [ "$child_binding_cleared" -eq 0 ] || teardown_worktree_return_receipt_remove "$sub_state" "$child_id" || return 1
             return "$child_return_rc"
           fi
           safe_rm_rf_child_worktree "$child_wt" "$child_proj"
@@ -2590,6 +2658,7 @@ cleanup_firstmate_home_children() {
     status_retire_presentation_task "$sub_state" "$child_id" || return 1
     rm -f "$sub_state/$child_id.turn-ended" \
       "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
+      "$sub_state/$child_id.worktree-return" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
       "$sub_state/$child_id.cursor-session"
@@ -2799,14 +2868,17 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   fi
   WORKTREE_BINDING_CLEARED=0
   if fm_worktree_binding_matches "$WT" "$STATE" "$ID"; then
+    teardown_worktree_return_receipt_write "$STATE" "$ID" "$WT" "$PROJ" || exit 1
     fm_worktree_binding_clear "$WT" "$STATE" "$ID" || exit 1
     WORKTREE_BINDING_CLEARED=1
   fi
   teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
     [ "$WORKTREE_BINDING_CLEARED" -eq 0 ] || fm_worktree_binding_write "$WT" "$STATE" "$ID" || exit 1
+    [ "$WORKTREE_BINDING_CLEARED" -eq 0 ] || teardown_worktree_return_receipt_remove "$STATE" "$ID" || exit 1
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
     exit 1
   }
+  teardown_worktree_return_receipt_remove "$STATE" "$ID" || exit 1
 fi
 teardown_release_worktree_transition_locks
 
@@ -2899,6 +2971,7 @@ remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
+  "$STATE/$ID.worktree-return" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \

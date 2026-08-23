@@ -114,7 +114,7 @@ fm_code_currency_guard_files() {
 }
 
 fm_code_currency_landed_worktree_drift() {
-  local root=$1 head=$2 base=$3 inventory status
+  local root=$1 head=$2 base=$3 inventory status sub_drift sub_untracked
   inventory=$(fm_code_currency_temp_file) || return 1
   if ! fm_code_currency_capture "$root" "$inventory" diff --name-only -z "$head...$base" --; then
     rm -f "$inventory"
@@ -165,7 +165,16 @@ fm_code_currency_landed_worktree_drift() {
             continue
           fi
           actual=$(git -C "$root/$path" rev-parse HEAD 2>/dev/null) || exit 1
-          [ "$actual" = "$oid" ] || fm_code_currency_print_path "$path"
+          if [ "$actual" != "$oid" ]; then
+            fm_code_currency_print_path "$path"
+            continue
+          fi
+          sub_drift=$(fm_code_currency_head_worktree_drift "$root/$path" "$oid") || exit 1
+          sub_untracked=$(git -C "$root/$path" ls-files --others --directory \
+            --no-empty-directory 2>/dev/null) || exit 1
+          if [ -n "$sub_drift" ] || [ -n "$sub_untracked" ]; then
+            fm_code_currency_print_path "$path"
+          fi
           ;;
         *)
           fm_code_currency_print_path "$path"
@@ -179,7 +188,7 @@ fm_code_currency_landed_worktree_drift() {
 }
 
 fm_code_currency_head_worktree_drift() {
-  local root=$1 head=$2 inventory status
+  local root=$1 head=$2 inventory status sub_drift sub_untracked
   inventory=$(fm_code_currency_temp_file) || return 1
   if ! fm_code_currency_capture "$root" "$inventory" ls-tree -rz "$head"; then
     rm -f "$inventory"
@@ -237,7 +246,16 @@ fm_code_currency_head_worktree_drift() {
           continue
         fi
         actual=$(git -C "$root/$path" rev-parse HEAD 2>/dev/null) || exit 1
-        [ "$actual" = "$oid" ] || drift[$index]=1
+        if [ "$actual" != "$oid" ]; then
+          drift[$index]=1
+          continue
+        fi
+        sub_drift=$(fm_code_currency_head_worktree_drift "$root/$path" "$oid") || exit 1
+        sub_untracked=$(git -C "$root/$path" ls-files --others --directory \
+          --no-empty-directory 2>/dev/null) || exit 1
+        if [ -n "$sub_drift" ] || [ -n "$sub_untracked" ]; then
+          drift[$index]=1
+        fi
         ;;
       *)
         drift[$index]=1

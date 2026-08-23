@@ -83,7 +83,77 @@ set -eu
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export FM_STANDING_REVIEW_ROOT="$ROOT"
-exec python3 - "$@" <<'PY'
+STANDING_REVIEW_HOME=
+STANDING_REVIEW_STATE=
+STANDING_REVIEW_ID=
+STANDING_REVIEW_LOCK_REQUIRED=1
+STANDING_REVIEW_PREV=
+for STANDING_REVIEW_ARG in "$@"; do
+  if [ -n "$STANDING_REVIEW_PREV" ]; then
+    case "$STANDING_REVIEW_PREV" in
+      home) STANDING_REVIEW_HOME=$STANDING_REVIEW_ARG ;;
+      state) STANDING_REVIEW_STATE=$STANDING_REVIEW_ARG ;;
+      id) STANDING_REVIEW_ID=$STANDING_REVIEW_ARG ;;
+    esac
+    STANDING_REVIEW_PREV=
+    continue
+  fi
+  case "$STANDING_REVIEW_ARG" in
+    --home) STANDING_REVIEW_PREV=home ;;
+    --state) STANDING_REVIEW_PREV=state ;;
+    --id) STANDING_REVIEW_PREV=id ;;
+    --dry-run|--validate|-h|--help) STANDING_REVIEW_LOCK_REQUIRED=0 ;;
+  esac
+done
+
+STANDING_REVIEW_LIFECYCLE_LOCK=
+STANDING_REVIEW_LIFECYCLE_LOCK_HELD=0
+STANDING_REVIEW_LIFECYCLE_INHERITED=0
+standing_review_release_lifecycle_lock() {
+  local status=$?
+  if [ "$STANDING_REVIEW_LIFECYCLE_LOCK_HELD" -eq 1 ]; then
+    fm_lock_release "$STANDING_REVIEW_LIFECYCLE_LOCK" || true
+    STANDING_REVIEW_LIFECYCLE_LOCK_HELD=0
+  fi
+  return "$status"
+}
+
+if [ "$STANDING_REVIEW_LOCK_REQUIRED" -eq 1 ] \
+   && [ -n "$STANDING_REVIEW_HOME" ] && [ -n "$STANDING_REVIEW_ID" ]; then
+  if [ -z "$STANDING_REVIEW_STATE" ]; then
+    STANDING_REVIEW_STATE=${FM_STATE_OVERRIDE:-$STANDING_REVIEW_HOME/state}
+  fi
+  STANDING_REVIEW_STATE=$(CDPATH='' cd -- "$STANDING_REVIEW_STATE" 2>/dev/null && pwd -P) || exit 1
+  # shellcheck source=bin/fm-pr-lib.sh
+  . "$ROOT/bin/fm-pr-lib.sh"
+  # shellcheck source=bin/fm-check-lib.sh
+  . "$ROOT/bin/fm-check-lib.sh"
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$ROOT/bin/fm-wake-lib.sh"
+  STANDING_REVIEW_LIFECYCLE_LOCK=$(fm_custom_check_lifecycle_lock_path \
+    "$STANDING_REVIEW_STATE" "$STANDING_REVIEW_ID") || exit 1
+  case "${FM_STANDING_REVIEW_LIFECYCLE_OWNER_PID:-}" in
+    ''|*[!0-9]*) ;;
+    *)
+      if [ "$(cat "$STANDING_REVIEW_LIFECYCLE_LOCK/pid" 2>/dev/null || true)" \
+           = "$FM_STANDING_REVIEW_LIFECYCLE_OWNER_PID" ] \
+         && fm_pid_alive "$FM_STANDING_REVIEW_LIFECYCLE_OWNER_PID"; then
+        STANDING_REVIEW_LIFECYCLE_INHERITED=1
+      fi
+      ;;
+  esac
+  if [ "$STANDING_REVIEW_LIFECYCLE_INHERITED" -eq 0 ]; then
+    fm_lock_acquire_wait "$STANDING_REVIEW_LIFECYCLE_LOCK" || exit 1
+    STANDING_REVIEW_LIFECYCLE_LOCK_HELD=1
+    trap standing_review_release_lifecycle_lock EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+  fi
+fi
+
+set +e
+python3 - "$@" <<'PY'
 from __future__ import annotations
 
 import argparse
@@ -990,3 +1060,6 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 PY
+STANDING_REVIEW_STATUS=$?
+set -e
+exit "$STANDING_REVIEW_STATUS"

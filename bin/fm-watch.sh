@@ -1047,7 +1047,12 @@ while :; do
           CUSTOM_CHECK_LIFECYCLE_LOCK_HELD=1
           if fm_custom_check_snapshot_prepare "$STATE" "$id"; then
             custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
-            run_check_capture "$custom_snapshot" || exit 1
+            if fm_standing_review_check_owned "$custom_snapshot"; then
+              FM_STANDING_REVIEW_LIFECYCLE_OWNER_PID=${BASHPID:-$$} \
+                run_check_capture "$custom_snapshot" || exit 1
+            else
+              run_check_capture "$custom_snapshot" || exit 1
+            fi
             out=$FM_CHECK_RESULT
             fm_custom_check_snapshot_cleanup
             fm_lock_release "$CUSTOM_CHECK_LIFECYCLE_LOCK" || exit 1

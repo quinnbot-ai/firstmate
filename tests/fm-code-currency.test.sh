@@ -632,6 +632,46 @@ SH
   pass "tracked-byte inspection failures keep live-code status visible and unproven"
 }
 
+test_dirty_submodule_checkout_is_unproven() {
+  local repo sub out
+  sub="$TMP_ROOT/submodule-source"
+  git init -q -b main "$sub"
+  mkdir -p "$sub/bin"
+  printf '%s\n' old > "$sub/bin/runtime.sh"
+  git -C "$sub" add bin/runtime.sh
+  git -C "$sub" commit -q -m old
+  fm_git_add_origin "$sub" "$sub.origin.git"
+
+  repo=$(make_repo "$TMP_ROOT/dirty-submodule")
+  git -c protocol.file.allow=always -C "$repo" submodule add -q "$sub.origin.git" modules/runtime
+  git -C "$repo" commit -q -m "add runtime submodule"
+  git -C "$repo" push -q origin main
+  git -C "$repo" fetch -q origin
+
+  printf '%s\n' landed > "$sub/bin/runtime.sh"
+  git -C "$sub" add bin/runtime.sh
+  git -C "$sub" commit -q -m landed
+  git -C "$sub" push -q origin main
+  git -C "$repo/modules/runtime" fetch -q origin
+  git -C "$repo/modules/runtime" checkout -q origin/main
+  git -C "$repo" add modules/runtime
+  git -C "$repo" commit -q -m "advance runtime submodule"
+  git -C "$repo" push -q origin main
+  git -C "$repo" fetch -q origin
+
+  hold_back "$repo" 1
+  git -c protocol.file.allow=always -C "$repo" submodule update -q --init --recursive
+  printf '%s\n' landed > "$repo/modules/runtime/bin/runtime.sh"
+  out=$(fm_code_currency_line "$repo" || true)
+  assert_contains "$out" "CODE_STALE: UNPROVEN live code" \
+    "dirty submodule bytes produced no live-code uncertainty"
+  assert_contains "$out" "modules/runtime" \
+    "dirty submodule bytes did not identify the unproven path"
+  assert_not_contains "$out" "inactive here" \
+    "dirty submodule bytes were called inactive"
+  pass "dirty submodule bytes keep landed code status unproven"
+}
+
 # --- SESSION START: the line reaches the digest -----------------------------
 
 # The library is only useful if a session start actually prints it, and only
@@ -674,5 +714,6 @@ test_changing_worktree_snapshot_is_unproven
 test_diverged_equivalent_landed_bytes_are_unproven
 test_ref_change_during_inspection_is_unproven
 test_byte_inspection_failure_is_unproven
+test_dirty_submodule_checkout_is_unproven
 test_ignored_landed_path_is_unproven
 test_bootstrap_line

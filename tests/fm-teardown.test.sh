@@ -3362,6 +3362,33 @@ test_network_query_releases_pool_lock_and_revalidates_owner() {
   pass "teardown releases transition locks for network queries and revalidates before return"
 }
 
+test_worktree_return_receipt_recovers_after_binding_clear() {
+  local case_dir state_real out
+  case_dir=$(make_case return-receipt-recovery)
+  write_meta "$case_dir" no-mistakes ship
+  declare_binding_in_meta "$case_dir"
+  bind_worktree_to_task_x1 "$case_dir"
+  state_real=$(CDPATH='' cd -- "$case_dir/state" && pwd -P)
+  cat > "$case_dir/state/task-x1.worktree-return" <<EOF
+schema=fm-worktree-return-v1
+state=$state_real
+task_id=task-x1
+spawn_gen=
+worktree=$case_dir/wt
+project=$case_dir/project
+EOF
+  chmod 0600 "$case_dir/state/task-x1.worktree-return"
+  fm_worktree_binding_clear "$case_dir/wt" "$case_dir/state" task-x1 \
+    || fail "could not create the interrupted-return fixture"
+  out=$(run_teardown "$case_dir" --force 2>&1) \
+    || fail "teardown did not recover its exact interrupted return: $out"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "recovered worktree return retained task metadata"
+  assert_absent "$case_dir/state/task-x1.worktree-return" \
+    "recovered worktree return retained its transaction receipt"
+  pass "an exact return receipt recovers binding-clear interruption"
+}
+
 test_local_only_fork_remote_allows
 test_recycled_slot_refuses_and_names_the_live_owner
 test_recycled_slot_refuses_even_under_force
@@ -3439,3 +3466,4 @@ test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
 test_network_query_releases_pool_lock_and_revalidates_owner
+test_worktree_return_receipt_recovers_after_binding_clear

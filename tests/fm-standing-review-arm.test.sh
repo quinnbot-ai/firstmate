@@ -429,6 +429,50 @@ SH
   pass "disarm waits for the watcher before removing review state"
 }
 
+test_disarm_waits_for_a_direct_review_scan() {
+  local home fakebin real_python started release scan_pid disarm_pid i rc
+  home=$(make_home direct-scan-lifecycle)
+  arm "$home" --id r >/dev/null 2>&1 || fail "arming failed"
+  fakebin=$(fm_fakebin "$home/direct-scan-bin")
+  real_python=$(command -v python3)
+  started="$home/direct-scan-started"
+  release="$home/direct-scan-release"
+  cat > "$fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+: > "$FM_DIRECT_SCAN_STARTED"
+while [ ! -e "$FM_DIRECT_SCAN_RELEASE" ]; do sleep 0.01; done
+exec "$FM_REAL_PYTHON" "$@"
+SH
+  chmod +x "$fakebin/python3"
+  PATH="$fakebin:$PATH" FM_DIRECT_SCAN_STARTED="$started" \
+    FM_DIRECT_SCAN_RELEASE="$release" FM_REAL_PYTHON="$real_python" \
+    "$ROOT/bin/fm-standing-review.sh" --home "$home" --id r \
+    > "$home/direct-scan.out" 2> "$home/direct-scan.err" &
+  scan_pid=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$started" ]; do
+    kill -0 "$scan_pid" 2>/dev/null || break
+    sleep 0.01
+    i=$((i + 1))
+  done
+  assert_present "$started" "direct review scan did not reach evaluation"
+  arm "$home" --id r --disarm --purge > "$home/direct-disarm.out" 2>&1 &
+  disarm_pid=$!
+  sleep 0.05
+  kill -0 "$disarm_pid" 2>/dev/null \
+    || fail "disarm completed while a direct review scan owned the lifecycle"
+  : > "$release"
+  rc=0
+  wait "$scan_pid" || rc=$?
+  [ "$rc" -eq 0 ] || fail "direct review scan failed: $(cat "$home/direct-scan.err")"
+  rc=0
+  wait "$disarm_pid" || rc=$?
+  [ "$rc" -eq 0 ] || fail "disarm failed after direct scan: $(cat "$home/direct-disarm.out")"
+  assert_absent "$home/state/r.standing-review-latch" \
+    "direct scan recreated durable review state after purge"
+  pass "disarm serializes with direct review scans"
+}
+
 test_purge_refuses_unremovable_state_without_partial_disarm() {
   local home latch out rc
   home=$(make_home purge-directory)
@@ -547,6 +591,7 @@ test_arm_waits_for_the_check_lifecycle_boundary
 test_disarm_stops_the_review_and_keeps_what_it_reported
 test_disarm_refuses_a_foreign_check
 test_disarm_waits_for_an_active_watcher_check
+test_disarm_waits_for_a_direct_review_scan
 test_purge_refuses_unremovable_state_without_partial_disarm
 test_list_reports_what_is_armed
 test_list_waits_for_rearm_registration

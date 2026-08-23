@@ -384,6 +384,29 @@ test_noun_phrase_directive_reference_refuses() {
   pass "a noun-phrase helper directive refuses dispatch"
 }
 
+test_colon_labeled_directive_reference_refuses() {
+  local id=brief-colon-label-a28 rec out status expected
+  rec=$(make_case colon-label-command "$id" 'Run: bin/fm-colon-label-missing.sh before editing.')
+  read_case "$rec"
+
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite a colon-labeled helper instruction"
+  expected="$POOL_DIR/bin/fm-colon-label-missing.sh"
+  assert_contains "$out" "$expected" "colon-labeled directive did not resolve against the task worktree"
+  assert_absent "$HOME_DIR/state/$id.meta" "colon-labeled helper refusal published metadata"
+
+  id=brief-colon-prose-a29
+  rec=$(make_case colon-label-prose "$id" \
+    'Documentation: bin/fm-retired.sh describes the old workflow.')
+  read_case "$rec"
+  out=$(run_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "colon-labeled prose was treated as a helper instruction: $out"
+  assert_contains "$out" "spawned $id" "colon-labeled prose did not reach worker dispatch"
+  pass "a colon-labeled helper directive refuses dispatch"
+}
+
 test_negative_modal_reference_passes() {
   local id=brief-negative-modal-a8 rec out status
   rec=$(make_case negative-modal "$id" 'You must never run bin/fm-negative-only.sh.')
@@ -784,6 +807,7 @@ test_unenumerated_imperative_reference_refuses
 test_ordered_imperative_reference_refuses
 test_linked_imperative_reference_refuses
 test_noun_phrase_directive_reference_refuses
+test_colon_labeled_directive_reference_refuses
 test_negative_modal_reference_passes
 test_mixed_negation_still_refuses_positive_instruction
 test_sentence_after_negation_still_refuses_positive_instruction
