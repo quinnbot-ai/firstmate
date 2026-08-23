@@ -61,6 +61,7 @@ sub is_instruction {
   return 0 if $prefix =~ /\b(?:do\s+not|don['’]t|must\s+not|must\s+never|should\s+not|never|avoid)\b/i;
   return 1 if $prefix =~ /\b(?:must|shall|should|need(?:s)?\s+to|required\s+to|have\s+to)\b/i;
   return 1 if $prefix =~ /\b(?:make\s+sure\s+to|ensure\s+you)\b/i;
+  return 1 if $prefix =~ /^(?:your|the)\s+(?:(?:first|next|initial|required)\s+)?(?:action|step|task|instruction)\s+(?:is|will\s+be|must\s+be)\s+to\s+\S+(?:\s+\S+)*$/i;
   return 1 if is_directive_prefix($prefix);
   return 0;
 }

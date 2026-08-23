@@ -435,9 +435,100 @@ SH
     fm_code_currency_line "$repo" || true)
   [ -z "$out" ] || fail "a current clean checkout reported a currency problem: $out"
   hash_calls=$(wc -l < "$log" | tr -d ' ')
-  [ "$hash_calls" -eq 1 ] \
+  [ "$hash_calls" -eq 2 ] \
     || fail "the tracked-byte proof spawned $hash_calls regular-file hash processes"
-  pass "tracked regular files are byte-proven in one hash batch"
+  pass "tracked regular files are byte-proven in two stable hash snapshots"
+}
+
+test_tree_inventory_failure_is_unproven() {
+  local repo out real_git shim
+  repo=$(make_repo "$TMP_ROOT/tree-inventory-failure")
+  mkdir -p "$repo/bin"
+  printf '%s\n' runtime > "$repo/bin/fm-runtime.sh"
+  git -C "$repo" add bin/fm-runtime.sh
+  git -C "$repo" commit -q -m "add runtime"
+  git -C "$repo" push -q origin main
+  land "$repo" docs/landed.md landed
+  hold_back "$repo" 1
+
+  real_git=$(command -v git)
+  shim="$TMP_ROOT/tree-inventory-failure-bin"
+  mkdir -p "$shim"
+  cat > "$shim/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" ls-tree -rz "*) exit 7 ;;
+esac
+exec "$FM_REAL_GIT" "$@"
+SH
+  chmod +x "$shim/git"
+
+  out=$(PATH="$shim:$PATH" FM_REAL_GIT="$real_git" \
+    fm_code_currency_line "$repo" || true)
+  assert_contains "$out" "CODE_STALE: UNPROVEN live code" \
+    "a failed tracked-tree inventory suppressed the currency diagnostic"
+  assert_contains "$out" "inspection could not prove" \
+    "a failed tracked-tree inventory was not diagnosed"
+  assert_not_contains "$out" "CODE_STALE: running code" \
+    "a failed tracked-tree inventory produced a running-code claim"
+  pass "tracked-tree inventory failures remain visible and unproven"
+}
+
+test_changing_worktree_snapshot_is_unproven() {
+  local repo out real_git shim count_file early late i
+  repo=$(make_repo "$TMP_ROOT/worktree-snapshot-change")
+  mkdir -p "$repo/bin"
+  i=0
+  while [ "$i" -lt 129 ]; do
+    printf 'runtime %03d\n' "$i" > "$repo/bin/runtime-$(printf '%03d' "$i").sh"
+    i=$((i + 1))
+  done
+  git -C "$repo" add bin
+  git -C "$repo" commit -q -m "add runtime files"
+  git -C "$repo" push -q origin main
+  land "$repo" docs/landed.md landed
+  hold_back "$repo" 1
+  early="$repo/bin/runtime-000.sh"
+  late="$repo/bin/runtime-128.sh"
+  printf '%s\n' changing > "$late"
+
+  real_git=$(command -v git)
+  shim="$TMP_ROOT/worktree-snapshot-change-bin"
+  count_file="$TMP_ROOT/worktree-snapshot-change.count"
+  mkdir -p "$shim"
+  cat > "$shim/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" hash-object --no-filters -- "*)
+    count=0
+    [ ! -f "$FM_HASH_COUNT" ] || count=$(cat "$FM_HASH_COUNT")
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$FM_HASH_COUNT"
+    if [ "$count" -eq 1 ]; then
+      "$FM_REAL_GIT" "$@"
+      rc=$?
+      printf '%s\n' changing > "$FM_EARLY_PATH"
+      exit "$rc"
+    fi
+    if [ "$count" -eq 2 ]; then
+      "$FM_REAL_GIT" -C "$FM_MUTATE_REPO" show HEAD:bin/runtime-128.sh > "$FM_LATE_PATH"
+    fi
+    ;;
+esac
+exec "$FM_REAL_GIT" "$@"
+SH
+  chmod +x "$shim/git"
+
+  out=$(PATH="$shim:$PATH" FM_REAL_GIT="$real_git" FM_HASH_COUNT="$count_file" \
+    FM_EARLY_PATH="$early" FM_LATE_PATH="$late" FM_MUTATE_REPO="$repo" \
+    fm_code_currency_line "$repo" || true)
+  assert_contains "$out" "CODE_STALE: UNPROVEN live code" \
+    "a changing tracked-byte scan produced no live-code uncertainty"
+  assert_contains "$out" "worktree bytes changed during" \
+    "a changing tracked-byte scan was not diagnosed"
+  assert_not_contains "$out" "CODE_STALE: running code" \
+    "a mixed tracked-byte scan produced a running-code claim"
+  pass "currency reporting requires two stable worktree byte snapshots"
 }
 
 test_diverged_equivalent_landed_bytes_are_unproven() {
@@ -578,6 +669,8 @@ test_index_hints_cannot_hide_landed_path_drift
 test_unrelated_index_hint_prevents_running_claim
 test_stat_cache_cannot_hide_tracked_runtime_drift
 test_tracked_byte_proof_batches_regular_files
+test_tree_inventory_failure_is_unproven
+test_changing_worktree_snapshot_is_unproven
 test_diverged_equivalent_landed_bytes_are_unproven
 test_ref_change_during_inspection_is_unproven
 test_byte_inspection_failure_is_unproven

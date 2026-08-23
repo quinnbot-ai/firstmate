@@ -80,12 +80,26 @@ fm_code_currency_print_path() {
   printf '%q\n' "$1"
 }
 
+fm_code_currency_capture() {
+  local root=$1 output=$2
+  shift 2
+  git -C "$root" "$@" > "$output" 2>/dev/null
+}
+
+fm_code_currency_temp_file() {
+  mktemp "${TMPDIR:-/tmp}/fm-code-currency.XXXXXX"
+}
+
 # fm_code_currency_guard_files <root> <base_ref>
 # Echo, one per line, the guard paths (above) that differ between the commit at
 # HEAD and <base_ref>, in git's own path order.
 fm_code_currency_guard_files() {
-  local root=$1 head=$2 base=$3 path pat
-  git -C "$root" diff --name-only -z "$head...$base" -- >/dev/null 2>&1 || return 1
+  local root=$1 head=$2 base=$3 path pat inventory status
+  inventory=$(fm_code_currency_temp_file) || return 1
+  if ! fm_code_currency_capture "$root" "$inventory" diff --name-only -z "$head...$base" --; then
+    rm -f "$inventory"
+    return 1
+  fi
   while IFS= read -r -d '' path; do
     for pat in "${FM_CODE_CURRENCY_GUARD_PATTERNS[@]}"; do
       # shellcheck disable=SC2254  # unquoted here on purpose: $pat is the pattern
@@ -93,66 +107,86 @@ fm_code_currency_guard_files() {
         $pat) fm_code_currency_print_path "$path"; break ;;
       esac
     done
-  done < <(git -C "$root" diff --name-only -z "$head...$base" -- 2>/dev/null)
+  done < "$inventory"
+  status=$?
+  rm -f "$inventory"
+  return "$status"
 }
 
 fm_code_currency_landed_worktree_drift() {
-  local root=$1 head=$2 base=$3 path entry metadata mode type oid actual expected_exec actual_exec
-  git -C "$root" diff --name-only -z "$head...$base" -- >/dev/null 2>&1 || return 1
-  while IFS= read -r -d '' path; do
-    entry=$(git -C "$root" ls-tree "$head" -- "$path" 2>/dev/null) || return 1
-    if [ -z "$entry" ]; then
-      if [ -e "$root/$path" ] || [ -L "$root/$path" ]; then
-        fm_code_currency_print_path "$path"
+  local root=$1 head=$2 base=$3 inventory status
+  inventory=$(fm_code_currency_temp_file) || return 1
+  if ! fm_code_currency_capture "$root" "$inventory" diff --name-only -z "$head...$base" --; then
+    rm -f "$inventory"
+    return 1
+  fi
+  (
+    local path entry metadata mode type oid actual expected_exec actual_exec
+    while IFS= read -r -d '' path; do
+      entry=$(git -C "$root" ls-tree "$head" -- "$path" 2>/dev/null) || exit 1
+      if [ -z "$entry" ]; then
+        if [ -e "$root/$path" ] || [ -L "$root/$path" ]; then
+          fm_code_currency_print_path "$path"
+        fi
+        continue
       fi
-      continue
-    fi
-    metadata=${entry%%$'\t'*}
-    mode=${metadata%% *}
-    metadata=${metadata#* }
-    type=${metadata%% *}
-    oid=${metadata##* }
-    case "$mode:$type" in
-      100644:blob | 100755:blob)
-        if [ ! -f "$root/$path" ] || [ -L "$root/$path" ]; then
+      metadata=${entry%%$'\t'*}
+      mode=${metadata%% *}
+      metadata=${metadata#* }
+      type=${metadata%% *}
+      oid=${metadata##* }
+      case "$mode:$type" in
+        100644:blob | 100755:blob)
+          if [ ! -f "$root/$path" ] || [ -L "$root/$path" ]; then
+            fm_code_currency_print_path "$path"
+            continue
+          fi
+          actual=$(git -C "$root" hash-object --no-filters "$root/$path" 2>/dev/null) || exit 1
+          expected_exec=0
+          [ "$mode" != 100755 ] || expected_exec=1
+          actual_exec=0
+          [ ! -x "$root/$path" ] || actual_exec=1
+          if [ "$actual" != "$oid" ] || [ "$actual_exec" -ne "$expected_exec" ]; then
+            fm_code_currency_print_path "$path"
+          fi
+          ;;
+        120000:blob)
+          if [ ! -L "$root/$path" ]; then
+            fm_code_currency_print_path "$path"
+            continue
+          fi
+          actual=$(perl -e 'my $v = readlink shift; defined $v or exit 1; print $v' \
+            "$root/$path" | git -C "$root" hash-object --stdin 2>/dev/null) || exit 1
+          [ "$actual" = "$oid" ] || fm_code_currency_print_path "$path"
+          ;;
+        160000:commit)
+          if [ ! -d "$root/$path" ]; then
+            fm_code_currency_print_path "$path"
+            continue
+          fi
+          actual=$(git -C "$root/$path" rev-parse HEAD 2>/dev/null) || exit 1
+          [ "$actual" = "$oid" ] || fm_code_currency_print_path "$path"
+          ;;
+        *)
           fm_code_currency_print_path "$path"
-          continue
-        fi
-        actual=$(git -C "$root" hash-object --no-filters "$root/$path" 2>/dev/null) || return 1
-        expected_exec=0
-        [ "$mode" != 100755 ] || expected_exec=1
-        actual_exec=0
-        [ ! -x "$root/$path" ] || actual_exec=1
-        if [ "$actual" != "$oid" ] || [ "$actual_exec" -ne "$expected_exec" ]; then
-          fm_code_currency_print_path "$path"
-        fi
-        ;;
-      120000:blob)
-        if [ ! -L "$root/$path" ]; then
-          fm_code_currency_print_path "$path"
-          continue
-        fi
-        actual=$(perl -e 'my $v = readlink shift; defined $v or exit 1; print $v' \
-          "$root/$path" | git -C "$root" hash-object --stdin 2>/dev/null) || return 1
-        [ "$actual" = "$oid" ] || fm_code_currency_print_path "$path"
-        ;;
-      160000:commit)
-        if [ ! -d "$root/$path" ]; then
-          fm_code_currency_print_path "$path"
-          continue
-        fi
-        actual=$(git -C "$root/$path" rev-parse HEAD 2>/dev/null) || return 1
-        [ "$actual" = "$oid" ] || fm_code_currency_print_path "$path"
-        ;;
-      *)
-        fm_code_currency_print_path "$path"
-        ;;
-    esac
-  done < <(git -C "$root" diff --name-only -z "$head...$base" -- 2>/dev/null)
+          ;;
+      esac
+    done
+  ) < "$inventory"
+  status=$?
+  rm -f "$inventory"
+  return "$status"
 }
 
 fm_code_currency_head_worktree_drift() {
-  local root=$1 head=$2 record metadata mode type oid path actual expected_exec actual_exec
+  local root=$1 head=$2 inventory status
+  inventory=$(fm_code_currency_temp_file) || return 1
+  if ! fm_code_currency_capture "$root" "$inventory" ls-tree -rz "$head"; then
+    rm -f "$inventory"
+    return 1
+  fi
+  (
+  local record metadata mode type oid path actual expected_exec actual_exec
   local index count offset batch_count actuals hash_index regular_index
   local -a paths drift regular_paths regular_positions regular_oids
   paths=()
@@ -160,7 +194,6 @@ fm_code_currency_head_worktree_drift() {
   regular_paths=()
   regular_positions=()
   regular_oids=()
-  git -C "$root" ls-tree -r "$head" >/dev/null 2>&1 || return 1
   while IFS= read -r -d '' record; do
     metadata=${record%%$'\t'*}
     path=${record#*$'\t'}
@@ -195,7 +228,7 @@ fm_code_currency_head_worktree_drift() {
           continue
         fi
         actual=$(perl -e 'my $v = readlink shift; defined $v or exit 1; print $v' \
-          "$root/$path" | git -C "$root" hash-object --stdin 2>/dev/null) || return 1
+          "$root/$path" | git -C "$root" hash-object --stdin 2>/dev/null) || exit 1
         [ "$actual" = "$oid" ] || drift[$index]=1
         ;;
       160000:commit)
@@ -203,14 +236,14 @@ fm_code_currency_head_worktree_drift() {
           drift[$index]=1
           continue
         fi
-        actual=$(git -C "$root/$path" rev-parse HEAD 2>/dev/null) || return 1
+        actual=$(git -C "$root/$path" rev-parse HEAD 2>/dev/null) || exit 1
         [ "$actual" = "$oid" ] || drift[$index]=1
         ;;
       *)
         drift[$index]=1
         ;;
     esac
-  done < <(git -C "$root" ls-tree -rz "$head" 2>/dev/null)
+  done
 
   count=${#regular_paths[@]}
   offset=0
@@ -218,10 +251,10 @@ fm_code_currency_head_worktree_drift() {
     batch_count=$((count - offset))
     [ "$batch_count" -le 128 ] || batch_count=128
     actuals=$(git -C "$root" hash-object --no-filters -- \
-      "${regular_paths[@]:offset:batch_count}" 2>/dev/null) || return 1
+      "${regular_paths[@]:offset:batch_count}" 2>/dev/null) || exit 1
     hash_index=0
     while IFS= read -r actual; do
-      [ "$hash_index" -lt "$batch_count" ] || return 1
+      [ "$hash_index" -lt "$batch_count" ] || exit 1
       regular_index=$((offset + hash_index))
       index=${regular_positions[$regular_index]}
       [ "$actual" = "${regular_oids[$regular_index]}" ] || drift[$index]=1
@@ -229,7 +262,7 @@ fm_code_currency_head_worktree_drift() {
     done <<EOF
 $actuals
 EOF
-    [ "$hash_index" -eq "$batch_count" ] || return 1
+    [ "$hash_index" -eq "$batch_count" ] || exit 1
     offset=$((offset + batch_count))
   done
 
@@ -239,11 +272,19 @@ EOF
     [ "${drift[$index]}" -eq 0 ] || fm_code_currency_print_path "${paths[$index]}"
     index=$((index + 1))
   done
+  ) < "$inventory"
+  status=$?
+  rm -f "$inventory"
+  return "$status"
 }
 
 fm_code_currency_index_hints() {
-  local root=$1 entry tag path
-  git -C "$root" ls-files -v -z >/dev/null 2>&1 || return 1
+  local root=$1 entry tag path inventory status
+  inventory=$(fm_code_currency_temp_file) || return 1
+  if ! fm_code_currency_capture "$root" "$inventory" ls-files -v -z; then
+    rm -f "$inventory"
+    return 1
+  fi
   while IFS= read -r -d '' entry; do
     tag=${entry%% *}
     case "$tag" in
@@ -252,7 +293,10 @@ fm_code_currency_index_hints() {
         fm_code_currency_print_path "$path"
         ;;
     esac
-  done < <(git -C "$root" ls-files -v -z 2>/dev/null)
+  done < "$inventory"
+  status=$?
+  rm -f "$inventory"
+  return "$status"
 }
 
 fm_code_currency_snapshot_matches() {
@@ -268,6 +312,12 @@ fm_code_currency_snapshot_changed_line() {
     "$base" "$head_sha" "$base_sha"
 }
 
+fm_code_currency_worktree_changed_line() {
+  local base=$1 head_sha=$2 base_sha=$3
+  printf 'CODE_STALE: UNPROVEN live code: tracked worktree bytes changed during landed-versus-live inspection of snapshot %s/%s (%s); retry session-start status before relying on code currency.\n' \
+    "$head_sha" "$base_sha" "$base"
+}
+
 fm_code_currency_inspection_failed_line() {
   local base=$1 head_sha=$2 base_sha=$3 behind=$4
   printf 'CODE_STALE: UNPROVEN live code: landed-versus-live inspection could not prove the tracked checkout at %s. The inspected snapshot is %s commit(s) behind %s (%s) as last fetched; repair the checkout inspection failure before relying on code currency.\n' \
@@ -280,7 +330,7 @@ fm_code_currency_inspection_failed_line() {
 # unprovable. Echo nothing (returning 1) for other clean states: not a git work
 # tree, nothing to compare against, already current, or ahead only.
 fm_code_currency_line() {
-  local root=$1 base behind ahead head_oid base_oid head_sha base_sha guard guard_count shown more guard_text tracked_status head_drift head_drift_shown landed_drift landed_drift_shown index_hints index_hints_shown
+  local root=$1 base behind ahead head_oid base_oid head_sha base_sha guard guard_count shown more guard_text tracked_status head_drift head_drift_confirm head_drift_shown landed_drift landed_drift_shown index_hints index_hints_shown
   git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
   base=$(fm_code_currency_base_ref "$root") || return 1
   head_oid=$(git -C "$root" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) || return 1
@@ -299,6 +349,23 @@ fm_code_currency_line() {
     fi
     return 0
   fi
+  if ! head_drift_confirm=$(fm_code_currency_head_worktree_drift "$root" "$head_oid"); then
+    if fm_code_currency_snapshot_matches "$root" "$base" "$head_oid" "$base_oid"; then
+      fm_code_currency_inspection_failed_line "$base" "$head_sha" "$base_sha" "$behind"
+    else
+      fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+    fi
+    return 0
+  fi
+  if [ "$head_drift" != "$head_drift_confirm" ]; then
+    if fm_code_currency_snapshot_matches "$root" "$base" "$head_oid" "$base_oid"; then
+      fm_code_currency_worktree_changed_line "$base" "$head_sha" "$base_sha"
+    else
+      fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+    fi
+    return 0
+  fi
+  head_drift=$head_drift_confirm
   if [ -n "$head_drift" ]; then
     if ! fm_code_currency_snapshot_matches "$root" "$base" "$head_oid" "$base_oid"; then
       fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"

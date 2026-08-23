@@ -369,6 +369,21 @@ test_linked_imperative_reference_refuses() {
   pass "a linked imperative helper reference refuses dispatch"
 }
 
+test_noun_phrase_directive_reference_refuses() {
+  local id=brief-noun-phrase-a27 rec out status expected
+  rec=$(make_case noun-phrase-command "$id" \
+    'Your first action is to run bin/fm-noun-phrase-missing.sh before editing.')
+  read_case "$rec"
+
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite a noun-phrase helper instruction"
+  expected="$POOL_DIR/bin/fm-noun-phrase-missing.sh"
+  assert_contains "$out" "$expected" "noun-phrase directive did not resolve against the task worktree"
+  assert_absent "$HOME_DIR/state/$id.meta" "noun-phrase helper refusal published metadata"
+  pass "a noun-phrase helper directive refuses dispatch"
+}
+
 test_negative_modal_reference_passes() {
   local id=brief-negative-modal-a8 rec out status
   rec=$(make_case negative-modal "$id" 'You must never run bin/fm-negative-only.sh.')
@@ -726,6 +741,7 @@ test_second_person_imperative_reference_refuses
 test_unenumerated_imperative_reference_refuses
 test_ordered_imperative_reference_refuses
 test_linked_imperative_reference_refuses
+test_noun_phrase_directive_reference_refuses
 test_negative_modal_reference_passes
 test_mixed_negation_still_refuses_positive_instruction
 test_sentence_after_negation_still_refuses_positive_instruction
