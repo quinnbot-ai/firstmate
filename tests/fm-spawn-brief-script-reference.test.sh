@@ -409,6 +409,23 @@ test_markdown_emphasized_object_directive_reference_refuses() {
   pass "a helper with a Markdown-emphasized command object refuses dispatch"
 }
 
+test_markdown_task_directive_reference_refuses() {
+  local id=brief-markdown-task-a43 rec out status expected
+  rec=$(make_case markdown-task-command "$id" \
+    '- [ ] Run bin/fm-markdown-task-missing.sh before editing.')
+  read_case "$rec"
+
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite an absent Markdown task-list helper instruction"
+  expected="$POOL_DIR/bin/fm-markdown-task-missing.sh"
+  assert_contains "$out" "$expected" \
+    "Markdown task-list helper did not resolve against the task worktree"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "Markdown task-list helper refusal published metadata"
+  pass "a Markdown task-list helper instruction refuses dispatch"
+}
+
 test_second_person_imperative_reference_refuses() {
   local id=brief-second-person-a13 rec out status expected
   rec=$(make_case second-person-command "$id" 'Ensure you run bin/fm-second-person-missing.sh before editing.')
@@ -992,6 +1009,7 @@ test_assurance_imperative_reference_refuses
 test_markdown_linked_directive_reference_refuses
 test_markdown_emphasized_directive_reference_refuses
 test_markdown_emphasized_object_directive_reference_refuses
+test_markdown_task_directive_reference_refuses
 test_second_person_imperative_reference_refuses
 test_directed_subject_reference_refuses
 test_commissioned_subject_reference_refuses

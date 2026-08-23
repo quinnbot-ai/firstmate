@@ -44,7 +44,7 @@ sub clause_prefix {
   $prefix =~ s/\[([^\]\r\n]+)\]\(\s*$/$1/;
   $prefix =~ s/(?:\*\*|__|~~|\*|_)\s*$//;
   $prefix =~ s/^.*(?:[;!?]|\.\s+)\s*//s;
-  $prefix =~ s/^\s*(?:(?:[-*+] | \d+[.)]\s+))//x;
+  $prefix =~ s/^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?//;
   $prefix =~ s/^.*,\s*//s;
   return $prefix;
 }
