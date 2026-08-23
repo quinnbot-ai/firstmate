@@ -238,6 +238,26 @@ test_list_reports_what_is_armed() {
   pass "the armed reviews in a home are inspectable"
 }
 
+test_mode_conflicts_and_stray_purge_are_refused() {
+  local home out rc
+  home=$(make_home mode-conflicts)
+
+  out=$(arm "$home" --id r --disarm --list 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "disarm followed by list was accepted"
+  assert_contains "$out" "cannot be combined" "the mode-conflict refusal was not actionable"
+
+  out=$(arm "$home" --id r --list --disarm 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "list followed by disarm was accepted"
+  assert_contains "$out" "cannot be combined" "reversed mode flags changed the refusal"
+
+  out=$(arm "$home" --id r --purge 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "purge was accepted while arming"
+  assert_contains "$out" "requires --disarm" "stray purge did not name its required mode"
+  assert_absent "$home/state/r.check.sh" "a refused mode combination armed a review"
+
+  pass "standing review modes are order-independent and purge is disarm-only"
+}
+
 test_script_parses
 test_arming_registers_a_check_the_watcher_accepts
 test_the_check_ignores_the_environment_it_is_run_with
@@ -250,3 +270,4 @@ test_arming_refuses_to_overwrite_a_foreign_check
 test_disarm_stops_the_review_and_keeps_what_it_reported
 test_disarm_refuses_a_foreign_check
 test_list_reports_what_is_armed
+test_mode_conflicts_and_stray_purge_are_refused

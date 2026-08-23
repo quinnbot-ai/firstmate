@@ -151,6 +151,13 @@ EOF
 
 fm_code_currency_head_worktree_drift() {
   local root=$1 record metadata mode type oid path actual expected_exec actual_exec
+  local index count offset batch_count actuals hash_index regular_index
+  local -a paths drift regular_paths regular_positions regular_oids
+  paths=()
+  drift=()
+  regular_paths=()
+  regular_positions=()
+  regular_oids=()
   git -C "$root" ls-tree -r HEAD >/dev/null 2>&1 || return 1
   while IFS= read -r -d '' record; do
     metadata=${record%%$'\t'*}
@@ -159,43 +166,77 @@ fm_code_currency_head_worktree_drift() {
     metadata=${metadata#* }
     type=${metadata%% *}
     oid=${metadata##* }
+    index=${#paths[@]}
+    paths[$index]=$path
+    drift[$index]=0
     case "$mode:$type" in
       100644:blob | 100755:blob)
         if [ ! -f "$root/$path" ] || [ -L "$root/$path" ]; then
-          printf '%s\n' "$path"
+          drift[$index]=1
           continue
         fi
-        actual=$(git -C "$root" hash-object --no-filters "$root/$path" 2>/dev/null) || return 1
         expected_exec=0
         [ "$mode" != 100755 ] || expected_exec=1
         actual_exec=0
         [ ! -x "$root/$path" ] || actual_exec=1
-        if [ "$actual" != "$oid" ] || [ "$actual_exec" -ne "$expected_exec" ]; then
-          printf '%s\n' "$path"
+        if [ "$actual_exec" -ne "$expected_exec" ]; then
+          drift[$index]=1
+          continue
         fi
+        regular_paths[${#regular_paths[@]}]=$path
+        regular_positions[${#regular_positions[@]}]=$index
+        regular_oids[${#regular_oids[@]}]=$oid
         ;;
       120000:blob)
         if [ ! -L "$root/$path" ]; then
-          printf '%s\n' "$path"
+          drift[$index]=1
           continue
         fi
         actual=$(perl -e 'my $v = readlink shift; defined $v or exit 1; print $v' \
           "$root/$path" | git -C "$root" hash-object --stdin 2>/dev/null) || return 1
-        [ "$actual" = "$oid" ] || printf '%s\n' "$path"
+        [ "$actual" = "$oid" ] || drift[$index]=1
         ;;
       160000:commit)
         if [ ! -d "$root/$path" ]; then
-          printf '%s\n' "$path"
+          drift[$index]=1
           continue
         fi
         actual=$(git -C "$root/$path" rev-parse HEAD 2>/dev/null) || return 1
-        [ "$actual" = "$oid" ] || printf '%s\n' "$path"
+        [ "$actual" = "$oid" ] || drift[$index]=1
         ;;
       *)
-        printf '%s\n' "$path"
+        drift[$index]=1
         ;;
     esac
   done < <(git -C "$root" ls-tree -rz HEAD 2>/dev/null)
+
+  count=${#regular_paths[@]}
+  offset=0
+  while [ "$offset" -lt "$count" ]; do
+    batch_count=$((count - offset))
+    [ "$batch_count" -le 128 ] || batch_count=128
+    actuals=$(git -C "$root" hash-object --no-filters -- \
+      "${regular_paths[@]:offset:batch_count}" 2>/dev/null) || return 1
+    hash_index=0
+    while IFS= read -r actual; do
+      [ "$hash_index" -lt "$batch_count" ] || return 1
+      regular_index=$((offset + hash_index))
+      index=${regular_positions[$regular_index]}
+      [ "$actual" = "${regular_oids[$regular_index]}" ] || drift[$index]=1
+      hash_index=$((hash_index + 1))
+    done <<EOF
+$actuals
+EOF
+    [ "$hash_index" -eq "$batch_count" ] || return 1
+    offset=$((offset + batch_count))
+  done
+
+  index=0
+  count=${#paths[@]}
+  while [ "$index" -lt "$count" ]; do
+    [ "${drift[$index]}" -eq 0 ] || printf '%s\n' "${paths[$index]}"
+    index=$((index + 1))
+  done
 }
 
 fm_code_currency_index_hints() {

@@ -359,6 +359,8 @@ test_stat_cache_cannot_hide_tracked_runtime_drift() {
   land "$repo" bin/fm-runtime.sh "runtime-old"
   land "$repo" docs/landed.md "landed documentation"
   hold_back "$repo" 1
+  touch -t 200001010000 "$repo/bin/fm-runtime.sh"
+  git -C "$repo" update-index --refresh
   stamp="$repo/runtime.stamp"
   touch -r "$repo/bin/fm-runtime.sh" "$stamp"
   git -C "$repo" config core.trustctime false
@@ -379,6 +381,42 @@ test_stat_cache_cannot_hide_tracked_runtime_drift() {
   assert_not_contains "$out" "inactive here" \
     "hidden runtime bytes produced an inactivity claim"
   pass "tracked runtime bytes are proven independently of Git's stat cache"
+}
+
+test_tracked_byte_proof_batches_regular_files() {
+  local repo out real_git shim log hash_calls i
+  repo=$(make_repo "$TMP_ROOT/hash-batch")
+  mkdir -p "$repo/bin"
+  i=1
+  while [ "$i" -le 8 ]; do
+    printf 'runtime %s\n' "$i" > "$repo/bin/runtime-$i.sh"
+    i=$((i + 1))
+  done
+  git -C "$repo" add bin
+  git -C "$repo" commit -q -m "add runtime files"
+  git -C "$repo" push -q origin main
+  git -C "$repo" fetch -q origin
+
+  real_git=$(command -v git)
+  shim="$TMP_ROOT/hash-batch-bin"
+  log="$TMP_ROOT/hash-batch.calls"
+  mkdir -p "$shim"
+  cat > "$shim/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" hash-object "*) printf '%s\n' "$*" >> "$FM_HASH_LOG" ;;
+esac
+exec "$FM_REAL_GIT" "$@"
+SH
+  chmod +x "$shim/git"
+
+  out=$(PATH="$shim:$PATH" FM_REAL_GIT="$real_git" FM_HASH_LOG="$log" \
+    fm_code_currency_line "$repo" || true)
+  [ -z "$out" ] || fail "a current clean checkout reported a currency problem: $out"
+  hash_calls=$(wc -l < "$log" | tr -d ' ')
+  [ "$hash_calls" -eq 1 ] \
+    || fail "the tracked-byte proof spawned $hash_calls regular-file hash processes"
+  pass "tracked regular files are byte-proven in one hash batch"
 }
 
 test_diverged_equivalent_landed_bytes_are_unproven() {
@@ -438,6 +476,7 @@ test_untracked_landed_path_is_unproven
 test_index_hints_cannot_hide_landed_path_drift
 test_unrelated_index_hint_prevents_running_claim
 test_stat_cache_cannot_hide_tracked_runtime_drift
+test_tracked_byte_proof_batches_regular_files
 test_diverged_equivalent_landed_bytes_are_unproven
 test_ignored_landed_path_is_unproven
 test_bootstrap_line

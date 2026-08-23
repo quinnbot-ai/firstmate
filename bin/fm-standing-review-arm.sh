@@ -65,18 +65,30 @@ canonical_directory() {
 ID=
 MODE=arm
 PURGE=0
+DISARM_REQUESTED=0
+LIST_REQUESTED=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --id) [ "$#" -ge 2 ] || die "--id needs a value" 2; ID=$2; shift 2 ;;
     --home) [ "$#" -ge 2 ] || die "--home needs a value" 2; FM_HOME=$2; shift 2 ;;
-    --disarm) MODE=disarm; shift ;;
-    --list) MODE=list; shift ;;
+    --disarm) DISARM_REQUESTED=1; shift ;;
+    --list) LIST_REQUESTED=1; shift ;;
     --purge) PURGE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown argument: $1" 2 ;;
   esac
 done
+
+[ "$DISARM_REQUESTED" -eq 0 ] || [ "$LIST_REQUESTED" -eq 0 ] \
+  || die "--disarm and --list cannot be combined" 2
+if [ "$DISARM_REQUESTED" -eq 1 ]; then
+  MODE=disarm
+elif [ "$LIST_REQUESTED" -eq 1 ]; then
+  MODE=list
+fi
+[ "$PURGE" -eq 0 ] || [ "$MODE" = disarm ] || die "--purge requires --disarm" 2
+[ "$MODE" != list ] || [ -z "$ID" ] || die "--id cannot be used with --list" 2
 
 HOME_INPUT=$FM_HOME
 FM_HOME=$(canonical_directory "$HOME_INPUT") || die "home directory is unavailable: $HOME_INPUT"
