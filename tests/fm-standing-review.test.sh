@@ -315,6 +315,34 @@ test_special_control_files_fail_without_blocking() {
   pass "special spec and latch files fail loudly without blocking"
 }
 
+test_structural_paths_cannot_break_the_wake_line() {
+  local home source_path out
+  home=$(make_home structural-path acme)
+  source_path="$home/missing"$'\n'"source.json"
+  jq -n \
+    --arg root "$home/subjects" \
+    --arg path "$source_path" \
+    '{
+      version: "fm-standing-review-v1",
+      subject_root: $root,
+      sources: [{name: "src", path: $path, records: "rows"}],
+      rules: [{
+        name: "candidate", source: "src", subject_field: "venture",
+        when: [{field: "commits_30d", op: "eq", value: 0}],
+        evidence_fields: ["cost_30d"], action: "dispatch a worker", rank: 0
+      }]
+    }' > "$home/config/standing-reviews/r.json"
+
+  out=$(scan "$home" --id r --dry-run)
+  assert_contains "$out" "source-missing" \
+    "a missing structural source did not emit its finding"
+  [ "$(printf '%s\n' "$out" | sed '/^$/d' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "a structural source path broke the one-line wake contract: $out"
+  assert_contains "$out" "missing source.json" \
+    "the cleaned structural source path was not preserved on the wake line"
+  pass "structural source paths are cleaned at the shared wake boundary"
+}
+
 test_json_equality_does_not_conflate_booleans_and_numbers() {
   local home out
   home=$(make_home typed-equality acme)
@@ -914,6 +942,7 @@ test_cadence_silences_the_sweep_between_reviews
 test_concurrent_scans_are_single_flight
 test_special_evidence_file_fails_without_blocking
 test_special_control_files_fail_without_blocking
+test_structural_paths_cannot_break_the_wake_line
 test_json_equality_does_not_conflate_booleans_and_numbers
 test_the_same_finding_does_not_wake_twice
 test_drifting_evidence_does_not_defeat_the_latch

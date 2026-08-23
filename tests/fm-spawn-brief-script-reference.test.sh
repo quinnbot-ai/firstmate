@@ -42,7 +42,20 @@ SH
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
-  return) rm -f -- "${FM_FAKE_LEASE:?FM_FAKE_LEASE unset}" ;;
+  get)
+    printf '{"path":"%s","lease_id":"%s","lease_holder":"fixture"}\n' \
+      "${FM_FAKE_TREEHOUSE_PATH:?FM_FAKE_TREEHOUSE_PATH unset}" \
+      "${FM_FAKE_TREEHOUSE_LEASE_ID:?FM_FAKE_TREEHOUSE_LEASE_ID unset}"
+    printf '%s\n' "$FM_FAKE_TREEHOUSE_LEASE_ID" > "${FM_FAKE_LEASE:?FM_FAKE_LEASE unset}"
+    ;;
+  return)
+    case " $* " in
+      *" --if-lease-id ${FM_FAKE_TREEHOUSE_LEASE_ID:?FM_FAKE_TREEHOUSE_LEASE_ID unset} "*)
+        rm -f -- "${FM_FAKE_LEASE:?FM_FAKE_LEASE unset}"
+        ;;
+      *) exit 1 ;;
+    esac
+    ;;
 esac
 exit 0
 SH
@@ -89,6 +102,8 @@ run_spawn() {
     FM_BUSY_LOCK_STALE_SECS="${FM_TEST_BUSY_LOCK_STALE_SECS:-5}" \
     FM_FAKE_ENDPOINT="$HOME_DIR/state/$id.endpoint" \
     FM_FAKE_LEASE="$HOME_DIR/state/$id.lease" \
+    FM_FAKE_TREEHOUSE_PATH="${FM_FAKE_TREEHOUSE_PATH_OVERRIDE:-$POOL_DIR}" \
+    FM_FAKE_TREEHOUSE_LEASE_ID="lease-$id" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJECT_DIR" --mode no-mistakes --yolo off 2>&1
 }
@@ -179,6 +194,20 @@ test_modal_imperative_reference_refuses() {
   assert_contains "$out" "$expected" "modal imperative did not resolve against the task worktree"
   assert_absent "$HOME_DIR/state/$id.meta" "modal helper refusal published metadata"
   pass "a modal imperative helper reference refuses dispatch"
+}
+
+test_bare_modal_imperative_reference_refuses() {
+  local id=brief-bare-modal-a16 rec out status expected
+  rec=$(make_case bare-modal-command "$id" 'Must run bin/fm-bare-modal-missing.sh before editing.')
+  read_case "$rec"
+
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite an absent bare-modal helper command"
+  expected="$POOL_DIR/bin/fm-bare-modal-missing.sh"
+  assert_contains "$out" "$expected" "bare-modal imperative did not resolve against the task worktree"
+  assert_absent "$HOME_DIR/state/$id.meta" "bare-modal helper refusal published metadata"
+  pass "a bare-modal imperative helper reference refuses dispatch"
 }
 
 test_infinitive_imperative_reference_refuses() {
@@ -305,6 +334,25 @@ test_prepublication_failure_rolls_back_fresh_resources() {
   pass "a prepublication failure rolls back its exact fresh resources"
 }
 
+test_invalid_allocated_worktree_returns_exact_lease() {
+  local id=brief-invalid-lease-a17 rec out status
+  rec=$(make_case invalid-allocated-worktree "$id" 'Proceed with the task.')
+  read_case "$rec"
+  FM_FAKE_TREEHOUSE_PATH_OVERRIDE=$PROJECT_DIR
+
+  set +e
+  out=$(run_spawn "$id")
+  status=$?
+  set -e
+  unset FM_FAKE_TREEHOUSE_PATH_OVERRIDE
+  [ "$status" -ne 0 ] || fail "spawn accepted the primary checkout as an allocated worktree"
+  assert_contains "$out" "did not yield an isolated worktree" \
+    "fixture did not fail at allocated-worktree validation"
+  assert_absent "$HOME_DIR/state/$id.endpoint" "invalid allocation leaked its endpoint"
+  assert_absent "$HOME_DIR/state/$id.lease" "invalid allocation leaked its exact durable lease"
+  pass "an invalid allocation returns only its exact durable lease"
+}
+
 test_conditional_prose_reference_does_not_refuse() {
   local id=brief-conditional-prose-a15 rec out status
   rec=$(make_case conditional-prose "$id" \
@@ -337,6 +385,7 @@ test_fenced_command_reference_refuses
 test_unquoted_command_reference_refuses
 test_prefixed_imperative_reference_refuses
 test_modal_imperative_reference_refuses
+test_bare_modal_imperative_reference_refuses
 test_infinitive_imperative_reference_refuses
 test_second_person_imperative_reference_refuses
 test_negative_modal_reference_does_not_refuse
@@ -345,6 +394,7 @@ test_sentence_after_negation_still_refuses_positive_instruction
 test_prose_only_mention_does_not_refuse
 test_pool_transition_lock_precedes_allocation
 test_prepublication_failure_rolls_back_fresh_resources
+test_invalid_allocated_worktree_returns_exact_lease
 test_conditional_prose_reference_does_not_refuse
 
 echo "# all fm-spawn-brief-script-reference tests passed"

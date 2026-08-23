@@ -509,11 +509,11 @@ class Candidate:
             ),
             "",
         )
-        return cap(
+        line = clean(
             f"review {review_id}: {self.rule} {self.subject} "
-            f"[{evidence_text}] -> {self.action}",
-            numeric,
+            f"[{evidence_text}] -> {self.action}"
         )
+        return cap(line, numeric)
 
     def sort_key(self):
         return (-self.rank, self.rule, self.subject)

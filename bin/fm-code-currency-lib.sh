@@ -149,6 +149,55 @@ $landed
 EOF
 }
 
+fm_code_currency_head_worktree_drift() {
+  local root=$1 record metadata mode type oid path actual expected_exec actual_exec
+  git -C "$root" ls-tree -r HEAD >/dev/null 2>&1 || return 1
+  while IFS= read -r -d '' record; do
+    metadata=${record%%$'\t'*}
+    path=${record#*$'\t'}
+    mode=${metadata%% *}
+    metadata=${metadata#* }
+    type=${metadata%% *}
+    oid=${metadata##* }
+    case "$mode:$type" in
+      100644:blob | 100755:blob)
+        if [ ! -f "$root/$path" ] || [ -L "$root/$path" ]; then
+          printf '%s\n' "$path"
+          continue
+        fi
+        actual=$(git -C "$root" hash-object --no-filters "$root/$path" 2>/dev/null) || return 1
+        expected_exec=0
+        [ "$mode" != 100755 ] || expected_exec=1
+        actual_exec=0
+        [ ! -x "$root/$path" ] || actual_exec=1
+        if [ "$actual" != "$oid" ] || [ "$actual_exec" -ne "$expected_exec" ]; then
+          printf '%s\n' "$path"
+        fi
+        ;;
+      120000:blob)
+        if [ ! -L "$root/$path" ]; then
+          printf '%s\n' "$path"
+          continue
+        fi
+        actual=$(perl -e 'my $v = readlink shift; defined $v or exit 1; print $v' \
+          "$root/$path" | git -C "$root" hash-object --stdin 2>/dev/null) || return 1
+        [ "$actual" = "$oid" ] || printf '%s\n' "$path"
+        ;;
+      160000:commit)
+        if [ ! -d "$root/$path" ]; then
+          printf '%s\n' "$path"
+          continue
+        fi
+        actual=$(git -C "$root/$path" rev-parse HEAD 2>/dev/null) || return 1
+        [ "$actual" = "$oid" ] || printf '%s\n' "$path"
+        ;;
+      *)
+        printf '%s\n' "$path"
+        ;;
+    esac
+  done < <(git -C "$root" ls-tree -rz HEAD 2>/dev/null)
+}
+
 fm_code_currency_index_hints() {
   local root=$1 entry tag path
   git -C "$root" ls-files -v -z >/dev/null 2>&1 || return 1
@@ -169,7 +218,7 @@ fm_code_currency_index_hints() {
 # unprovable. Echo nothing (returning 1) for other clean states: not a git work
 # tree, nothing to compare against, already current, or ahead only.
 fm_code_currency_line() {
-  local root=$1 base behind ahead head_sha base_sha guard guard_count shown more guard_text tracked_status landed_drift landed_drift_shown index_hints index_hints_shown
+  local root=$1 base behind ahead head_sha base_sha guard guard_count shown more guard_text tracked_status head_drift head_drift_shown landed_drift landed_drift_shown index_hints index_hints_shown
   git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
   base=$(fm_code_currency_base_ref "$root") || return 1
   behind=$(git -C "$root" rev-list --count "HEAD..$base" 2>/dev/null) || return 1
@@ -178,7 +227,14 @@ fm_code_currency_line() {
   esac
   head_sha=$(git -C "$root" rev-parse --short=7 HEAD 2>/dev/null) || return 1
   base_sha=$(git -C "$root" rev-parse --short=7 "$base" 2>/dev/null) || return 1
-  if git -C "$root" diff --quiet HEAD -- 2>/dev/null; then
+  head_drift=$(fm_code_currency_head_worktree_drift "$root") || return 1
+  if [ -n "$head_drift" ]; then
+    head_drift_shown=$(printf '%s\n' "$head_drift" | head -n 4 | paste -sd, - | sed 's/,/, /g')
+    printf 'CODE_STALE: UNPROVEN live code: tracked worktree bytes differ from checked-out HEAD %s: %s. HEAD is %s commit(s) behind %s (%s) as last fetched; reconcile the tracked checkout before relying on landed-versus-live status.\n' \
+      "$head_sha" "$head_drift_shown" "$behind" "$base" "$base_sha"
+    return 0
+  fi
+  if git -C "$root" diff --cached --quiet HEAD -- 2>/dev/null; then
     tracked_status=0
   else
     tracked_status=$?
@@ -186,7 +242,7 @@ fm_code_currency_line() {
   case "$tracked_status" in
     0) ;;
     1)
-      printf 'CODE_STALE: UNPROVEN live code: tracked files differ from checked-out HEAD (%s), which is %s commit(s) behind %s (%s) as last fetched. Installed code cannot be proven to match HEAD or the landed branch; reconcile the tracked checkout before relying on landed-versus-live status.\n' \
+      printf 'CODE_STALE: UNPROVEN live code: the tracked index differs from checked-out HEAD (%s), which is %s commit(s) behind %s (%s) as last fetched. Installed code cannot be proven to match HEAD or the landed branch; reconcile the tracked checkout before relying on landed-versus-live status.\n' \
         "$head_sha" "$behind" "$base" "$base_sha"
       return 0
       ;;

@@ -353,6 +353,34 @@ test_unrelated_index_hint_prevents_running_claim() {
   pass "index hints anywhere make checked-out runtime bytes unproven"
 }
 
+test_stat_cache_cannot_hide_tracked_runtime_drift() {
+  local repo out diff_status stamp
+  repo=$(make_repo "$TMP_ROOT/stat-cache")
+  land "$repo" bin/fm-runtime.sh "runtime-old"
+  land "$repo" docs/landed.md "landed documentation"
+  hold_back "$repo" 1
+  stamp="$repo/runtime.stamp"
+  touch -r "$repo/bin/fm-runtime.sh" "$stamp"
+  git -C "$repo" config core.trustctime false
+  git -C "$repo" config core.checkStat minimal
+  printf '%s\n' "runtime-new" > "$repo/bin/fm-runtime.sh"
+  touch -r "$stamp" "$repo/bin/fm-runtime.sh"
+
+  git -C "$repo" diff --quiet HEAD --
+  diff_status=$?
+  expect_code 0 "$diff_status" "fixture failed: Git did not trust the unchanged stat cache"
+  out=$(fm_code_currency_line "$repo" || true)
+  assert_contains "$out" "UNPROVEN live code" \
+    "cached stat fields allowed changed runtime bytes to be called running code"
+  assert_contains "$out" "bin/fm-runtime.sh" \
+    "the byte-level proof did not identify the hidden runtime path"
+  assert_not_contains "$out" "CODE_STALE: running code" \
+    "hidden runtime bytes produced a running-code claim"
+  assert_not_contains "$out" "inactive here" \
+    "hidden runtime bytes produced an inactivity claim"
+  pass "tracked runtime bytes are proven independently of Git's stat cache"
+}
+
 test_diverged_equivalent_landed_bytes_are_unproven() {
   local repo out
   repo=$(make_repo "$TMP_ROOT/diverged-equivalent")
@@ -409,6 +437,7 @@ test_dirty_tracked_checkout_is_unproven
 test_untracked_landed_path_is_unproven
 test_index_hints_cannot_hide_landed_path_drift
 test_unrelated_index_hint_prevents_running_claim
+test_stat_cache_cannot_hide_tracked_runtime_drift
 test_diverged_equivalent_landed_bytes_are_unproven
 test_ignored_landed_path_is_unproven
 test_bootstrap_line
