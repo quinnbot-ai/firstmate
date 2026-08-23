@@ -1,0 +1,12 @@
+END-USER FLOW: explicit standing review emits evidence without creating work
+
+1) first scheduled review
+review venture-review: candidate acme [commits_30d=0 cost_30d=125] -> dispatch a worker to decide this
+
+2) evidence drifts, cadence expires, same subject remains in cooldown
+second wake output: <silent>
+
+3) durable state created by the review
+venture-review.standing-review-last
+venture-review.standing-review-latch
+self-generated task state: absent

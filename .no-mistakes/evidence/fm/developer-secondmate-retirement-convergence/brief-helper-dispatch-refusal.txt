@@ -1,0 +1,6 @@
+END-USER FLOW: fm-spawn refuses a brief that requires an absent Firstmate helper
+command: bin/fm-spawn.sh evidence-missing-helper <project> --mode no-mistakes --yolo off
+exit: 1
+warning: <fixture>/evidence-missing/home/data/evidence-missing-helper/brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+error: brief helper reference bin/fm-required-but-absent.sh resolves in this task worktree to <fixture>/evidence-missing/pool/bin/fm-required-but-absent.sh, but that script is absent; refusing dispatch
+rollback: clean (no task metadata, endpoint, or worktree lease remains)

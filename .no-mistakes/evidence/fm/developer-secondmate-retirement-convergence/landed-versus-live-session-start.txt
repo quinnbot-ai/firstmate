@@ -1,0 +1,7 @@
+END-USER FLOW: session-start distinguishes landed code from the checkout in use
+checkout before: 204e3f872d7b
+landed default:  2799b344f719
+CODE_STALE: UNPROVEN live code: checked-out HEAD 204e3f8 is at least 1 commit(s) behind origin/main (2799b34) as last fetched, changing guard paths: bin/fm-pr-merge.sh. Tracked bytes matched HEAD during inspection, but the unlocked checkout can change before use, so installed code cannot be proven to exclude landed changes.
+checkout after:  204e3f872d7b
+landed default:  2799b344f719
+currency check mutation: none

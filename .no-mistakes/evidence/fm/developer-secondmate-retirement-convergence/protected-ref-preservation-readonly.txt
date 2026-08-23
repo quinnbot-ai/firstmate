@@ -1,0 +1,54 @@
+READ-ONLY PRESERVATION EVIDENCE
+configured remote: https://github.com/kunchenguid/firstmate.git
+
+Named refs and commits visible to this isolated gate repository:
+fm/venture-loops-contest
+  expected commit prefix: 02f15ce
+  local ref: MISSING
+  commit object: MISSING
+fm/fm-reconcile-existing-stale-pointers-rerun-20260822
+  expected commit prefix: 52268af
+  local ref: MISSING
+  commit object: MISSING
+fm/fm-reconcile-existing-stale-pointers
+  expected commit prefix: d0b2ec2
+  local ref: MISSING
+  commit object: MISSING
+fm/fm-surface-landed-not-live
+  expected commit prefix: 0bd7
+  local ref: MISSING
+  commit object: MISSING
+fm/fork-branch-adjudication
+  expected commit prefix: 74e6bf
+  local ref: MISSING
+  commit object: MISSING
+fm/fm-brief-script-reference-preflight-rerun-20260822
+  expected commit prefix: 286fa6
+  local ref: MISSING
+  commit object: MISSING
+fm/fm-brief-script-reference-preflight
+  expected commit prefix: 343e9b
+  local ref: MISSING
+  commit object: MISSING
+fm/afk-completion-refill
+  expected commit prefix: 70aeba8
+  local ref: MISSING
+  commit object: 70aeba855527f7693082f6dd1bc731e334d0269f
+
+PR numbers on the configured GitHub remote:
+  number: 151
+  title: "feat(spawn): per-task crewmate model selection (--model)"
+  state: closed
+  merged: no
+  number: 162
+  title: "feat: support image attachments in X replies"
+  state: merged
+  merged: "2026-06-30T19:23:26Z"
+  number: 164
+  title: Fm/adopt owner main 0630
+  state: closed
+  merged: no
+  number: 165
+  title: Add Mattermost outbox watcher
+  state: open
+  merged: no

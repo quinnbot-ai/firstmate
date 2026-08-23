@@ -1,0 +1,13 @@
+END-USER FLOW: guarded stale-pointer reconciliation
+
+1) default/read-only dry run with an explicit live owner
+STALE: lane-a copy <fixture>/e2e/wt is owned by lane-b in <fixture>/e2e/state (branch fm/lane-b, via asserted-endpoint)
+summary: 1 stale pointer(s) to retire, 0 already retired, 0 unresolved (re-run with --apply to retire)
+dry-run durable marker: absent
+
+2) apply after the same ownership proof
+RETIRED: lane-a copy <fixture>/e2e/wt is owned by lane-b in <fixture>/e2e/state (branch fm/lane-b, via binding)
+summary: 1 stale pointer(s), 1 retired, 0 already retired, 0 unresolved, 0 failed
+retirement owner: lane-b
+live copy branch: fm/lane-b
+preserved lane status: byte-identical
