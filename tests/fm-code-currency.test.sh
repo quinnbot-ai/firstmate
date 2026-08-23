@@ -64,8 +64,8 @@ land_elsewhere() {
 }
 
 # hold_back <repo> <n>: move the checkout back <n> commits without touching
-# origin, leaving the repo running code the default branch has moved past. This
-# is the deliberate hold - landed work that is not live.
+# origin, leaving the checked-out commit behind the default branch. This is the
+# deliberate hold between landed work and the commit present in the checkout.
 hold_back() {
   local repo=$1 n=$2
   git -C "$repo" reset -q --hard "HEAD~$n"
@@ -102,7 +102,7 @@ test_states() {
   [ -z "$out" ] || fail "reported a gap while the checkout was only ahead: $out"
   git -C "$repo" reset -q --hard origin/main
 
-  # Behind: three commits landed, none of them running here.
+  # Behind: three commits landed, none of them present in checked-out HEAD.
   land "$repo" docs/one.md one
   land "$repo" docs/two.md two
   land "$repo" docs/three.md three
@@ -111,7 +111,7 @@ test_states() {
   assert_contains "$out" "CODE_STALE:" "a checkout three commits behind reported nothing"
   assert_contains "$out" "3 commit(s) behind" "the gap did not name how many commits are missing"
   assert_contains "$out" "origin/main" "the gap did not name the branch the code root follows"
-  assert_contains "$out" "$(git -C "$repo" rev-parse --short=7 HEAD)" "the gap did not name the commit actually running"
+  assert_contains "$out" "$(git -C "$repo" rev-parse --short=7 HEAD)" "the gap did not name the checked-out commit"
   assert_contains "$out" "$(git -C "$repo" rev-parse --short=7 origin/main)" "the gap did not name the commit that landed"
 
   # Diverged: local work on top of a held-back base is still behind by three.
@@ -253,12 +253,8 @@ test_dirty_tracked_checkout_is_unproven() {
 
   printf 'locally reverted\n' > "$repo/bin/fm-guard.sh"
   out=$(fm_code_currency_line "$repo" || true)
-  assert_contains "$out" "CODE_STALE: UNPROVEN live code" \
-    "a current HEAD with locally changed tracked code was called live"
-  assert_contains "$out" "0 commit(s) behind" \
-    "the unproven current checkout did not separate branch currency from live bytes"
-  assert_not_contains "$out" "running code" \
-    "a dirty checkout was described as proven running code"
+  [ -z "$out" ] \
+    || fail "a current dirty checkout was mislabeled stale: $out"
 
   git -C "$repo" reset -q --hard origin/main
   current_guard=$(git -C "$repo" show origin/main:bin/fm-guard.sh)
@@ -418,6 +414,8 @@ test_tracked_byte_proof_batches_regular_files() {
   git -C "$repo" commit -q -m "add runtime files"
   git -C "$repo" push -q origin main
   git -C "$repo" fetch -q origin
+  land "$repo" docs/landed.md landed
+  hold_back "$repo" 1
 
   real_git=$(command -v git)
   shim="$TMP_ROOT/hash-batch-bin"
@@ -434,7 +432,8 @@ SH
 
   out=$(PATH="$shim:$PATH" FM_REAL_GIT="$real_git" FM_HASH_LOG="$log" \
     fm_code_currency_line "$repo" || true)
-  [ -z "$out" ] || fail "a current clean checkout reported a currency problem: $out"
+  assert_contains "$out" "1 commit(s) behind" \
+    "the stale checkout did not exercise tracked-byte proof: $out"
   hash_calls=$(wc -l < "$log" | tr -d ' ')
   [ "$hash_calls" -eq 2 ] \
     || fail "the tracked-byte proof spawned $hash_calls regular-file hash processes"

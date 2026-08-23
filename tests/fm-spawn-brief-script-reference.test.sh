@@ -229,6 +229,20 @@ test_unquoted_command_reference_refuses() {
   pass "an absent unquoted helper command refuses dispatch"
 }
 
+test_object_bearing_directive_reference_refuses() {
+  local id=brief-object-command-a31 rec out status expected
+  rec=$(make_case object-command "$id" 'Run the helper bin/fm-object-missing.sh before editing.')
+  read_case "$rec"
+
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite an object-bearing helper command"
+  expected="$POOL_DIR/bin/fm-object-missing.sh"
+  assert_contains "$out" "$expected" "object-bearing command did not resolve against the task worktree"
+  assert_absent "$HOME_DIR/state/$id.meta" "object-bearing helper refusal published metadata"
+  pass "an object-bearing helper command refuses dispatch"
+}
+
 test_dotted_helper_reference_refuses() {
   local id=brief-dotted-a18 rec out status expected
   rec=$(make_case dotted-command "$id" 'Run bin/fm-dotted-missing.v2.sh before editing.')
@@ -605,7 +619,7 @@ test_historical_prose_mention_passes() {
 test_descriptive_prose_mention_passes() {
   local id=brief-descriptive-prose-a24 rec out status
   rec=$(make_case descriptive-prose "$id" \
-    'Documentation for bin/fm-retired.sh describes the old workflow.')
+    'Documentation for the helper bin/fm-retired.sh describes the old workflow.')
   read_case "$rec"
 
   out=$(run_spawn "$id")
@@ -807,6 +821,7 @@ test_absent_variable_expanded_helper_refuses_at_task_worktree
 test_present_helper_passes
 test_fenced_command_reference_refuses
 test_unquoted_command_reference_refuses
+test_object_bearing_directive_reference_refuses
 test_dotted_helper_reference_refuses
 test_punctuated_helper_reference_refuses
 test_prefixed_imperative_reference_refuses

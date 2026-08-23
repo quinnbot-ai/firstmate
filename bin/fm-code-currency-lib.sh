@@ -1,13 +1,13 @@
 # shellcheck shell=bash
-# Shared "landed is not running" check for a firstmate code root.
+# Shared checked-out-versus-landed check for a firstmate code root.
 # Usage: . bin/fm-code-currency-lib.sh
 #
 # Firstmate never self-updates. A change merged to the default branch reaches a
-# running home only when the captain runs /updatefirstmate (bin/fm-update.sh),
-# so "merged" and "running here" are two different facts and nothing else in the
-# session-start digest separates them. This library is the one place that does:
-# it compares the commit actually checked out in a code root against the default
-# branch that root follows, and reports the gap.
+# home's checked-out commit only when the captain runs /updatefirstmate
+# (bin/fm-update.sh), so "merged" and "checked out here" are two different facts.
+# This library compares the commit checked out in a code root against the
+# default branch that root follows and reports the gap without claiming which
+# worktree bytes a running process has engaged.
 #
 # The comparison is deliberately LOCAL and never fetches. It reads the
 # already-present remote-tracking ref, so the reported gap is a FLOOR - the code
@@ -16,10 +16,10 @@
 # invent one, and it keeps the check free, offline-safe, and usable by a
 # read-only session that holds no fleet lock.
 #
-# HEAD, not the default-branch ref, is the subject: HEAD is what the home is
-# actually running. A primary checkout normally has them equal; a secondmate
-# home sits at a detached HEAD; and a primary stranded on a feature branch
-# (the tangle of fm-tangle-lib.sh) is still running that tree.
+# HEAD, not the default-branch ref, is the subject because it identifies the
+# commit checked out in the home. A primary checkout normally has them equal; a
+# secondmate home sits at a detached HEAD; and a primary stranded on a feature
+# branch (the tangle of fm-tangle-lib.sh) is still checked out at that tree.
 #
 # This library only reports. It never fetches, updates, or fast-forwards
 # anything - holding at an older commit is a captain decision, and a home may be
@@ -33,7 +33,7 @@
 # already protecting them. The list widens attention and is never a guarantee -
 # an unlisted path can still matter, and a listed one can change harmlessly. Its
 # job is to turn "20 commits behind" into "the merge refusal and the teardown
-# refusal are among what is not running here".
+# refusal are absent from the checked-out commit".
 # It is an ARRAY, and each glob is quoted, because the patterns must survive to
 # the match as patterns. A plain string expanded through word splitting is also
 # pathname-expanded against the current directory first, which silently swaps
@@ -359,6 +359,7 @@ fm_code_currency_line() {
   esac
   head_sha=${head_oid:0:7}
   base_sha=${base_oid:0:7}
+  [ "$behind" -gt 0 ] || return 1
   if ! head_drift=$(fm_code_currency_head_worktree_drift "$root" "$head_oid"); then
     if fm_code_currency_snapshot_matches "$root" "$base" "$head_oid" "$base_oid"; then
       fm_code_currency_inspection_failed_line "$base" "$head_sha" "$base_sha" "$behind"
@@ -454,13 +455,6 @@ fm_code_currency_line() {
     printf 'CODE_STALE: UNPROVEN live code: tracked index hints prevent checked-out HEAD %s from proving worktree bytes: %s. HEAD is %s commit(s) behind %s (%s) as last fetched; reconcile assume-unchanged or skip-worktree state before relying on landed-versus-live status.\n' \
       "$head_sha" "$index_hints_shown" "$behind" "$base" "$base_sha"
     return 0
-  fi
-  if [ "$behind" -eq 0 ]; then
-    fm_code_currency_snapshot_matches "$root" "$base" "$head_oid" "$base_oid" || {
-      fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
-      return 0
-    }
-    return 1
   fi
   ahead=$(git -C "$root" rev-list --count "$base_oid..$head_oid" 2>/dev/null) || {
     if fm_code_currency_snapshot_matches "$root" "$base" "$head_oid" "$base_oid"; then

@@ -47,7 +47,10 @@ sub is_directive_prefix {
   my $ordering = qr/(?:please|first|initially|next|then|subsequently|afterwards?|finally|lastly|instead)/i;
   my $word = qr/[A-Za-z][A-Za-z0-9'’_-]*/;
   my $link = qr/(?:and|then|by|to|ahead\s+and)/i;
-  return $prefix =~ /^(?:$ordering\s+)*$word(?:\s+$link\s+$word)*$/i;
+  my $directive_verb = qr/(?:apply|begin|call|check|complete|consult|deploy|execute|follow|inspect|invoke|launch|load|open|perform|read|reference|rerun|retry|review|run|source|start|use|validate|verify)/i;
+  my $executable_object = qr/(?:(?:the|a|an|this|that)\s+)?(?:$word\s+)*(?:helper|script|command|tool|utility|preflight|check|workflow)/i;
+  return 1 if $prefix =~ /^(?:$ordering\s+)*$word(?:\s+$link\s+$word)*$/i;
+  return $prefix =~ /^(?:$ordering\s+)*$directive_verb(?:\s+$link\s+$word)*\s+$executable_object\s*:?$/i;
 }
 
 sub is_instruction {
