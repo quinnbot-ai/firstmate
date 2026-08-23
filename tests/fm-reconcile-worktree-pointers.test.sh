@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Tests for bin/fm-reconcile-worktree-pointers.sh and the binding-independent
-# ownership proof in bin/fm-worktree-owner-lib.sh.
+# Tests for bin/fm-reconcile-worktree-pointers.sh and its binding-independent
+# live-endpoint ownership proof.
 #
 # THE GAP THESE COVER. The current-owner check in bin/fm-teardown.sh reads an
 # ownership binding out of the copy, so it protects every copy assigned after
@@ -8,13 +8,13 @@
 # exist - a record with no declared binding, over a copy carrying none. Those are
 # exactly the collisions a home accumulates, because the lanes holding stale
 # pointers are preserved lanes that are never torn down and therefore never
-# repaired. The second proof reads the branch the copy actually has checked out
-# and cross-confirms it against that claimant's own record.
+# repaired. The second proof requires one task's durable record and live endpoint
+# to agree on the copy's exact physical path.
 #
 # Matrix:
-#   (r1) unbound copy on another recorded task's branch  -> STALE, pointer retired
-#   (r2) unbound copy still on this lane's own branch    -> quiet (nothing to repair)
-#   (r3) branch names a task this home does not record   -> UNRESOLVED, untouched
+#   (r1) unbound copy proven by another task's endpoint  -> STALE, pointer retired
+#   (r2) unbound copy proven by this lane's endpoint     -> quiet (nothing to repair)
+#   (r3) unbound copy with no live endpoint proof        -> UNRESOLVED, untouched
 #   (r4) readable binding disagrees with the branch      -> binding wins, quiet
 #   (r5) default run reports without changing anything   -> dry-run by default
 #   (r6) re-run over an already-retired pointer          -> counted, not rewritten
@@ -35,9 +35,29 @@ TMP_ROOT=$(fm_test_tmproot fm-reconcile-pointer-tests)
 # Build a home with a project repo and one pooled copy. The copy starts on
 # fm/lane-a, which is lane-a's own branch. Echoes the case dir.
 make_home() {
-  local name=$1 case_dir
+  local name=$1 case_dir fakebin
   case_dir="$TMP_ROOT/$name"
-  mkdir -p "$case_dir/state"
+  fakebin=$(fm_fakebin "$case_dir/fake")
+  mkdir -p "$case_dir/state" "$case_dir/endpoints"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+target=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = -t ]; then
+    shift
+    target=${1:-}
+    break
+  fi
+  shift
+done
+id=${target##*:fm-}
+path_file=${FM_FAKE_ENDPOINT_ROOT:?FM_FAKE_ENDPOINT_ROOT unset}/$id.cwd
+[ -f "$path_file" ] || exit 1
+IFS= read -r path < "$path_file"
+printf '%s\n' "$path"
+SH
+  chmod +x "$fakebin/tmux"
   fm_git_worktree "$case_dir/project" "$case_dir/wt" fm/lane-a
   printf '%s\n' "$case_dir"
 }
@@ -64,28 +84,39 @@ hand_copy_to_branch() {
   git -C "$case_dir/wt" checkout -q -b "$branch"
 }
 
+place_endpoint() {
+  local case_dir=$1 id=$2 path=${3:-$1/wt}
+  printf '%s\n' "$path" > "$case_dir/endpoints/$id.cwd"
+}
+
 run_reconcile() {
   local case_dir=$1; shift
-  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" "$RECONCILE" "$@"
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_FAKE_ENDPOINT_ROOT="$case_dir/endpoints" \
+    PATH="$case_dir/fake/fakebin:$PATH" "$RECONCILE" "$@"
 }
 
 # (r1) The reproduction: lane-a's record still names a slot the pool has since
-# handed to lane-b. Neither side carries a binding, so only the branch the copy
-# actually has checked out can settle it.
+# handed to lane-b. Neither side carries a binding, so lane-b's live endpoint
+# and durable record must independently settle it.
 test_unbound_recycled_slot_is_retired() {
-  local case_dir out
+  local case_dir out state_real
   case_dir=$(make_home unbound-recycled)
   record_lane "$case_dir" lane-a
   hand_copy_to_branch "$case_dir" fm/lane-b
   record_lane "$case_dir" lane-b
+  place_endpoint "$case_dir" lane-b
 
   out=$(run_reconcile "$case_dir" --apply)
+  state_real=$(CDPATH='' cd -- "$case_dir/state" && pwd -P)
 
   assert_contains "$out" "RETIRED: lane-a" "unbound: the stale pointer is retired"
   assert_contains "$out" "owned by lane-b" "unbound: the report names the owning task"
-  assert_contains "$out" "via branch" "unbound: the report names the proof it used"
+  assert_contains "$out" "via endpoint" "unbound: the report names the proof it used"
   assert_grep "worktree_retired=lane-b" "$case_dir/state/lane-a.meta" \
     "unbound: the durable retirement names the proven owner"
+  assert_grep "worktree_retired_state=$state_real" "$case_dir/state/lane-a.meta" \
+    "unbound: the durable retirement preserves the owner's state identity"
   assert_grep "worktree=$case_dir/wt" "$case_dir/state/lane-a.meta" \
     "unbound: the stale pointer is kept as history, not deleted"
   assert_no_grep "worktree_retired" "$case_dir/state/lane-b.meta" \
@@ -101,6 +132,7 @@ test_own_copy_is_not_reassigned() {
   local case_dir out
   case_dir=$(make_home own-copy)
   record_lane "$case_dir" lane-a
+  place_endpoint "$case_dir" lane-a
 
   out=$(run_reconcile "$case_dir" --apply)
 
@@ -111,8 +143,8 @@ test_own_copy_is_not_reassigned() {
   pass "reconcile leaves a lane that still holds its own copy alone"
 }
 
-# (r3) One-sided evidence. The copy carries some fm/* branch, but this home has
-# no record of that task holding it, so nothing is proven either way.
+# (r3) Workspace content alone is not evidence. Without a live endpoint proving
+# this copy's path, nothing is proven either way.
 test_branch_without_a_matching_record_is_unresolved() {
   local case_dir out
   case_dir=$(make_home ghost-branch)
@@ -122,7 +154,7 @@ test_branch_without_a_matching_record_is_unresolved() {
   out=$(run_reconcile "$case_dir" --apply)
 
   assert_contains "$out" "UNRESOLVED: lane-a" "ghost: an unconfirmed branch is not a verdict"
-  assert_contains "$out" "no record of task ghost" "ghost: the report says what was missing"
+  assert_contains "$out" "no single active task endpoint" "ghost: the report says what was missing"
   assert_not_contains "$out" "RETIRED" "ghost: nothing is retired on one-sided evidence"
   assert_no_grep "worktree_retired" "$case_dir/state/lane-a.meta" \
     "ghost: the record is left untouched"
@@ -152,7 +184,7 @@ test_binding_outranks_the_checked_out_branch() {
 }
 
 test_binding_distinguishes_same_task_id_across_homes() {
-  local case_dir other_state out
+  local case_dir other_state other_state_real out
   case_dir=$(make_home cross-home-same-id)
   other_state="$case_dir/other-state"
   mkdir -p "$other_state"
@@ -168,11 +200,14 @@ test_binding_distinguishes_same_task_id_across_homes() {
     || fail "cross-home: could not bind the copy to the other home"
 
   out=$(run_reconcile "$case_dir" --apply)
+  other_state_real=$(CDPATH='' cd -- "$other_state" && pwd -P)
 
   assert_contains "$out" "RETIRED: lane-a" \
     "cross-home: an equal task id in another home is still a different owner"
   assert_grep "worktree_retired=lane-a" "$case_dir/state/lane-a.meta" \
     "cross-home: the stale local pointer is retired"
+  assert_grep "worktree_retired_state=$other_state_real" "$case_dir/state/lane-a.meta" \
+    "cross-home: retirement preserves the other home's identity"
   assert_no_grep "worktree_retired" "$other_state/lane-a.meta" \
     "cross-home: the live owner's record is untouched"
   pass "bindings distinguish equal task ids in different Firstmate homes"
@@ -186,6 +221,7 @@ test_default_run_changes_nothing() {
   record_lane "$case_dir" lane-a
   hand_copy_to_branch "$case_dir" fm/lane-b
   record_lane "$case_dir" lane-b
+  place_endpoint "$case_dir" lane-b
 
   out=$(run_reconcile "$case_dir" --dry-run)
 
@@ -203,9 +239,10 @@ test_apply_revalidates_ownership_inside_the_transition_lock() {
   hand_copy_to_branch "$case_dir" fm/lane-b
   record_lane "$case_dir" lane-b
   record_lane "$case_dir" lane-c
+  place_endpoint "$case_dir" lane-b
   ready="$case_dir/transition-ready"
   switch="$case_dir/transition-switch"
-  env ROOT="$ROOT" STATE="$case_dir/state" WT="$case_dir/wt" \
+  env ROOT="$ROOT" STATE="$case_dir/state" WT="$case_dir/wt" ENDPOINTS="$case_dir/endpoints" \
     READY="$ready" SWITCH="$switch" bash -c '
       . "$ROOT/bin/fm-wake-lib.sh"
       . "$ROOT/bin/fm-worktree-binding-lib.sh"
@@ -213,7 +250,8 @@ test_apply_revalidates_ownership_inside_the_transition_lock() {
       fm_lock_acquire_wait "$lock"
       : > "$READY"
       while [ ! -e "$SWITCH" ]; do /bin/sleep 0.01; done
-      git -C "$WT" checkout -q -b fm/lane-c
+      rm -f "$ENDPOINTS/lane-b.cwd"
+      printf "%s\n" "$WT" > "$ENDPOINTS/lane-c.cwd"
       fm_lock_release "$lock"
     ' &
   holder_pid=$!
@@ -244,6 +282,7 @@ test_rerun_is_idempotent() {
   record_lane "$case_dir" lane-a
   hand_copy_to_branch "$case_dir" fm/lane-b
   record_lane "$case_dir" lane-b
+  place_endpoint "$case_dir" lane-b
   run_reconcile "$case_dir" --apply >/dev/null
   before=$(cat "$case_dir/state/lane-a.meta")
 
@@ -256,8 +295,9 @@ test_rerun_is_idempotent() {
   pass "reconcile is idempotent across repeated runs"
 }
 
-# (r7) A pooled slot sitting on a detached HEAD says nothing about ownership.
-test_detached_head_is_unresolved() {
+# (r7) A pooled slot with no live endpoint proof says nothing about ownership,
+# regardless of its checked-out branch.
+test_copy_without_live_endpoint_is_unresolved() {
   local case_dir out
   case_dir=$(make_home detached)
   record_lane "$case_dir" lane-a
@@ -268,7 +308,26 @@ test_detached_head_is_unresolved() {
   assert_contains "$out" "UNRESOLVED: lane-a" "detached: ownership is unprovable"
   assert_no_grep "worktree_retired" "$case_dir/state/lane-a.meta" \
     "detached: nothing is retired"
-  pass "reconcile leaves a copy on a detached HEAD alone"
+  pass "reconcile leaves a copy without live endpoint proof alone"
+}
+
+test_branch_name_cannot_override_live_endpoint_owner() {
+  local case_dir out
+  case_dir=$(make_home branch-deception)
+  record_lane "$case_dir" lane-a
+  hand_copy_to_branch "$case_dir" fm/lane-b
+  record_lane "$case_dir" lane-b
+  place_endpoint "$case_dir" lane-a
+
+  out=$(run_reconcile "$case_dir" --apply)
+
+  assert_no_grep "worktree_retired" "$case_dir/state/lane-a.meta" \
+    "branch-deception: mutable branch content cannot retire the live owner's pointer"
+  assert_grep "worktree_retired=lane-a" "$case_dir/state/lane-b.meta" \
+    "branch-deception: the endpoint-proven owner retires only the stale claimant"
+  assert_contains "$out" "RETIRED: lane-b" \
+    "branch-deception: the stale branch-named claimant is reported"
+  pass "live endpoint proof outranks a misleading task branch"
 }
 
 # (r8) A secondmate home is a persistent home, not a pooled slot; it is never
@@ -285,6 +344,7 @@ test_secondmate_home_is_skipped() {
     "mode=no-mistakes"
   hand_copy_to_branch "$case_dir" fm/lane-b
   record_lane "$case_dir" lane-b
+  place_endpoint "$case_dir" lane-b
 
   out=$(run_reconcile "$case_dir" --apply)
 
@@ -303,6 +363,7 @@ test_repair_never_touches_the_status_log() {
   record_lane "$case_dir" lane-a
   hand_copy_to_branch "$case_dir" fm/lane-b
   record_lane "$case_dir" lane-b
+  place_endpoint "$case_dir" lane-b
   printf 'paused [key=preserved]: do not clean up\n' > "$case_dir/state/lane-a.status"
 
   run_reconcile "$case_dir" --apply >/dev/null
@@ -322,6 +383,7 @@ test_binding_distinguishes_same_task_id_across_homes
 test_default_run_changes_nothing
 test_apply_revalidates_ownership_inside_the_transition_lock
 test_rerun_is_idempotent
-test_detached_head_is_unresolved
+test_copy_without_live_endpoint_is_unresolved
+test_branch_name_cannot_override_live_endpoint_owner
 test_secondmate_home_is_skipped
 test_repair_never_touches_the_status_log

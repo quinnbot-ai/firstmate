@@ -807,6 +807,7 @@ test_retired_worktree_is_not_published_as_active() {
   fm_write_meta "$home/state/retired-task.meta" \
     "window=firstmate:fm-retired-task" \
     "worktree=$historical" \
+    "worktree_retired_state=$home/state" \
     "worktree_retired=live-task" \
     "project=firstmate" \
     "harness=claude" \
@@ -814,12 +815,13 @@ test_retired_worktree_is_not_published_as_active() {
     "mode=ship"
   fakebin=$(make_fakebin "$home")
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
-  printf '%s' "$out" | jq -e --arg historical "$historical" '
+  printf '%s' "$out" | jq -e --arg historical "$historical" --arg owner_state "$home/state" '
     .tasks[] | select(.id == "retired-task")
     | .paths.worktree == {path:null,present:false}
       and .paths.retired_worktree.path == $historical
       and .paths.retired_worktree.present == true
       and .worktree_retired_to == "live-task"
+      and .worktree_retired_state == $owner_state
   ' >/dev/null || fail "a retired historical pointer was published as active: $out"
   pass "fleet snapshots separate retired worktree history from active ownership"
 }

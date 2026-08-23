@@ -34,13 +34,14 @@
 # caught in one pass.
 #
 # Ownership is resolved by bin/fm-worktree-owner-lib.sh, from the copy itself -
-# its ownership binding when it has one, otherwise the branch it actually has
-# checked out cross-confirmed against the claimant's own record. A copy whose
+# its ownership binding when it has one, otherwise one exact task record and a
+# live, read-only endpoint path that independently agree on the physical copy.
+# The checked-out branch is diagnostic context, never ownership authority. A copy whose
 # owner cannot be proven is reported as unresolved and left completely alone:
 # "cannot tell" is never treated as "reassigned".
 #
 # Output lines, one per task record:
-#   STALE:      <id> copy <path> is owned by <owner> (branch <branch>, via <method>)
+#   STALE:      <id> copy <path> is owned by <owner> in <state> (branch <branch>, via <method>)
 #   RETIRED:    <id> ... (with --apply)
 #   UNRESOLVED: <id> <detail>
 # followed by a one-line summary. Exit 0 on a clean run, 1 if a retirement failed.
@@ -54,6 +55,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-worktree-binding-lib.sh
 . "$SCRIPT_DIR/fm-worktree-binding-lib.sh"
 # shellcheck source=bin/fm-worktree-owner-lib.sh
@@ -114,8 +117,8 @@ for meta in "$STATE"/*.meta; do
     stale=$((stale + 1))
     owner=$FM_WORKTREE_OWNER_TASK_ID
     branch=${FM_WORKTREE_OWNER_BRANCH:-<unreadable>}
-    printf 'STALE: %s copy %s is owned by %s (branch %s, via %s)\n' \
-      "$id" "$wt" "$owner" "$branch" "$FM_WORKTREE_OWNER_METHOD"
+    printf 'STALE: %s copy %s is owned by %s in %s (branch %s, via %s)\n' \
+      "$id" "$wt" "$owner" "$FM_WORKTREE_OWNER_STATE" "$branch" "$FM_WORKTREE_OWNER_METHOD"
     continue
   fi
   lock=$(fm_meta_lock_path "$meta") || { failed=$((failed + 1)); continue; }
@@ -167,10 +170,10 @@ for meta in "$STATE"/*.meta; do
   stale=$((stale + 1))
   owner=$FM_WORKTREE_OWNER_TASK_ID
   branch=${FM_WORKTREE_OWNER_BRANCH:-<unreadable>}
-  if fm_worktree_owner_retire_pointer "$meta" "$owner"; then
+  if fm_worktree_owner_retire_pointer "$meta" "$FM_WORKTREE_OWNER_STATE" "$owner"; then
     retired_now=$((retired_now + 1))
-    printf 'RETIRED: %s copy %s is owned by %s (branch %s, via %s)\n' \
-      "$id" "$wt" "$owner" "$branch" "$FM_WORKTREE_OWNER_METHOD"
+    printf 'RETIRED: %s copy %s is owned by %s in %s (branch %s, via %s)\n' \
+      "$id" "$wt" "$owner" "$FM_WORKTREE_OWNER_STATE" "$branch" "$FM_WORKTREE_OWNER_METHOD"
   else
     failed=$((failed + 1))
   fi

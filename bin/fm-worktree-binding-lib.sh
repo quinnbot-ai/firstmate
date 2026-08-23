@@ -65,13 +65,16 @@ fm_worktree_pool_transition_lock_path() {  # <state-dir> <project>
 
 FM_WORKTREE_RECORD_ACTIVE_PATH=
 FM_WORKTREE_RECORD_RETIRED_OWNER=
+FM_WORKTREE_RECORD_RETIRED_STATE=
 
 fm_worktree_record_resolve() {  # <meta-file>
   local meta=${1-}
   FM_WORKTREE_RECORD_ACTIVE_PATH=
   FM_WORKTREE_RECORD_RETIRED_OWNER=
+  FM_WORKTREE_RECORD_RETIRED_STATE=
   [ -n "$meta" ] && [ -f "$meta" ] || return 1
   FM_WORKTREE_RECORD_RETIRED_OWNER=$(sed -n 's/^worktree_retired=//p' "$meta" | tail -1)
+  FM_WORKTREE_RECORD_RETIRED_STATE=$(sed -n 's/^worktree_retired_state=//p' "$meta" | tail -1)
   [ -z "$FM_WORKTREE_RECORD_RETIRED_OWNER" ] || return 1
   FM_WORKTREE_RECORD_ACTIVE_PATH=$(sed -n 's/^worktree=//p' "$meta" | tail -1)
   [ -n "$FM_WORKTREE_RECORD_ACTIVE_PATH" ]

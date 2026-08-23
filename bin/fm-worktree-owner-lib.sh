@@ -17,39 +17,36 @@
 # grows with the number of protected lanes, and every protected lane is by
 # construction one that will never be cleaned up on its own.
 #
-# THE SECOND PROOF. When no binding can be read, ownership is still legible from
-# the copy itself: the branch it actually has checked out. bin/fm-brief.sh gives
-# every task the single branch name `fm/<task-id>`, so a copy sitting on
-# `fm/<other>` is announcing that it is now <other>'s. That is exactly the check
-# a supervisor runs by hand before an unbound teardown, and it reads the copy
-# rather than the record, which is the whole point: a recorded path is an
-# allocation, never proof of ownership.
+# THE SECOND PROOF. When no binding can be read, ownership requires an active
+# endpoint whose durable task metadata points at the copy and whose live,
+# read-only current-path query resolves to that same copy. A checked-out branch
+# is mutable task content and remains diagnostic context only. The endpoint and
+# record agreement is independent of that content, which is the whole point: a
+# recorded path and branch name are allocations and workspace state, never proof
+# of ownership.
 #
 # THREE CONDITIONS KEEP IT QUIET. A wrong "this copy was reassigned" verdict is
 # as damaging as the missing one, because it retires a live pointer and refuses
-# a legitimate cleanup, so the branch proof fires only when all three hold:
+# a legitimate cleanup, so the endpoint proof fires only when all three hold:
 #
-#   1. The binding wins whenever it is readable. The branch is consulted ONLY
-#      after fm_worktree_binding_read has failed. A worker that checks out some
-#      other branch inside its own copy must never look reassigned.
-#   2. The branch must name a task THIS home records, whose own record points
-#      back at this same path. One-sided evidence ("some fm/* branch is checked
-#      out here") proves nothing; the copy and the claimant's record have to
-#      agree before the reassignment is called proven.
-#   3. Callers compare the resolved owner against the task they are asking
-#      about. A copy that is still its own lane's resolves to that lane and is
-#      reported as owned, not reassigned.
+#   1. The binding wins whenever it is readable. Endpoint fallback is consulted
+#      only when the private marker is definitely absent.
+#   2. A claimant must have exact endpoint metadata and an active record for the
+#      copy, and a read-only runtime query must return that exact physical path.
+#   3. Exactly one claimant may prove the path. Zero or multiple claimants leave
+#      ownership unresolved and preserve every record and copy.
 #
-# Usage: . bin/fm-worktree-owner-lib.sh   (after bin/fm-worktree-binding-lib.sh)
+# Usage: . bin/fm-worktree-owner-lib.sh
+#   (after bin/fm-backend.sh and bin/fm-worktree-binding-lib.sh)
 #
 # Public entry points:
 #   fm_worktree_owner_resolve <worktree> <state-dir>
-#     Sets FM_WORKTREE_OWNER_STATE / _TASK_ID / _METHOD (binding|branch) /
+#     Sets FM_WORKTREE_OWNER_STATE / _TASK_ID / _METHOD (binding|endpoint) /
 #     _BRANCH and
 #     returns 0 when the copy's current owner is proven. Returns non-zero with
 #     FM_WORKTREE_OWNER_DETAIL when it is not; unprovable is never a verdict.
-#   fm_worktree_owner_retire_pointer <meta-file> <owner-task-id>
-#     Writes the durable `worktree_retired=<owner>` line into one task record and
+#   fm_worktree_owner_retire_pointer <meta-file> <owner-state> <owner-task-id>
+#     Writes the durable owner state and task identity into one task record and
 #     KEEPS the stale `worktree=` value as history. Callers own the meta lock;
 #     this function does not take one.
 
@@ -59,19 +56,6 @@ FM_WORKTREE_OWNER_METHOD=
 FM_WORKTREE_OWNER_BRANCH=
 FM_WORKTREE_OWNER_DETAIL=
 
-# The one place that knows bin/fm-brief.sh's `fm/<task-id>` branch convention.
-fm_worktree_owner_branch_task_id() {  # <branch> -> task id on stdout
-  local branch=${1-} id
-  case "$branch" in
-    fm/?*) id=${branch#fm/} ;;
-    *) return 1 ;;
-  esac
-  fm_worktree_binding_task_id_valid "$id" || return 1
-  printf '%s\n' "$id"
-}
-
-# Condition 2: the claimant named by the branch must be a task this home records,
-# and that record must point back at this exact copy.
 fm_worktree_owner_record_confirms() {  # <state-dir> <task-id> <worktree>
   local state=${1-} id=${2-} worktree=${3-} state_real meta
   state_real=$(fm_worktree_binding_state_resolve "$state" 2>/dev/null) || return 1
@@ -81,10 +65,25 @@ fm_worktree_owner_record_confirms() {  # <state-dir> <task-id> <worktree>
   [ "$FM_WORKTREE_RECORD_ACTIVE_PATH" = "$worktree" ]
 }
 
+fm_worktree_owner_endpoint_current_path() {  # <meta-file> <task-id>
+  local meta=${1-} id=${2-} backend target
+  fm_backend_validate_task_endpoint "$meta" "$id" >/dev/null 2>&1 || return 1
+  backend=$FM_BACKEND_VALIDATED_BACKEND
+  target=$FM_BACKEND_VALIDATED_TARGET
+  case "$backend" in
+    tmux)
+      fm_backend_source tmux >/dev/null 2>&1 || return 1
+      fm_backend_tmux_current_path "$target"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 # These result globals are read by the caller after this sourced helper returns.
 # shellcheck disable=SC2034
 fm_worktree_owner_resolve() {  # <worktree> <state-dir>
-  local worktree=${1-} state=${2-} state_real branch candidate
+  local worktree=${1-} state=${2-} state_real worktree_real branch meta id declared
+  local active_real current current_real candidate= candidate_count=0
   FM_WORKTREE_OWNER_TASK_ID=
   FM_WORKTREE_OWNER_STATE=
   FM_WORKTREE_OWNER_METHOD=
@@ -114,23 +113,41 @@ fm_worktree_owner_resolve() {  # <worktree> <state-dir>
     FM_WORKTREE_OWNER_DETAIL=$(fm_worktree_binding_detail)
     return 1
   fi
+  worktree_real=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || {
+    FM_WORKTREE_OWNER_DETAIL="cannot resolve the physical path of the copy at $worktree"
+    return 1
+  }
   branch=$(git -C "$worktree" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
   FM_WORKTREE_OWNER_BRANCH=$branch
-  if [ -z "$branch" ]; then
-    FM_WORKTREE_OWNER_DETAIL="the copy at $worktree names no owner and its checked-out branch is unreadable"
+  for meta in "$state_real"/*.meta; do
+    [ -f "$meta" ] || continue
+    id=${meta##*/}
+    id=${id%.meta}
+    fm_worktree_binding_task_id_valid "$id" || continue
+    declared=$(fm_meta_get "$meta" worktree_binding)
+    [ -z "$declared" ] || continue
+    fm_worktree_record_resolve "$meta" || continue
+    [ -d "$FM_WORKTREE_RECORD_ACTIVE_PATH" ] || continue
+    active_real=$(CDPATH='' cd -- "$FM_WORKTREE_RECORD_ACTIVE_PATH" 2>/dev/null && pwd -P) || continue
+    [ "$active_real" = "$worktree_real" ] || continue
+    current=$(fm_worktree_owner_endpoint_current_path "$meta" "$id" 2>/dev/null || true)
+    [ -n "$current" ] && [ -d "$current" ] || continue
+    current_real=$(CDPATH='' cd -- "$current" 2>/dev/null && pwd -P) || continue
+    [ "$current_real" = "$worktree_real" ] || continue
+    candidate=$id
+    candidate_count=$((candidate_count + 1))
+  done
+  if [ "$candidate_count" -eq 0 ]; then
+    FM_WORKTREE_OWNER_DETAIL="the unbound copy at $worktree has no single active task endpoint proving its current physical path"
     return 1
   fi
-  if ! candidate=$(fm_worktree_owner_branch_task_id "$branch"); then
-    FM_WORKTREE_OWNER_DETAIL="the copy at $worktree names no owner and its branch '$branch' is not a task branch"
-    return 1
-  fi
-  if ! fm_worktree_owner_record_confirms "$state_real" "$candidate" "$worktree"; then
-    FM_WORKTREE_OWNER_DETAIL="the copy at $worktree has branch '$branch' checked out, but this home has no record of task $candidate holding that copy"
+  if [ "$candidate_count" -ne 1 ]; then
+    FM_WORKTREE_OWNER_DETAIL="the unbound copy at $worktree has multiple active task endpoints claiming its current physical path"
     return 1
   fi
   FM_WORKTREE_OWNER_STATE=$state_real
   FM_WORKTREE_OWNER_TASK_ID=$candidate
-  FM_WORKTREE_OWNER_METHOD=branch
+  FM_WORKTREE_OWNER_METHOD=endpoint
   return 0
 }
 
@@ -139,8 +156,8 @@ fm_worktree_owner_resolve() {  # <worktree> <state-dir>
 # endpoint validation needs it, so deleting it would make the record permanently
 # un-tearable. The added line names the task proven to own the path instead, and
 # it is durable, so a failed later step is re-run idempotently.
-fm_worktree_owner_retire_pointer() {  # <meta-file> <owner-task-id>
-  local meta=${1-} owner=${2-} tmp
+fm_worktree_owner_retire_pointer() {  # <meta-file> <owner-state> <owner-task-id>
+  local meta=${1-} owner_state=${2-} owner=${3-} owner_state_real tmp
   [ -f "$meta" ] || {
     echo "error: no task record at ${meta:-<empty>} to retire a copy pointer in" >&2
     return 1
@@ -149,8 +166,16 @@ fm_worktree_owner_retire_pointer() {  # <meta-file> <owner-task-id>
     echo "error: refusing to retire a copy pointer to an invalid owning task id" >&2
     return 1
   }
+  owner_state_real=$(fm_worktree_binding_state_resolve "$owner_state" 2>/dev/null) || {
+    echo "error: refusing to retire a copy pointer to an invalid owning state" >&2
+    return 1
+  }
   tmp="$meta.forget.$$"
-  if ! { awk '!/^worktree_retired=/' "$meta" && printf 'worktree_retired=%s\n' "$owner"; } > "$tmp" 2>/dev/null; then
+  if ! {
+    awk '!/^worktree_retired(_state)?=/' "$meta"
+    printf 'worktree_retired_state=%s\n' "$owner_state_real"
+    printf 'worktree_retired=%s\n' "$owner"
+  } > "$tmp" 2>/dev/null; then
     rm -f "$tmp" 2>/dev/null || true
     echo "error: could not rewrite $meta to retire its stale copy pointer" >&2
     return 1

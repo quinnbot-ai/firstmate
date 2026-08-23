@@ -72,7 +72,8 @@
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
 #   --forget-worktree records this task's recorded copy as retired (a durable
-#   worktree_retired=<owner> line; the stale worktree= value is kept as history)
+#   worktree_retired_state=<state> and worktree_retired=<owner> lines; the stale
+#   worktree= value is kept as history)
 #   and then cleans up records only. It refuses unless another task provably owns
 #   the recorded copy, so it can never become a way to skip the isolated-copy
 #   checks. It is still a TEARDOWN: the lane's records go away with the pointer.
@@ -552,14 +553,14 @@ reject_unwarranted_forget_worktree() {  # <why-it-does-not-apply>
 # bin/fm-worktree-owner-lib.sh's fm_worktree_owner_retire_pointer.
 # Deliberately narrow: only reachable once the copy itself has already proven a
 # different task owns it.
-retire_recycled_worktree_record() {  # <owner-task-id> <owner-branch>
-  local owner=$1 owner_branch=$2 stale=$WT
-  if ! fm_worktree_owner_retire_pointer "$META" "$owner"; then
+retire_recycled_worktree_record() {  # <owner-state> <owner-task-id> <owner-branch>
+  local owner_state=$1 owner=$2 owner_branch=$3 stale=$WT
+  if ! fm_worktree_owner_retire_pointer "$META" "$owner_state" "$owner"; then
     echo "REFUSED: could not retire task $ID's stale copy pointer in $META." >&2
     return 1
   fi
   WT=
-  echo "note: retired task $ID's stale pointer to $stale, which task $owner owns (branch $owner_branch); cleaning up task $ID's records only." >&2
+  echo "note: retired task $ID's stale pointer to $stale, which task $owner in $owner_state owns (branch $owner_branch); cleaning up task $ID's records only." >&2
   return 0
 }
 
@@ -609,7 +610,7 @@ validate_worktree_ownership() {
         echo "Cannot retire task $ID's pointer without a positively confirmed current owner." >&2
         return 1
       fi
-      retire_recycled_worktree_record "$FM_WORKTREE_OWNER_TASK_ID" \
+      retire_recycled_worktree_record "$FM_WORKTREE_OWNER_STATE" "$FM_WORKTREE_OWNER_TASK_ID" \
         "${FM_WORKTREE_OWNER_BRANCH:-$owner_branch}" || return 1
       return 0
     fi
@@ -622,12 +623,10 @@ validate_worktree_ownership() {
     return 1
   fi
 
-  # No readable binding in the copy. Ownership can still be proven from the copy
-  # itself - the branch it actually has checked out, cross-confirmed against the
-  # claimant's own record - which is what covers the collisions that already
-  # existed when bindings arrived. bin/fm-worktree-owner-lib.sh owns that proof
-  # and the conditions that keep it quiet; an unprovable copy resolves to nothing
-  # and must remain untouched.
+  # No readable binding in the copy. Legacy ownership can still be proven by a
+  # claimant's live endpoint and active record. bin/fm-worktree-owner-lib.sh owns
+  # that proof and the conditions that keep it quiet; an unprovable copy resolves
+  # to nothing and must remain untouched.
   if fm_worktree_owner_resolve "$WT" "$STATE"; then
     if [ "$FM_WORKTREE_OWNER_STATE" = "$(fm_worktree_binding_state_resolve "$STATE")" ] \
        && [ "$FM_WORKTREE_OWNER_TASK_ID" = "$ID" ]; then
@@ -636,7 +635,7 @@ validate_worktree_ownership() {
     fi
     owner_branch=${FM_WORKTREE_OWNER_BRANCH:-<unreadable>}
     if [ "$FORGET_WORKTREE" = 1 ]; then
-      retire_recycled_worktree_record "$FM_WORKTREE_OWNER_TASK_ID" "$owner_branch" || return 1
+      retire_recycled_worktree_record "$FM_WORKTREE_OWNER_STATE" "$FM_WORKTREE_OWNER_TASK_ID" "$owner_branch" || return 1
       return 0
     fi
     echo "REFUSED: the isolated copy at $WT is no longer task $ID's in $STATE; task $FM_WORKTREE_OWNER_TASK_ID in $FM_WORKTREE_OWNER_STATE owns it now." >&2

@@ -95,7 +95,8 @@ make_case() {
   local name=$1 case_dir fakebin
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data" "$fakebin"
+  mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data" \
+    "$case_dir/endpoints" "$fakebin"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
@@ -106,7 +107,22 @@ exit 0
 SH
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
-# tmux kill-window etc.: succeed silently.
+# tmux live-path proof reports the path registered for the requested endpoint.
+case "$*" in
+  *'#{pane_current_path}'*)
+    target=
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = -t ]; then
+        target=${2:-}
+        break
+      fi
+      shift
+    done
+    id=${target##*:fm-}
+    [ -n "$id" ] && [ -f "${FM_FAKE_ENDPOINT_ROOT:?FM_FAKE_ENDPOINT_ROOT unset}/$id.cwd" ] || exit 1
+    cat "$FM_FAKE_ENDPOINT_ROOT/$id.cwd"
+    ;;
+esac
 exit 0
 SH
   # Default gh-axi mock: no PR is associated with the branch, and viewing any PR
@@ -227,6 +243,7 @@ write_meta() {
     "project=$case_dir/project" \
     "kind=$kind" \
     "mode=$mode"
+  printf '%s\n' "$case_dir/wt" > "$case_dir/endpoints/task-x1.cwd"
 }
 
 # Commit something on the worktree's task branch. Args: case_dir [message]
@@ -565,6 +582,7 @@ run_teardown() {
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_FAKE_ENDPOINT_ROOT="$case_dir/endpoints" \
   PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
     "$TEARDOWN" task-x1 "$@"
 }
@@ -740,13 +758,14 @@ test_equal_task_id_in_another_home_is_not_local_ownership() {
 
 # The supported way out: retire the stale pointer, then clean up records only.
 test_forget_worktree_retires_the_stale_pointer_and_spares_the_copy() {
-  local case_dir rc
+  local case_dir rc state_real
   case_dir=$(make_case recycled-slot-forget)
   write_meta "$case_dir" no-mistakes ship
   declare_binding_in_meta "$case_dir"
   log_treehouse_calls "$case_dir"
   hand_worktree_to_other_task "$case_dir" live-lane fm/live-lane
   wt_commit "$case_dir" "live lane work"
+  state_real=$(CDPATH='' cd -- "$case_dir/state" && pwd -P)
 
   set +e
   run_teardown "$case_dir" --forget-worktree > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -763,8 +782,8 @@ test_forget_worktree_retires_the_stale_pointer_and_spares_the_copy() {
     || fail "forget-worktree: the live lane's ownership record was destroyed"
   [ "$FM_WORKTREE_BINDING_TASK_ID" = live-lane ] \
     || fail "forget-worktree: the copy's owner changed to $FM_WORKTREE_BINDING_TASK_ID"
-  assert_contains "$(cat "$case_dir/stderr")" "which task live-lane owns" \
-    "forget-worktree: retiring the pointer names the task that owns the copy"
+  assert_contains "$(cat "$case_dir/stderr")" "which task live-lane in $state_real owns" \
+    "forget-worktree: retiring the pointer names the task and state that own the copy"
   [ ! -s "$case_dir/treehouse.log" ] \
     || fail "forget-worktree: the live lane's copy was returned to the pool"
   pass "--forget-worktree retires the stale pointer and leaves the live copy alone"
@@ -958,9 +977,8 @@ test_dangling_binding_is_not_absent() {
 #
 # The collisions a home has ALREADY accumulated look different from the ones
 # above: neither the stale record nor the recycled copy carries an ownership
-# binding, because both predate it. Ownership is then read from the branch the
-# copy actually has checked out, cross-confirmed against that claimant's own
-# record (bin/fm-worktree-owner-lib.sh).
+# binding, because both predate it. Ownership is then proven by the claimant's
+# live endpoint and active record (bin/fm-worktree-owner-lib.sh).
 
 # Hand the copy to another task WITHOUT writing an ownership binding, the way a
 # slot recycled before bindings existed looks. Args: case_dir owner_task_id
@@ -974,6 +992,8 @@ hand_unbound_worktree_to_other_task() {
     "project=$case_dir/project" \
     "kind=ship" \
     "mode=no-mistakes"
+  rm -f "$case_dir/endpoints/task-x1.cwd"
+  printf '%s\n' "$case_dir/wt" > "$case_dir/endpoints/$owner.cwd"
 }
 
 # (z9) The uncovered case: no binding anywhere, so the pre-fix code let teardown
@@ -1043,6 +1063,7 @@ test_unconfirmed_branch_is_not_a_reassignment() {
   git -C "$case_dir/wt" checkout -q -b fm/ghost-lane
   wt_commit "$case_dir" "this task's own work"
   add_fork_with_pushed_branch "$case_dir"
+  rm -f "$case_dir/endpoints/task-x1.cwd"
 
   set +e
   run_teardown "$case_dir" --force > "$case_dir/force-stdout" 2> "$case_dir/force-stderr"
@@ -1846,6 +1867,8 @@ test_herdr_teardown_clears_escalation_marker() {
     'herdr_workspace_id=wG' \
     'herdr_tab_id=wG:tQ' \
     'herdr_pane_id=wG:pQ' >> "$case_dir/state/task-x1.meta"
+  declare_binding_in_meta "$case_dir"
+  bind_worktree_to_task_x1 "$case_dir"
   # A reachable session whose exact pane is already structurally gone: the
   # locked close is a no-op and the record gate sees a confirmed-gone pane.
   cat > "$case_dir/fakebin/herdr" <<SH
@@ -1880,6 +1903,8 @@ configure_flat_herdr_teardown_case() {  # <case-dir>
     'herdr_workspace_id=wG' \
     'herdr_tab_id=wG:tQ' \
     'herdr_pane_id=wG:pQ' >> "$case_dir/state/task-x1.meta"
+  declare_binding_in_meta "$case_dir"
+  bind_worktree_to_task_x1 "$case_dir"
   cat > "$case_dir/fakebin/herdr" <<SH
 #!/usr/bin/env bash
 set -u
@@ -2108,11 +2133,14 @@ configure_secondmate_with_herdr_child() {  # <case-dir>
     "project=$case_dir/project" \
     "kind=ship" \
     "mode=local-only" \
+    "worktree_binding=fm-worktree-binding.v2" \
     "backend=herdr" \
     "herdr_session=childsession" \
     "herdr_workspace_id=wC" \
     "herdr_tab_id=wC:t1" \
     "herdr_pane_id=wC:p1"
+  fm_worktree_binding_write "$child_wt" "$home/state" child-herdr \
+    || fail "could not bind the Herdr child copy"
   : > "$home/state/child-herdr.status"
   : > "$home/state/child-herdr.turn-ended"
   cat > "$case_dir/fakebin/herdr" <<SH
@@ -2190,7 +2218,10 @@ configure_secondmate_with_tmux_children() {  # <case-dir>
       "worktree=$child_wt" \
       "project=$case_dir/project" \
       "kind=ship" \
-      "mode=local-only"
+      "mode=local-only" \
+      "worktree_binding=fm-worktree-binding.v2"
+    fm_worktree_binding_write "$child_wt" "$home/state" "$child" \
+      || fail "could not bind the $child copy"
     : > "$home/state/$child.status"
   done
 }
@@ -2378,11 +2409,14 @@ configure_nested_secondmate_with_herdr_grandchild() {  # <case-dir>
     "project=$case_dir/project" \
     "kind=ship" \
     "mode=local-only" \
+    "worktree_binding=fm-worktree-binding.v2" \
     "backend=herdr" \
     "herdr_session=grandchildsession" \
     "herdr_workspace_id=wG" \
     "herdr_tab_id=wG:t1" \
     "herdr_pane_id=wG:p1"
+  fm_worktree_binding_write "$grandchild_wt" "$nested_home/state" grandchild-herdr \
+    || fail "could not bind the Herdr grandchild copy"
   : > "$nested_home/state/grandchild-herdr.status"
   : > "$nested_home/state/grandchild-herdr.turn-ended"
   cat > "$case_dir/fakebin/herdr" <<SH
@@ -2444,6 +2478,8 @@ configure_herdr_projection_teardown_case() {  # <case-dir>
     'herdr_workspace_id=w1' \
     'herdr_tab_id=w1:t2' \
     'herdr_pane_id=w1:p2' >> "$case_dir/state/task-x1.meta"
+  declare_binding_in_meta "$case_dir"
+  bind_worktree_to_task_x1 "$case_dir"
   printf '%s\n' \
     'version=1' \
     'task_id=task-x1' \
@@ -2838,6 +2874,8 @@ test_lsof_absent_reaps_tmux_process_group() {
   local case_dir rc pid path_without_lsof
   case_dir=$(make_case lsof-absent-process-group-reap)
   write_meta "$case_dir" no-mistakes ship
+  declare_binding_in_meta "$case_dir"
+  bind_worktree_to_task_x1 "$case_dir"
   land_shippable_commit "$case_dir"
   path_without_lsof=$(make_path_without_lsof "$case_dir")
   PATH="$path_without_lsof" command -v lsof >/dev/null 2>&1 \

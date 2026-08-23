@@ -47,7 +47,12 @@ PERL
 }
 
 fm_brief_refuse_missing_helper_scripts() {  # <brief> <task-worktree>
-  local brief=$1 worktree=$2 raw basename resolved missing=0 seen=$'\n'
+  local brief=$1 worktree=$2 references raw basename resolved missing=0 seen=$'\n'
+  if ! references=$(fm_brief_helper_script_references "$brief"); then
+    printf 'error: could not inspect brief helper references in %s; refusing dispatch\n' "$brief" >&2
+    return 1
+  fi
+  [ -n "$references" ] || return 0
   while IFS=$'\t' read -r raw basename; do
     [ -n "$basename" ] || continue
     case "$seen" in
@@ -60,6 +65,6 @@ fm_brief_refuse_missing_helper_scripts() {  # <brief> <task-worktree>
         "$raw" "$resolved" >&2
       missing=1
     fi
-  done < <(fm_brief_helper_script_references "$brief")
+  done <<< "$references"
   return "$missing"
 }

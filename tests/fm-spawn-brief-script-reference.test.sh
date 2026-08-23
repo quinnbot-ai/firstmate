@@ -411,6 +411,30 @@ test_dont_forget_reference_refuses() {
   pass "don't-forget instructions cannot bypass helper validation"
 }
 
+test_brief_parser_failure_refuses_and_rolls_back() {
+  local id=brief-parser-failure-a21 rec out status
+  rec=$(make_case parser-failure "$id" 'Run bin/fm-any-helper.sh before editing.')
+  read_case "$rec"
+  cat > "$FAKEBIN_DIR/perl" <<'SH'
+#!/usr/bin/env bash
+exit 7
+SH
+  chmod +x "$FAKEBIN_DIR/perl"
+
+  set +e
+  out=$(run_spawn "$id")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "spawn dispatched after its brief parser failed: $out"
+  assert_contains "$out" "could not inspect brief helper references" \
+    "parser failure did not produce a fail-closed refusal"
+  assert_absent "$HOME_DIR/state/$id.meta" "parser failure published worker metadata"
+  assert_absent "$HOME_DIR/state/$id.endpoint" "parser failure leaked its fresh endpoint"
+  assert_absent "$HOME_DIR/state/$id.lease" "parser failure leaked its pooled worktree lease"
+  pass "brief parser failures refuse dispatch and roll back fresh resources"
+}
+
 test_linked_homes_share_pool_transition_lock() {
   local rec linked state_a state_b lock_a lock_b
   rec=$(make_case cross-home-pool-lock brief-cross-home-a20 'Proceed with the task.')
@@ -445,6 +469,7 @@ test_mixed_negation_still_refuses_positive_instruction
 test_sentence_after_negation_still_refuses_positive_instruction
 test_prose_only_mention_refuses
 test_dont_forget_reference_refuses
+test_brief_parser_failure_refuses_and_rolls_back
 test_linked_homes_share_pool_transition_lock
 test_pool_transition_lock_precedes_allocation
 test_prepublication_failure_rolls_back_fresh_resources

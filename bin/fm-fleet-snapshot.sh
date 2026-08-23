@@ -428,7 +428,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 }
 
 task_json_lines() {
-  local meta id kind harness mode yolo project worktree retired_worktree worktree_retired_to home projects backend target status_log report_path
+  local meta id kind harness mode yolo project worktree retired_worktree worktree_retired_to worktree_retired_state home projects backend target status_log report_path
   local remote_host remote_root remote_state remote_rc remote_home_present
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json retired_worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
@@ -446,12 +446,14 @@ task_json_lines() {
     worktree=$(meta_value "$meta" worktree)
     retired_worktree=
     worktree_retired_to=
+    worktree_retired_state=
     if fm_worktree_record_resolve "$meta"; then
       worktree=$FM_WORKTREE_RECORD_ACTIVE_PATH
     elif [ -n "$FM_WORKTREE_RECORD_RETIRED_OWNER" ]; then
       retired_worktree=$worktree
       worktree=
       worktree_retired_to=$FM_WORKTREE_RECORD_RETIRED_OWNER
+      worktree_retired_state=$FM_WORKTREE_RECORD_RETIRED_STATE
     fi
     home=$(meta_value "$meta" home)
     projects=$(meta_value "$meta" projects)
@@ -574,6 +576,7 @@ task_json_lines() {
       --arg project "$project" \
       --arg worktree "$worktree" \
       --arg worktree_retired_to "$worktree_retired_to" \
+      --arg worktree_retired_state "$worktree_retired_state" \
       --arg home "$home" \
       --arg projects "$projects" \
       --arg backend "$backend" \
@@ -615,6 +618,7 @@ task_json_lines() {
           report:$report
         },
         worktree_retired_to:($worktree_retired_to | if . == "" then null else . end),
+        worktree_retired_state:($worktree_retired_state | if . == "" then null else . end),
         secondmate_projects:($projects | if . == "" then [] else split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(. != "")) end),
         current_state:($current_state + {observed_at:$observed_at,freshness:"fresh"}),
         endpoint:{target:($target | if . == "" then null else . end),exists:$endpoint_exists,agent_alive:$agent_alive,
