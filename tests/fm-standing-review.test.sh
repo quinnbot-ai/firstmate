@@ -544,6 +544,49 @@ test_a_stale_source_suppresses_its_own_rules() {
   pass "G2: a review reports its own blindness before what it saw while blind"
 }
 
+test_source_replacement_cannot_reuse_an_earlier_freshness_check() {
+  local home hook_dir out
+  home=$(make_home replaced-source acme)
+  hook_dir="$home/python-hook"
+  mkdir -p "$hook_dir"
+  write_source "$home" '[{"venture":"acme","cost_30d":10,"commits_30d":1}]'
+  printf '{"rows":[{"venture":"acme","cost_30d":10,"commits_30d":0}]}\n' \
+    > "$home/stale-source.json"
+  touch -t 200001010000 "$home/stale-source.json"
+  write_spec "$home" r '[{"field":"commits_30d","op":"eq","value":0}]' \
+    '["cost_30d","commits_30d"]'
+  cat > "$hook_dir/sitecustomize.py" <<'PY'
+import os
+from pathlib import Path
+
+original_stat = Path.stat
+replaced = False
+target = os.path.realpath(os.environ["FM_RACE_SOURCE"])
+
+
+def replace_after_stat(path, *args, **kwargs):
+    global replaced
+    result = original_stat(path, *args, **kwargs)
+    if not replaced and os.path.realpath(os.fspath(path)) == target:
+        replaced = True
+        os.replace(os.environ["FM_RACE_REPLACEMENT"], os.fspath(path))
+    return result
+
+
+Path.stat = replace_after_stat
+PY
+
+  out=$(PYTHONPATH="$hook_dir" FM_RACE_SOURCE="$home/source.json" \
+    FM_RACE_REPLACEMENT="$home/stale-source.json" \
+    "$SCAN" --home "$home" --id r)
+
+  assert_contains "$out" "source-invalid" \
+    "a replaced evidence source reused the prior file's freshness result"
+  assert_not_contains "$out" "candidate" \
+    "stale replacement bytes produced an actionable rule finding"
+  pass "freshness and evidence parsing use one stable source snapshot"
+}
+
 test_only_one_finding_is_emitted_per_review() {
   local home out lines
   home=$(make_home one-line acme beta gamma)
@@ -1033,6 +1076,7 @@ test_drifting_evidence_does_not_defeat_the_latch
 test_the_latch_expires_so_a_recurrence_can_wake_again
 test_a_stale_source_becomes_the_finding
 test_a_stale_source_suppresses_its_own_rules
+test_source_replacement_cannot_reuse_an_earlier_freshness_check
 test_only_one_finding_is_emitted_per_review
 test_rank_decides_which_finding_is_reported
 test_an_unusable_spec_is_reported_rather_than_ignored

@@ -215,13 +215,13 @@ fm_worktree_owner_resolve() {  # <worktree> <state-dir> [<asserted-state> <asser
       id=${meta##*/}
       id=${id%.meta}
       fm_worktree_binding_task_id_valid "$id" || continue
-      declared=$(fm_meta_get "$meta" worktree_binding)
-      [ -z "$declared" ] || continue
       fm_worktree_record_resolve "$meta" || continue
       [ -d "$FM_WORKTREE_RECORD_ACTIVE_PATH" ] || continue
       active_real=$(CDPATH='' cd -- "$FM_WORKTREE_RECORD_ACTIVE_PATH" 2>/dev/null && pwd -P) || continue
       [ "$active_real" = "$worktree_real" ] || continue
       claimant_count=$((claimant_count + 1))
+      declared=$(fm_meta_get "$meta" worktree_binding)
+      [ -z "$declared" ] || continue
       current=$(fm_worktree_owner_endpoint_current_path "$meta" "$id" 2>/dev/null || true)
       [ -n "$current" ] && [ -d "$current" ] || continue
       current_real=$(CDPATH='' cd -- "$current" 2>/dev/null && pwd -P) || continue

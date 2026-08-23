@@ -401,6 +401,27 @@ test_ambiguous_legacy_claimants_require_an_explicit_owner() {
   pass "reconcile requires an explicit owner when legacy records collide"
 }
 
+test_declared_record_without_marker_remains_a_claimant() {
+  local case_dir out
+  case_dir=$(make_home declared-claimant)
+  record_lane "$case_dir" lane-a "worktree_binding=fm-worktree-binding.v2"
+  record_lane "$case_dir" lane-b
+  place_endpoint "$case_dir" lane-a
+  place_endpoint "$case_dir" lane-b
+
+  out=$(run_reconcile "$case_dir" --apply)
+
+  assert_contains "$out" "UNRESOLVED:" \
+    "declared-claimant: automatic legacy ownership ignored a declared claimant"
+  assert_no_grep "worktree_retired" "$case_dir/state/lane-a.meta" \
+    "declared-claimant: the declared claimant was retired"
+  assert_no_grep "worktree_retired" "$case_dir/state/lane-b.meta" \
+    "declared-claimant: the legacy claimant was retired"
+  fm_worktree_binding_is_absent "$case_dir/wt" \
+    || fail "declared-claimant: ambiguity created an ownership binding"
+  pass "declared records remain claimants when their private marker is missing"
+}
+
 test_legacy_claimant_inventory_spans_linked_homes() {
   local case_dir mate out
   case_dir=$(make_home linked-home-claimants)
@@ -469,5 +490,6 @@ test_branch_name_cannot_override_live_endpoint_owner
 test_secondmate_home_is_skipped
 test_repair_never_touches_the_status_log
 test_ambiguous_legacy_claimants_require_an_explicit_owner
+test_declared_record_without_marker_remains_a_claimant
 test_legacy_claimant_inventory_spans_linked_homes
 test_legacy_endpoint_proof_supports_every_flat_backend

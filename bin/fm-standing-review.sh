@@ -189,18 +189,42 @@ def json_loads_finite(text: str):
     return json.loads(text, parse_constant=reject_constant, parse_float=finite_float)
 
 
-def read_regular_text(path: Path) -> str:
+def stat_identity(info):
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def read_regular_snapshot(path: Path, expected=None) -> str:
     fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
             raise ValueError(f"not a regular file: {path}")
         handle = os.fdopen(fd, "r", encoding="utf-8")
         fd = -1
         with handle:
-            return handle.read()
+            text = handle.read()
+            finished = os.fstat(handle.fileno())
+        current = path.stat()
+        identities = {stat_identity(opened), stat_identity(finished), stat_identity(current)}
+        if expected is not None:
+            identities.add(stat_identity(expected))
+        if len(identities) != 1:
+            raise ValueError(f"file changed during review: {path}")
+        return text
     finally:
         if fd >= 0:
             os.close(fd)
+
+
+def read_regular_text(path: Path) -> str:
+    return read_regular_snapshot(path)
 
 
 def fmt_number(value) -> str:
@@ -682,7 +706,8 @@ def build_structural(spec, review_id, now):
     out = []
     for name, source in sorted(spec["sources"].items()):
         try:
-            mtime = int(source["path"].stat().st_mtime)
+            source_stat = source["path"].stat()
+            mtime = int(source_stat.st_mtime)
         except OSError:
             out.append(
                 structural(
@@ -716,7 +741,7 @@ def build_structural(spec, review_id, now):
                 )
             )
             continue
-        fresh[name] = source
+        fresh[name] = dict(source, snapshot_stat=source_stat)
     return out, fresh
 
 
@@ -868,7 +893,7 @@ def main() -> int:
             for name, source in fresh_sources.items():
                 try:
                     payloads[name] = json_loads_finite(
-                        read_regular_text(source["path"])
+                        read_regular_snapshot(source["path"], source["snapshot_stat"])
                     )
                 except (OSError, ValueError) as exc:
                     candidates.append(
