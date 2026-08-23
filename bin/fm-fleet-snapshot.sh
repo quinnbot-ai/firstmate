@@ -31,6 +31,10 @@
 #     It never changes captain_actionable; renderers may use it to keep
 #     prose-deferred rows out of default views.
 #   tasks[]: one row per state/<id>.meta, sorted by id.
+#     An active task exposes its positively resolved copy at paths.worktree.
+#     A retired stale pointer instead exposes its historical path at
+#     paths.retired_worktree and its proven successor through
+#     worktree_retired_to and worktree_retired_state.
 #     current_state is parsed from bin/fm-crew-state.sh <id> and preserves
 #     state, source, detail, and raw line separately.
 #     paths.status_log.last_event is historical wake-event data only, never

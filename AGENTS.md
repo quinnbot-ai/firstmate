@@ -363,7 +363,7 @@ Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` and the forge's `pr_he
 Tell the captain the PR's full URL, always the complete `https://...` link rather than a bare `#number`, a concise outcome summary, and the no-mistakes risk level when applicable.
 A captain instruction to merge is explicit authority; `yolo` is the only standing routine merge authority.
 For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.
-For a recurring review of a surface rather than a one-off poll, use `bin/fm-standing-review-arm.sh`, which owns the spec, the cadence, and the conditions that keep such a check from waking firstmate for anything a supervisor cannot act on.
+For a recurring review of a surface rather than a one-off poll, use `bin/fm-standing-review-arm.sh`; `docs/configuration.md` owns operator setup, while the review and arm script headers own their respective mechanics.
 
 Tear down a ship task only after landing is confirmed.
 A teardown refusal - for uncommitted or unlanded work, or because the recorded isolated copy now belongs to another task - is a stop-and-investigate result, never an obstacle to bypass.

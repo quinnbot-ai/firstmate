@@ -10,6 +10,9 @@
 # only a fallback when fetch fails (stale recorded SHAs must never win over a
 # reachable remote PR head). If neither PR head can be resolved, fall back to
 # the local branch with a warning. Without pr=, compare the local branch.
+# Before reading that local comparison commit, the helper positively validates
+# the task's current worktree ownership and refuses a retired or unverifiable
+# recorded pointer rather than reviewing another task's recycled copy.
 # Usage: fm-review-diff.sh <task-id> [--stat]
 #   --stat prints only the stat summary; default prints stat summary plus full diff.
 set -eu

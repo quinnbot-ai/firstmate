@@ -23,10 +23,11 @@
 #      ship or scout record that declares worktree_binding=fm-worktree-binding.v2
 #      must prove its private current-task binding before any worktree read.
 #      A missing, unreadable, or mismatched declared binding is unknown/none
-#      rather than a plausible verdict about another recycled lane. Legacy
-#      records remain readable unless a current marker positively proves that
-#      their path has been reassigned. Persistent secondmate homes never use
-#      reusable-task bindings.
+#      rather than a plausible verdict about another recycled lane. A legacy
+#      record with no marker remains readable only when the pool-wide ownership
+#      proof identifies it as the sole current claimant; ambiguous legacy claims
+#      are unknown/none. Persistent secondmate homes never use reusable-task
+#      bindings.
 #      A meta recording remote_host= is a remote secondmate: its worktree and
 #      endpoint live on that host, so the local worktree and pane reads are
 #      skipped and the remote host is asked for the endpoint's recovery-grade state
@@ -57,8 +58,8 @@
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
 #      `resolved` never become current state or detail.
-#   5. Missing meta, torn-down worktree, or unverifiable declared local task
-#      binding: report unknown · none. If no run is attributed to this crew, a
+#   5. Missing meta, torn-down worktree, or unverifiable local task ownership:
+#      report unknown · none. If no run is attributed to this crew, a
 #      dead endpoint also reports unknown · none rather than trusting a stale
 #      status log.
 #

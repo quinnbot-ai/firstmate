@@ -177,10 +177,10 @@ If another live session holds the fleet lock, both surfaces keep the alarm but s
 Ship briefs also tell the crewmate to verify `pwd -P` and `git rev-parse --show-toplevel` before creating `fm/<id>`, then stop with a blocked status if it landed in the primary checkout.
 
 The same shared-repository topology creates a second, quieter exposure: firstmate never updates itself, so a change merged to the default branch does not reach a home's checked-out commit until the captain approves `/updatefirstmate`.
-Every home reads its tooling from a code root, and the primary home plus each linked-worktree secondmate home follow the same repository, so a code root left behind leaves all of them equally behind at once.
+Every home reads its tooling from its own checked-out code root; local linked-worktree homes share repository refs but can remain at different commits, while remote homes compare against their separate tracked roots.
 `fm-code-currency-lib.sh` compares the commit `FM_ROOT` actually has checked out against the remote-tracking ref of the default branch it follows, and `bin/fm-bootstrap.sh` reports a commit gap as `CODE_STALE:`, unproven tracked drift at a current commit as `CODE_DRIFT:`, or an unresolved changed-snapshot relation as `CODE_CURRENCY:` during session start.
 The comparison is a local read of an already-fetched ref, so the reported gap is a floor rather than a live query, and the check never fetches, fast-forwards, or otherwise closes the gap it reports: a home may be pinned at an older commit deliberately, and only the captain moves it.
-Because the checkout is unlocked, both diagnostics avoid claiming which code a running process has engaged, even when inspected worktree bytes match a commit.
+Because the checkout is unlocked, these diagnostics avoid claiming which code a running process has engaged, even when inspected worktree bytes match a commit.
 
 ## No-mistakes gate authority boundary
 

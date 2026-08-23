@@ -144,9 +144,9 @@
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
 #   refuses the spawn rather than risking a PR based on stale history.
-#   Before dispatch, every syntactic bin/fm-*.sh reference in the brief is
-#   resolved against that actual task worktree.  Missing helpers refuse the
-#   dispatch without interpreting open-ended natural language
+#   Before dispatch, each bin/fm-*.sh reference used as an executable brief
+#   instruction is resolved against that actual task worktree. Missing helpers
+#   refuse dispatch, while descriptive and prohibitive references do not
 #   (bin/fm-brief-script-reference-lib.sh).
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]

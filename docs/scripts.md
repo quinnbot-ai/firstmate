@@ -106,13 +106,14 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-check-lib.sh`        | Validate custom-check registrations and prepare private execution snapshots          |
 | `fm-tool-update-check.sh` | Report watched tooling with an update available, and updates installed but left inert by PATH order |
 | `fm-standing-review.sh`  | Run one standing review over declared evidence sources and print at most one admissible wake line |
-| `fm-standing-review-arm.sh` | Validate a standing review's spec, then generate and register its watcher check |
+| `fm-standing-review-arm.sh` | Validate, arm, list, or disarm standing-review watcher checks |
 | `fm-pr-lib.sh`           | Own canonical task and PR validation plus private atomic PR-poll publication and identity-bound retirement |
 | `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated PR/MR-poll sidecars           |
 | `fm-pr-check-migrate.sh` | Quarantine older task polls without execution and rebuild only canonical polls       |
 | `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, then atomically arm a static merge poll |
 | `fm-pr-merge.sh`         | Record PR metadata, then merge a task's canonical full GitHub or GitLab URL          |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task with an explicit delivery mode |
+| `fm-reconcile-worktree-pointers.sh` | Report stale recorded-copy pointers and retire only positively bound pointers on explicit apply |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                      |
