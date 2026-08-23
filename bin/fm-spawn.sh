@@ -730,22 +730,45 @@ spawn_treehouse_holder_leases() {
   ' 2>/dev/null
 }
 
-spawn_treehouse_rollback_unparsed_allocation() {
-  local current allocation rollback_path rollback_lease_id
-  current=$(spawn_treehouse_holder_leases) || return 1
-  allocation=$(printf '%s\n' "$current" | jq -ce \
-    --argjson before "$SPAWN_TREEHOUSE_LEASES_BEFORE" '
-      [ .[]
-        | select(.lease_id as $lease_id
-          | (($before | map(.lease_id) | index($lease_id)) == null))
-      ]
-      | if length == 1 then .[0] else empty end
-    ' 2>/dev/null) || return 1
-  rollback_path=$(printf '%s\n' "$allocation" | jq -er '.path' 2>/dev/null) || return 1
-  rollback_lease_id=$(printf '%s\n' "$allocation" | jq -er '.lease_id' 2>/dev/null) || return 1
-  ( cd "$PROJ_ABS" && treehouse return --force \
-      --if-lease-id "$rollback_lease_id" --if-lease-holder "$ID" \
-      "$rollback_path" ) >/dev/null 2>&1
+spawn_treehouse_rollback_unparsed_allocation() {  # [known-lease-id]
+  local known_lease_id=${1:-} current allocation rollback_path rollback_lease_id
+  local attempt=0 max_attempts=20
+  while [ "$attempt" -lt "$max_attempts" ]; do
+    current=$(spawn_treehouse_holder_leases) || {
+      attempt=$((attempt + 1))
+      [ "$attempt" -ge "$max_attempts" ] || sleep 0.1
+      continue
+    }
+    if [ -n "$known_lease_id" ]; then
+      allocation=$(printf '%s\n' "$current" | jq -c --arg lease_id "$known_lease_id" '
+        [ .[] | select(.lease_id == $lease_id) ]
+        | if length == 1 then .[0] elif length == 0 then null else error("duplicate lease identity") end
+      ' 2>/dev/null) || allocation=
+      [ "$allocation" != null ] || return 0
+    else
+      allocation=$(printf '%s\n' "$current" | jq -ce \
+        --argjson before "$SPAWN_TREEHOUSE_LEASES_BEFORE" '
+          [ .[]
+            | select(.lease_id as $lease_id
+              | (($before | map(.lease_id) | index($lease_id)) == null))
+          ]
+          | if length == 1 then .[0] else error("allocation is not unique") end
+        ' 2>/dev/null) || allocation=
+    fi
+    if [ -n "$allocation" ]; then
+      rollback_path=$(printf '%s\n' "$allocation" | jq -er '.path' 2>/dev/null) || rollback_path=
+      rollback_lease_id=$(printf '%s\n' "$allocation" | jq -er '.lease_id' 2>/dev/null) || rollback_lease_id=
+      if [ -n "$rollback_path" ] && [ -n "$rollback_lease_id" ] \
+         && ( cd "$PROJ_ABS" && treehouse return --force \
+              --if-lease-id "$rollback_lease_id" --if-lease-holder "$ID" \
+              "$rollback_path" ) >/dev/null 2>&1; then
+        return 0
+      fi
+    fi
+    attempt=$((attempt + 1))
+    [ "$attempt" -ge "$max_attempts" ] || sleep 0.1
+  done
+  return 1
 }
 
 spawn_fresh_resources_rollback() {
@@ -2383,15 +2406,16 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     echo "error: treehouse could not allocate a durable worktree lease for $ID" >&2
     exit 1
   }
+  SPAWN_TREEHOUSE_LEASE_ID=$(printf '%s\n' "$lease_json" | jq -er '.lease_id | select(type == "string" and length > 0)' 2>/dev/null || true)
   WT=$(printf '%s\n' "$lease_json" | jq -er '.path | select(type == "string" and length > 0)' 2>/dev/null) || {
-    if ! spawn_treehouse_rollback_unparsed_allocation; then
+    if ! spawn_treehouse_rollback_unparsed_allocation "$SPAWN_TREEHOUSE_LEASE_ID"; then
       echo "warning: could not identify and return the malformed allocation for $ID" >&2
     fi
     echo "error: treehouse returned a lease without a valid worktree path for $ID" >&2
     exit 1
   }
   SPAWN_FRESH_WORKTREE_PENDING=1
-  SPAWN_TREEHOUSE_LEASE_ID=$(printf '%s\n' "$lease_json" | jq -er '.lease_id | select(type == "string" and length > 0)' 2>/dev/null) || {
+  [ -n "$SPAWN_TREEHOUSE_LEASE_ID" ] || {
     echo "error: treehouse returned a lease without an identity for $ID" >&2
     exit 1
   }

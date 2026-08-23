@@ -46,13 +46,15 @@ sub is_instruction {
   my ($text, $start, $in_fence) = @_;
   return 1 if $in_fence;
   my $prefix = clause_prefix($text, $start);
+  $prefix =~ s/`+\s*$//;
   $prefix =~ s/^\s+|\s+$//g;
   return 1 if $prefix eq '' || $prefix =~ /^\$\s*$/;
   return 1 if $prefix =~ /\bdon['’]t\s+forget\b/i;
   return 0 if $prefix =~ /\b(?:do\s+not|don['’]t|must\s+not|must\s+never|should\s+not|never|avoid)\b/i;
   return 1 if $prefix =~ /\b(?:must|shall|should|need(?:s)?\s+to|required\s+to|have\s+to)\b/i;
-  return 0 if $prefix =~ /^(?:the|a|an|this|that|these|those|it|they|you|we|i|if|when|whenever|where|while|because|although|historically|previously|formerly|in\s+(?:older|previous|prior|legacy|historical)\b)\b/i;
-  return 1;
+  return 1 if $prefix =~ /\b(?:make\s+sure\s+to|ensure\s+you)\b/i;
+  return 1 if $prefix =~ /^(?:(?:please|then|instead)\s+)*[A-Za-z][A-Za-z0-9'’_-]*(?:\s+(?:and|then)\s+[A-Za-z][A-Za-z0-9'’_-]*)*$/i;
+  return 0;
 }
 
 sub emit_scripts {

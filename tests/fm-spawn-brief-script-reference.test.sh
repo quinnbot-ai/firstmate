@@ -74,6 +74,12 @@ case "${1:-}" in
     : > "${FM_FAKE_TREEHOUSE_ALLOCATION:?FM_FAKE_TREEHOUSE_ALLOCATION unset}"
     ;;
   status)
+    if [ "${FM_FAKE_TREEHOUSE_STATUS_FAIL_AFTER_GET_ONCE:-0}" = 1 ] \
+       && [ -e "${FM_FAKE_TREEHOUSE_ALLOCATION:?FM_FAKE_TREEHOUSE_ALLOCATION unset}" ] \
+       && [ ! -e "${FM_FAKE_TREEHOUSE_STATUS_FAILED:?FM_FAKE_TREEHOUSE_STATUS_FAILED unset}" ]; then
+      : > "$FM_FAKE_TREEHOUSE_STATUS_FAILED"
+      exit 1
+    fi
     if [ -e "${FM_FAKE_TREEHOUSE_ALLOCATION:?FM_FAKE_TREEHOUSE_ALLOCATION unset}" ]; then
       printf '[{"path":"%s","status":"leased","lease_id":"%s","lease_holder":"%s","processes":[]}]\n' \
         "${FM_FAKE_TREEHOUSE_PATH:?FM_FAKE_TREEHOUSE_PATH unset}" \
@@ -148,7 +154,9 @@ run_spawn() {
     FM_FAKE_TREEHOUSE_LEASE_ID="lease-$id" \
     FM_FAKE_TREEHOUSE_HOLDER="$id" \
     FM_FAKE_TREEHOUSE_ALLOCATION="$HOME_DIR/state/$id.treehouse-allocation" \
+    FM_FAKE_TREEHOUSE_STATUS_FAILED="$HOME_DIR/state/$id.treehouse-status-failed" \
     FM_FAKE_TREEHOUSE_RESULT="${FM_FAKE_TREEHOUSE_RESULT:-complete}" \
+    FM_FAKE_TREEHOUSE_STATUS_FAIL_AFTER_GET_ONCE="${FM_FAKE_TREEHOUSE_STATUS_FAIL_AFTER_GET_ONCE:-0}" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJECT_DIR" --mode no-mistakes --yolo off 2>&1
 }
@@ -509,6 +517,19 @@ test_historical_prose_mention_passes() {
   pass "historical and prohibitive prose does not refuse dispatch"
 }
 
+test_descriptive_prose_mention_passes() {
+  local id=brief-descriptive-prose-a24 rec out status
+  rec=$(make_case descriptive-prose "$id" \
+    'Documentation for bin/fm-retired.sh describes the old workflow.')
+  read_case "$rec"
+
+  out=$(run_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "descriptive prose was treated as an executable instruction: $out"
+  assert_contains "$out" "spawned $id" "descriptive prose did not reach worker dispatch"
+  pass "descriptive helper prose is not treated as executable"
+}
+
 test_dont_forget_reference_refuses() {
   local id=brief-dont-forget-a19 rec out status
   rec=$(make_case dont-forget "$id" "Don't forget to run bin/fm-dont-forget-missing.sh before editing.")
@@ -585,6 +606,26 @@ test_missing_lease_path_recovers_and_returns_the_exact_allocation() {
   pass "a pathless lease is recovered from pool status and returned exactly"
 }
 
+test_missing_lease_path_retries_status_recovery() {
+  local id=brief-missing-lease-path-retry-a25 rec out status
+  rec=$(make_case missing-lease-path-retry "$id" 'Proceed with the task.')
+  read_case "$rec"
+
+  set +e
+  out=$(FM_FAKE_TREEHOUSE_RESULT=missing-path \
+    FM_FAKE_TREEHOUSE_STATUS_FAIL_AFTER_GET_ONCE=1 run_spawn "$id")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "spawn accepted a lease without a path after status retry: $out"
+  assert_contains "$out" "lease without a valid worktree path" \
+    "retried malformed lease refusal did not identify the missing path"
+  assert_absent "$HOME_DIR/state/$id.endpoint" "status retry leaked its fresh endpoint"
+  assert_absent "$HOME_DIR/state/$id.lease" "status retry leaked its exact allocation"
+  assert_absent "$HOME_DIR/state/$id.meta" "status retry published task metadata"
+  pass "a pathless lease survives transient status failure during rollback"
+}
+
 test_linked_homes_share_pool_transition_lock() {
   local rec linked state_a state_b lock_a lock_b
   rec=$(make_case cross-home-pool-lock brief-cross-home-a20 'Proceed with the task.')
@@ -620,10 +661,12 @@ test_negative_modal_reference_passes
 test_mixed_negation_still_refuses_positive_instruction
 test_sentence_after_negation_still_refuses_positive_instruction
 test_historical_prose_mention_passes
+test_descriptive_prose_mention_passes
 test_dont_forget_reference_refuses
 test_brief_parser_failure_refuses_and_rolls_back
 test_missing_lease_identity_rolls_back_the_holder_allocation
 test_missing_lease_path_recovers_and_returns_the_exact_allocation
+test_missing_lease_path_retries_status_recovery
 test_linked_homes_share_pool_transition_lock
 test_pool_transition_lock_precedes_allocation
 test_pool_transition_lock_releases_before_endpoint_settle
