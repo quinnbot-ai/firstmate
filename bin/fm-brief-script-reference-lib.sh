@@ -36,6 +36,11 @@ my $script = qr{
 sub clause_prefix {
   my ($text, $start) = @_;
   my $prefix = substr($text, 0, $start);
+  $prefix =~ s/\[([^\]\r\n]+)\]\([^\)\r\n]*\)/$1/g;
+  $prefix =~ s{(`+)([^`\r\n]+)\1}{$2}g;
+  $prefix =~ s{(\*{1,3})([^*\r\n]+)\1}{$2}g;
+  $prefix =~ s{(_{1,3})([^_\r\n]+)\1}{$2}g;
+  $prefix =~ s{(~~)([^~\r\n]+)\1}{$2}g;
   $prefix =~ s/\[([^\]\r\n]+)\]\(\s*$/$1/;
   $prefix =~ s/(?:\*\*|__|~~|\*|_)\s*$//;
   $prefix =~ s/^.*(?:[;!?]|\.\s+)\s*//s;

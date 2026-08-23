@@ -392,6 +392,23 @@ test_markdown_emphasized_directive_reference_refuses() {
   pass "a Markdown-emphasized helper instruction refuses dispatch"
 }
 
+test_markdown_emphasized_object_directive_reference_refuses() {
+  local id=brief-markdown-object-a37 rec out status expected
+  rec=$(make_case markdown-object-command "$id" \
+    'Run the **helper** bin/fm-markdown-object-missing.sh before editing.')
+  read_case "$rec"
+
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite an absent helper with a Markdown-emphasized command object"
+  expected="$POOL_DIR/bin/fm-markdown-object-missing.sh"
+  assert_contains "$out" "$expected" \
+    "helper with a Markdown-emphasized command object did not resolve against the task worktree"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "helper with a Markdown-emphasized command object published metadata"
+  pass "a helper with a Markdown-emphasized command object refuses dispatch"
+}
+
 test_second_person_imperative_reference_refuses() {
   local id=brief-second-person-a13 rec out status expected
   rec=$(make_case second-person-command "$id" 'Ensure you run bin/fm-second-person-missing.sh before editing.')
@@ -940,6 +957,7 @@ test_infinitive_imperative_reference_refuses
 test_assurance_imperative_reference_refuses
 test_markdown_linked_directive_reference_refuses
 test_markdown_emphasized_directive_reference_refuses
+test_markdown_emphasized_object_directive_reference_refuses
 test_second_person_imperative_reference_refuses
 test_directed_subject_reference_refuses
 test_unenumerated_imperative_reference_refuses
