@@ -179,6 +179,20 @@ test_unquoted_command_reference_refuses() {
   pass "an absent unquoted helper command refuses dispatch"
 }
 
+test_dotted_helper_reference_refuses() {
+  local id=brief-dotted-a18 rec out status expected
+  rec=$(make_case dotted-command "$id" 'Run bin/fm-dotted-missing.v2.sh before editing.')
+  read_case "$rec"
+
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite an absent dotted helper command"
+  expected="$POOL_DIR/bin/fm-dotted-missing.v2.sh"
+  assert_contains "$out" "$expected" "dotted helper did not resolve against the task worktree"
+  assert_absent "$HOME_DIR/state/$id.meta" "dotted helper refusal published metadata"
+  pass "a dotted helper basename is checked before dispatch"
+}
+
 test_prefixed_imperative_reference_refuses() {
   local id=brief-prefixed-a6 rec out status expected
   rec=$(make_case prefixed-command "$id" 'Before editing, run bin/fm-prefixed-missing.sh.')
@@ -515,6 +529,7 @@ test_absent_variable_expanded_helper_refuses_at_task_worktree
 test_present_helper_passes
 test_fenced_command_reference_refuses
 test_unquoted_command_reference_refuses
+test_dotted_helper_reference_refuses
 test_prefixed_imperative_reference_refuses
 test_modal_imperative_reference_refuses
 test_bare_modal_imperative_reference_refuses

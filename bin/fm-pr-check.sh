@@ -19,6 +19,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-worktree-binding-lib.sh
 . "$SCRIPT_DIR/fm-worktree-binding-lib.sh"
+# shellcheck source=bin/fm-worktree-owner-lib.sh
+. "$SCRIPT_DIR/fm-worktree-owner-lib.sh"
 
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2

@@ -50,6 +50,25 @@ test_binding_publication_rejects_non_regular_markers() {
   pass "binding publication rejects non-regular targets and confirms ownership"
 }
 
+test_linked_homes_share_worktree_transition_lock() {
+  local project worktree state_a state_b lock_a lock_b
+  project="$TMP_ROOT/lock-project"
+  worktree="$TMP_ROOT/lock-worktree"
+  state_a="$TMP_ROOT/home-a/state"
+  state_b="$TMP_ROOT/home-b/state"
+  mkdir -p "$state_a" "$state_b"
+  fm_git_worktree "$project" "$worktree" binding-lock
+
+  lock_a=$(fm_worktree_transition_lock_path "$state_a" "$worktree") \
+    || fail "could not resolve the first home's worktree transition lock"
+  lock_b=$(fm_worktree_transition_lock_path "$state_b" "$worktree") \
+    || fail "could not resolve the linked home's worktree transition lock"
+  [ "$lock_a" = "$lock_b" ] \
+    || fail "linked homes resolved different worktree transition locks"
+  pass "linked homes share one worktree transition lock"
+}
+
 test_binding_publication_rejects_non_regular_markers
+test_linked_homes_share_worktree_transition_lock
 
 echo "# all fm-worktree-binding tests passed"

@@ -25,8 +25,12 @@
 #     Resolves the raw, unretired allocation record for ownership transitions.
 #   fm_worktree_record_active_resolve <meta-file>
 #     Resolves an operational worktree only when its current binding permits
-#     this record to use it; legacy records remain active only while no marker
-#     has been published for a newer owner.
+#     this record to use it; legacy records require the pool-wide owner proof.
+#   fm_worktree_record_active_guard_acquire <meta-file>
+#     Holds the repository pool and worktree transition locks while resolving
+#     an operational worktree, so dependent reads cannot cross reassignment.
+#   fm_worktree_record_active_guard_release
+#     Releases a successful active-worktree guard.
 #   fm_worktree_binding_write <worktree> <state-dir> <task-id>
 #     Atomically binds a freshly assigned worktree to its current task.
 #   fm_worktree_binding_clear <worktree> <state-dir> <task-id>
@@ -47,14 +51,16 @@ FM_WORKTREE_BINDING_STATE=
 FM_WORKTREE_BINDING_DETAIL=
 
 fm_worktree_transition_lock_path() {  # <state-dir> <worktree>
-  local state=${1-} worktree=${2-} state_real worktree_real digest
+  local state=${1-} worktree=${2-} worktree_real common_dir digest
   [ -n "$state" ] && [ -d "$state" ] || return 1
   [ -n "$worktree" ] && [ -d "$worktree" ] || return 1
-  state_real=$(CDPATH='' cd -- "$state" 2>/dev/null && pwd -P) || return 1
+  (CDPATH='' cd -- "$state" 2>/dev/null) || return 1
   worktree_real=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 1
+  common_dir=$(git -C "$worktree_real" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  [ -n "$common_dir" ] && [ -d "$common_dir" ] || return 1
   digest=$(printf '%s' "$worktree_real" | git hash-object --stdin 2>/dev/null) || return 1
   [ -n "$digest" ] || return 1
-  printf '%s/.worktree-transition-%s.lock\n' "$state_real" "$digest"
+  printf '%s/firstmate-worktree-transition-%s.lock\n' "$common_dir" "$digest"
 }
 
 fm_worktree_pool_transition_lock_path() {  # <state-dir> <project>
@@ -71,6 +77,9 @@ FM_WORKTREE_RECORD_ACTIVE_PATH=
 FM_WORKTREE_RECORD_RETIRED_OWNER=
 FM_WORKTREE_RECORD_RETIRED_STATE=
 FM_WORKTREE_RECORD_DETAIL=
+FM_WORKTREE_RECORD_ACTIVE_POOL_LOCK=
+FM_WORKTREE_RECORD_ACTIVE_TRANSITION_LOCK=
+FM_WORKTREE_RECORD_ACTIVE_GUARD_HELD=0
 
 fm_worktree_record_resolve() {  # <meta-file>
   local meta=${1-}
@@ -111,7 +120,17 @@ fm_worktree_record_active_resolve() {  # <meta-file>
       else
         read_detail=$FM_WORKTREE_BINDING_DETAIL
         if fm_worktree_binding_is_absent "$FM_WORKTREE_RECORD_ACTIVE_PATH"; then
-          return 0
+          if ! declare -F fm_worktree_owner_resolve >/dev/null 2>&1; then
+            FM_WORKTREE_RECORD_DETAIL="worktree binding unverifiable: legacy ownership proof is unavailable for $FM_WORKTREE_RECORD_ACTIVE_PATH"
+          elif fm_worktree_owner_resolve "$FM_WORKTREE_RECORD_ACTIVE_PATH" "$state" \
+             && [ "$FM_WORKTREE_OWNER_STATE" = "$(fm_worktree_binding_state_resolve "$state")" ] \
+             && [ "$FM_WORKTREE_OWNER_TASK_ID" = "$task_id" ]; then
+            return 0
+          else
+            FM_WORKTREE_RECORD_DETAIL=${FM_WORKTREE_OWNER_DETAIL:-"worktree binding unverifiable: legacy ownership is not proven for $FM_WORKTREE_RECORD_ACTIVE_PATH"}
+          fi
+          FM_WORKTREE_RECORD_ACTIVE_PATH=
+          return 1
         fi
         if ! fm_worktree_binding_git_dir "$FM_WORKTREE_RECORD_ACTIVE_PATH" >/dev/null 2>&1; then
           return 0
@@ -125,6 +144,64 @@ fm_worktree_record_active_resolve() {  # <meta-file>
   esac
   FM_WORKTREE_RECORD_ACTIVE_PATH=
   return 1
+}
+
+fm_worktree_record_active_guard_acquire() {  # <meta-file>
+  local meta=${1-} project kind pool_lock transition_lock detail
+  FM_WORKTREE_RECORD_ACTIVE_POOL_LOCK=
+  FM_WORKTREE_RECORD_ACTIVE_TRANSITION_LOCK=
+  FM_WORKTREE_RECORD_ACTIVE_GUARD_HELD=0
+  fm_worktree_record_resolve "$meta" || return 1
+  kind=$(sed -n 's/^kind=//p' "$meta" | tail -1)
+  if [ "$kind" = secondmate ] || [ ! -d "$FM_WORKTREE_RECORD_ACTIVE_PATH" ]; then
+    fm_worktree_record_active_resolve "$meta"
+    return
+  fi
+  declare -F fm_lock_acquire_wait >/dev/null 2>&1 || {
+    FM_WORKTREE_RECORD_DETAIL="worktree binding unverifiable: transition lock support is unavailable"
+    FM_WORKTREE_RECORD_ACTIVE_PATH=
+    return 1
+  }
+  project=$(sed -n 's/^project=//p' "$meta" | tail -1)
+  pool_lock=$(fm_worktree_pool_transition_lock_path "$(dirname -- "$meta")" "$project") || {
+    FM_WORKTREE_RECORD_DETAIL="worktree binding unverifiable: cannot establish the repository pool transition lock"
+    FM_WORKTREE_RECORD_ACTIVE_PATH=
+    return 1
+  }
+  transition_lock=$(fm_worktree_transition_lock_path "$(dirname -- "$meta")" "$FM_WORKTREE_RECORD_ACTIVE_PATH") || {
+    FM_WORKTREE_RECORD_DETAIL="worktree binding unverifiable: cannot establish the worktree transition lock"
+    FM_WORKTREE_RECORD_ACTIVE_PATH=
+    return 1
+  }
+  fm_lock_acquire_wait "$pool_lock" || return 1
+  FM_WORKTREE_RECORD_ACTIVE_POOL_LOCK=$pool_lock
+  fm_lock_acquire_wait "$transition_lock" || {
+    fm_lock_release "$pool_lock" || true
+    FM_WORKTREE_RECORD_ACTIVE_POOL_LOCK=
+    return 1
+  }
+  FM_WORKTREE_RECORD_ACTIVE_TRANSITION_LOCK=$transition_lock
+  FM_WORKTREE_RECORD_ACTIVE_GUARD_HELD=1
+  if fm_worktree_record_active_resolve "$meta"; then
+    return 0
+  fi
+  detail=$FM_WORKTREE_RECORD_DETAIL
+  fm_worktree_record_active_guard_release
+  FM_WORKTREE_RECORD_DETAIL=$detail
+  return 1
+}
+
+fm_worktree_record_active_guard_release() {
+  [ "$FM_WORKTREE_RECORD_ACTIVE_GUARD_HELD" = 1 ] || return 0
+  FM_WORKTREE_RECORD_ACTIVE_GUARD_HELD=0
+  if [ -n "$FM_WORKTREE_RECORD_ACTIVE_TRANSITION_LOCK" ]; then
+    fm_lock_release "$FM_WORKTREE_RECORD_ACTIVE_TRANSITION_LOCK" || true
+  fi
+  if [ -n "$FM_WORKTREE_RECORD_ACTIVE_POOL_LOCK" ]; then
+    fm_lock_release "$FM_WORKTREE_RECORD_ACTIVE_POOL_LOCK" || true
+  fi
+  FM_WORKTREE_RECORD_ACTIVE_TRANSITION_LOCK=
+  FM_WORKTREE_RECORD_ACTIVE_POOL_LOCK=
 }
 
 fm_worktree_binding_detail() {

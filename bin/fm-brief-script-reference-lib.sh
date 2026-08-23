@@ -29,7 +29,7 @@ my $script = qr{
       /[^\s`'"]*/
     )?
     bin/
-    (fm-[A-Za-z0-9][A-Za-z0-9_-]*\.sh)
+    (fm-[A-Za-z0-9][A-Za-z0-9._-]*\.sh)
   )
 }x;
 

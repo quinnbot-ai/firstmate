@@ -136,6 +136,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-worktree-binding-lib.sh
 . "$SCRIPT_DIR/fm-worktree-binding-lib.sh"
+# shellcheck source=bin/fm-worktree-owner-lib.sh
+. "$SCRIPT_DIR/fm-worktree-owner-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}

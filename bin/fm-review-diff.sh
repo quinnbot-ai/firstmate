@@ -20,6 +20,10 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-worktree-binding-lib.sh
 . "$SCRIPT_DIR/fm-worktree-binding-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-worktree-owner-lib.sh
+. "$SCRIPT_DIR/fm-worktree-owner-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 usage() {
@@ -44,7 +48,13 @@ esac
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 
-if ! fm_worktree_record_active_resolve "$META"; then
+review_diff_cleanup() {
+  fm_worktree_record_active_guard_release
+}
+trap review_diff_cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+if ! fm_worktree_record_active_guard_acquire "$META"; then
   if [ -n "$FM_WORKTREE_RECORD_RETIRED_OWNER" ]; then
     echo "error: task $ID's worktree pointer is retired after reassignment to task $FM_WORKTREE_RECORD_RETIRED_OWNER" >&2
     exit 1
@@ -156,15 +166,18 @@ fi
 
 git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "error: base $BASE does not exist in $WT" >&2; exit 1; }
 git -C "$WT" rev-parse --verify --quiet "$COMPARE_REF^{commit}" >/dev/null || { echo "error: compare ref $COMPARE_REF does not resolve in $WT" >&2; exit 1; }
+BASE_OID=$(git -C "$WT" rev-parse --verify "$BASE^{commit}")
+COMPARE_OID=$(git -C "$WT" rev-parse --verify "$COMPARE_REF^{commit}")
+fm_worktree_record_active_guard_release
 
 echo "diff base: $BASE"
-if git -C "$WT" diff --quiet "$BASE...$COMPARE_REF" --; then
+if git -C "$PROJ" diff --quiet "$BASE_OID...$COMPARE_OID" --; then
   echo "no changes vs $BASE"
   exit 0
 fi
 
-git -C "$WT" diff --stat "$BASE...$COMPARE_REF" --
+git -C "$PROJ" diff --stat "$BASE_OID...$COMPARE_OID" --
 if ! "$STAT_ONLY"; then
   echo
-  git -C "$WT" diff "$BASE...$COMPARE_REF" --
+  git -C "$PROJ" diff "$BASE_OID...$COMPARE_OID" --
 fi

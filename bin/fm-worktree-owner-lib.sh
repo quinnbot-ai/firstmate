@@ -62,6 +62,14 @@ FM_WORKTREE_OWNER_DETAIL=
 FM_WORKTREE_OWNER_INVENTORY_SEEN=
 
 FM_WORKTREE_OWNER_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if ! declare -F fm_backend_validate_task_endpoint >/dev/null 2>&1; then
+  # shellcheck source=bin/fm-backend.sh
+  . "$FM_WORKTREE_OWNER_LIB_DIR/fm-backend.sh"
+fi
+if ! declare -F fm_worktree_record_resolve >/dev/null 2>&1; then
+  # shellcheck source=bin/fm-worktree-binding-lib.sh
+  . "$FM_WORKTREE_OWNER_LIB_DIR/fm-worktree-binding-lib.sh"
+fi
 if ! declare -F secondmate_registry_parse_line >/dev/null 2>&1; then
   # shellcheck source=bin/fm-secondmate-registry-lib.sh
   . "$FM_WORKTREE_OWNER_LIB_DIR/fm-secondmate-registry-lib.sh"

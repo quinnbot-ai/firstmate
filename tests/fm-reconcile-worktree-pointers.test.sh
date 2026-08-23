@@ -422,6 +422,35 @@ test_declared_record_without_marker_remains_a_claimant() {
   pass "declared records remain claimants when their private marker is missing"
 }
 
+test_active_legacy_resolution_requires_pool_wide_owner_proof() {
+  local case_dir path_prefix
+  case_dir=$(make_home active-legacy-owner)
+  record_lane "$case_dir" lane-a
+  place_endpoint "$case_dir" lane-a
+  path_prefix="$case_dir/fake/fakebin:$PATH"
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-backend.sh"
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-worktree-owner-lib.sh"
+
+  PATH="$path_prefix" FM_FAKE_ENDPOINT_ROOT="$case_dir/endpoints" \
+    fm_worktree_record_active_resolve "$case_dir/state/lane-a.meta" \
+    || fail "active-legacy-owner: the sole endpoint-proven owner was hidden"
+  [ "$FM_WORKTREE_RECORD_ACTIVE_PATH" = "$case_dir/wt" ] \
+    || fail "active-legacy-owner: the proven owner resolved the wrong copy"
+
+  record_lane "$case_dir" lane-b
+  if PATH="$path_prefix" FM_FAKE_ENDPOINT_ROOT="$case_dir/endpoints" \
+      fm_worktree_record_active_resolve "$case_dir/state/lane-a.meta"; then
+    fail "active-legacy-owner: a disputed legacy copy remained active for lane-a"
+  fi
+  if PATH="$path_prefix" FM_FAKE_ENDPOINT_ROOT="$case_dir/endpoints" \
+      fm_worktree_record_active_resolve "$case_dir/state/lane-b.meta"; then
+    fail "active-legacy-owner: a stale claimant resolved another lane's copy"
+  fi
+  pass "active legacy records require the pool-wide ownership proof"
+}
+
 test_legacy_claimant_inventory_spans_linked_homes() {
   local case_dir mate out
   case_dir=$(make_home linked-home-claimants)
@@ -491,5 +520,6 @@ test_secondmate_home_is_skipped
 test_repair_never_touches_the_status_log
 test_ambiguous_legacy_claimants_require_an_explicit_owner
 test_declared_record_without_marker_remains_a_claimant
+test_active_legacy_resolution_requires_pool_wide_owner_proof
 test_legacy_claimant_inventory_spans_linked_homes
 test_legacy_endpoint_proof_supports_every_flat_backend

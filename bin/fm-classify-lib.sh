@@ -49,6 +49,8 @@ case $- in *u*) _fm_classify_nounset=on ;; *) _fm_classify_nounset=off ;; esac
 . "$_FM_CLASSIFY_LIB_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-worktree-binding-lib.sh
 . "$_FM_CLASSIFY_LIB_DIR/fm-worktree-binding-lib.sh"
+# shellcheck source=bin/fm-worktree-owner-lib.sh
+. "$_FM_CLASSIFY_LIB_DIR/fm-worktree-owner-lib.sh"
 [ "$_fm_classify_nounset" = on ] || set +u
 unset _fm_classify_nounset
 
