@@ -169,7 +169,7 @@ fm_worktree_owner_state_inventory() {  # <state-dir>
 fm_worktree_owner_resolve() {  # <worktree> <state-dir> [<asserted-state> <asserted-task>]
   local worktree=${1-} state=${2-} asserted_state=${3-} asserted_task=${4-}
   local state_real worktree_real branch meta id declared inventory inventory_state inventory_ok=0 caller_inventory_ok=0
-  local active_real current current_real candidate= candidate_state= candidate_count=0 claimant_count=0 asserted_candidate_count=0
+  local active_real current current_real candidate='' candidate_state='' candidate_count=0 claimant_count=0 asserted_candidate_count=0
   FM_WORKTREE_OWNER_TASK_ID=
   FM_WORKTREE_OWNER_STATE=
   FM_WORKTREE_OWNER_METHOD=
@@ -210,10 +210,10 @@ fm_worktree_owner_resolve() {  # <worktree> <state-dir> [<asserted-state> <asser
     return 1
   }
   if [ -n "$asserted_state" ] || [ -n "$asserted_task" ]; then
-    [ -n "$asserted_state" ] && fm_worktree_binding_task_id_valid "$asserted_task" || {
+    if [ -z "$asserted_state" ] || ! fm_worktree_binding_task_id_valid "$asserted_task"; then
       FM_WORKTREE_OWNER_DETAIL="the asserted legacy owner identity is incomplete or invalid"
       return 1
-    }
+    fi
     asserted_state=$(fm_worktree_binding_state_resolve "$asserted_state" 2>/dev/null) || {
       FM_WORKTREE_OWNER_DETAIL="the asserted legacy owner state cannot be resolved"
       return 1

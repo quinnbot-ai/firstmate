@@ -211,12 +211,12 @@ fm_code_currency_head_worktree_drift() {
     type=${metadata%% *}
     oid=${metadata##* }
     index=${#paths[@]}
-    paths[$index]=$path
-    drift[$index]=0
+    paths[index]=$path
+    drift[index]=0
     case "$mode:$type" in
       100644:blob | 100755:blob)
         if [ ! -f "$root/$path" ] || [ -L "$root/$path" ]; then
-          drift[$index]=1
+          drift[index]=1
           continue
         fi
         expected_exec=0
@@ -224,7 +224,7 @@ fm_code_currency_head_worktree_drift() {
         actual_exec=0
         [ ! -x "$root/$path" ] || actual_exec=1
         if [ "$actual_exec" -ne "$expected_exec" ]; then
-          drift[$index]=1
+          drift[index]=1
           continue
         fi
         regular_paths[${#regular_paths[@]}]=$path
@@ -233,32 +233,32 @@ fm_code_currency_head_worktree_drift() {
         ;;
       120000:blob)
         if [ ! -L "$root/$path" ]; then
-          drift[$index]=1
+          drift[index]=1
           continue
         fi
         actual=$(perl -e 'my $v = readlink shift; defined $v or exit 1; print $v' \
           "$root/$path" | git -C "$root" hash-object --stdin 2>/dev/null) || exit 1
-        [ "$actual" = "$oid" ] || drift[$index]=1
+        [ "$actual" = "$oid" ] || drift[index]=1
         ;;
       160000:commit)
         if [ ! -d "$root/$path" ]; then
-          drift[$index]=1
+          drift[index]=1
           continue
         fi
         actual=$(git -C "$root/$path" rev-parse HEAD 2>/dev/null) || exit 1
         if [ "$actual" != "$oid" ]; then
-          drift[$index]=1
+          drift[index]=1
           continue
         fi
         sub_drift=$(fm_code_currency_head_worktree_drift "$root/$path" "$oid") || exit 1
         sub_untracked=$(git -C "$root/$path" ls-files --others --directory \
           --no-empty-directory 2>/dev/null) || exit 1
         if [ -n "$sub_drift" ] || [ -n "$sub_untracked" ]; then
-          drift[$index]=1
+          drift[index]=1
         fi
         ;;
       *)
-        drift[$index]=1
+        drift[index]=1
         ;;
     esac
   done
@@ -275,7 +275,7 @@ fm_code_currency_head_worktree_drift() {
       [ "$hash_index" -lt "$batch_count" ] || exit 1
       regular_index=$((offset + hash_index))
       index=${regular_positions[$regular_index]}
-      [ "$actual" = "${regular_oids[$regular_index]}" ] || drift[$index]=1
+      [ "$actual" = "${regular_oids[$regular_index]}" ] || drift[index]=1
       hash_index=$((hash_index + 1))
     done <<EOF
 $actuals

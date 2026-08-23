@@ -15,6 +15,7 @@ fm_meta_lock_path() {
   printf '%s/.meta-%s.lock\n' "$dir" "${base%.meta}"
 }
 
+# shellcheck disable=SC2329 # Called by the sourced worktree-binding library.
 fm_lock_acquire_wait() {
   return 0
 }

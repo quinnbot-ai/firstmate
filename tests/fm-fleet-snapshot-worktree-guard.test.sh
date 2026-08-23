@@ -178,6 +178,7 @@ test_post_guard_metadata_replacement_skips_mixed_row() {
     "spawn_gen=new-incarnation"
   fakebin=$(fm_fakebin "$home")
   fake_crew="$home/fake-crew-state.sh"
+  # shellcheck disable=SC2016 # These variables expand when the generated fixture runs.
   printf '%s\n' '#!/usr/bin/env bash' \
     'mv -- "${FM_SNAPSHOT_TEST_NEXT_META:?}" "${FM_SNAPSHOT_TEST_META:?}"' \
     'printf "%s\n" "working: replacement-incarnation" > "${FM_SNAPSHOT_TEST_STATUS:?}"' \

@@ -117,6 +117,7 @@ fm_worktree_record_resolve() {  # <meta-file>
   FM_WORKTREE_RECORD_DETAIL=
   [ -n "$meta" ] && [ -f "$meta" ] || return 1
   FM_WORKTREE_RECORD_RETIRED_OWNER=$(sed -n 's/^worktree_retired=//p' "$meta" | tail -1)
+  # shellcheck disable=SC2034 # Public result global read by sourcing callers.
   FM_WORKTREE_RECORD_RETIRED_STATE=$(sed -n 's/^worktree_retired_state=//p' "$meta" | tail -1)
   [ -z "$FM_WORKTREE_RECORD_RETIRED_OWNER" ] || return 1
   FM_WORKTREE_RECORD_ACTIVE_PATH=$(sed -n 's/^worktree=//p' "$meta" | tail -1)
@@ -186,12 +187,12 @@ fm_worktree_record_active_guard_acquire() {  # <meta-file> [retain-meta]
   FM_WORKTREE_RECORD_ACTIVE_POOL_LOCK=
   FM_WORKTREE_RECORD_ACTIVE_TRANSITION_LOCK=
   FM_WORKTREE_RECORD_ACTIVE_GUARD_HELD=0
-  declare -F fm_lock_acquire_wait >/dev/null 2>&1 \
-    && declare -F fm_meta_lock_path >/dev/null 2>&1 || {
+  if ! declare -F fm_lock_acquire_wait >/dev/null 2>&1 \
+     || ! declare -F fm_meta_lock_path >/dev/null 2>&1; then
     FM_WORKTREE_RECORD_DETAIL="worktree binding unverifiable: lifecycle lock support is unavailable"
     FM_WORKTREE_RECORD_ACTIVE_PATH=
     return 1
-  }
+  fi
   state=$(dirname -- "$meta")
   meta_lock=$(fm_meta_lock_path "$meta") || {
     FM_WORKTREE_RECORD_DETAIL="worktree binding unverifiable: cannot establish the task metadata lock"

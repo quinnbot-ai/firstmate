@@ -59,7 +59,7 @@ die() {
 
 canonical_directory() {
   [ -d "$1" ] || return 1
-  ( CDPATH= cd -- "$1" && pwd -P )
+  (CDPATH='' cd -- "$1" && pwd -P)
 }
 
 ID=

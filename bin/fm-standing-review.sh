@@ -112,6 +112,7 @@ done
 STANDING_REVIEW_LIFECYCLE_LOCK=
 STANDING_REVIEW_LIFECYCLE_LOCK_HELD=0
 STANDING_REVIEW_LIFECYCLE_INHERITED=0
+# shellcheck disable=SC2329 # Invoked by the EXIT trap below.
 standing_review_release_lifecycle_lock() {
   local status=$?
   if [ "$STANDING_REVIEW_LIFECYCLE_LOCK_HELD" -eq 1 ]; then

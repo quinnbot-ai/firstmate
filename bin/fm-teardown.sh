@@ -2365,9 +2365,9 @@ preflight_descendant_worktree_ownership() {
       echo "REFUSED: descendant task $task_id does not positively own worktree $worktree; $owner_detail; forced teardown changed nothing" >&2
       return 1
     fi
-    DESCENDANT_OWNER_STATES[$i]=$FM_WORKTREE_OWNER_STATE
-    DESCENDANT_OWNER_TASKS[$i]=$FM_WORKTREE_OWNER_TASK_ID
-    DESCENDANT_OWNER_WORKTREES[$i]=$worktree
+    DESCENDANT_OWNER_STATES[i]=$FM_WORKTREE_OWNER_STATE
+    DESCENDANT_OWNER_TASKS[i]=$FM_WORKTREE_OWNER_TASK_ID
+    DESCENDANT_OWNER_WORKTREES[i]=$worktree
   done
 }
 

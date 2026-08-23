@@ -314,6 +314,7 @@ test_dry_run_resolves_inside_the_transition_lock() {
   place_endpoint "$case_dir" lane-b
   ready="$case_dir/transition-ready"
   switch="$case_dir/transition-switch"
+  # shellcheck disable=SC2016 # Variables expand inside the child shell.
   env ROOT="$ROOT" STATE="$case_dir/state" WT="$case_dir/wt" ENDPOINTS="$case_dir/endpoints" \
     READY="$ready" SWITCH="$switch" bash -c '
       . "$ROOT/bin/fm-wake-lib.sh"
@@ -360,6 +361,7 @@ test_apply_revalidates_ownership_inside_the_transition_lock() {
   place_endpoint "$case_dir" lane-b
   ready="$case_dir/transition-ready"
   switch="$case_dir/transition-switch"
+  # shellcheck disable=SC2016 # Variables expand inside the child shell.
   env ROOT="$ROOT" STATE="$case_dir/state" WT="$case_dir/wt" ENDPOINTS="$case_dir/endpoints" \
     READY="$ready" SWITCH="$switch" bash -c '
       . "$ROOT/bin/fm-wake-lib.sh"
@@ -647,6 +649,7 @@ test_legacy_endpoint_proof_supports_every_flat_backend() {
   fm_backend_validate_task_endpoint() {
     FM_BACKEND_VALIDATED_BACKEND=$(fm_meta_get "$1" backend)
     [ -n "$FM_BACKEND_VALIDATED_BACKEND" ] || FM_BACKEND_VALIDATED_BACKEND=tmux
+    # shellcheck disable=SC2034 # Backend contract output consumed by the caller.
     FM_BACKEND_VALIDATED_TARGET=fixture
   }
   fm_backend_source() { return 0; }

@@ -94,8 +94,10 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ -n "$ASSERTED_OWNER_STATE" ] || [ -n "$ASSERTED_OWNER_TASK" ]; then
-  [ -n "$ASSERTED_OWNER_STATE" ] && fm_worktree_binding_task_id_valid "$ASSERTED_OWNER_TASK" \
-    || { echo "error: --owner-state and --owner-task must be supplied together" >&2; exit 2; }
+  if [ -z "$ASSERTED_OWNER_STATE" ] || ! fm_worktree_binding_task_id_valid "$ASSERTED_OWNER_TASK"; then
+    echo "error: --owner-state and --owner-task must be supplied together" >&2
+    exit 2
+  fi
 fi
 
 [ -d "$STATE" ] || { echo "error: no state directory at $STATE" >&2; exit 2; }
