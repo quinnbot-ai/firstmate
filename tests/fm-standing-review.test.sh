@@ -484,6 +484,23 @@ test_json_equality_does_not_conflate_booleans_and_numbers() {
   pass "predicate equality preserves JSON boolean and number types"
 }
 
+test_nested_json_equality_preserves_boolean_and_number_types() {
+  local home out
+  home=$(make_home nested-typed-equality acme)
+  write_source "$home" '[{"venture":"acme","signals":{"cost":true},"cost_30d":10}]'
+  write_spec "$home" r \
+    '[{"field":"signals","op":"eq","value":{"cost":1}}]' '["cost_30d"]'
+
+  out=$(scan "$home" --id r --dry-run)
+  [ -z "$out" ] || fail "nested JSON true satisfied numeric equality: $out"
+
+  write_spec "$home" r \
+    '[{"field":"signals","op":"ne","value":{"cost":1}}]' '["cost_30d"]'
+  out=$(scan "$home" --id r --dry-run)
+  assert_contains "$out" "acme" "nested JSON true did not differ from numeric one"
+  pass "nested predicate equality preserves JSON boolean and number types"
+}
+
 test_the_same_finding_does_not_wake_twice() {
   local home first second err
   home=$(make_home novelty acme)
@@ -1118,6 +1135,7 @@ test_malformed_latch_fails_closed
 test_empty_latch_fails_closed
 test_structural_paths_cannot_break_the_wake_line
 test_json_equality_does_not_conflate_booleans_and_numbers
+test_nested_json_equality_preserves_boolean_and_number_types
 test_the_same_finding_does_not_wake_twice
 test_drifting_evidence_does_not_defeat_the_latch
 test_the_latch_expires_so_a_recurrence_can_wake_again

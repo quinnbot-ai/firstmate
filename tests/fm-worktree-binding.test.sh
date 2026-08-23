@@ -68,7 +68,31 @@ test_linked_homes_share_worktree_transition_lock() {
   pass "linked homes share one worktree transition lock"
 }
 
+test_missing_recorded_worktree_is_not_active() {
+  local state meta missing
+  state="$TMP_ROOT/missing-state"
+  meta="$state/lane-a.meta"
+  missing="$TMP_ROOT/missing-worktree"
+  mkdir -p "$state"
+  fm_write_meta "$meta" \
+    "worktree=$missing" \
+    "project=$TMP_ROOT/project" \
+    "kind=ship" \
+    "worktree_binding=fm-worktree-binding.v2"
+
+  if fm_worktree_record_active_guard_acquire "$meta"; then
+    fm_worktree_record_active_guard_release
+    fail "a missing recorded worktree resolved as active"
+  fi
+  [ -z "$FM_WORKTREE_RECORD_ACTIVE_PATH" ] \
+    || fail "a missing recorded worktree remained available to consumers"
+  assert_contains "$FM_WORKTREE_RECORD_DETAIL" "is not present" \
+    "missing worktree refusal did not explain the inactive path"
+  pass "missing recorded worktrees fail closed for active consumers"
+}
+
 test_binding_publication_rejects_non_regular_markers
 test_linked_homes_share_worktree_transition_lock
+test_missing_recorded_worktree_is_not_active
 
 echo "# all fm-worktree-binding tests passed"

@@ -98,7 +98,11 @@ fm_worktree_record_resolve() {  # <meta-file>
 fm_worktree_record_active_resolve() {  # <meta-file>
   local meta=${1-} schema state task_id read_detail kind
   fm_worktree_record_resolve "$meta" || return 1
-  [ -d "$FM_WORKTREE_RECORD_ACTIVE_PATH" ] || return 0
+  if [ ! -d "$FM_WORKTREE_RECORD_ACTIVE_PATH" ]; then
+    FM_WORKTREE_RECORD_DETAIL="worktree binding unverifiable: $FM_WORKTREE_RECORD_ACTIVE_PATH is not present"
+    FM_WORKTREE_RECORD_ACTIVE_PATH=
+    return 1
+  fi
   schema=$(sed -n 's/^worktree_binding=//p' "$meta" | tail -1)
   kind=$(sed -n 's/^kind=//p' "$meta" | tail -1)
   [ "$kind" != secondmate ] || return 0

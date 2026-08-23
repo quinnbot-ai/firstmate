@@ -241,6 +241,86 @@ test_default_run_changes_nothing() {
   pass "reconcile accepts an explicit dry run without changing anything"
 }
 
+test_last_metadata_value_is_authoritative() {
+  local case_dir old out
+  case_dir=$(make_home duplicate-worktree-field)
+  old="$case_dir/old-wt"
+  git -C "$case_dir/project" worktree add -q -b fm/duplicate-old "$old"
+  fm_write_meta "$case_dir/state/lane-a.meta" \
+    "window=firstmate:fm-lane-a" \
+    "endpoint_task_id=lane-a" \
+    "worktree=$old" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  fm_write_meta "$case_dir/state/lane-b.meta" \
+    "window=firstmate:fm-lane-b" \
+    "endpoint_task_id=lane-b" \
+    "worktree=$old" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  fm_worktree_binding_write "$case_dir/wt" "$case_dir/state" lane-a \
+    || fail "duplicate-field: could not bind the current lane-a worktree"
+  fm_worktree_binding_write "$old" "$case_dir/state" lane-b \
+    || fail "duplicate-field: could not bind the historical worktree"
+
+  out=$(run_reconcile "$case_dir" --apply)
+
+  assert_contains "$out" "0 stale pointer(s)" \
+    "duplicate-field: reconciliation did not honor the last worktree value"
+  assert_no_grep "worktree_retired" "$case_dir/state/lane-a.meta" \
+    "duplicate-field: the valid current pointer was retired"
+  pass "reconcile uses the metadata contract's last value"
+}
+
+test_dry_run_resolves_inside_the_transition_lock() {
+  local case_dir holder_pid reconcile_pid out i=0 ready switch
+  case_dir=$(make_home dry-ownership-transition)
+  record_lane "$case_dir" lane-a
+  hand_copy_to_branch "$case_dir" fm/lane-b
+  record_lane "$case_dir" lane-b
+  record_lane "$case_dir" lane-c
+  place_endpoint "$case_dir" lane-b
+  ready="$case_dir/transition-ready"
+  switch="$case_dir/transition-switch"
+  env ROOT="$ROOT" STATE="$case_dir/state" WT="$case_dir/wt" ENDPOINTS="$case_dir/endpoints" \
+    READY="$ready" SWITCH="$switch" bash -c '
+      . "$ROOT/bin/fm-wake-lib.sh"
+      . "$ROOT/bin/fm-worktree-binding-lib.sh"
+      lock=$(fm_worktree_transition_lock_path "$STATE" "$WT") || exit 1
+      fm_lock_acquire_wait "$lock"
+      : > "$READY"
+      while [ ! -e "$SWITCH" ]; do /bin/sleep 0.01; done
+      rm -f "$ENDPOINTS/lane-b.cwd"
+      printf "%s\n" "$WT" > "$ENDPOINTS/lane-c.cwd"
+      fm_lock_release "$lock"
+    ' &
+  holder_pid=$!
+  while [ ! -e "$ready" ] && [ "$i" -lt 200 ]; do
+    /bin/sleep 0.01
+    i=$((i + 1))
+  done
+  [ -e "$ready" ] || fail "dry transition lock holder did not start"
+  run_reconcile_owner "$case_dir" "$case_dir/state" lane-c --dry-run > "$case_dir/reconcile.out" &
+  reconcile_pid=$!
+  /bin/sleep 0.2
+  kill -0 "$reconcile_pid" 2>/dev/null \
+    || fail "dry-run completed while the ownership transition was locked"
+  : > "$switch"
+  wait "$holder_pid" || fail "dry ownership transition failed"
+  wait "$reconcile_pid" || fail "dry reconcile failed after ownership transition"
+  out=$(cat "$case_dir/reconcile.out")
+
+  assert_contains "$out" "STALE: lane-a" "dry transition: stale claimant was not reported"
+  assert_contains "$out" "owned by lane-c" \
+    "dry transition: report used ownership from before its stable snapshot"
+  assert_no_grep "worktree_retired" "$case_dir/state/lane-a.meta" \
+    "dry transition: reporting changed metadata"
+  pass "dry reconciliation reports ownership under the transition locks"
+}
+
 test_apply_revalidates_ownership_inside_the_transition_lock() {
   local case_dir holder_pid reconcile_pid out i=0 ready switch
   case_dir=$(make_home ownership-transition)
@@ -562,6 +642,8 @@ test_branch_without_a_matching_record_is_unresolved
 test_binding_outranks_the_checked_out_branch
 test_binding_distinguishes_same_task_id_across_homes
 test_default_run_changes_nothing
+test_last_metadata_value_is_authoritative
+test_dry_run_resolves_inside_the_transition_lock
 test_apply_revalidates_ownership_inside_the_transition_lock
 test_rerun_is_idempotent
 test_copy_without_live_endpoint_is_unresolved

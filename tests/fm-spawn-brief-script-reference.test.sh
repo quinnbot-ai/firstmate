@@ -52,25 +52,46 @@ SH
 set -u
 case "${1:-}" in
   get)
-    if [ "${FM_FAKE_TREEHOUSE_RESULT:-complete}" = missing-lease-id ]; then
-      printf '{"path":"%s","lease_holder":"%s"}\n' \
-        "${FM_FAKE_TREEHOUSE_PATH:?FM_FAKE_TREEHOUSE_PATH unset}" \
-        "${FM_FAKE_TREEHOUSE_HOLDER:?FM_FAKE_TREEHOUSE_HOLDER unset}"
-    else
-      printf '{"path":"%s","lease_id":"%s","lease_holder":"%s"}\n' \
+    case "${FM_FAKE_TREEHOUSE_RESULT:-complete}" in
+      missing-lease-id)
+        printf '{"path":"%s","lease_holder":"%s"}\n' \
+          "${FM_FAKE_TREEHOUSE_PATH:?FM_FAKE_TREEHOUSE_PATH unset}" \
+          "${FM_FAKE_TREEHOUSE_HOLDER:?FM_FAKE_TREEHOUSE_HOLDER unset}"
+        ;;
+      missing-path)
+        printf '{"lease_id":"%s","lease_holder":"%s"}\n' \
+          "${FM_FAKE_TREEHOUSE_LEASE_ID:?FM_FAKE_TREEHOUSE_LEASE_ID unset}" \
+          "${FM_FAKE_TREEHOUSE_HOLDER:?FM_FAKE_TREEHOUSE_HOLDER unset}"
+        ;;
+      *)
+        printf '{"path":"%s","lease_id":"%s","lease_holder":"%s"}\n' \
+          "${FM_FAKE_TREEHOUSE_PATH:?FM_FAKE_TREEHOUSE_PATH unset}" \
+          "${FM_FAKE_TREEHOUSE_LEASE_ID:?FM_FAKE_TREEHOUSE_LEASE_ID unset}" \
+          "${FM_FAKE_TREEHOUSE_HOLDER:?FM_FAKE_TREEHOUSE_HOLDER unset}"
+        ;;
+    esac
+    printf '%s\n' "$FM_FAKE_TREEHOUSE_LEASE_ID" > "${FM_FAKE_LEASE:?FM_FAKE_LEASE unset}"
+    : > "${FM_FAKE_TREEHOUSE_ALLOCATION:?FM_FAKE_TREEHOUSE_ALLOCATION unset}"
+    ;;
+  status)
+    if [ -e "${FM_FAKE_TREEHOUSE_ALLOCATION:?FM_FAKE_TREEHOUSE_ALLOCATION unset}" ]; then
+      printf '[{"path":"%s","status":"leased","lease_id":"%s","lease_holder":"%s","processes":[]}]\n' \
         "${FM_FAKE_TREEHOUSE_PATH:?FM_FAKE_TREEHOUSE_PATH unset}" \
         "${FM_FAKE_TREEHOUSE_LEASE_ID:?FM_FAKE_TREEHOUSE_LEASE_ID unset}" \
         "${FM_FAKE_TREEHOUSE_HOLDER:?FM_FAKE_TREEHOUSE_HOLDER unset}"
+    else
+      printf '[]\n'
     fi
-    printf '%s\n' "$FM_FAKE_TREEHOUSE_LEASE_ID" > "${FM_FAKE_LEASE:?FM_FAKE_LEASE unset}"
     ;;
   return)
     case " $* " in
       *" --if-lease-id ${FM_FAKE_TREEHOUSE_LEASE_ID:?FM_FAKE_TREEHOUSE_LEASE_ID unset} "*)
         rm -f -- "${FM_FAKE_LEASE:?FM_FAKE_LEASE unset}"
+        rm -f -- "${FM_FAKE_TREEHOUSE_ALLOCATION:?FM_FAKE_TREEHOUSE_ALLOCATION unset}"
         ;;
       *" --if-lease-holder ${FM_FAKE_TREEHOUSE_HOLDER:?FM_FAKE_TREEHOUSE_HOLDER unset} "*)
         rm -f -- "${FM_FAKE_LEASE:?FM_FAKE_LEASE unset}"
+        rm -f -- "${FM_FAKE_TREEHOUSE_ALLOCATION:?FM_FAKE_TREEHOUSE_ALLOCATION unset}"
         ;;
       *) exit 1 ;;
     esac
@@ -126,6 +147,7 @@ run_spawn() {
     FM_FAKE_TREEHOUSE_PATH="${FM_FAKE_TREEHOUSE_PATH_OVERRIDE:-$POOL_DIR}" \
     FM_FAKE_TREEHOUSE_LEASE_ID="lease-$id" \
     FM_FAKE_TREEHOUSE_HOLDER="$id" \
+    FM_FAKE_TREEHOUSE_ALLOCATION="$HOME_DIR/state/$id.treehouse-allocation" \
     FM_FAKE_TREEHOUSE_RESULT="${FM_FAKE_TREEHOUSE_RESULT:-complete}" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJECT_DIR" --mode no-mistakes --yolo off 2>&1
@@ -303,18 +325,16 @@ test_unenumerated_imperative_reference_refuses() {
   pass "an affirmative helper directive does not depend on an execution-verb allowlist"
 }
 
-test_negative_modal_reference_refuses() {
+test_negative_modal_reference_passes() {
   local id=brief-negative-modal-a8 rec out status
   rec=$(make_case negative-modal "$id" 'You must never run bin/fm-negative-only.sh.')
   read_case "$rec"
 
-  set +e
   out=$(run_spawn "$id")
   status=$?
-  set -e
-  expect_code 1 "$status" "an absent helper in a negative instruction dispatched: $out"
-  assert_contains "$out" "fm-negative-only.sh" "the negative helper reference was not diagnosed"
-  pass "a syntactic helper reference refuses without natural-language inference"
+  expect_code 0 "$status" "a prohibition was treated as an executable helper instruction: $out"
+  assert_contains "$out" "spawned $id" "a prohibition did not reach worker dispatch"
+  pass "a prohibited helper mention is not treated as executable"
 }
 
 test_mixed_negation_still_refuses_positive_instruction() {
@@ -328,8 +348,8 @@ test_mixed_negation_still_refuses_positive_instruction() {
   set -e
   expect_code 1 "$status" "a positive clause after a negated clause dispatched: $out"
   assert_contains "$out" "fm-mixed-missing.sh" "the positive missing helper was not diagnosed"
-  assert_contains "$out" "fm-old-helper.sh" "the first syntactic helper reference was not diagnosed"
-  pass "mixed clauses validate every syntactic helper reference"
+  assert_not_contains "$out" "fm-old-helper.sh" "the prohibited helper was treated as executable"
+  pass "mixed clauses validate only the affirmative helper instruction"
 }
 
 test_sentence_after_negation_still_refuses_positive_instruction() {
@@ -344,8 +364,8 @@ test_sentence_after_negation_still_refuses_positive_instruction() {
   expect_code 1 "$status" "a positive sentence after a negated sentence dispatched: $out"
   assert_contains "$out" "fm-sentence-missing.sh" \
     "the positive sentence's missing helper was not diagnosed"
-  assert_contains "$out" "fm-old-helper.sh" "the negated sentence's helper reference was not diagnosed"
-  pass "separate sentences validate every syntactic helper reference"
+  assert_not_contains "$out" "fm-old-helper.sh" "the prohibited sentence was treated as executable"
+  pass "separate sentences validate only the affirmative helper instruction"
 }
 
 test_pool_transition_lock_precedes_allocation() {
@@ -464,34 +484,29 @@ test_invalid_allocated_worktree_returns_exact_lease() {
   pass "an invalid allocation returns only its exact durable lease"
 }
 
-test_conditional_prose_reference_refuses() {
+test_conditional_prose_reference_passes() {
   local id=brief-conditional-prose-a15 rec out status
   rec=$(make_case conditional-prose "$id" \
     'If you run bin/fm-conditional-example.sh in older releases, it prints a legacy report.')
   read_case "$rec"
 
-  set +e
   out=$(run_spawn "$id")
   status=$?
-  set -e
-  expect_code 1 "$status" "an absent helper in conditional prose dispatched: $out"
-  assert_contains "$out" "fm-conditional-example.sh" "the conditional helper reference was not diagnosed"
-  pass "conditional prose cannot bypass syntactic helper validation"
+  expect_code 0 "$status" "conditional historical prose was treated as an instruction: $out"
+  assert_contains "$out" "spawned $id" "conditional prose did not reach worker dispatch"
+  pass "conditional historical prose is not treated as executable"
 }
 
-test_prose_only_mention_refuses() {
+test_historical_prose_mention_passes() {
   local id=brief-prose-a4 rec out status
-  # shellcheck disable=SC2016 # The literal variable reference exercises the prose parser path.
-  rec=$(make_case prose-only "$id" 'The historical examples run `$FM_ROOT/bin/fm-prose-only.sh` only as background context.')
+  rec=$(make_case prose-only "$id" 'The old workflow used bin/fm-retired.sh; do not run it.')
   read_case "$rec"
 
-  set +e
   out=$(run_spawn "$id")
   status=$?
-  set -e
-  expect_code 1 "$status" "an absent helper in prose dispatched: $out"
-  assert_contains "$out" "fm-prose-only.sh" "the prose helper reference was not diagnosed"
-  pass "prose cannot bypass syntactic helper validation"
+  expect_code 0 "$status" "historical prose was treated as an executable instruction: $out"
+  assert_contains "$out" "spawned $id" "historical prose did not reach worker dispatch"
+  pass "historical and prohibitive prose does not refuse dispatch"
 }
 
 test_dont_forget_reference_refuses() {
@@ -551,6 +566,25 @@ test_missing_lease_identity_rolls_back_the_holder_allocation() {
   pass "a lease missing its identity is returned through its holder guard"
 }
 
+test_missing_lease_path_recovers_and_returns_the_exact_allocation() {
+  local id=brief-missing-lease-path-a23 rec out status
+  rec=$(make_case missing-lease-path "$id" 'Proceed with the task.')
+  read_case "$rec"
+
+  set +e
+  out=$(FM_FAKE_TREEHOUSE_RESULT=missing-path run_spawn "$id")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "spawn accepted a lease without a path: $out"
+  assert_contains "$out" "lease without a valid worktree path" \
+    "malformed lease refusal did not identify the missing path"
+  assert_absent "$HOME_DIR/state/$id.endpoint" "pathless lease leaked its fresh endpoint"
+  assert_absent "$HOME_DIR/state/$id.lease" "pathless lease leaked its exact allocation"
+  assert_absent "$HOME_DIR/state/$id.meta" "pathless lease published task metadata"
+  pass "a pathless lease is recovered from pool status and returned exactly"
+}
+
 test_linked_homes_share_pool_transition_lock() {
   local rec linked state_a state_b lock_a lock_b
   rec=$(make_case cross-home-pool-lock brief-cross-home-a20 'Proceed with the task.')
@@ -582,18 +616,19 @@ test_bare_modal_imperative_reference_refuses
 test_infinitive_imperative_reference_refuses
 test_second_person_imperative_reference_refuses
 test_unenumerated_imperative_reference_refuses
-test_negative_modal_reference_refuses
+test_negative_modal_reference_passes
 test_mixed_negation_still_refuses_positive_instruction
 test_sentence_after_negation_still_refuses_positive_instruction
-test_prose_only_mention_refuses
+test_historical_prose_mention_passes
 test_dont_forget_reference_refuses
 test_brief_parser_failure_refuses_and_rolls_back
 test_missing_lease_identity_rolls_back_the_holder_allocation
+test_missing_lease_path_recovers_and_returns_the_exact_allocation
 test_linked_homes_share_pool_transition_lock
 test_pool_transition_lock_precedes_allocation
 test_pool_transition_lock_releases_before_endpoint_settle
 test_prepublication_failure_rolls_back_fresh_resources
 test_invalid_allocated_worktree_returns_exact_lease
-test_conditional_prose_reference_refuses
+test_conditional_prose_reference_passes
 
 echo "# all fm-spawn-brief-script-reference tests passed"

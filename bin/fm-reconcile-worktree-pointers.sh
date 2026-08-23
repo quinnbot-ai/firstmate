@@ -100,10 +100,6 @@ fi
 
 [ -d "$STATE" ] || { echo "error: no state directory at $STATE" >&2; exit 2; }
 
-meta_field() {  # <meta-file> <key>
-  sed -n "s/^$2=//p" "$1" | head -n 1
-}
-
 stale=0
 retired_now=0
 already=0
@@ -115,53 +111,24 @@ for meta in "$STATE"/*.meta; do
   id=${meta##*/}
   id=${id%.meta}
   fm_worktree_binding_task_id_valid "$id" || continue
-  # A secondmate home is a persistent home, not a pooled slot; its own removal
-  # validation owns it and it is never recycled underneath its record.
-  kind=$(meta_field "$meta" kind)
-  [ "$kind" != secondmate ] || continue
-  if [ -n "$(meta_field "$meta" worktree_retired)" ]; then
-    already=$((already + 1))
-    continue
-  fi
-  wt=$(meta_field "$meta" worktree)
-  # No pointer, or a pointer to something that no longer exists: there is no live
-  # copy here to misidentify, and nothing to retire.
-  [ -n "$wt" ] && [ -d "$wt" ] || continue
-  if [ "$APPLY" != 1 ]; then
-    if ! fm_worktree_owner_resolve "$wt" "$STATE" "$ASSERTED_OWNER_STATE" "$ASSERTED_OWNER_TASK"; then
-      unresolved=$((unresolved + 1))
-      printf 'UNRESOLVED: %s %s\n' "$id" "$FM_WORKTREE_OWNER_DETAIL"
-      continue
-    fi
-    if [ "$FM_WORKTREE_OWNER_STATE" = "$(fm_worktree_binding_state_resolve "$STATE")" ] \
-       && [ "$FM_WORKTREE_OWNER_TASK_ID" = "$id" ]; then
-      continue
-    fi
-    stale=$((stale + 1))
-    owner=$FM_WORKTREE_OWNER_TASK_ID
-    branch=${FM_WORKTREE_OWNER_BRANCH:-<unreadable>}
-    printf 'STALE: %s copy %s is owned by %s in %s (branch %s, via %s)\n' \
-      "$id" "$wt" "$owner" "$FM_WORKTREE_OWNER_STATE" "$branch" "$FM_WORKTREE_OWNER_METHOD"
-    continue
-  fi
   lock=$(fm_meta_lock_path "$meta") || { failed=$((failed + 1)); continue; }
   fm_lock_acquire_wait "$lock"
-  kind=$(meta_field "$meta" kind)
+  kind=$(fm_meta_get "$meta" kind)
   if [ "$kind" = secondmate ]; then
     fm_lock_release "$lock" || true
     continue
   fi
-  if [ -n "$(meta_field "$meta" worktree_retired)" ]; then
+  if [ -n "$(fm_meta_get "$meta" worktree_retired)" ]; then
     already=$((already + 1))
     fm_lock_release "$lock" || true
     continue
   fi
-  wt=$(meta_field "$meta" worktree)
+  wt=$(fm_meta_get "$meta" worktree)
   if [ -z "$wt" ] || [ ! -d "$wt" ]; then
     fm_lock_release "$lock" || true
     continue
   fi
-  project=$(meta_field "$meta" project)
+  project=$(fm_meta_get "$meta" project)
   pool_lock=$(fm_worktree_pool_transition_lock_path "$STATE" "$project") || {
     failed=$((failed + 1))
     fm_lock_release "$lock" || true
@@ -191,6 +158,16 @@ for meta in "$STATE"/*.meta; do
     continue
   fi
   stale=$((stale + 1))
+  owner=$FM_WORKTREE_OWNER_TASK_ID
+  branch=${FM_WORKTREE_OWNER_BRANCH:-<unreadable>}
+  if [ "$APPLY" != 1 ]; then
+    printf 'STALE: %s copy %s is owned by %s in %s (branch %s, via %s)\n' \
+      "$id" "$wt" "$owner" "$FM_WORKTREE_OWNER_STATE" "$branch" "$FM_WORKTREE_OWNER_METHOD"
+    fm_lock_release "$transition_lock" || true
+    fm_lock_release "$pool_lock" || true
+    fm_lock_release "$lock" || true
+    continue
+  fi
   if [ "$FM_WORKTREE_OWNER_METHOD" != binding ]; then
     if ! fm_worktree_owner_bind_resolved_legacy "$wt"; then
       failed=$((failed + 1))

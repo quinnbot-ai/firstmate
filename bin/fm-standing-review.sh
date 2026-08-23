@@ -641,6 +641,15 @@ def json_equal(left, right) -> bool:
         return left == right
     if type(left) is not type(right):
         return False
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            json_equal(left_item, right_item)
+            for left_item, right_item in zip(left, right)
+        )
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(
+            json_equal(left[key], right[key]) for key in left
+        )
     return left == right
 
 

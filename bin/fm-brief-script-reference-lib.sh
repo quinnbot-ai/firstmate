@@ -3,10 +3,9 @@
 #
 # Usage after sourcing: fm_brief_refuse_missing_helper_scripts <brief> <worktree>
 #
-# A brief can outlive the checkout it was written for.  This detects every
-# syntactic bin/fm-*.sh helper reference rather than interpreting open-ended
-# natural language to decide which mentions are executable.  The parser
-# recognizes bin/, ./bin/,
+# A brief can outlive the checkout it was written for.  This detects helper
+# references in executable instructions while leaving explicitly descriptive
+# and prohibitive prose alone.  The parser recognizes bin/, ./bin/,
 # $FM_ROOT/bin, and ${FM_ROOT}/bin forms, then resolves every reference to the
 # task worktree's bin/ directory.  A helper basename spans from fm- through the
 # last .sh before a slash, whitespace, NUL, quote, or backtick delimiter.  It
@@ -34,15 +33,40 @@ my $script = qr{
   )
 }x;
 
+sub clause_prefix {
+  my ($text, $start) = @_;
+  my $prefix = substr($text, 0, $start);
+  $prefix =~ s/^.*(?:[;!?]|\.\s+)\s*//s;
+  $prefix =~ s/^\s*(?:(?:[-*+] | \d+[.)]\s+))//x;
+  $prefix =~ s/^.*,\s*//s;
+  return $prefix;
+}
+
+sub is_instruction {
+  my ($text, $start, $in_fence) = @_;
+  return 1 if $in_fence;
+  my $prefix = clause_prefix($text, $start);
+  $prefix =~ s/^\s+|\s+$//g;
+  return 1 if $prefix eq '' || $prefix =~ /^\$\s*$/;
+  return 1 if $prefix =~ /\bdon['’]t\s+forget\b/i;
+  return 0 if $prefix =~ /\b(?:do\s+not|don['’]t|must\s+not|must\s+never|should\s+not|never|avoid)\b/i;
+  return 1 if $prefix =~ /\b(?:must|shall|should|need(?:s)?\s+to|required\s+to|have\s+to)\b/i;
+  return 0 if $prefix =~ /^(?:the|a|an|this|that|these|those|it|they|you|we|i|if|when|whenever|where|while|because|although|historically|previously|formerly|in\s+(?:older|previous|prior|legacy|historical)\b)\b/i;
+  return 1;
+}
+
 sub emit_scripts {
-  my ($text) = @_;
+  my ($text, $in_fence) = @_;
   while ($text =~ /$script/g) {
-    print "$1\t$2\n";
+    my ($raw, $basename, $start) = ($1, $2, $-[1]);
+    print "$raw\t$basename\n" if is_instruction($text, $start, $in_fence);
   }
 }
 
+my $in_fence = 0;
 while (my $line = <$fh>) {
-  emit_scripts($line);
+  emit_scripts($line, $in_fence);
+  $in_fence = !$in_fence if $line =~ /^\s*```/;
 }
 PERL
 }

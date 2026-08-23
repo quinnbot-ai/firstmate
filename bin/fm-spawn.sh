@@ -689,6 +689,7 @@ SPAWN_WORKTREE_POOL_TRANSITION_LOCK_HELD=0
 SPAWN_FRESH_ENDPOINT_PENDING=0
 SPAWN_FRESH_WORKTREE_PENDING=0
 SPAWN_TREEHOUSE_LEASE_ID=
+SPAWN_TREEHOUSE_LEASES_BEFORE=
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 RELAUNCH_REPLACEMENT_PENDING=0
@@ -714,6 +715,37 @@ parse_orca_worktree_result() {
   else
     ORCA_TERMINAL=
   fi
+}
+
+spawn_treehouse_holder_leases() {
+  local status_json
+  status_json=$(cd "$PROJ_ABS" && treehouse status --json) || return 1
+  printf '%s\n' "$status_json" | jq -ce --arg holder "$ID" '
+    [ .[]
+      | select(.lease_holder == $holder)
+      | select((.path | type) == "string" and (.path | length) > 0)
+      | select((.lease_id | type) == "string" and (.lease_id | length) > 0)
+      | {path: .path, lease_id: .lease_id}
+    ]
+  ' 2>/dev/null
+}
+
+spawn_treehouse_rollback_unparsed_allocation() {
+  local current allocation rollback_path rollback_lease_id
+  current=$(spawn_treehouse_holder_leases) || return 1
+  allocation=$(printf '%s\n' "$current" | jq -ce \
+    --argjson before "$SPAWN_TREEHOUSE_LEASES_BEFORE" '
+      [ .[]
+        | select(.lease_id as $lease_id
+          | (($before | map(.lease_id) | index($lease_id)) == null))
+      ]
+      | if length == 1 then .[0] else empty end
+    ' 2>/dev/null) || return 1
+  rollback_path=$(printf '%s\n' "$allocation" | jq -er '.path' 2>/dev/null) || return 1
+  rollback_lease_id=$(printf '%s\n' "$allocation" | jq -er '.lease_id' 2>/dev/null) || return 1
+  ( cd "$PROJ_ABS" && treehouse return --force \
+      --if-lease-id "$rollback_lease_id" --if-lease-holder "$ID" \
+      "$rollback_path" ) >/dev/null 2>&1
 }
 
 spawn_fresh_resources_rollback() {
@@ -2343,11 +2375,18 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  SPAWN_TREEHOUSE_LEASES_BEFORE=$(spawn_treehouse_holder_leases) || {
+    echo "error: treehouse could not establish a rollback snapshot before allocating for $ID" >&2
+    exit 1
+  }
   lease_json=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID" --json) || {
     echo "error: treehouse could not allocate a durable worktree lease for $ID" >&2
     exit 1
   }
   WT=$(printf '%s\n' "$lease_json" | jq -er '.path | select(type == "string" and length > 0)' 2>/dev/null) || {
+    if ! spawn_treehouse_rollback_unparsed_allocation; then
+      echo "warning: could not identify and return the malformed allocation for $ID" >&2
+    fi
     echo "error: treehouse returned a lease without a valid worktree path for $ID" >&2
     exit 1
   }
