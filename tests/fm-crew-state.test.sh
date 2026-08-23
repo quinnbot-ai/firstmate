@@ -1257,6 +1257,51 @@ SH
   pass "crew-state snapshots one metadata incarnation with its worktree"
 }
 
+test_post_guard_metadata_replacement_retries_current_incarnation() {
+  reset_fakes
+  local d meta next_meta real_grep out
+  d=$(setup_remote_case post-guard-metadata-replacement)
+  make_repo_on_branch "$d/wt" fm/post-guard-local
+  make_fakebin "$d" >/dev/null
+  meta="$d/state/rsm.meta"
+  next_meta="$meta.next"
+  mv -- "$meta" "$next_meta"
+  fm_write_meta "$meta" \
+    "window=fm:fm-rsm" "worktree=$d/wt" "project=$d/wt" \
+    "kind=scout" "harness=claude" "mode=ship"
+  fm_worktree_binding_write "$d/wt" "$d/state" rsm \
+    || fail "could not bind the pre-replacement crew-state metadata"
+  printf 'working: old local incarnation\n' > "$d/state/rsm.status"
+  real_grep=$(command -v grep)
+  cat > "$d/fakebin/grep" <<'SH'
+#!/usr/bin/env bash
+set -u
+last=
+for arg in "$@"; do last=$arg; done
+if [ "$last" = "${FM_TEST_REPLACE_STATUS:?}" ] && [ ! -e "${FM_TEST_REPLACE_MARKER:?}" ]; then
+  mv -- "${FM_TEST_REPLACE_META_NEXT:?}" "${FM_TEST_REPLACE_META:?}"
+  printf 'working: replacement remote incarnation\n' > "$FM_TEST_REPLACE_STATUS"
+  : > "$FM_TEST_REPLACE_MARKER"
+fi
+exec "${FM_TEST_REAL_GREP:?}" "$@"
+SH
+  chmod +x "$d/fakebin/grep"
+
+  out=$(PATH="$d/fakebin:$PATH" FM_HOME="$d" FM_STATE_OVERRIDE="$d/state" \
+    FM_SSH_BIN="$d/fakebin/fake-ssh" FM_FAKE_REMOTE_STATE_OUT=alive FM_FAKE_SSH_RC=0 \
+    FM_TEST_REPLACE_STATUS="$d/state/rsm.status" \
+    FM_TEST_REPLACE_MARKER="$d/replaced" FM_TEST_REPLACE_META_NEXT="$next_meta" \
+    FM_TEST_REPLACE_META="$meta" FM_TEST_REAL_GREP="$real_grep" \
+    "$CREW_STATE" rsm)
+  assert_contains "$out" "replacement remote incarnation" \
+    "crew-state did not retry against the replacement status log"
+  assert_contains "$out" "remote endpoint alive on remote-mac" \
+    "crew-state retained the old local metadata after replacement"
+  assert_not_contains "$out" "source: pane" \
+    "crew-state emitted the old local endpoint state after replacement"
+  pass "crew-state retries after post-guard metadata replacement"
+}
+
 # (i) kind=scout skips the run lookup entirely (its deliverable is a report).
 test_scout_skips_run_lookup() {
   reset_fakes
@@ -1706,6 +1751,7 @@ test_dead_window_still_reports_active_run_step
 test_no_timeout_uses_perl_bound
 test_worktree_guard_releases_before_run_identity_query
 test_metadata_replacement_uses_one_incarnation
+test_post_guard_metadata_replacement_retries_current_incarnation
 test_scout_skips_run_lookup
 test_torn_down_worktree
 test_exact_worktree_binding_reads_normally

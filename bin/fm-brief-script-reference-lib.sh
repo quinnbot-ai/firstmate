@@ -50,6 +50,22 @@ sub clause_prefix {
   return $prefix;
 }
 
+sub clause_suffix {
+  my ($text, $end) = @_;
+  my $suffix = substr($text, $end);
+  $suffix =~ s/^\s*(?:\)|\]|`+|\*{1,3}|_{1,3}|~~)+\s*//;
+  $suffix =~ s/(?:[;!?]|\.\s+).*$//s;
+  $suffix =~ s/^\s+|\s+$//g;
+  return $suffix;
+}
+
+sub is_post_path_instruction {
+  my ($suffix) = @_;
+  my $passive_action = qr/(?:applied|called|checked|consulted|deployed|executed|followed|inspected|invoked|launched|loaded|opened|performed|read|referenced|rerun|retried|reviewed|run|sourced|started|used|validated|verified)/i;
+  return 0 if $suffix =~ /^(?:must|shall|should|need(?:s)?\s+to|has\s+to|is\s+required\s+to)\s+(?:not|never)\b/i;
+  return $suffix =~ /^(?:(?:must|shall|should|need(?:s)?\s+to|has\s+to)\s+be|is\s+required\s+to\s+be)\s+$passive_action\b/i;
+}
+
 sub is_directive_prefix {
   my ($prefix) = @_;
   my $ordering = qr/(?:please|first|initially|next|then|subsequently|afterwards?|finally|lastly|instead)/i;
@@ -74,9 +90,10 @@ sub is_directive_prefix {
 }
 
 sub is_instruction {
-  my ($text, $start, $in_fence) = @_;
+  my ($text, $start, $end, $in_fence) = @_;
   return 1 if $in_fence;
   my $prefix = clause_prefix($text, $start);
+  my $suffix = clause_suffix($text, $end);
   $prefix =~ s/`+\s*$//;
   $prefix =~ s/^\s+|\s+$//g;
   $prefix =~ s/^(?:step|phase|stage|task|action|instruction)\s+[^:\s]+\s*:\s*//i;
@@ -86,6 +103,7 @@ sub is_instruction {
   return 0 if $prefix =~ /\b(?:do\s+not|don['’]t|must\s+not|must\s+never|should\s+not|never|avoid)\b/i;
   return 1 if $prefix =~ /\b(?:must|shall|should|need(?:s)?\s+to|required\s+to|have\s+to)\b/i;
   return 1 if $prefix =~ /^(?:your|the)\s+(?:(?:first|next|initial|required)\s+)?(?:action|step|task|instruction)\s+(?:is|will\s+be|must\s+be)\s+to\s+\S+(?:\s+\S+)*$/i;
+  return 1 if is_post_path_instruction($suffix);
   return 1 if is_directive_prefix($prefix);
   return 0;
 }
@@ -93,8 +111,8 @@ sub is_instruction {
 sub emit_scripts {
   my ($text, $in_fence) = @_;
   while ($text =~ /$script/g) {
-    my ($raw, $basename, $start) = ($1, $2, $-[1]);
-    print "$raw\t$basename\n" if is_instruction($text, $start, $in_fence);
+    my ($raw, $basename, $start, $end) = ($1, $2, $-[1], $+[1]);
+    print "$raw\t$basename\n" if is_instruction($text, $start, $end, $in_fence);
   }
 }
 

@@ -99,6 +99,9 @@ FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
 SEP=' · '
 CREW_WORKTREE_GUARD_HELD=0
+CREW_META_INCARNATION=
+CREW_META_RETRY=${FM_CREW_STATE_META_RETRY:-0}
+case "$CREW_META_RETRY" in ''|*[!0-9]*) CREW_META_RETRY=0 ;; esac
 
 crew_state_cleanup() {
   if [ "$CREW_WORKTREE_GUARD_HELD" -eq 1 ]; then
@@ -112,6 +115,17 @@ trap crew_state_cleanup EXIT
 # Emit the one canonical line and exit 0. Detail is optional.
 emit() {  # <state> <source> [detail]
   local line="state: $1${SEP}source: $2"
+  if [ -n "$CREW_META_INCARNATION" ] && [ "$CREW_WORKTREE_GUARD_HELD" -eq 0 ] \
+     && ! fm_meta_file_incarnation_matches "$META" "$CREW_META_INCARNATION"; then
+    if [ "$CREW_META_RETRY" -lt 2 ]; then
+      FM_CREW_STATE_META_RETRY=$((CREW_META_RETRY + 1))
+      export FM_CREW_STATE_META_RETRY
+      exec "$SCRIPT_DIR/fm-crew-state.sh" "$ID"
+    fi
+    line="state: unknown${SEP}source: none${SEP}metadata changed during state read"
+    printf '%s\n' "$line"
+    exit 0
+  fi
   [ -n "${3:-}" ] && line="$line${SEP}$3"
   printf '%s\n' "$line"
   exit 0
@@ -133,6 +147,8 @@ if [ "$FM_WORKTREE_RECORD_ACTIVE_GUARD_HELD" -eq 0 ]; then
   emit unknown none "${FM_WORKTREE_RECORD_DETAIL:-metadata unavailable for $ID}"
 fi
 CREW_WORKTREE_GUARD_HELD=1
+CREW_META_INCARNATION=$(fm_meta_file_incarnation "$META") \
+  || emit unknown none "metadata identity unavailable for $ID"
 KIND=$(meta_value kind)
 HARNESS=$(meta_value harness)
 REMOTE_HOST=$(meta_value remote_host)

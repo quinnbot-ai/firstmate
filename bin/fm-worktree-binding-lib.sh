@@ -35,6 +35,10 @@
 #     when no active worktree resolves, so callers can snapshot either state.
 #   fm_worktree_record_active_guard_release
 #     Releases a held active-worktree or metadata-snapshot guard.
+#   fm_meta_file_incarnation <meta-file>
+#     Returns a file-identity and content token for one metadata incarnation.
+#   fm_meta_file_incarnation_matches <meta-file> <expected-incarnation>
+#     Revalidates that token while holding the task metadata lock.
 #   fm_worktree_binding_write <worktree> <state-dir> <task-id>
 #     Atomically binds a freshly assigned worktree to its current task.
 #   fm_worktree_binding_clear <worktree> <state-dir> <task-id>
@@ -85,6 +89,25 @@ FM_WORKTREE_RECORD_ACTIVE_META_LOCK=
 FM_WORKTREE_RECORD_ACTIVE_POOL_LOCK=
 FM_WORKTREE_RECORD_ACTIVE_TRANSITION_LOCK=
 FM_WORKTREE_RECORD_ACTIVE_GUARD_HELD=0
+
+fm_meta_file_incarnation() {  # <meta-file>
+  local meta=${1-} file_id digest
+  [ -f "$meta" ] || return 1
+  file_id=$(stat -f '%d:%i' "$meta" 2>/dev/null) \
+    || file_id=$(stat -c '%d:%i' "$meta" 2>/dev/null) \
+    || return 1
+  digest=$(git hash-object --no-filters "$meta" 2>/dev/null) || return 1
+  printf '%s:%s\n' "$file_id" "$digest"
+}
+
+fm_meta_file_incarnation_matches() {  # <meta-file> <expected-incarnation>
+  local meta=${1-} expected=${2-} lock current
+  lock=$(fm_meta_lock_path "$meta") || return 1
+  fm_lock_acquire_wait "$lock" || return 1
+  current=$(fm_meta_file_incarnation "$meta" 2>/dev/null || true)
+  fm_lock_release "$lock"
+  [ -n "$current" ] && [ "$current" = "$expected" ]
+}
 
 fm_worktree_record_resolve() {  # <meta-file>
   local meta=${1-}

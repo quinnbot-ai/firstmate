@@ -443,6 +443,23 @@ test_markdown_heading_directive_reference_refuses() {
   pass "a Markdown heading helper instruction refuses dispatch"
 }
 
+test_post_path_modal_reference_refuses() {
+  local id=brief-post-path-modal-a45 rec out status expected
+  rec=$(make_case post-path-modal-command "$id" \
+    'The helper bin/fm-post-path-modal-missing.sh must be run before editing.')
+  read_case "$rec"
+
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite an absent helper in a post-path modal instruction"
+  expected="$POOL_DIR/bin/fm-post-path-modal-missing.sh"
+  assert_contains "$out" "$expected" \
+    "post-path modal helper did not resolve against the task worktree"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "post-path modal helper refusal published metadata"
+  pass "a post-path modal helper instruction refuses dispatch"
+}
+
 test_second_person_imperative_reference_refuses() {
   local id=brief-second-person-a13 rec out status expected
   rec=$(make_case second-person-command "$id" 'Ensure you run bin/fm-second-person-missing.sh before editing.')
@@ -1028,6 +1045,7 @@ test_markdown_emphasized_directive_reference_refuses
 test_markdown_emphasized_object_directive_reference_refuses
 test_markdown_task_directive_reference_refuses
 test_markdown_heading_directive_reference_refuses
+test_post_path_modal_reference_refuses
 test_second_person_imperative_reference_refuses
 test_directed_subject_reference_refuses
 test_commissioned_subject_reference_refuses
