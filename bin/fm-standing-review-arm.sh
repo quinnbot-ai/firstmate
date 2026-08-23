@@ -156,9 +156,25 @@ is_review_shim() {  # <path>
 }
 
 if [ "$MODE" = list ]; then
-  found=0
+  checks=()
+  TASK_SET_LOCK=$(fm_task_set_lock_path "$STATE") \
+    || die "cannot resolve the task-set lock for $STATE"
+  fm_lock_acquire_wait "$TASK_SET_LOCK" \
+    || die "cannot acquire the task-set lock for $STATE"
+  TASK_SET_LOCK_HELD=1
   for check in "$STATE"/*.check.sh; do
     [ -e "$check" ] || continue
+    checks+=("$check")
+  done
+  if [ "${#checks[@]}" -eq 0 ]; then
+    printf 'no standing reviews armed in %s\n' "$FM_HOME"
+    exit 0
+  fi
+  TASK_SET_LOCK_HELD=0
+  fm_lock_release "$TASK_SET_LOCK" \
+    || die "cannot release the task-set lock for $STATE"
+  found=0
+  for check in "${checks[@]}"; do
     id=$(basename "$check" .check.sh)
     fm_pr_task_id_valid "$id" || continue
     CHECK_LIFECYCLE_LOCK=$(fm_custom_check_lifecycle_lock_path "$STATE" "$id") \

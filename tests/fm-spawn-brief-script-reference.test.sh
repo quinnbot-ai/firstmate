@@ -358,6 +358,23 @@ test_assurance_imperative_reference_refuses() {
   pass "an assurance helper instruction refuses dispatch"
 }
 
+test_markdown_linked_directive_reference_refuses() {
+  local id=brief-markdown-link-a35 rec out status expected
+  rec=$(make_case markdown-link-command "$id" \
+    'Run [the helper](bin/fm-markdown-link-missing.sh) before editing.')
+  read_case "$rec"
+
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite an absent Markdown-linked helper instruction"
+  expected="$POOL_DIR/bin/fm-markdown-link-missing.sh"
+  assert_contains "$out" "$expected" \
+    "Markdown-linked helper did not resolve against the task worktree"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "Markdown-linked helper refusal published metadata"
+  pass "a Markdown-linked helper instruction refuses dispatch"
+}
+
 test_second_person_imperative_reference_refuses() {
   local id=brief-second-person-a13 rec out status expected
   rec=$(make_case second-person-command "$id" 'Ensure you run bin/fm-second-person-missing.sh before editing.')
@@ -876,6 +893,7 @@ test_modal_imperative_reference_refuses
 test_bare_modal_imperative_reference_refuses
 test_infinitive_imperative_reference_refuses
 test_assurance_imperative_reference_refuses
+test_markdown_linked_directive_reference_refuses
 test_second_person_imperative_reference_refuses
 test_directed_subject_reference_refuses
 test_unenumerated_imperative_reference_refuses

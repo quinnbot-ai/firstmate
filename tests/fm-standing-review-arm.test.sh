@@ -505,6 +505,27 @@ test_list_reports_what_is_armed() {
   pass "the armed reviews in a home are inspectable"
 }
 
+test_list_waits_for_task_set_snapshot() {
+  local home lock list_pid rc out
+  home=$(make_home list-task-set)
+  lock=$(fm_task_set_lock_path "$home/state") \
+    || fail "could not resolve the task-set lock"
+  fm_lock_acquire_wait "$lock" || fail "could not hold the task-set lock"
+  arm "$home" --list > "$home/list-task-set.out" 2>&1 &
+  list_pid=$!
+  sleep 0.05
+  kill -0 "$list_pid" 2>/dev/null \
+    || fail "listing took its review snapshot outside the task-set boundary"
+  fm_lock_release "$lock" || fail "could not release the task-set lock"
+  rc=0
+  wait "$list_pid" || rc=$?
+  [ "$rc" -eq 0 ] || fail "listing failed after task-set release"
+  out=$(cat "$home/list-task-set.out")
+  assert_contains "$out" "no standing reviews" \
+    "empty listing did not complete after its serialized snapshot"
+  pass "listing snapshots review ids under the task-set boundary"
+}
+
 test_list_waits_for_rearm_registration() {
   local home fakebin marker release real_shasum rearm_pid list_pid i rc out
   home=$(make_home list-rearm)
@@ -594,5 +615,6 @@ test_disarm_waits_for_an_active_watcher_check
 test_disarm_waits_for_a_direct_review_scan
 test_purge_refuses_unremovable_state_without_partial_disarm
 test_list_reports_what_is_armed
+test_list_waits_for_task_set_snapshot
 test_list_waits_for_rearm_registration
 test_mode_conflicts_and_stray_purge_are_refused

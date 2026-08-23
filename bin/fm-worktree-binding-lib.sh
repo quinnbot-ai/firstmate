@@ -27,9 +27,9 @@
 #     Resolves an operational worktree only when its current binding permits
 #     this record to use it; legacy records require the pool-wide owner proof.
 #   fm_worktree_record_active_guard_acquire <meta-file>
-#     Holds the home task-set, repository pool, and worktree transition locks
+#     Holds the task metadata, repository pool, and worktree transition locks
 #     while resolving an operational worktree, so dependent reads cannot cross
-#     record replacement or reassignment.
+#     record replacement or reassignment without blocking unrelated tasks.
 #   fm_worktree_record_active_guard_release
 #     Releases a successful active-worktree guard.
 #   fm_worktree_binding_write <worktree> <state-dir> <task-id>
@@ -78,7 +78,7 @@ FM_WORKTREE_RECORD_ACTIVE_PATH=
 FM_WORKTREE_RECORD_RETIRED_OWNER=
 FM_WORKTREE_RECORD_RETIRED_STATE=
 FM_WORKTREE_RECORD_DETAIL=
-FM_WORKTREE_RECORD_ACTIVE_TASK_SET_LOCK=
+FM_WORKTREE_RECORD_ACTIVE_META_LOCK=
 FM_WORKTREE_RECORD_ACTIVE_POOL_LOCK=
 FM_WORKTREE_RECORD_ACTIVE_TRANSITION_LOCK=
 FM_WORKTREE_RECORD_ACTIVE_GUARD_HELD=0
@@ -155,25 +155,25 @@ fm_worktree_record_active_resolve() {  # <meta-file>
 }
 
 fm_worktree_record_active_guard_acquire() {  # <meta-file>
-  local meta=${1-} state project kind task_set_lock pool_lock transition_lock detail
-  FM_WORKTREE_RECORD_ACTIVE_TASK_SET_LOCK=
+  local meta=${1-} state project kind meta_lock pool_lock transition_lock detail
+  FM_WORKTREE_RECORD_ACTIVE_META_LOCK=
   FM_WORKTREE_RECORD_ACTIVE_POOL_LOCK=
   FM_WORKTREE_RECORD_ACTIVE_TRANSITION_LOCK=
   FM_WORKTREE_RECORD_ACTIVE_GUARD_HELD=0
   declare -F fm_lock_acquire_wait >/dev/null 2>&1 \
-    && declare -F fm_task_set_lock_path >/dev/null 2>&1 || {
+    && declare -F fm_meta_lock_path >/dev/null 2>&1 || {
     FM_WORKTREE_RECORD_DETAIL="worktree binding unverifiable: lifecycle lock support is unavailable"
     FM_WORKTREE_RECORD_ACTIVE_PATH=
     return 1
   }
   state=$(dirname -- "$meta")
-  task_set_lock=$(fm_task_set_lock_path "$state") || {
-    FM_WORKTREE_RECORD_DETAIL="worktree binding unverifiable: cannot establish the home task-set lock"
+  meta_lock=$(fm_meta_lock_path "$meta") || {
+    FM_WORKTREE_RECORD_DETAIL="worktree binding unverifiable: cannot establish the task metadata lock"
     FM_WORKTREE_RECORD_ACTIVE_PATH=
     return 1
   }
-  fm_lock_acquire_wait "$task_set_lock" || return 1
-  FM_WORKTREE_RECORD_ACTIVE_TASK_SET_LOCK=$task_set_lock
+  fm_lock_acquire_wait "$meta_lock" || return 1
+  FM_WORKTREE_RECORD_ACTIVE_META_LOCK=$meta_lock
   FM_WORKTREE_RECORD_ACTIVE_GUARD_HELD=1
   if ! fm_worktree_record_resolve "$meta"; then
     detail=$FM_WORKTREE_RECORD_DETAIL
@@ -232,12 +232,12 @@ fm_worktree_record_active_guard_release() {
   if [ -n "$FM_WORKTREE_RECORD_ACTIVE_POOL_LOCK" ]; then
     fm_lock_release "$FM_WORKTREE_RECORD_ACTIVE_POOL_LOCK" || true
   fi
-  if [ -n "$FM_WORKTREE_RECORD_ACTIVE_TASK_SET_LOCK" ]; then
-    fm_lock_release "$FM_WORKTREE_RECORD_ACTIVE_TASK_SET_LOCK" || true
+  if [ -n "$FM_WORKTREE_RECORD_ACTIVE_META_LOCK" ]; then
+    fm_lock_release "$FM_WORKTREE_RECORD_ACTIVE_META_LOCK" || true
   fi
   FM_WORKTREE_RECORD_ACTIVE_TRANSITION_LOCK=
   FM_WORKTREE_RECORD_ACTIVE_POOL_LOCK=
-  FM_WORKTREE_RECORD_ACTIVE_TASK_SET_LOCK=
+  FM_WORKTREE_RECORD_ACTIVE_META_LOCK=
 }
 
 fm_worktree_binding_detail() {

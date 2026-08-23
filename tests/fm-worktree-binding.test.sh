@@ -8,8 +8,11 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-worktree-binding)
 
-fm_task_set_lock_path() {
-  printf '%s/.task-set.lock\n' "$1"
+fm_meta_lock_path() {
+  local meta=$1 dir base
+  dir=${meta%/*}
+  base=${meta##*/}
+  printf '%s/.meta-%s.lock\n' "$dir" "${base%.meta}"
 }
 
 fm_lock_acquire_wait() {
@@ -122,7 +125,7 @@ test_active_guard_serializes_metadata_identity() {
     "kind=ship" \
     "worktree_binding=fm-worktree-binding.v2"
 
-  TEST_IDENTITY_TASK_SET="$state/.task-set.lock"
+  TEST_IDENTITY_META_LOCK="$state/.meta-lane-a.lock"
   TEST_IDENTITY_META=$meta
   TEST_IDENTITY_PROJECT=$project_b
   TEST_IDENTITY_WORKTREE=$worktree_b
@@ -130,8 +133,8 @@ test_active_guard_serializes_metadata_identity() {
   fm_lock_acquire_wait() {
     local lock=$1
     if [ "$TEST_IDENTITY_LOCKED" -eq 0 ]; then
-      [ "$lock" = "$TEST_IDENTITY_TASK_SET" ] \
-        || fail "active guard did not serialize task identity before repository locking"
+      [ "$lock" = "$TEST_IDENTITY_META_LOCK" ] \
+        || fail "active guard did not serialize task metadata before repository locking"
       TEST_IDENTITY_LOCKED=1
       fm_write_meta "$TEST_IDENTITY_META" \
         "worktree=$TEST_IDENTITY_WORKTREE" \
@@ -154,8 +157,10 @@ test_active_guard_serializes_metadata_identity() {
     || fail "active guard returned a path outside its repository pool lock"
   [ "$FM_WORKTREE_RECORD_ACTIVE_TRANSITION_LOCK" = "$expected_transition" ] \
     || fail "active guard returned a path outside its worktree transition lock"
+  [ "$FM_WORKTREE_RECORD_ACTIVE_META_LOCK" = "$TEST_IDENTITY_META_LOCK" ] \
+    || fail "active guard did not retain the task metadata lock"
   fm_worktree_record_active_guard_release
-  pass "active guard serializes task identity before worktree ownership"
+  pass "active guard serializes task metadata without a home-wide lock"
 }
 
 test_binding_publication_rejects_non_regular_markers
