@@ -53,7 +53,9 @@ sub is_instruction {
   return 0 if $prefix =~ /\b(?:do\s+not|don['’]t|must\s+not|must\s+never|should\s+not|never|avoid)\b/i;
   return 1 if $prefix =~ /\b(?:must|shall|should|need(?:s)?\s+to|required\s+to|have\s+to)\b/i;
   return 1 if $prefix =~ /\b(?:make\s+sure\s+to|ensure\s+you)\b/i;
-  return 1 if $prefix =~ /^(?:(?:please|then|instead)\s+)*[A-Za-z][A-Za-z0-9'’_-]*(?:\s+(?:and|then)\s+[A-Za-z][A-Za-z0-9'’_-]*)*$/i;
+  my $sequence = qr/(?:please|first|initially|next|then|subsequently|afterwards?|finally|lastly|instead)/i;
+  my $verb = qr/[A-Za-z][A-Za-z0-9'’_-]*/;
+  return 1 if $prefix =~ /^(?:$sequence\s+)*$verb(?:\s+(?:and|then)\s+$verb)*$/i;
   return 0;
 }
 

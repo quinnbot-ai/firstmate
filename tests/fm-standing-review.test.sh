@@ -524,6 +524,28 @@ test_the_same_finding_does_not_wake_twice() {
   pass "G6: a condition that is still true does not wake again"
 }
 
+test_object_key_order_does_not_mint_a_new_finding() {
+  local home first second err
+  home=$(make_home object-order acme)
+  write_source "$home" '[{"venture":"acme","signals":{"cost":10,"commits":0},"cost_30d":10}]'
+  write_spec "$home" r '[{"field":"cost_30d","op":"ge","value":1}]' \
+    '["signals","cost_30d"]' 0 '' \
+    '"interval_seconds": 1, "subject_cooldown_seconds": 1,'
+
+  first=$(scan "$home" --id r)
+  [ -n "$first" ] || fail "the first composite-evidence review produced nothing"
+  sleep 2
+  write_source "$home" '[{"venture":"acme","signals":{"commits":0,"cost":10},"cost_30d":10}]'
+  err=$("$SCAN" --home "$home" --id r --explain 2>&1 >"$home/out")
+  second=$(cat "$home/out")
+  [ -z "$second" ] || fail "reordered object keys minted a new finding: $second"
+  case "$err" in
+    *"G6 novelty"*) ;;
+    *) fail "reordered composite evidence did not retain its novelty identity: $err" ;;
+  esac
+  pass "G6: object key order does not change finding identity"
+}
+
 test_drifting_evidence_does_not_defeat_the_latch() {
   local home first second err
   home=$(make_home cooldown acme)
@@ -1137,6 +1159,7 @@ test_structural_paths_cannot_break_the_wake_line
 test_json_equality_does_not_conflate_booleans_and_numbers
 test_nested_json_equality_preserves_boolean_and_number_types
 test_the_same_finding_does_not_wake_twice
+test_object_key_order_does_not_mint_a_new_finding
 test_drifting_evidence_does_not_defeat_the_latch
 test_the_latch_expires_so_a_recurrence_can_wake_again
 test_a_stale_source_becomes_the_finding

@@ -70,15 +70,36 @@ LIST_REQUESTED=0
 TMP=
 PRIOR_CHECK=
 PRIOR_TRUST=
+REPLACEMENT_PENDING=0
 TASK_SET_LOCK=
 TASK_SET_LOCK_HELD=0
 CHECK_LIFECYCLE_LOCK=
 CHECK_LIFECYCLE_LOCK_HELD=0
 
+rollback_replacement() {
+  [ "$REPLACEMENT_PENDING" -eq 1 ] || return 0
+  if [ -n "$PRIOR_CHECK" ] && [ -n "$PRIOR_TRUST" ]; then
+    mv -f -- "$PRIOR_TRUST" "$TRUST" || return 1
+    PRIOR_TRUST=
+    mv -f -- "$PRIOR_CHECK" "$CHECK" || return 1
+    PRIOR_CHECK=
+  else
+    rm -f -- "$CHECK" "$TRUST" || return 1
+  fi
+  REPLACEMENT_PENDING=0
+}
+
 cleanup() {
+  local status=$?
   [ -z "$TMP" ] || rm -f -- "$TMP"
-  [ -z "$PRIOR_CHECK" ] || rm -f -- "$PRIOR_CHECK"
-  [ -z "$PRIOR_TRUST" ] || rm -f -- "$PRIOR_TRUST"
+  if ! rollback_replacement; then
+    printf 'error: could not restore the prior standing review registration\n' >&2
+    status=1
+  fi
+  if [ "$REPLACEMENT_PENDING" -eq 0 ]; then
+    [ -z "$PRIOR_CHECK" ] || rm -f -- "$PRIOR_CHECK"
+    [ -z "$PRIOR_TRUST" ] || rm -f -- "$PRIOR_TRUST"
+  fi
   if [ "$CHECK_LIFECYCLE_LOCK_HELD" -eq 1 ]; then
     CHECK_LIFECYCLE_LOCK_HELD=0
     fm_lock_release "$CHECK_LIFECYCLE_LOCK"
@@ -87,6 +108,7 @@ cleanup() {
     TASK_SET_LOCK_HELD=0
     fm_lock_release "$TASK_SET_LOCK"
   fi
+  return "$status"
 }
 
 trap cleanup EXIT
@@ -248,21 +270,15 @@ chmod 0700 "$TMP" || die "cannot set the check shim mode"
 bash -n "$TMP" || die "generated check shim does not parse"
 mv -f -- "$TMP" "$CHECK" || die "cannot install the check shim"
 TMP=
+REPLACEMENT_PENDING=1
 
 if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
   "$SCRIPT_DIR/fm-check-register.sh" "$ID"; then
-  if [ -n "$PRIOR_CHECK" ] && [ -n "$PRIOR_TRUST" ]; then
-    mv -f -- "$PRIOR_TRUST" "$TRUST" \
-      || die "check registration failed for $ID and the prior registration could not be restored"
-    PRIOR_TRUST=
-    mv -f -- "$PRIOR_CHECK" "$CHECK" \
-      || die "check registration failed for $ID and the prior shim could not be restored"
-    PRIOR_CHECK=
-  else
-    rm -f -- "$CHECK" "$TRUST"
-  fi
+  rollback_replacement \
+    || die "check registration failed for $ID and the prior review could not be restored"
   die "check registration failed for $ID"
 fi
+REPLACEMENT_PENDING=0
 [ -z "$PRIOR_CHECK" ] || rm -f -- "$PRIOR_CHECK"
 [ -z "$PRIOR_TRUST" ] || rm -f -- "$PRIOR_TRUST"
 PRIOR_CHECK=

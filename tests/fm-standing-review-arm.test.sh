@@ -242,6 +242,47 @@ SH
   pass "a failed re-arm preserves the previously registered review"
 }
 
+test_interrupted_rearm_restores_the_registered_review() {
+  local home fakebin marker real_shasum pid i rc check_hash trust_bytes
+  home=$(make_home interrupted-rearm)
+  arm "$home" --id r >/dev/null 2>&1 || fail "initial arming failed"
+  check_hash=$(fm_custom_check_sha256 "$home/state/r.check.sh")
+  trust_bytes=$(cat "$home/state/r.check-trust")
+  marker="$home/rearm-registering"
+  real_shasum=$(command -v shasum)
+  fakebin=$(fm_fakebin "$home/rearm-interrupt")
+  cat > "$fakebin/shasum" <<'SH'
+#!/usr/bin/env bash
+: > "$FM_REARM_MARKER"
+sleep 1
+exec "$FM_REAL_SHASUM" "$@"
+SH
+  chmod +x "$fakebin/shasum"
+
+  PATH="$fakebin:$PATH" FM_REARM_MARKER="$marker" FM_REAL_SHASUM="$real_shasum" \
+    FM_ROOT_OVERRIDE="$ROOT" "$ARM" --home "$home" --id r \
+    > "$home/rearm.out" 2>&1 &
+  pid=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$marker" ]; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.01
+    i=$((i + 1))
+  done
+  assert_present "$marker" "re-arm did not reach registration"
+  kill -TERM "$pid" 2>/dev/null || fail "could not interrupt the re-arm"
+  rc=0
+  wait "$pid" || rc=$?
+  [ "$rc" -eq 143 ] || fail "interrupted re-arm exited with $rc: $(cat "$home/rearm.out")"
+  [ "$(fm_custom_check_sha256 "$home/state/r.check.sh")" = "$check_hash" ] \
+    || fail "interrupted re-arm did not restore the prior check bytes"
+  [ "$(cat "$home/state/r.check-trust")" = "$trust_bytes" ] \
+    || fail "interrupted re-arm did not restore the prior trust record"
+  fm_custom_check_registered "$home/state" r \
+    || fail "interrupted re-arm disabled the previously registered review"
+  pass "an interrupted re-arm restores the registered review"
+}
+
 test_reserved_system_check_ids_are_refused() {
   local home id out rc
   home=$(make_home reserved-ids)
@@ -414,6 +455,7 @@ test_arming_refuses_an_id_that_names_a_task
 test_spawning_refuses_an_id_reserved_by_a_review
 test_arming_refuses_to_overwrite_a_foreign_check
 test_failed_rearm_preserves_the_registered_review
+test_interrupted_rearm_restores_the_registered_review
 test_reserved_system_check_ids_are_refused
 test_arm_waits_for_the_check_lifecycle_boundary
 test_disarm_stops_the_review_and_keeps_what_it_reported

@@ -236,6 +236,16 @@ def fmt_number(value) -> str:
 def fmt_value(value) -> str:
     if is_number(value):
         return fmt_number(value)
+    if isinstance(value, (dict, list)):
+        return clean(
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        )
     return clean(value)
 
 

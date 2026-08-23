@@ -333,6 +333,20 @@ test_unenumerated_imperative_reference_refuses() {
   pass "an affirmative helper directive does not depend on an execution-verb allowlist"
 }
 
+test_ordered_imperative_reference_refuses() {
+  local id=brief-ordered-a25 rec out status expected
+  rec=$(make_case ordered-command "$id" 'First run bin/fm-ordered-missing.sh before editing.')
+  read_case "$rec"
+
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite an ordered helper instruction"
+  expected="$POOL_DIR/bin/fm-ordered-missing.sh"
+  assert_contains "$out" "$expected" "ordered imperative did not resolve against the task worktree"
+  assert_absent "$HOME_DIR/state/$id.meta" "ordered helper refusal published metadata"
+  pass "an ordered imperative helper reference refuses dispatch"
+}
+
 test_negative_modal_reference_passes() {
   local id=brief-negative-modal-a8 rec out status
   rec=$(make_case negative-modal "$id" 'You must never run bin/fm-negative-only.sh.')
@@ -657,6 +671,7 @@ test_bare_modal_imperative_reference_refuses
 test_infinitive_imperative_reference_refuses
 test_second_person_imperative_reference_refuses
 test_unenumerated_imperative_reference_refuses
+test_ordered_imperative_reference_refuses
 test_negative_modal_reference_passes
 test_mixed_negation_still_refuses_positive_instruction
 test_sentence_after_negation_still_refuses_positive_instruction
