@@ -226,6 +226,25 @@ meta_value() {  # <meta-file> <key>
   fm_meta_get "$1" "$2"
 }
 
+fleet_meta_incarnation() {  # <meta-file>
+  local meta=$1 file_id digest
+  [ -f "$meta" ] || return 1
+  file_id=$(stat -f '%d:%i' "$meta" 2>/dev/null) \
+    || file_id=$(stat -c '%d:%i' "$meta" 2>/dev/null) \
+    || return 1
+  digest=$(git hash-object --no-filters "$meta" 2>/dev/null) || return 1
+  printf '%s:%s\n' "$file_id" "$digest"
+}
+
+fleet_meta_incarnation_matches() {  # <meta-file> <expected-incarnation>
+  local meta=$1 expected=$2 lock current
+  lock=$(fm_meta_lock_path "$meta") || return 1
+  fm_lock_acquire_wait "$lock" || return 1
+  current=$(fleet_meta_incarnation "$meta" 2>/dev/null || true)
+  fm_lock_release "$lock"
+  [ -n "$current" ] && [ "$current" = "$expected" ]
+}
+
 last_nonempty_line() {  # <file>
   [ -f "$1" ] || return 1
   grep -v '^[[:space:]]*$' "$1" 2>/dev/null | tail -1
@@ -441,6 +460,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 
 task_json_lines() {
   local meta id kind harness mode yolo project worktree retired_worktree worktree_retired_to worktree_retired_state home projects backend target status_log report_path
+  local meta_incarnation
   local remote_host remote_root remote_state remote_rc remote_home_present
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json retired_worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status worktree_present
@@ -460,6 +480,11 @@ task_json_lines() {
       FLEET_WORKTREE_GUARD_HELD=0
       continue
     fi
+    meta_incarnation=$(fleet_meta_incarnation "$meta") || {
+      fm_worktree_record_active_guard_release
+      FLEET_WORKTREE_GUARD_HELD=0
+      continue
+    }
     kind=$(meta_value "$meta" kind)
     [ -n "$kind" ] || kind=ship
     harness=$(meta_value "$meta" harness)
@@ -582,6 +607,7 @@ task_json_lines() {
       fi
     fi
 
+    fleet_meta_incarnation_matches "$meta" "$meta_incarnation" || continue
     [ -f "$report_path" ] && report_present=1 || report_present=0
     meta_json=$(path_present_json "$meta")
     status_json=$event_json

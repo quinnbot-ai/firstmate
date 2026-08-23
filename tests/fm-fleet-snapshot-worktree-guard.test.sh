@@ -149,5 +149,54 @@ SH
   pass "fleet snapshot captures one metadata incarnation"
 }
 
+test_post_guard_metadata_replacement_skips_mixed_row() {
+  local home fakebin project_a project_b worktree fake_crew next_meta out
+  home="$TMP_ROOT/post-guard-home"
+  project_a="$home/project-a"
+  project_b="$home/project-b"
+  worktree="$home/projects/old-copy"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects" "$project_b"
+  fm_git_worktree "$project_a" "$worktree" fleet-post-guard-old
+  fm_write_meta "$home/state/reused.meta" \
+    "window=firstmate:fm-reused" \
+    "worktree=$worktree" \
+    "worktree_binding=fm-worktree-binding.v2" \
+    "project=$project_a" \
+    "harness=claude" \
+    "kind=scout" \
+    "mode=ship" \
+    "spawn_gen=old-incarnation"
+  fm_worktree_binding_write "$worktree" "$home/state" reused \
+    || fail "could not bind the pre-replacement fleet metadata"
+  next_meta="$home/state/reused.meta.next"
+  fm_write_meta "$next_meta" \
+    "window=firstmate:fm-reused" \
+    "project=$project_b" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "spawn_gen=new-incarnation"
+  fakebin=$(fm_fakebin "$home")
+  fake_crew="$home/fake-crew-state.sh"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'mv -- "${FM_SNAPSHOT_TEST_NEXT_META:?}" "${FM_SNAPSHOT_TEST_META:?}"' \
+    'printf "%s\n" "working: replacement-incarnation" > "${FM_SNAPSHOT_TEST_STATUS:?}"' \
+    'printf "%s\n" "state: working · source: pane"' > "$fake_crew"
+  chmod +x "$fake_crew"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' > "$fakebin/tmux"
+  chmod +x "$fakebin/tmux"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_CREW_STATE_BIN="$fake_crew" \
+    FM_SNAPSHOT_TEST_NEXT_META="$next_meta" \
+    FM_SNAPSHOT_TEST_META="$home/state/reused.meta" \
+    FM_SNAPSHOT_TEST_STATUS="$home/state/reused.status" \
+    "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    [.tasks[] | select(.id == "reused")] | length == 0
+  ' >/dev/null || fail "fleet snapshot emitted a mixed post-guard incarnation: $out"
+  pass "fleet snapshot skips post-guard metadata replacement"
+}
+
 test_active_worktree_presence_is_captured_with_ownership
 test_metadata_replacement_uses_one_incarnation
+test_post_guard_metadata_replacement_skips_mixed_row

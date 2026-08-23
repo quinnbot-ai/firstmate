@@ -179,6 +179,7 @@ DEFAULT_SUBJECT_COOLDOWN = 604800   # 7 days
 DEFAULT_LATCH_RETENTION = 7776000   # 90 days
 DEFAULT_SOURCE_MAX_AGE = 172800     # 2 days
 FUTURE_SKEW_SECONDS = 5
+MAX_JSON_DEPTH = 256
 
 # The watcher composes "check: <path>: <out>" into a wake reason that is read
 # in a digest, so a long line costs more than it carries. The marker matches
@@ -259,7 +260,22 @@ def json_loads_finite(text: str):
             raise ValueError(f"non-finite number {value}")
         return parsed
 
-    return json.loads(text, parse_constant=reject_constant, parse_float=finite_float)
+    try:
+        parsed = json.loads(
+            text, parse_constant=reject_constant, parse_float=finite_float
+        )
+    except RecursionError as exc:
+        raise ValueError("JSON nesting exceeds supported depth") from exc
+    stack = [(parsed, 0)]
+    while stack:
+        value, depth = stack.pop()
+        if depth > MAX_JSON_DEPTH:
+            raise ValueError("JSON nesting exceeds supported depth")
+        if isinstance(value, dict):
+            stack.extend((child, depth + 1) for child in value.values())
+        elif isinstance(value, list):
+            stack.extend((child, depth + 1) for child in value)
+    return parsed
 
 
 def stat_identity(info):

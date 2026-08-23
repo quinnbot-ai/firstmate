@@ -1108,6 +1108,31 @@ test_nonfinite_source_measurement_is_structural_error() {
   pass "non-finite source measurements are structural errors"
 }
 
+test_deeply_nested_source_is_structural_error() {
+  local home out
+  home=$(make_home deeply-nested-source acme)
+  python3 - "$home/source.json" <<'PY'
+import sys
+from pathlib import Path
+
+Path(sys.argv[1]).write_text(
+    '{"rows":' + ('[' * 2000) + '0' + (']' * 2000) + '}',
+    encoding="utf-8",
+)
+PY
+  write_spec "$home" r '[{"field":"commits_30d","op":"eq","value":0}]' \
+    '["commits_30d"]'
+
+  out=$(scan "$home" --id r)
+  assert_contains "$out" "source-invalid" \
+    "a deeply nested source left the standing review silently empty"
+  assert_contains "$out" "JSON nesting exceeds supported depth" \
+    "the deep-source diagnostic did not identify the parser bound"
+  [ "$(printf '%s\n' "$out" | sed '/^$/d' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the deep-source diagnostic broke the one-line wake contract: $out"
+  pass "deeply nested source JSON fails structurally"
+}
+
 test_nonfinite_spec_number_is_rejected() {
   local home out rc
   home=$(make_home nonfinite-spec acme)
@@ -1179,6 +1204,7 @@ test_a_long_finding_is_bounded_for_the_wake_digest
 test_a_long_text_field_cannot_truncate_the_measurement
 test_retention_cannot_expire_before_subject_cooldown
 test_nonfinite_source_measurement_is_structural_error
+test_deeply_nested_source_is_structural_error
 test_nonfinite_spec_number_is_rejected
 test_unsafe_evidence_field_is_rejected_on_one_line
 test_blindness_is_reported_before_a_finding_from_elsewhere
