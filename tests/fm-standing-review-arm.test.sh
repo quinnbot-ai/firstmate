@@ -283,6 +283,43 @@ SH
   pass "an interrupted re-arm restores the registered review"
 }
 
+test_interrupted_rearm_publication_restores_the_registered_review() {
+  local home canonical_home fakebin marker real_mv rc check_hash trust_bytes out
+  home=$(make_home interrupted-rearm-publication)
+  canonical_home=$(cd "$home" && pwd -P)
+  arm "$home" --id r >/dev/null 2>&1 || fail "initial arming failed"
+  check_hash=$(fm_custom_check_sha256 "$home/state/r.check.sh")
+  trust_bytes=$(cat "$home/state/r.check-trust")
+  marker="$home/rearm-published"
+  real_mv=$(command -v mv)
+  fakebin=$(fm_fakebin "$home/rearm-publication-interrupt")
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+last=
+for last do :; done
+"$FM_REAL_MV" "$@" || exit $?
+if [ "$last" = "$FM_REARM_CHECK" ] && [ ! -e "$FM_REARM_MARKER" ]; then
+  : > "$FM_REARM_MARKER"
+  kill -TERM "$PPID"
+fi
+SH
+  chmod +x "$fakebin/mv"
+
+  out=$(PATH="$fakebin:$PATH" FM_REAL_MV="$real_mv" FM_REARM_CHECK="$canonical_home/state/r.check.sh" \
+    FM_REARM_MARKER="$marker" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ARM" --home "$home" --id r 2>&1)
+  rc=$?
+  [ "$rc" -eq 143 ] || fail "publication-interrupted re-arm exited with $rc: $out"
+  assert_present "$marker" "re-arm did not publish its replacement before interruption"
+  [ "$(fm_custom_check_sha256 "$home/state/r.check.sh")" = "$check_hash" ] \
+    || fail "publication interruption did not restore the prior check bytes"
+  [ "$(cat "$home/state/r.check-trust")" = "$trust_bytes" ] \
+    || fail "publication interruption did not restore the prior trust record"
+  fm_custom_check_registered "$home/state" r \
+    || fail "publication interruption disabled the previously registered review"
+  pass "an interruption at replacement publication restores the registered review"
+}
+
 test_reserved_system_check_ids_are_refused() {
   local home id out rc
   home=$(make_home reserved-ids)
@@ -504,6 +541,7 @@ test_spawning_refuses_an_id_reserved_by_a_review
 test_arming_refuses_to_overwrite_a_foreign_check
 test_failed_rearm_preserves_the_registered_review
 test_interrupted_rearm_restores_the_registered_review
+test_interrupted_rearm_publication_restores_the_registered_review
 test_reserved_system_check_ids_are_refused
 test_arm_waits_for_the_check_lifecycle_boundary
 test_disarm_stops_the_review_and_keeps_what_it_reported

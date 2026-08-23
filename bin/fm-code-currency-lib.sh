@@ -84,8 +84,8 @@ fm_code_currency_print_path() {
 # Echo, one per line, the guard paths (above) that differ between the commit at
 # HEAD and <base_ref>, in git's own path order.
 fm_code_currency_guard_files() {
-  local root=$1 base=$2 path pat
-  git -C "$root" diff --name-only -z "HEAD...$base" -- >/dev/null 2>&1 || return 1
+  local root=$1 head=$2 base=$3 path pat
+  git -C "$root" diff --name-only -z "$head...$base" -- >/dev/null 2>&1 || return 1
   while IFS= read -r -d '' path; do
     for pat in "${FM_CODE_CURRENCY_GUARD_PATTERNS[@]}"; do
       # shellcheck disable=SC2254  # unquoted here on purpose: $pat is the pattern
@@ -93,14 +93,14 @@ fm_code_currency_guard_files() {
         $pat) fm_code_currency_print_path "$path"; break ;;
       esac
     done
-  done < <(git -C "$root" diff --name-only -z "HEAD...$base" -- 2>/dev/null)
+  done < <(git -C "$root" diff --name-only -z "$head...$base" -- 2>/dev/null)
 }
 
 fm_code_currency_landed_worktree_drift() {
-  local root=$1 base=$2 path entry metadata mode type oid actual expected_exec actual_exec
-  git -C "$root" diff --name-only -z "HEAD...$base" -- >/dev/null 2>&1 || return 1
+  local root=$1 head=$2 base=$3 path entry metadata mode type oid actual expected_exec actual_exec
+  git -C "$root" diff --name-only -z "$head...$base" -- >/dev/null 2>&1 || return 1
   while IFS= read -r -d '' path; do
-    entry=$(git -C "$root" ls-tree HEAD -- "$path" 2>/dev/null) || return 1
+    entry=$(git -C "$root" ls-tree "$head" -- "$path" 2>/dev/null) || return 1
     if [ -z "$entry" ]; then
       if [ -e "$root/$path" ] || [ -L "$root/$path" ]; then
         fm_code_currency_print_path "$path"
@@ -148,11 +148,11 @@ fm_code_currency_landed_worktree_drift() {
         fm_code_currency_print_path "$path"
         ;;
     esac
-  done < <(git -C "$root" diff --name-only -z "HEAD...$base" -- 2>/dev/null)
+  done < <(git -C "$root" diff --name-only -z "$head...$base" -- 2>/dev/null)
 }
 
 fm_code_currency_head_worktree_drift() {
-  local root=$1 record metadata mode type oid path actual expected_exec actual_exec
+  local root=$1 head=$2 record metadata mode type oid path actual expected_exec actual_exec
   local index count offset batch_count actuals hash_index regular_index
   local -a paths drift regular_paths regular_positions regular_oids
   paths=()
@@ -160,7 +160,7 @@ fm_code_currency_head_worktree_drift() {
   regular_paths=()
   regular_positions=()
   regular_oids=()
-  git -C "$root" ls-tree -r HEAD >/dev/null 2>&1 || return 1
+  git -C "$root" ls-tree -r "$head" >/dev/null 2>&1 || return 1
   while IFS= read -r -d '' record; do
     metadata=${record%%$'\t'*}
     path=${record#*$'\t'}
@@ -210,7 +210,7 @@ fm_code_currency_head_worktree_drift() {
         drift[$index]=1
         ;;
     esac
-  done < <(git -C "$root" ls-tree -rz HEAD 2>/dev/null)
+  done < <(git -C "$root" ls-tree -rz "$head" 2>/dev/null)
 
   count=${#regular_paths[@]}
   offset=0
@@ -255,29 +255,61 @@ fm_code_currency_index_hints() {
   done < <(git -C "$root" ls-files -v -z 2>/dev/null)
 }
 
+fm_code_currency_snapshot_matches() {
+  local root=$1 base=$2 expected_head=$3 expected_base=$4 current_head current_base
+  current_head=$(git -C "$root" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) || return 1
+  current_base=$(git -C "$root" rev-parse --verify "$base^{commit}" 2>/dev/null) || return 1
+  [ "$current_head" = "$expected_head" ] && [ "$current_base" = "$expected_base" ]
+}
+
+fm_code_currency_snapshot_changed_line() {
+  local base=$1 head_sha=$2 base_sha=$3
+  printf 'CODE_STALE: UNPROVEN live code: checked-out HEAD or %s changed during landed-versus-live inspection from snapshot %s/%s; retry session-start status before relying on code currency.\n' \
+    "$base" "$head_sha" "$base_sha"
+}
+
+fm_code_currency_inspection_failed_line() {
+  local base=$1 head_sha=$2 base_sha=$3 behind=$4
+  printf 'CODE_STALE: UNPROVEN live code: landed-versus-live inspection could not prove the tracked checkout at %s. The inspected snapshot is %s commit(s) behind %s (%s) as last fetched; repair the checkout inspection failure before relying on code currency.\n' \
+    "$head_sha" "$behind" "$base" "$base_sha"
+}
+
 # fm_code_currency_line <root>
 # Echo one CODE_STALE diagnostic when the clean checkout at <root> is behind the
 # default branch it follows, or when checkout drift makes live code
 # unprovable. Echo nothing (returning 1) for other clean states: not a git work
 # tree, nothing to compare against, already current, or ahead only.
 fm_code_currency_line() {
-  local root=$1 base behind ahead head_sha base_sha guard guard_count shown more guard_text tracked_status head_drift head_drift_shown landed_drift landed_drift_shown index_hints index_hints_shown
+  local root=$1 base behind ahead head_oid base_oid head_sha base_sha guard guard_count shown more guard_text tracked_status head_drift head_drift_shown landed_drift landed_drift_shown index_hints index_hints_shown
   git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
   base=$(fm_code_currency_base_ref "$root") || return 1
-  behind=$(git -C "$root" rev-list --count "HEAD..$base" 2>/dev/null) || return 1
+  head_oid=$(git -C "$root" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) || return 1
+  base_oid=$(git -C "$root" rev-parse --verify "$base^{commit}" 2>/dev/null) || return 1
+  behind=$(git -C "$root" rev-list --count "$head_oid..$base_oid" 2>/dev/null) || return 1
   case "$behind" in
     '' | *[!0-9]*) return 1 ;;
   esac
-  head_sha=$(git -C "$root" rev-parse --short=7 HEAD 2>/dev/null) || return 1
-  base_sha=$(git -C "$root" rev-parse --short=7 "$base" 2>/dev/null) || return 1
-  head_drift=$(fm_code_currency_head_worktree_drift "$root") || return 1
+  head_sha=${head_oid:0:7}
+  base_sha=${base_oid:0:7}
+  if ! head_drift=$(fm_code_currency_head_worktree_drift "$root" "$head_oid"); then
+    if fm_code_currency_snapshot_matches "$root" "$base" "$head_oid" "$base_oid"; then
+      fm_code_currency_inspection_failed_line "$base" "$head_sha" "$base_sha" "$behind"
+    else
+      fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+    fi
+    return 0
+  fi
   if [ -n "$head_drift" ]; then
+    if ! fm_code_currency_snapshot_matches "$root" "$base" "$head_oid" "$base_oid"; then
+      fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+      return 0
+    fi
     head_drift_shown=$(printf '%s\n' "$head_drift" | head -n 4 | paste -sd, - | sed 's/,/, /g')
     printf 'CODE_STALE: UNPROVEN live code: tracked worktree bytes differ from checked-out HEAD %s: %s. HEAD is %s commit(s) behind %s (%s) as last fetched; reconcile the tracked checkout before relying on landed-versus-live status.\n' \
       "$head_sha" "$head_drift_shown" "$behind" "$base" "$base_sha"
     return 0
   fi
-  if git -C "$root" diff --cached --quiet HEAD -- 2>/dev/null; then
+  if git -C "$root" diff --cached --quiet "$head_oid" -- 2>/dev/null; then
     tracked_status=0
   else
     tracked_status=$?
@@ -285,38 +317,95 @@ fm_code_currency_line() {
   case "$tracked_status" in
     0) ;;
     1)
+      if ! fm_code_currency_snapshot_matches "$root" "$base" "$head_oid" "$base_oid"; then
+        fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+        return 0
+      fi
       printf 'CODE_STALE: UNPROVEN live code: the tracked index differs from checked-out HEAD (%s), which is %s commit(s) behind %s (%s) as last fetched. Installed code cannot be proven to match HEAD or the landed branch; reconcile the tracked checkout before relying on landed-versus-live status.\n' \
         "$head_sha" "$behind" "$base" "$base_sha"
       return 0
       ;;
-    *) return 1 ;;
+    *)
+      if fm_code_currency_snapshot_matches "$root" "$base" "$head_oid" "$base_oid"; then
+        fm_code_currency_inspection_failed_line "$base" "$head_sha" "$base_sha" "$behind"
+      else
+        fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+      fi
+      return 0
+      ;;
   esac
-  landed_drift=$(fm_code_currency_landed_worktree_drift "$root" "$base") || return 1
+  if ! landed_drift=$(fm_code_currency_landed_worktree_drift "$root" "$head_oid" "$base_oid"); then
+    if fm_code_currency_snapshot_matches "$root" "$base" "$head_oid" "$base_oid"; then
+      fm_code_currency_inspection_failed_line "$base" "$head_sha" "$base_sha" "$behind"
+    else
+      fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+    fi
+    return 0
+  fi
   if [ -n "$landed_drift" ]; then
+    if ! fm_code_currency_snapshot_matches "$root" "$base" "$head_oid" "$base_oid"; then
+      fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+      return 0
+    fi
     landed_drift_shown=$(printf '%s\n' "$landed_drift" | head -n 4 | paste -sd, - | sed 's/,/, /g')
     printf 'CODE_STALE: UNPROVEN live code: landed paths differ from checked-out HEAD %s in the worktree: %s. HEAD is %s commit(s) behind %s (%s) as last fetched; installed code cannot be proven to match HEAD or the landed branch.\n' \
       "$head_sha" "$landed_drift_shown" "$behind" "$base" "$base_sha"
     return 0
   fi
-  index_hints=$(fm_code_currency_index_hints "$root") || return 1
+  if ! index_hints=$(fm_code_currency_index_hints "$root"); then
+    if fm_code_currency_snapshot_matches "$root" "$base" "$head_oid" "$base_oid"; then
+      fm_code_currency_inspection_failed_line "$base" "$head_sha" "$base_sha" "$behind"
+    else
+      fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+    fi
+    return 0
+  fi
   if [ -n "$index_hints" ]; then
+    if ! fm_code_currency_snapshot_matches "$root" "$base" "$head_oid" "$base_oid"; then
+      fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+      return 0
+    fi
     index_hints_shown=$(printf '%s\n' "$index_hints" | head -n 4 | paste -sd, - | sed 's/,/, /g')
     printf 'CODE_STALE: UNPROVEN live code: tracked index hints prevent checked-out HEAD %s from proving worktree bytes: %s. HEAD is %s commit(s) behind %s (%s) as last fetched; reconcile assume-unchanged or skip-worktree state before relying on landed-versus-live status.\n' \
       "$head_sha" "$index_hints_shown" "$behind" "$base" "$base_sha"
     return 0
   fi
-  [ "$behind" -gt 0 ] || return 1
-  ahead=$(git -C "$root" rev-list --count "$base..HEAD" 2>/dev/null) || return 1
+  if [ "$behind" -eq 0 ]; then
+    fm_code_currency_snapshot_matches "$root" "$base" "$head_oid" "$base_oid" || {
+      fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+      return 0
+    }
+    return 1
+  fi
+  ahead=$(git -C "$root" rev-list --count "$base_oid..$head_oid" 2>/dev/null) || {
+    if fm_code_currency_snapshot_matches "$root" "$base" "$head_oid" "$base_oid"; then
+      fm_code_currency_inspection_failed_line "$base" "$head_sha" "$base_sha" "$behind"
+    else
+      fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+    fi
+    return 0
+  }
   case "$ahead" in
     '' | *[!0-9]*) return 1 ;;
   esac
   if [ "$ahead" -gt 0 ]; then
+    if ! fm_code_currency_snapshot_matches "$root" "$base" "$head_oid" "$base_oid"; then
+      fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+      return 0
+    fi
     printf 'CODE_STALE: UNPROVEN live code: checked-out HEAD %s has %s commit(s) not in %s and is %s commit(s) behind %s (%s) as last fetched. The divergent checkout may independently contain landed behavior, so installed code cannot be classified as the landed changes being inactive.\n' \
       "$head_sha" "$ahead" "$base" "$behind" "$base" "$base_sha"
     return 0
   fi
 
-  guard=$(fm_code_currency_guard_files "$root" "$base")
+  if ! guard=$(fm_code_currency_guard_files "$root" "$head_oid" "$base_oid"); then
+    if fm_code_currency_snapshot_matches "$root" "$base" "$head_oid" "$base_oid"; then
+      fm_code_currency_inspection_failed_line "$base" "$head_sha" "$base_sha" "$behind"
+    else
+      fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+    fi
+    return 0
+  fi
   if [ -n "$guard" ]; then
     guard_count=$(printf '%s\n' "$guard" | wc -l | tr -d ' ')
     shown=$(printf '%s\n' "$guard" | head -n "$FM_CODE_CURRENCY_GUARD_SHOWN" | paste -sd, - | sed 's/,/, /g')
@@ -330,6 +419,10 @@ fm_code_currency_line() {
     guard_text="; no guard path changes among them"
   fi
 
+  if ! fm_code_currency_snapshot_matches "$root" "$base" "$head_oid" "$base_oid"; then
+    fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+    return 0
+  fi
   printf 'CODE_STALE: running code (%s) is at least %s commit(s) behind %s (%s) as last fetched%s. Landed is not running - firstmate never updates itself, so those changes are inactive here until the captain approves an update.\n' \
     "$head_sha" "$behind" "$base" "$base_sha" "$guard_text"
 }

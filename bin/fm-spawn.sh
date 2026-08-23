@@ -688,6 +688,7 @@ SPAWN_WORKTREE_POOL_TRANSITION_LOCK=
 SPAWN_WORKTREE_POOL_TRANSITION_LOCK_HELD=0
 SPAWN_FRESH_ENDPOINT_PENDING=0
 SPAWN_FRESH_WORKTREE_PENDING=0
+SPAWN_TREEHOUSE_ALLOCATION_PENDING=0
 SPAWN_TREEHOUSE_LEASE_ID=
 SPAWN_TREEHOUSE_LEASES_BEFORE=
 SPAWN_TASK_SET_LOCK=
@@ -776,6 +777,7 @@ spawn_fresh_resources_rollback() {
   local -a treehouse_return_guard
   [ "$SPAWN_FRESH_ENDPOINT_PENDING" = 1 ] \
     || [ "$SPAWN_FRESH_WORKTREE_PENDING" = 1 ] \
+    || [ "$SPAWN_TREEHOUSE_ALLOCATION_PENDING" = 1 ] \
     || return 0
   if [ -n "${BUSY_GEN:-}" ] && [ -n "${STATE_REAL:-}" ]; then
     "$FM_ROOT/bin/fm-busy-event.sh" retire "$STATE_REAL" "$ID" \
@@ -787,6 +789,15 @@ spawn_fresh_resources_rollback() {
       SPAWN_FRESH_ENDPOINT_PENDING=0
     else
       echo "warning: could not remove aborted spawn endpoint $T; retaining its worktree lease" >&2
+      return 1
+    fi
+  fi
+  if [ "$SPAWN_TREEHOUSE_ALLOCATION_PENDING" = 1 ] \
+     && [ "$SPAWN_FRESH_WORKTREE_PENDING" != 1 ]; then
+    if spawn_treehouse_rollback_unparsed_allocation "$SPAWN_TREEHOUSE_LEASE_ID"; then
+      SPAWN_TREEHOUSE_ALLOCATION_PENDING=0
+    else
+      echo "warning: could not identify and return the interrupted allocation for $ID" >&2
       return 1
     fi
   fi
@@ -837,6 +848,7 @@ spawn_fresh_resources_rollback() {
     return 1
   fi
   SPAWN_FRESH_WORKTREE_PENDING=0
+  SPAWN_TREEHOUSE_ALLOCATION_PENDING=0
 }
 
 spawn_abort_cleanup() {
@@ -2402,19 +2414,23 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     echo "error: treehouse could not establish a rollback snapshot before allocating for $ID" >&2
     exit 1
   }
+  SPAWN_TREEHOUSE_ALLOCATION_PENDING=1
   lease_json=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID" --json) || {
     echo "error: treehouse could not allocate a durable worktree lease for $ID" >&2
     exit 1
   }
   SPAWN_TREEHOUSE_LEASE_ID=$(printf '%s\n' "$lease_json" | jq -er '.lease_id | select(type == "string" and length > 0)' 2>/dev/null || true)
   WT=$(printf '%s\n' "$lease_json" | jq -er '.path | select(type == "string" and length > 0)' 2>/dev/null) || {
-    if ! spawn_treehouse_rollback_unparsed_allocation "$SPAWN_TREEHOUSE_LEASE_ID"; then
+    if spawn_treehouse_rollback_unparsed_allocation "$SPAWN_TREEHOUSE_LEASE_ID"; then
+      SPAWN_TREEHOUSE_ALLOCATION_PENDING=0
+    else
       echo "warning: could not identify and return the malformed allocation for $ID" >&2
     fi
     echo "error: treehouse returned a lease without a valid worktree path for $ID" >&2
     exit 1
   }
   SPAWN_FRESH_WORKTREE_PENDING=1
+  SPAWN_TREEHOUSE_ALLOCATION_PENDING=0
   [ -n "$SPAWN_TREEHOUSE_LEASE_ID" ] || {
     echo "error: treehouse returned a lease without an identity for $ID" >&2
     exit 1

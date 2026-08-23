@@ -281,9 +281,9 @@ TMP=$(mktemp "$STATE/.fm-standing-review-shim.XXXXXX") || die "cannot stage the 
 } > "$TMP" || die "cannot write the check shim"
 chmod 0700 "$TMP" || die "cannot set the check shim mode"
 bash -n "$TMP" || die "generated check shim does not parse"
+REPLACEMENT_PENDING=1
 mv -f -- "$TMP" "$CHECK" || die "cannot install the check shim"
 TMP=
-REPLACEMENT_PENDING=1
 
 if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
   "$SCRIPT_DIR/fm-check-register.sh" "$ID"; then

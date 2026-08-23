@@ -72,6 +72,12 @@ case "${1:-}" in
     esac
     printf '%s\n' "$FM_FAKE_TREEHOUSE_LEASE_ID" > "${FM_FAKE_LEASE:?FM_FAKE_LEASE unset}"
     : > "${FM_FAKE_TREEHOUSE_ALLOCATION:?FM_FAKE_TREEHOUSE_ALLOCATION unset}"
+    if [ -n "${FM_FAKE_TREEHOUSE_GET_ENTERED:-}" ]; then
+      : > "$FM_FAKE_TREEHOUSE_GET_ENTERED"
+      while [ ! -e "${FM_FAKE_TREEHOUSE_GET_RELEASE:?FM_FAKE_TREEHOUSE_GET_RELEASE unset}" ]; do
+        /bin/sleep 0.01
+      done
+    fi
     ;;
   status)
     if [ "${FM_FAKE_TREEHOUSE_STATUS_FAIL_AFTER_GET_ONCE:-0}" = 1 ] \
@@ -157,8 +163,10 @@ run_spawn() {
     FM_FAKE_TREEHOUSE_STATUS_FAILED="$HOME_DIR/state/$id.treehouse-status-failed" \
     FM_FAKE_TREEHOUSE_RESULT="${FM_FAKE_TREEHOUSE_RESULT:-complete}" \
     FM_FAKE_TREEHOUSE_STATUS_FAIL_AFTER_GET_ONCE="${FM_FAKE_TREEHOUSE_STATUS_FAIL_AFTER_GET_ONCE:-0}" \
+    FM_FAKE_TREEHOUSE_GET_ENTERED="${FM_FAKE_TREEHOUSE_GET_ENTERED:-}" \
+    FM_FAKE_TREEHOUSE_GET_RELEASE="${FM_FAKE_TREEHOUSE_GET_RELEASE:-}" \
     PATH="$FAKEBIN_DIR:$PATH" \
-    "$SPAWN" "$id" "$PROJECT_DIR" --mode no-mistakes --yolo off 2>&1
+    exec "$SPAWN" "$id" "$PROJECT_DIR" --mode no-mistakes --yolo off 2>&1
 }
 
 test_absent_variable_expanded_helper_refuses_at_task_worktree() {
@@ -654,6 +662,37 @@ test_missing_lease_path_retries_status_recovery() {
   pass "a pathless lease survives transient status failure during rollback"
 }
 
+test_allocation_interruption_rolls_back_the_exact_lease() {
+  local id=brief-allocation-interrupt-a26 rec entered release pid i rc
+  rec=$(make_case allocation-interrupt "$id" 'Proceed with the task.')
+  read_case "$rec"
+  entered="$HOME_DIR/state/$id.get-entered"
+  release="$HOME_DIR/state/$id.get-release"
+
+  FM_FAKE_TREEHOUSE_GET_ENTERED="$entered" FM_FAKE_TREEHOUSE_GET_RELEASE="$release" \
+    run_spawn "$id" > "$HOME_DIR/state/$id.spawn.out" 2>&1 &
+  pid=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$entered" ]; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.01
+    i=$((i + 1))
+  done
+  assert_present "$entered" "spawn did not reach the allocated lease boundary"
+  kill -TERM "$pid" 2>/dev/null || fail "could not interrupt worktree allocation"
+  : > "$release"
+  rc=0
+  wait "$pid" || rc=$?
+  [ "$rc" -eq 143 ] \
+    || fail "allocation-interrupted spawn exited with $rc: $(cat "$HOME_DIR/state/$id.spawn.out")"
+  assert_absent "$HOME_DIR/state/$id.endpoint" "interrupted allocation leaked its endpoint"
+  assert_absent "$HOME_DIR/state/$id.lease" "interrupted allocation leaked its exact lease"
+  assert_absent "$HOME_DIR/state/$id.treehouse-allocation" \
+    "interrupted allocation remained in pool status"
+  assert_absent "$HOME_DIR/state/$id.meta" "interrupted allocation published task metadata"
+  pass "an allocation interruption rolls back its exact lease"
+}
+
 test_linked_homes_share_pool_transition_lock() {
   local rec linked state_a state_b lock_a lock_b
   rec=$(make_case cross-home-pool-lock brief-cross-home-a20 'Proceed with the task.')
@@ -697,6 +736,7 @@ test_brief_parser_failure_refuses_and_rolls_back
 test_missing_lease_identity_rolls_back_the_holder_allocation
 test_missing_lease_path_recovers_and_returns_the_exact_allocation
 test_missing_lease_path_retries_status_recovery
+test_allocation_interruption_rolls_back_the_exact_lease
 test_linked_homes_share_pool_transition_lock
 test_pool_transition_lock_precedes_allocation
 test_pool_transition_lock_releases_before_endpoint_settle

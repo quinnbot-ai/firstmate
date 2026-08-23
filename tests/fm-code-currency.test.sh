@@ -462,6 +462,85 @@ test_diverged_equivalent_landed_bytes_are_unproven() {
   pass "divergent equivalent landed bytes keep live-code status unproven"
 }
 
+test_ref_change_during_inspection_is_unproven() {
+  local repo out real_git shim marker
+  repo=$(make_repo "$TMP_ROOT/ref-change")
+  mkdir -p "$repo/bin"
+  printf '%s\n' runtime > "$repo/bin/fm-runtime.sh"
+  git -C "$repo" add bin/fm-runtime.sh
+  git -C "$repo" commit -q -m "add runtime"
+  git -C "$repo" push -q origin main
+  land "$repo" docs/landed.md landed
+  hold_back "$repo" 1
+
+  real_git=$(command -v git)
+  shim="$TMP_ROOT/ref-change-bin"
+  marker="$TMP_ROOT/ref-change-triggered"
+  mkdir -p "$shim"
+  cat > "$shim/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" diff --cached --quiet "*)
+    if [ ! -e "$FM_MUTATE_MARKER" ]; then
+      : > "$FM_MUTATE_MARKER"
+      "$FM_REAL_GIT" -C "$FM_MUTATE_REPO" reset -q --hard origin/main
+    fi
+    ;;
+esac
+exec "$FM_REAL_GIT" "$@"
+SH
+  chmod +x "$shim/git"
+
+  out=$(PATH="$shim:$PATH" FM_REAL_GIT="$real_git" FM_MUTATE_REPO="$repo" \
+    FM_MUTATE_MARKER="$marker" fm_code_currency_line "$repo" || true)
+  assert_present "$marker" "fixture did not change HEAD during inspection"
+  assert_contains "$out" "UNPROVEN live code" \
+    "a changing checkout produced no live-code uncertainty"
+  assert_contains "$out" "changed during landed-versus-live inspection" \
+    "the diagnostic did not identify its invalidated snapshot"
+  assert_not_contains "$out" "CODE_STALE: running code" \
+    "a stale snapshot described the updated checkout as behind"
+  assert_not_contains "$out" "inactive here" \
+    "a stale snapshot described landed code as inactive"
+  pass "currency reporting refuses a checkout snapshot that changes mid-inspection"
+}
+
+test_byte_inspection_failure_is_unproven() {
+  local repo out real_git shim
+  repo=$(make_repo "$TMP_ROOT/inspection-failure")
+  mkdir -p "$repo/bin"
+  printf '%s\n' runtime > "$repo/bin/fm-runtime.sh"
+  git -C "$repo" add bin/fm-runtime.sh
+  git -C "$repo" commit -q -m "add runtime"
+  git -C "$repo" push -q origin main
+  land "$repo" docs/landed.md landed
+  hold_back "$repo" 1
+
+  real_git=$(command -v git)
+  shim="$TMP_ROOT/inspection-failure-bin"
+  mkdir -p "$shim"
+  cat > "$shim/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" hash-object "*) exit 7 ;;
+esac
+exec "$FM_REAL_GIT" "$@"
+SH
+  chmod +x "$shim/git"
+
+  out=$(PATH="$shim:$PATH" FM_REAL_GIT="$real_git" \
+    fm_code_currency_line "$repo" || true)
+  assert_contains "$out" "CODE_STALE: UNPROVEN live code" \
+    "a tracked-byte inspection failure suppressed the currency diagnostic"
+  assert_contains "$out" "inspection could not prove" \
+    "the inspection failure was not identified"
+  assert_not_contains "$out" "CODE_STALE: running code" \
+    "an inspection failure produced a running-code claim"
+  assert_not_contains "$out" "inactive here" \
+    "an inspection failure produced an inactivity claim"
+  pass "tracked-byte inspection failures keep live-code status visible and unproven"
+}
+
 # --- SESSION START: the line reaches the digest -----------------------------
 
 # The library is only useful if a session start actually prints it, and only
@@ -500,5 +579,7 @@ test_unrelated_index_hint_prevents_running_claim
 test_stat_cache_cannot_hide_tracked_runtime_drift
 test_tracked_byte_proof_batches_regular_files
 test_diverged_equivalent_landed_bytes_are_unproven
+test_ref_change_during_inspection_is_unproven
+test_byte_inspection_failure_is_unproven
 test_ignored_landed_path_is_unproven
 test_bootstrap_line
