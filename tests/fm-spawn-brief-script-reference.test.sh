@@ -52,14 +52,24 @@ SH
 set -u
 case "${1:-}" in
   get)
-    printf '{"path":"%s","lease_id":"%s","lease_holder":"fixture"}\n' \
-      "${FM_FAKE_TREEHOUSE_PATH:?FM_FAKE_TREEHOUSE_PATH unset}" \
-      "${FM_FAKE_TREEHOUSE_LEASE_ID:?FM_FAKE_TREEHOUSE_LEASE_ID unset}"
+    if [ "${FM_FAKE_TREEHOUSE_RESULT:-complete}" = missing-lease-id ]; then
+      printf '{"path":"%s","lease_holder":"%s"}\n' \
+        "${FM_FAKE_TREEHOUSE_PATH:?FM_FAKE_TREEHOUSE_PATH unset}" \
+        "${FM_FAKE_TREEHOUSE_HOLDER:?FM_FAKE_TREEHOUSE_HOLDER unset}"
+    else
+      printf '{"path":"%s","lease_id":"%s","lease_holder":"%s"}\n' \
+        "${FM_FAKE_TREEHOUSE_PATH:?FM_FAKE_TREEHOUSE_PATH unset}" \
+        "${FM_FAKE_TREEHOUSE_LEASE_ID:?FM_FAKE_TREEHOUSE_LEASE_ID unset}" \
+        "${FM_FAKE_TREEHOUSE_HOLDER:?FM_FAKE_TREEHOUSE_HOLDER unset}"
+    fi
     printf '%s\n' "$FM_FAKE_TREEHOUSE_LEASE_ID" > "${FM_FAKE_LEASE:?FM_FAKE_LEASE unset}"
     ;;
   return)
     case " $* " in
       *" --if-lease-id ${FM_FAKE_TREEHOUSE_LEASE_ID:?FM_FAKE_TREEHOUSE_LEASE_ID unset} "*)
+        rm -f -- "${FM_FAKE_LEASE:?FM_FAKE_LEASE unset}"
+        ;;
+      *" --if-lease-holder ${FM_FAKE_TREEHOUSE_HOLDER:?FM_FAKE_TREEHOUSE_HOLDER unset} "*)
         rm -f -- "${FM_FAKE_LEASE:?FM_FAKE_LEASE unset}"
         ;;
       *) exit 1 ;;
@@ -115,6 +125,8 @@ run_spawn() {
     FM_FAKE_PANE_BLOCK_RELEASE="${FM_FAKE_PANE_BLOCK_RELEASE:-}" \
     FM_FAKE_TREEHOUSE_PATH="${FM_FAKE_TREEHOUSE_PATH_OVERRIDE:-$POOL_DIR}" \
     FM_FAKE_TREEHOUSE_LEASE_ID="lease-$id" \
+    FM_FAKE_TREEHOUSE_HOLDER="$id" \
+    FM_FAKE_TREEHOUSE_RESULT="${FM_FAKE_TREEHOUSE_RESULT:-complete}" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJECT_DIR" --mode no-mistakes --yolo off 2>&1
 }
@@ -520,6 +532,25 @@ SH
   pass "brief parser failures refuse dispatch and roll back fresh resources"
 }
 
+test_missing_lease_identity_rolls_back_the_holder_allocation() {
+  local id=brief-missing-lease-id-a22 rec out status
+  rec=$(make_case missing-lease-id "$id" 'Proceed with the task.')
+  read_case "$rec"
+
+  set +e
+  out=$(FM_FAKE_TREEHOUSE_RESULT=missing-lease-id run_spawn "$id")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "spawn accepted a lease without an identity: $out"
+  assert_contains "$out" "lease without an identity" \
+    "malformed lease refusal did not identify the missing field"
+  assert_absent "$HOME_DIR/state/$id.endpoint" "malformed lease leaked its fresh endpoint"
+  assert_absent "$HOME_DIR/state/$id.lease" "malformed lease leaked its holder-owned allocation"
+  assert_absent "$HOME_DIR/state/$id.meta" "malformed lease published task metadata"
+  pass "a lease missing its identity is returned through its holder guard"
+}
+
 test_linked_homes_share_pool_transition_lock() {
   local rec linked state_a state_b lock_a lock_b
   rec=$(make_case cross-home-pool-lock brief-cross-home-a20 'Proceed with the task.')
@@ -557,6 +588,7 @@ test_sentence_after_negation_still_refuses_positive_instruction
 test_prose_only_mention_refuses
 test_dont_forget_reference_refuses
 test_brief_parser_failure_refuses_and_rolls_back
+test_missing_lease_identity_rolls_back_the_holder_allocation
 test_linked_homes_share_pool_transition_lock
 test_pool_transition_lock_precedes_allocation
 test_pool_transition_lock_releases_before_endpoint_settle

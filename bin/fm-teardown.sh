@@ -584,10 +584,12 @@ validate_worktree_ownership() {
     WT=
     return 0
   fi
-  # No pointer, or a pointer to something that no longer exists: there is no
-  # live copy here to misidentify. --forget-worktree passes silently rather than
-  # refusing, so a re-run in that state stays idempotent too.
-  if [ -z "$WT" ] || [ ! -d "$WT" ]; then
+  if [ -z "$WT" ]; then
+    reject_unwarranted_forget_worktree "task $ID has no recorded copy to prove reassigned" || return 1
+    return 0
+  fi
+  if [ ! -d "$WT" ]; then
+    reject_unwarranted_forget_worktree "the recorded copy at $WT is unavailable and has no proven current owner" || return 1
     return 0
   fi
 

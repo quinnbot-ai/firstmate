@@ -105,6 +105,8 @@ WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
 WATCHER_DOWNTIME_MARKER="$STATE/.watcher-down"
 WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
+CUSTOM_CHECK_LIFECYCLE_LOCK=
+CUSTOM_CHECK_LIFECYCLE_LOCK_HELD=0
 # The singleton-lock acquisition, EXIT trap, and the blocking supervision loop
 # all live below the source guard at the very bottom of this file (see "Main
 # entry"). Sourcing this file for unit tests therefore loads the functions -
@@ -901,6 +903,10 @@ watcher_cleanup() {
   fm_active_check_stop || cleanup_status=1
   fm_check_output_cleanup
   fm_custom_check_snapshot_cleanup
+  if [ "$CUSTOM_CHECK_LIFECYCLE_LOCK_HELD" -eq 1 ]; then
+    CUSTOM_CHECK_LIFECYCLE_LOCK_HELD=0
+    fm_lock_release "$CUSTOM_CHECK_LIFECYCLE_LOCK" || cleanup_status=1
+  fi
   if [ "$owns_lock" -eq 1 ] \
     && ! fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" "$transition" "$WATCH_LOCK" downtime; then
     echo "watcher: recovery state could not be persisted; retaining stale lock evidence" >&2
@@ -1032,15 +1038,27 @@ while :; do
           run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
             "$provider" "$url" "$host" "$path" "$number" || exit 1
           out=$FM_CHECK_RESULT
-        elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
-          custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
-          run_check_capture "$custom_snapshot" || exit 1
-          out=$FM_CHECK_RESULT
-          fm_custom_check_snapshot_cleanup
         else
-          fm_custom_check_snapshot_cleanup
-          rejected_checks="$rejected_checks $c"
-          continue
+          CUSTOM_CHECK_LIFECYCLE_LOCK=$(fm_custom_check_lifecycle_lock_path "$STATE" "$id") || {
+            rejected_checks="$rejected_checks $c"
+            continue
+          }
+          fm_lock_acquire_wait "$CUSTOM_CHECK_LIFECYCLE_LOCK" || exit 1
+          CUSTOM_CHECK_LIFECYCLE_LOCK_HELD=1
+          if fm_custom_check_snapshot_prepare "$STATE" "$id"; then
+            custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
+            run_check_capture "$custom_snapshot" || exit 1
+            out=$FM_CHECK_RESULT
+            fm_custom_check_snapshot_cleanup
+            fm_lock_release "$CUSTOM_CHECK_LIFECYCLE_LOCK" || exit 1
+            CUSTOM_CHECK_LIFECYCLE_LOCK_HELD=0
+          else
+            fm_custom_check_snapshot_cleanup
+            fm_lock_release "$CUSTOM_CHECK_LIFECYCLE_LOCK" || exit 1
+            CUSTOM_CHECK_LIFECYCLE_LOCK_HELD=0
+            rejected_checks="$rejected_checks $c"
+            continue
+          fi
         fi
       fi
       if [ -n "$out" ]; then

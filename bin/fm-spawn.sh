@@ -718,6 +718,7 @@ parse_orca_worktree_result() {
 
 spawn_fresh_resources_rollback() {
   local binding_cleared=0
+  local -a treehouse_return_guard
   [ "$SPAWN_FRESH_ENDPOINT_PENDING" = 1 ] \
     || [ "$SPAWN_FRESH_WORKTREE_PENDING" = 1 ] \
     || return 0
@@ -769,8 +770,13 @@ spawn_fresh_resources_rollback() {
     echo "warning: worktree ownership changed during aborted spawn of $ID; refusing to return $WT" >&2
     return 1
   fi
+  if [ -n "$SPAWN_TREEHOUSE_LEASE_ID" ]; then
+    treehouse_return_guard=(--if-lease-id "$SPAWN_TREEHOUSE_LEASE_ID")
+  else
+    treehouse_return_guard=(--if-lease-holder "$ID")
+  fi
   if ! ( cd "$PROJ_ABS" && treehouse return --force \
-      --if-lease-id "$SPAWN_TREEHOUSE_LEASE_ID" "$WT" ) >/dev/null 2>&1; then
+      "${treehouse_return_guard[@]}" "$WT" ) >/dev/null 2>&1; then
     [ "$binding_cleared" -eq 0 ] || fm_worktree_binding_write "$WT" "$STATE" "$ID" || true
     echo "warning: could not return aborted spawn worktree $WT" >&2
     return 1
@@ -2345,11 +2351,11 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     echo "error: treehouse returned a lease without a valid worktree path for $ID" >&2
     exit 1
   }
+  SPAWN_FRESH_WORKTREE_PENDING=1
   SPAWN_TREEHOUSE_LEASE_ID=$(printf '%s\n' "$lease_json" | jq -er '.lease_id | select(type == "string" and length > 0)' 2>/dev/null) || {
     echo "error: treehouse returned a lease without an identity for $ID" >&2
     exit 1
   }
-  SPAWN_FRESH_WORKTREE_PENDING=1
   validate_spawn_worktree "treehouse get --lease" "$T"
   SPAWN_WORKTREE_TRANSITION_LOCK=$(fm_worktree_transition_lock_path "$STATE" "$WT") || {
     echo "error: cannot establish the ownership transition lock for worktree $WT" >&2

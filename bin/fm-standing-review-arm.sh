@@ -72,11 +72,17 @@ PRIOR_CHECK=
 PRIOR_TRUST=
 TASK_SET_LOCK=
 TASK_SET_LOCK_HELD=0
+CHECK_LIFECYCLE_LOCK=
+CHECK_LIFECYCLE_LOCK_HELD=0
 
 cleanup() {
   [ -z "$TMP" ] || rm -f -- "$TMP"
   [ -z "$PRIOR_CHECK" ] || rm -f -- "$PRIOR_CHECK"
   [ -z "$PRIOR_TRUST" ] || rm -f -- "$PRIOR_TRUST"
+  if [ "$CHECK_LIFECYCLE_LOCK_HELD" -eq 1 ]; then
+    CHECK_LIFECYCLE_LOCK_HELD=0
+    fm_lock_release "$CHECK_LIFECYCLE_LOCK"
+  fi
   if [ "$TASK_SET_LOCK_HELD" -eq 1 ]; then
     TASK_SET_LOCK_HELD=0
     fm_lock_release "$TASK_SET_LOCK"
@@ -143,17 +149,59 @@ fi
 [ -n "$ID" ] || die "--id is required" 2
 fm_pr_task_id_valid "$ID" || die "review id is not a safe identifier: $ID" 2
 case "$ID" in */*) die "review id must not contain a path separator" 2 ;; esac
+fm_standing_review_id_reserved "$ID" \
+  && die "review id is reserved by a system check: $ID" 2
 
 CHECK="$STATE/$ID.check.sh"
 TRUST="$STATE/$ID.check-trust"
 
+acquire_review_locks() {
+  TASK_SET_LOCK=$(fm_task_set_lock_path "$STATE") \
+    || die "cannot resolve the task-set lock for $STATE"
+  fm_lock_try_acquire "$TASK_SET_LOCK" \
+    || die "this home's task set is locked by another operation; refusing to $MODE review $ID"
+  TASK_SET_LOCK_HELD=1
+  CHECK_LIFECYCLE_LOCK=$(fm_custom_check_lifecycle_lock_path "$STATE" "$ID") \
+    || die "cannot resolve the check lifecycle lock for $ID"
+  fm_lock_acquire_wait "$CHECK_LIFECYCLE_LOCK" \
+    || die "cannot acquire the check lifecycle lock for $ID"
+  CHECK_LIFECYCLE_LOCK_HELD=1
+}
+
+review_artifact_present() {
+  [ -e "$1" ] || [ -L "$1" ]
+}
+
+review_artifact_preflight_remove() {
+  local path=$1
+  if [ -d "$path" ] && [ ! -L "$path" ]; then
+    die "review artifact is a directory; refusing to remove it: $path"
+  fi
+}
+
+review_artifact_remove() {
+  local path=$1
+  review_artifact_present "$path" || return 0
+  rm -f -- "$path" || die "could not remove review artifact: $path"
+  ! review_artifact_present "$path" || die "review artifact remains after removal: $path"
+}
+
 if [ "$MODE" = disarm ]; then
-  if [ -e "$CHECK" ] && ! is_review_shim "$CHECK"; then
+  acquire_review_locks
+  if review_artifact_present "$CHECK" && ! is_review_shim "$CHECK"; then
     die "state/$ID.check.sh is not a standing review shim; refusing to remove it"
   fi
-  rm -f -- "$CHECK" "$TRUST"
+  review_artifact_preflight_remove "$CHECK"
+  review_artifact_preflight_remove "$TRUST"
   if [ "$PURGE" -eq 1 ]; then
-    rm -f -- "$STATE/$ID.standing-review-latch" "$STATE/$ID.standing-review-last"
+    review_artifact_preflight_remove "$STATE/$ID.standing-review-latch"
+    review_artifact_preflight_remove "$STATE/$ID.standing-review-last"
+  fi
+  review_artifact_remove "$CHECK"
+  review_artifact_remove "$TRUST"
+  if [ "$PURGE" -eq 1 ]; then
+    review_artifact_remove "$STATE/$ID.standing-review-latch"
+    review_artifact_remove "$STATE/$ID.standing-review-last"
     printf 'disarmed: %s (durable records purged)\n' "$ID"
   else
     printf 'disarmed: %s\n' "$ID"
@@ -169,11 +217,7 @@ SCAN="$FM_ROOT/bin/fm-standing-review.sh"
 "$SCAN" --home "$FM_HOME" --state "$STATE" --config "$CONFIG" \
   --id "$ID" --validate || exit 1
 
-TASK_SET_LOCK=$(fm_task_set_lock_path "$STATE") \
-  || die "cannot resolve the task-set lock for $STATE"
-fm_lock_try_acquire "$TASK_SET_LOCK" \
-  || die "this home's task set is locked by another operation; refusing to arm review $ID"
-TASK_SET_LOCK_HELD=1
+acquire_review_locks
 
 [ -e "$STATE/$ID.meta" ] && die "$ID already names a task in this home; choose another review id"
 if [ -e "$CHECK" ] && ! is_review_shim "$CHECK"; then

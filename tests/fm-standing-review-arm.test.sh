@@ -29,6 +29,8 @@ TMP_ROOT=$(fm_test_tmproot fm-standing-review-arm)
 . "$ROOT/bin/fm-pr-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh disable=SC1091
 . "$ROOT/bin/fm-check-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh disable=SC1091
+. "$ROOT/bin/fm-wake-lib.sh"
 
 make_home() {  # <case-name>
   local home="$TMP_ROOT/$1"
@@ -240,6 +242,44 @@ SH
   pass "a failed re-arm preserves the previously registered review"
 }
 
+test_reserved_system_check_ids_are_refused() {
+  local home id out rc
+  home=$(make_home reserved-ids)
+  for id in x-watch tool-updates; do
+    out=$(arm "$home" --id "$id" 2>&1); rc=$?
+    [ "$rc" -ne 0 ] || fail "reserved system check id $id was armed"
+    assert_contains "$out" "reserved by a system check" \
+      "reserved id $id did not name the namespace conflict"
+    assert_absent "$home/state/$id.check.sh" "reserved id $id wrote a check"
+  done
+  pass "system check ids cannot be armed as standing reviews"
+}
+
+test_arm_waits_for_the_check_lifecycle_boundary() {
+  local home lock out pid i rc
+  home=$(make_home arm-lifecycle)
+  lock=$(fm_custom_check_lifecycle_lock_path "$home/state" r) \
+    || fail "could not resolve the lifecycle lock"
+  fm_lock_acquire_wait "$lock" || fail "could not hold the lifecycle lock"
+  arm "$home" --id r > "$home/arm.out" 2>&1 &
+  pid=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -d "$home/state/.task-set.lock" ]; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.01
+    i=$((i + 1))
+  done
+  kill -0 "$pid" 2>/dev/null || fail "arming exited before the lifecycle lock was released"
+  assert_absent "$home/state/r.check.sh" "arming published a check outside the lifecycle boundary"
+  fm_lock_release "$lock" || fail "could not release the lifecycle lock"
+  rc=0
+  wait "$pid" || rc=$?
+  [ "$rc" -eq 0 ] || fail "arming failed after the lifecycle lock was released: $(cat "$home/arm.out")"
+  fm_custom_check_registered "$home/state" r \
+    || fail "arming did not publish a registered check pair"
+  pass "arming publishes the check and trust pair inside one lifecycle boundary"
+}
+
 test_disarm_stops_the_review_and_keeps_what_it_reported() {
   local home
   home=$(make_home disarm)
@@ -265,6 +305,65 @@ test_disarm_refuses_a_foreign_check() {
   [ "$rc" -ne 0 ] || fail "disarm removed a check it did not generate"
   assert_present "$home/state/r.check.sh" "disarm deleted a foreign check"
   pass "disarm refuses a check it did not generate"
+}
+
+test_disarm_waits_for_an_active_watcher_check() {
+  local home state started release pid disarm_pid i rc
+  home=$(make_home disarm-lifecycle)
+  state="$home/state"
+  started="$home/check-started"
+  release="$home/check-release"
+  cat > "$state/r.check.sh" <<SH
+#!/usr/bin/env bash
+$FM_STANDING_REVIEW_CHECK_MARKER
+: > $(printf '%q' "$started")
+while [ ! -e $(printf '%q' "$release") ]; do sleep 0.01; done
+SH
+  chmod 0700 "$state/r.check.sh"
+  FM_HOME="$home" "$ROOT/bin/fm-check-register.sh" r >/dev/null \
+    || fail "could not register the blocking review check"
+  printf '%s\n' fm-pr-check-migration-v1 > "$state/.pr-check-migration-v1"
+  chmod 0600 "$state/.pr-check-migration-v1"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_POLL=0.1 FM_CHECK_INTERVAL=0 \
+    FM_CHECK_TIMEOUT=10 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 \
+    "$ROOT/bin/fm-watch.sh" > "$home/watch.out" 2> "$home/watch.err" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$started" ]; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.01
+    i=$((i + 1))
+  done
+  assert_present "$started" "watcher did not enter the registered review check"
+  arm "$home" --id r --disarm --purge > "$home/disarm.out" 2>&1 &
+  disarm_pid=$!
+  sleep 0.05
+  kill -0 "$disarm_pid" 2>/dev/null \
+    || fail "disarm completed while the watcher still owned the review lifecycle"
+  assert_present "$state/r.check.sh" "disarm removed a check while the watcher was executing it"
+  : > "$release"
+  rc=0
+  wait "$disarm_pid" || rc=$?
+  [ "$rc" -eq 0 ] || fail "serialized disarm failed: $(cat "$home/disarm.out")"
+  assert_absent "$state/r.check.sh" "serialized disarm left the check armed"
+  kill -TERM "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  pass "disarm waits for the watcher before removing review state"
+}
+
+test_purge_refuses_unremovable_state_without_partial_disarm() {
+  local home latch out rc
+  home=$(make_home purge-directory)
+  arm "$home" --id r >/dev/null 2>&1 || fail "arming failed"
+  latch="$home/state/r.standing-review-latch"
+  mkdir "$latch"
+  out=$(arm "$home" --id r --disarm --purge 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "purge reported success with an unremovable latch"
+  assert_contains "$out" "is a directory" "purge refusal did not name the invalid artifact"
+  assert_present "$home/state/r.check.sh" "failed purge partially removed the review check"
+  assert_present "$home/state/r.check-trust" "failed purge partially removed the trust record"
+  [ -d "$latch" ] || fail "failed purge changed the invalid durable artifact"
+  pass "purge refuses unremovable state without partially disarming"
 }
 
 test_list_reports_what_is_armed() {
@@ -315,7 +414,11 @@ test_arming_refuses_an_id_that_names_a_task
 test_spawning_refuses_an_id_reserved_by_a_review
 test_arming_refuses_to_overwrite_a_foreign_check
 test_failed_rearm_preserves_the_registered_review
+test_reserved_system_check_ids_are_refused
+test_arm_waits_for_the_check_lifecycle_boundary
 test_disarm_stops_the_review_and_keeps_what_it_reported
 test_disarm_refuses_a_foreign_check
+test_disarm_waits_for_an_active_watcher_check
+test_purge_refuses_unremovable_state_without_partial_disarm
 test_list_reports_what_is_armed
 test_mode_conflicts_and_stray_purge_are_refused

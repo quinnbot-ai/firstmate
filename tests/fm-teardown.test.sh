@@ -866,6 +866,29 @@ test_forget_worktree_refuses_without_a_proven_reassignment() {
   pass "--forget-worktree refuses when the copy still belongs to this task"
 }
 
+test_forget_worktree_refuses_a_missing_unretired_copy() {
+  local case_dir rc
+  case_dir=$(make_case forget-missing-unretired)
+  write_meta "$case_dir" no-mistakes ship
+  log_treehouse_calls "$case_dir"
+  git -C "$case_dir/project" worktree remove --force "$case_dir/wt" \
+    || fail "forget-missing-unretired: could not remove the fixture copy"
+
+  set +e
+  run_teardown "$case_dir" --force --forget-worktree > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "forget-missing-unretired: an unavailable pointer must not be forgotten"
+  assert_contains "$(cat "$case_dir/stderr")" "unavailable and has no proven current owner" \
+    "forget-missing-unretired: refusal did not name the missing ownership proof"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "forget-missing-unretired: teardown erased the unretired task record"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "forget-missing-unretired: teardown attempted a pool return"
+  pass "--forget-worktree refuses an unavailable unretired copy"
+}
+
 # Retirement is durable, so a teardown that fails a later step is re-run against a
 # record that already carries it. That re-run must repeat the record-only cleanup
 # on its own, with or without the flag, and must still leave the live copy alone.
@@ -3276,6 +3299,7 @@ test_forget_worktree_retires_the_stale_pointer_and_spares_the_copy
 test_forget_worktree_refuses_an_orphan_binding
 test_force_and_forget_worktree_together_complete
 test_forget_worktree_refuses_without_a_proven_reassignment
+test_forget_worktree_refuses_a_missing_unretired_copy
 test_unbound_recycled_slot_refuses_ambiguous_legacy_ownership
 test_unbound_recycled_slot_is_retirable
 test_unconfirmed_branch_is_not_a_reassignment
