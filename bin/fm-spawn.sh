@@ -647,6 +647,10 @@ spawn_remote_secondmate() {
     [ -z "$remote_recorded_traceparent" ] || echo "traceparent=$remote_recorded_traceparent"
   } > "$tmp"
   mv -f -- "$tmp" "$meta"
+  if [ "$SPAWN_META_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$SPAWN_META_LOCK"
+    SPAWN_META_LOCK_HELD=0
+  fi
   if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_SET_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_SET_LOCK"
@@ -855,40 +859,43 @@ spawn_fresh_resources_rollback() {
 }
 
 spawn_fresh_metadata_rollback() {
-  local meta rollback_lock published_gen
+  local meta rollback_lock published_gen rollback_lock_acquired=0
   [ "$SPAWN_FRESH_META_ROLLBACK_PENDING" = 1 ] || return 0
   meta="$STATE/$ID.meta"
   rollback_lock=$(fm_meta_lock_path "$meta") || {
     echo "warning: could not resolve the metadata lock after aborted spawn of $ID; retaining its resources" >&2
     return 1
   }
-  fm_lock_acquire_wait "$rollback_lock" || {
-    echo "warning: could not acquire the metadata lock after aborted spawn of $ID; retaining its resources" >&2
-    return 1
-  }
+  if [ "$SPAWN_META_LOCK_HELD" != 1 ] || [ "$SPAWN_META_LOCK" != "$rollback_lock" ]; then
+    fm_lock_acquire_wait "$rollback_lock" || {
+      echo "warning: could not acquire the metadata lock after aborted spawn of $ID; retaining its resources" >&2
+      return 1
+    }
+    rollback_lock_acquired=1
+  fi
   if [ ! -e "$meta" ] && [ ! -L "$meta" ]; then
     SPAWN_FRESH_META_ROLLBACK_PENDING=0
-    fm_lock_release "$rollback_lock" || true
+    [ "$rollback_lock_acquired" = 0 ] || fm_lock_release "$rollback_lock" || true
     return 0
   fi
   if [ ! -f "$meta" ] || [ -L "$meta" ]; then
-    fm_lock_release "$rollback_lock" || true
+    [ "$rollback_lock_acquired" = 0 ] || fm_lock_release "$rollback_lock" || true
     echo "warning: aborted spawn metadata for $ID is not a regular owned record; retaining its resources" >&2
     return 1
   fi
   published_gen=$(fm_meta_get "$meta" spawn_gen)
   if [ -z "${SPAWN_GEN:-}" ] || [ "$published_gen" != "$SPAWN_GEN" ]; then
-    fm_lock_release "$rollback_lock" || true
+    [ "$rollback_lock_acquired" = 0 ] || fm_lock_release "$rollback_lock" || true
     echo "warning: task metadata changed during aborted spawn of $ID; retaining its resources" >&2
     return 1
   fi
   if ! rm -f -- "$meta" || [ -e "$meta" ] || [ -L "$meta" ]; then
-    fm_lock_release "$rollback_lock" || true
+    [ "$rollback_lock_acquired" = 0 ] || fm_lock_release "$rollback_lock" || true
     echo "warning: could not remove exact aborted spawn metadata for $ID; retaining its resources" >&2
     return 1
   fi
   SPAWN_FRESH_META_ROLLBACK_PENDING=0
-  fm_lock_release "$rollback_lock" || true
+  [ "$rollback_lock_acquired" = 0 ] || fm_lock_release "$rollback_lock" || true
 }
 
 spawn_abort_cleanup() {
@@ -1149,6 +1156,15 @@ if [ "$RELAUNCH" -eq 0 ]; then
     echo "error: task id $ID is reserved by an armed standing review in this home; choose another task id or disarm the review first" >&2
     exit 1
   fi
+  SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || {
+    echo "error: could not resolve the metadata lock for task $ID" >&2
+    exit 1
+  }
+  if ! fm_lock_acquire_wait "$SPAWN_META_LOCK"; then
+    echo "error: could not acquire the metadata lock for task $ID" >&2
+    exit 1
+  fi
+  SPAWN_META_LOCK_HELD=1
 fi
 if [ "$KIND" = secondmate ]; then
   if spawn_remote_secondmate "$ID"; then

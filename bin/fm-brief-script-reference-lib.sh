@@ -37,6 +37,7 @@ sub clause_prefix {
   my ($text, $start) = @_;
   my $prefix = substr($text, 0, $start);
   $prefix =~ s/\[([^\]\r\n]+)\]\(\s*$/$1/;
+  $prefix =~ s/(?:\*\*|__|~~|\*|_)\s*$//;
   $prefix =~ s/^.*(?:[;!?]|\.\s+)\s*//s;
   $prefix =~ s/^\s*(?:(?:[-*+] | \d+[.)]\s+))//x;
   $prefix =~ s/^.*,\s*//s;

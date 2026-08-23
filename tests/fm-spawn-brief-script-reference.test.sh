@@ -375,6 +375,23 @@ test_markdown_linked_directive_reference_refuses() {
   pass "a Markdown-linked helper instruction refuses dispatch"
 }
 
+test_markdown_emphasized_directive_reference_refuses() {
+  local id=brief-markdown-emphasis-a36 rec out status expected
+  rec=$(make_case markdown-emphasis-command "$id" \
+    'Run **bin/fm-markdown-emphasis-missing.sh** before editing.')
+  read_case "$rec"
+
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite an absent Markdown-emphasized helper instruction"
+  expected="$POOL_DIR/bin/fm-markdown-emphasis-missing.sh"
+  assert_contains "$out" "$expected" \
+    "Markdown-emphasized helper did not resolve against the task worktree"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "Markdown-emphasized helper refusal published metadata"
+  pass "a Markdown-emphasized helper instruction refuses dispatch"
+}
+
 test_second_person_imperative_reference_refuses() {
   local id=brief-second-person-a13 rec out status expected
   rec=$(make_case second-person-command "$id" 'Ensure you run bin/fm-second-person-missing.sh before editing.')
@@ -563,6 +580,34 @@ test_pool_transition_lock_precedes_allocation() {
   assert_present "$HOME_DIR/state/$id.lease" "spawn never acquired the pooled worktree after lock release"
   assert_present "$HOME_DIR/state/$id.meta" "spawn never published its binding after lock release"
   pass "the pool transition lock covers allocation through binding publication"
+}
+
+test_fresh_metadata_publication_waits_for_identity_lock() {
+  local id=brief-meta-lock-a37 rec lock out_file pid status
+  rec=$(make_case meta-lock "$id" 'Proceed with the task.')
+  read_case "$rec"
+  lock=$(fm_meta_lock_path "$HOME_DIR/state/$id.meta") || \
+    fail "could not resolve the fixture metadata lock"
+  fm_lock_acquire_wait "$lock"
+  out_file="$HOME_DIR/state/$id.spawn-output"
+  run_spawn "$id" >"$out_file" &
+  pid=$!
+  sleep 1
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fm_lock_release "$lock"
+    wait "$pid" || true
+    fail "fresh spawn did not wait for the held metadata lock: $(cat "$out_file")"
+  fi
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "fresh spawn published metadata while its identity lock was held"
+  fm_lock_release "$lock"
+  wait "$pid"
+  status=$?
+  expect_code 0 "$status" \
+    "fresh spawn failed after the metadata lock was released: $(cat "$out_file")"
+  assert_present "$HOME_DIR/state/$id.meta" \
+    "fresh spawn did not publish metadata after the identity lock was released"
+  pass "fresh metadata publication waits for its task identity lock"
 }
 
 test_pool_transition_lock_releases_before_endpoint_settle() {
@@ -894,6 +939,7 @@ test_bare_modal_imperative_reference_refuses
 test_infinitive_imperative_reference_refuses
 test_assurance_imperative_reference_refuses
 test_markdown_linked_directive_reference_refuses
+test_markdown_emphasized_directive_reference_refuses
 test_second_person_imperative_reference_refuses
 test_directed_subject_reference_refuses
 test_unenumerated_imperative_reference_refuses
@@ -915,6 +961,7 @@ test_allocation_interruption_rolls_back_the_exact_lease
 test_metadata_publication_interruption_rolls_back_the_exact_incarnation
 test_linked_homes_share_pool_transition_lock
 test_pool_transition_lock_precedes_allocation
+test_fresh_metadata_publication_waits_for_identity_lock
 test_pool_transition_lock_releases_before_endpoint_settle
 test_prepublication_failure_rolls_back_fresh_resources
 test_invalid_allocated_worktree_returns_exact_lease
