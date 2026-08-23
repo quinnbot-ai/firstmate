@@ -1197,6 +1197,66 @@ test_worktree_guard_releases_before_run_identity_query() {
   pass "crew-state releases ownership before run queries and keeps its identity snapshot"
 }
 
+test_metadata_replacement_uses_one_incarnation() {
+  reset_fakes
+  local d lock wait_marker out_file err_file next_meta pid attempt out real_sleep
+  d=$(new_case metadata-replacement)
+  make_repo_on_branch "$d/wt-a" fm/metadata-old
+  make_repo_on_branch "$d/wt-b" fm/metadata-current
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/reused.meta" \
+    "window=fm:fm-reused" "worktree=$d/wt-a" "project=$d/wt-a" \
+    "kind=scout" "harness=claude" "mode=ship"
+  fm_worktree_binding_write "$d/wt-a" "$d/state" reused \
+    || fail "could not bind the old metadata incarnation"
+  fm_worktree_binding_write "$d/wt-b" "$d/state" reused \
+    || fail "could not bind the replacement metadata incarnation"
+  FM_FAKE_AXI_STATUS="$(run_running fm/metadata-current)"
+  FM_FAKE_BUSY=0
+  export FM_FAKE_AXI_STATUS FM_FAKE_BUSY
+  wait_marker="$d/meta-lock.waiting"
+  real_sleep=$(command -v sleep)
+  cat > "$d/fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+: > "${FM_FAKE_LOCK_WAIT:?FM_FAKE_LOCK_WAIT unset}"
+exec "${FM_REAL_SLEEP:?FM_REAL_SLEEP unset}" "$@"
+SH
+  chmod +x "$d/fakebin/sleep"
+  lock=$(fm_meta_lock_path "$d/state/reused.meta") \
+    || fail "could not resolve the metadata replacement lock"
+  fm_lock_acquire_wait "$lock"
+  out_file="$d/crew-state.out"
+  err_file="$d/crew-state.err"
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" \
+    FM_FAKE_LOCK_WAIT="$wait_marker" FM_REAL_SLEEP="$real_sleep" \
+    "$CREW_STATE" reused > "$out_file" 2> "$err_file" &
+  pid=$!
+  attempt=0
+  while [ ! -e "$wait_marker" ] && kill -0 "$pid" 2>/dev/null \
+    && [ "$attempt" -lt 100 ]; do
+    /bin/sleep 0.02
+    attempt=$((attempt + 1))
+  done
+  if [ ! -e "$wait_marker" ]; then
+    fm_lock_release "$lock"
+    wait "$pid" || true
+    fail "crew-state did not wait for the metadata replacement lock: $(cat "$err_file")"
+  fi
+  next_meta="$d/state/reused.meta.next"
+  fm_write_meta "$next_meta" \
+    "window=fm:fm-reused" "worktree=$d/wt-b" "project=$d/wt-b" \
+    "kind=ship" "harness=codex" "mode=no-mistakes"
+  mv -- "$next_meta" "$d/state/reused.meta"
+  fm_lock_release "$lock"
+  wait "$pid" || fail "crew-state failed after metadata replacement: $(cat "$err_file")"
+  out=$(cat "$out_file")
+  assert_contains "$out" "state: working" \
+    "crew-state retained the old scout kind with the replacement worktree"
+  assert_contains "$out" "source: run-step" \
+    "crew-state did not use one replacement metadata incarnation"
+  pass "crew-state snapshots one metadata incarnation with its worktree"
+}
+
 # (i) kind=scout skips the run lookup entirely (its deliverable is a report).
 test_scout_skips_run_lookup() {
   reset_fakes
@@ -1645,6 +1705,7 @@ test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step
 test_no_timeout_uses_perl_bound
 test_worktree_guard_releases_before_run_identity_query
+test_metadata_replacement_uses_one_incarnation
 test_scout_skips_run_lookup
 test_torn_down_worktree
 test_exact_worktree_binding_reads_normally

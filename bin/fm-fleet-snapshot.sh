@@ -444,11 +444,22 @@ task_json_lines() {
   local remote_host remote_root remote_state remote_rc remote_home_present
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json retired_worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status worktree_present
-  local open_decisions_tsv open_decisions_json
+  local open_decisions_tsv open_decisions_json worktree_active
 
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     id=$(basename "$meta" .meta)
+    worktree_active=0
+    if fm_worktree_record_snapshot_guard_acquire "$meta"; then
+      worktree_active=1
+    fi
+    [ "$FM_WORKTREE_RECORD_ACTIVE_GUARD_HELD" -eq 1 ] || continue
+    FLEET_WORKTREE_GUARD_HELD=1
+    if [ ! -f "$meta" ]; then
+      fm_worktree_record_active_guard_release
+      FLEET_WORKTREE_GUARD_HELD=0
+      continue
+    fi
     kind=$(meta_value "$meta" kind)
     [ -n "$kind" ] || kind=ship
     harness=$(meta_value "$meta" harness)
@@ -460,12 +471,9 @@ task_json_lines() {
     worktree_retired_to=
     worktree_retired_state=
     worktree_present=0
-    if fm_worktree_record_active_guard_acquire "$meta"; then
-      [ "$FM_WORKTREE_RECORD_ACTIVE_GUARD_HELD" -eq 0 ] || FLEET_WORKTREE_GUARD_HELD=1
+    if [ "$worktree_active" -eq 1 ]; then
       worktree=$FM_WORKTREE_RECORD_ACTIVE_PATH
       [ ! -e "$worktree" ] || worktree_present=1
-      fm_worktree_record_active_guard_release
-      FLEET_WORKTREE_GUARD_HELD=0
     elif [ -n "$FM_WORKTREE_RECORD_RETIRED_OWNER" ]; then
       retired_worktree=$worktree
       worktree=
@@ -478,6 +486,7 @@ task_json_lines() {
     projects=$(meta_value "$meta" projects)
     remote_host=$(meta_value "$meta" remote_host)
     remote_root=$(meta_value "$meta" remote_root)
+    pr=$(meta_value "$meta" pr)
     remote_home_present=null
     if [ -n "$remote_host" ]; then
       backend=$(meta_value "$meta" remote_backend)
@@ -487,9 +496,10 @@ task_json_lines() {
       backend=$(fm_backend_of_meta "$meta")
       target=$(fm_backend_target_of_meta "$meta")
     fi
+    fm_worktree_record_active_guard_release
+    FLEET_WORKTREE_GUARD_HELD=0
     status_log="$STATE/$id.status"
     report_path="$DATA/$id/report.md"
-    pr=$(meta_value "$meta" pr)
     pr_source=meta
     if [ -z "$pr" ]; then
       pr_from_status=$(first_pr_url_in_file "$status_log" || true)

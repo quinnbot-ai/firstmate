@@ -30,8 +30,11 @@
 #     Holds the task metadata, repository pool, and worktree transition locks
 #     while resolving an operational worktree, so dependent reads cannot cross
 #     record replacement or reassignment without blocking unrelated tasks.
+#   fm_worktree_record_snapshot_guard_acquire <meta-file>
+#     Resolves an operational worktree while retaining the task metadata lock
+#     when no active worktree resolves, so callers can snapshot either state.
 #   fm_worktree_record_active_guard_release
-#     Releases a successful active-worktree guard.
+#     Releases a held active-worktree or metadata-snapshot guard.
 #   fm_worktree_binding_write <worktree> <state-dir> <task-id>
 #     Atomically binds a freshly assigned worktree to its current task.
 #   fm_worktree_binding_clear <worktree> <state-dir> <task-id>
@@ -154,8 +157,8 @@ fm_worktree_record_active_resolve() {  # <meta-file>
   return 1
 }
 
-fm_worktree_record_active_guard_acquire() {  # <meta-file>
-  local meta=${1-} state project kind meta_lock pool_lock transition_lock detail
+fm_worktree_record_active_guard_acquire() {  # <meta-file> [retain-meta]
+  local meta=${1-} retain_meta=${2-} state project kind meta_lock pool_lock transition_lock detail
   FM_WORKTREE_RECORD_ACTIVE_META_LOCK=
   FM_WORKTREE_RECORD_ACTIVE_POOL_LOCK=
   FM_WORKTREE_RECORD_ACTIVE_TRANSITION_LOCK=
@@ -177,7 +180,9 @@ fm_worktree_record_active_guard_acquire() {  # <meta-file>
   FM_WORKTREE_RECORD_ACTIVE_GUARD_HELD=1
   if ! fm_worktree_record_resolve "$meta"; then
     detail=$FM_WORKTREE_RECORD_DETAIL
-    fm_worktree_record_active_guard_release
+    if [ "$retain_meta" != retain-meta ]; then
+      fm_worktree_record_active_guard_release
+    fi
     FM_WORKTREE_RECORD_DETAIL=$detail
     return 1
   fi
@@ -187,7 +192,9 @@ fm_worktree_record_active_guard_acquire() {  # <meta-file>
       return 0
     fi
     detail=$FM_WORKTREE_RECORD_DETAIL
-    fm_worktree_record_active_guard_release
+    if [ "$retain_meta" != retain-meta ]; then
+      fm_worktree_record_active_guard_release
+    fi
     FM_WORKTREE_RECORD_DETAIL=$detail
     return 1
   fi
@@ -195,22 +202,33 @@ fm_worktree_record_active_guard_acquire() {  # <meta-file>
   pool_lock=$(fm_worktree_pool_transition_lock_path "$state" "$project") || {
     FM_WORKTREE_RECORD_DETAIL="worktree binding unverifiable: cannot establish the repository pool transition lock"
     FM_WORKTREE_RECORD_ACTIVE_PATH=
-    fm_worktree_record_active_guard_release
+    if [ "$retain_meta" != retain-meta ]; then
+      fm_worktree_record_active_guard_release
+    fi
     return 1
   }
   transition_lock=$(fm_worktree_transition_lock_path "$state" "$FM_WORKTREE_RECORD_ACTIVE_PATH") || {
     FM_WORKTREE_RECORD_DETAIL="worktree binding unverifiable: cannot establish the worktree transition lock"
     FM_WORKTREE_RECORD_ACTIVE_PATH=
-    fm_worktree_record_active_guard_release
+    if [ "$retain_meta" != retain-meta ]; then
+      fm_worktree_record_active_guard_release
+    fi
     return 1
   }
   fm_lock_acquire_wait "$pool_lock" || {
-    fm_worktree_record_active_guard_release
+    if [ "$retain_meta" != retain-meta ]; then
+      fm_worktree_record_active_guard_release
+    fi
     return 1
   }
   FM_WORKTREE_RECORD_ACTIVE_POOL_LOCK=$pool_lock
   fm_lock_acquire_wait "$transition_lock" || {
-    fm_worktree_record_active_guard_release
+    if [ "$retain_meta" = retain-meta ]; then
+      fm_lock_release "$FM_WORKTREE_RECORD_ACTIVE_POOL_LOCK" || true
+      FM_WORKTREE_RECORD_ACTIVE_POOL_LOCK=
+    else
+      fm_worktree_record_active_guard_release
+    fi
     return 1
   }
   FM_WORKTREE_RECORD_ACTIVE_TRANSITION_LOCK=$transition_lock
@@ -218,9 +236,20 @@ fm_worktree_record_active_guard_acquire() {  # <meta-file>
     return 0
   fi
   detail=$FM_WORKTREE_RECORD_DETAIL
-  fm_worktree_record_active_guard_release
+  if [ "$retain_meta" = retain-meta ]; then
+    fm_lock_release "$FM_WORKTREE_RECORD_ACTIVE_TRANSITION_LOCK" || true
+    fm_lock_release "$FM_WORKTREE_RECORD_ACTIVE_POOL_LOCK" || true
+    FM_WORKTREE_RECORD_ACTIVE_TRANSITION_LOCK=
+    FM_WORKTREE_RECORD_ACTIVE_POOL_LOCK=
+  else
+    fm_worktree_record_active_guard_release
+  fi
   FM_WORKTREE_RECORD_DETAIL=$detail
   return 1
+}
+
+fm_worktree_record_snapshot_guard_acquire() {  # <meta-file>
+  fm_worktree_record_active_guard_acquire "$1" retain-meta
 }
 
 fm_worktree_record_active_guard_release() {

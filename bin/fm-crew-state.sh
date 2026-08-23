@@ -125,12 +125,22 @@ meta_value() {  # <key>
   grep "^$1=" "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
+WORKTREE_ACTIVE=0
+if fm_worktree_record_snapshot_guard_acquire "$META"; then
+  WORKTREE_ACTIVE=1
+fi
+if [ "$FM_WORKTREE_RECORD_ACTIVE_GUARD_HELD" -eq 0 ]; then
+  emit unknown none "${FM_WORKTREE_RECORD_DETAIL:-metadata unavailable for $ID}"
+fi
+CREW_WORKTREE_GUARD_HELD=1
 KIND=$(meta_value kind)
 HARNESS=$(meta_value harness)
 REMOTE_HOST=$(meta_value remote_host)
 PROJ=$(meta_value project)
+TASK_BACKEND=$(fm_backend_of_meta "$META")
+BACKEND_TARGET=$(fm_backend_target_of_meta "$META")
 [ -n "$KIND" ] || KIND=ship
-if ! fm_worktree_record_active_guard_acquire "$META"; then
+if [ "$WORKTREE_ACTIVE" -eq 0 ]; then
   if [ -n "$FM_WORKTREE_RECORD_RETIRED_OWNER" ] && [ "$KIND" != secondmate ]; then
     emit unknown none "worktree pointer retired after reassignment to task $FM_WORKTREE_RECORD_RETIRED_OWNER"
   fi
@@ -138,7 +148,6 @@ if ! fm_worktree_record_active_guard_acquire "$META"; then
     emit unknown none "$FM_WORKTREE_RECORD_DETAIL"
   fi
 fi
-[ "$FM_WORKTREE_RECORD_ACTIVE_GUARD_HELD" -eq 0 ] || CREW_WORKTREE_GUARD_HELD=1
 WT=$FM_WORKTREE_RECORD_ACTIVE_PATH
 
 # A torn-down (or never-created) worktree has no current state to read. A
@@ -230,8 +239,6 @@ fi
 # state (e.g. done) instead of being masked as unknown. Backend-aware
 # (fm_backend_of_meta defaults absent backend= to tmux, the P1 contract): a
 # herdr task is read through fm_backend_capture instead of a bare tmux probe.
-TASK_BACKEND=$(fm_backend_of_meta "$META")
-BACKEND_TARGET=$(fm_backend_target_of_meta "$META")
 EXPECTED_LABEL="fm-$ID"
 pane_readable() {  # <target>
   case "$TASK_BACKEND" in

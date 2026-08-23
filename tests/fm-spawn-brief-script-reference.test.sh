@@ -438,6 +438,23 @@ test_directed_subject_reference_refuses() {
   pass "a directed-subject helper instruction refuses dispatch"
 }
 
+test_commissioned_subject_reference_refuses() {
+  local id=brief-commissioned-subject-a38 rec out status expected
+  rec=$(make_case commissioned-subject-command "$id" \
+    'I need you to run bin/fm-commissioned-subject-missing.sh before editing.')
+  read_case "$rec"
+
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite a commissioned helper instruction"
+  expected="$POOL_DIR/bin/fm-commissioned-subject-missing.sh"
+  assert_contains "$out" "$expected" \
+    "commissioned-subject instruction did not resolve against the task worktree"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "commissioned-subject helper refusal published metadata"
+  pass "a commissioned-subject helper instruction refuses dispatch"
+}
+
 test_unenumerated_imperative_reference_refuses() {
   local id=brief-unenumerated-a18 rec out status expected
   rec=$(make_case unenumerated-command "$id" 'Launch bin/fm-launch-missing.sh before editing.')
@@ -960,6 +977,7 @@ test_markdown_emphasized_directive_reference_refuses
 test_markdown_emphasized_object_directive_reference_refuses
 test_second_person_imperative_reference_refuses
 test_directed_subject_reference_refuses
+test_commissioned_subject_reference_refuses
 test_unenumerated_imperative_reference_refuses
 test_ordered_imperative_reference_refuses
 test_linked_imperative_reference_refuses
