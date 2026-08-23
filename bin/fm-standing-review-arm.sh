@@ -76,6 +76,12 @@ TASK_SET_LOCK_HELD=0
 CHECK_LIFECYCLE_LOCK=
 CHECK_LIFECYCLE_LOCK_HELD=0
 
+release_check_lifecycle_lock() {
+  [ "$CHECK_LIFECYCLE_LOCK_HELD" -eq 1 ] || return 0
+  CHECK_LIFECYCLE_LOCK_HELD=0
+  fm_lock_release "$CHECK_LIFECYCLE_LOCK"
+}
+
 rollback_replacement() {
   [ "$REPLACEMENT_PENDING" -eq 1 ] || return 0
   if [ -n "$PRIOR_CHECK" ] && [ -n "$PRIOR_TRUST" ]; then
@@ -101,8 +107,7 @@ cleanup() {
     [ -z "$PRIOR_TRUST" ] || rm -f -- "$PRIOR_TRUST"
   fi
   if [ "$CHECK_LIFECYCLE_LOCK_HELD" -eq 1 ]; then
-    CHECK_LIFECYCLE_LOCK_HELD=0
-    fm_lock_release "$CHECK_LIFECYCLE_LOCK"
+    release_check_lifecycle_lock || status=1
   fi
   if [ "$TASK_SET_LOCK_HELD" -eq 1 ]; then
     TASK_SET_LOCK_HELD=0
@@ -154,15 +159,23 @@ if [ "$MODE" = list ]; then
   found=0
   for check in "$STATE"/*.check.sh; do
     [ -e "$check" ] || continue
-    is_review_shim "$check" || continue
     id=$(basename "$check" .check.sh)
-    if fm_custom_check_registered "$STATE" "$id" 2>/dev/null; then
-      state=registered
-    else
-      state=UNREGISTERED
+    fm_pr_task_id_valid "$id" || continue
+    CHECK_LIFECYCLE_LOCK=$(fm_custom_check_lifecycle_lock_path "$STATE" "$id") \
+      || die "cannot resolve the check lifecycle lock for $id"
+    fm_lock_acquire_wait "$CHECK_LIFECYCLE_LOCK" \
+      || die "cannot acquire the check lifecycle lock for $id"
+    CHECK_LIFECYCLE_LOCK_HELD=1
+    if { [ -e "$check" ] || [ -L "$check" ]; } && is_review_shim "$check"; then
+      if fm_custom_check_registered "$STATE" "$id" 2>/dev/null; then
+        state=registered
+      else
+        state=UNREGISTERED
+      fi
+      printf '%s\t%s\t%s\n' "$id" "$state" "$CONFIG/standing-reviews/$id.json"
+      found=1
     fi
-    printf '%s\t%s\t%s\n' "$id" "$state" "$CONFIG/standing-reviews/$id.json"
-    found=1
+    release_check_lifecycle_lock || die "cannot release the check lifecycle lock for $id"
   done
   [ "$found" -eq 1 ] || printf 'no standing reviews armed in %s\n' "$FM_HOME"
   exit 0

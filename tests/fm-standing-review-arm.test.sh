@@ -424,6 +424,54 @@ test_list_reports_what_is_armed() {
   pass "the armed reviews in a home are inspectable"
 }
 
+test_list_waits_for_rearm_registration() {
+  local home fakebin marker release real_shasum rearm_pid list_pid i rc out
+  home=$(make_home list-rearm)
+  arm "$home" --id r >/dev/null 2>&1 || fail "initial arming failed"
+  marker="$home/rearm-registering"
+  release="$home/rearm-release"
+  real_shasum=$(command -v shasum)
+  fakebin=$(fm_fakebin "$home/list-rearm-bin")
+  cat > "$fakebin/shasum" <<'SH'
+#!/usr/bin/env bash
+: > "$FM_REARM_MARKER"
+while [ ! -e "$FM_REARM_RELEASE" ]; do sleep 0.01; done
+exec "$FM_REAL_SHASUM" "$@"
+SH
+  chmod +x "$fakebin/shasum"
+
+  PATH="$fakebin:$PATH" FM_REARM_MARKER="$marker" FM_REARM_RELEASE="$release" \
+    FM_REAL_SHASUM="$real_shasum" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ARM" --home "$home" --id r > "$home/rearm.out" 2>&1 &
+  rearm_pid=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$marker" ]; do
+    kill -0 "$rearm_pid" 2>/dev/null || break
+    sleep 0.01
+    i=$((i + 1))
+  done
+  assert_present "$marker" "re-arm did not reach registration"
+
+  arm "$home" --list > "$home/list.out" 2>&1 &
+  list_pid=$!
+  sleep 0.05
+  kill -0 "$list_pid" 2>/dev/null \
+    || fail "listing observed the partially replaced registration instead of waiting"
+  : > "$release"
+  rc=0
+  wait "$rearm_pid" || rc=$?
+  [ "$rc" -eq 0 ] || fail "re-arm failed after registration resumed: $(cat "$home/rearm.out")"
+  rc=0
+  wait "$list_pid" || rc=$?
+  [ "$rc" -eq 0 ] || fail "listing failed after re-arm completed: $(cat "$home/list.out")"
+  out=$(cat "$home/list.out")
+  assert_contains "$out" $'r\tregistered' \
+    "listing did not snapshot the completed check and trust pair"
+  assert_not_contains "$out" "UNREGISTERED" \
+    "listing exposed the transient replacement state"
+  pass "listing waits for a re-arm registration pair"
+}
+
 test_mode_conflicts_and_stray_purge_are_refused() {
   local home out rc
   home=$(make_home mode-conflicts)
@@ -463,4 +511,5 @@ test_disarm_refuses_a_foreign_check
 test_disarm_waits_for_an_active_watcher_check
 test_purge_refuses_unremovable_state_without_partial_disarm
 test_list_reports_what_is_armed
+test_list_waits_for_rearm_registration
 test_mode_conflicts_and_stray_purge_are_refused

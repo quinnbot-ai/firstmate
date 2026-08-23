@@ -76,30 +76,34 @@ fm_code_currency_base_ref() {
   printf 'origin/%s\n' "$default"
 }
 
+fm_code_currency_print_path() {
+  printf '%q\n' "$1"
+}
+
 # fm_code_currency_guard_files <root> <base_ref>
 # Echo, one per line, the guard paths (above) that differ between the commit at
 # HEAD and <base_ref>, in git's own path order.
 fm_code_currency_guard_files() {
   local root=$1 base=$2 path pat
-  git -C "$root" diff --name-only "HEAD...$base" 2>/dev/null | while IFS= read -r path; do
+  git -C "$root" diff --name-only -z "HEAD...$base" -- >/dev/null 2>&1 || return 1
+  while IFS= read -r -d '' path; do
     for pat in "${FM_CODE_CURRENCY_GUARD_PATTERNS[@]}"; do
       # shellcheck disable=SC2254  # unquoted here on purpose: $pat is the pattern
       case "$path" in
-        $pat) printf '%s\n' "$path"; break ;;
+        $pat) fm_code_currency_print_path "$path"; break ;;
       esac
     done
-  done
+  done < <(git -C "$root" diff --name-only -z "HEAD...$base" -- 2>/dev/null)
 }
 
 fm_code_currency_landed_worktree_drift() {
-  local root=$1 base=$2 path landed entry metadata mode type oid actual expected_exec actual_exec
-  landed=$(git -C "$root" diff --name-only "HEAD...$base" 2>/dev/null) || return 1
-  while IFS= read -r path; do
-    [ -n "$path" ] || continue
+  local root=$1 base=$2 path entry metadata mode type oid actual expected_exec actual_exec
+  git -C "$root" diff --name-only -z "HEAD...$base" -- >/dev/null 2>&1 || return 1
+  while IFS= read -r -d '' path; do
     entry=$(git -C "$root" ls-tree HEAD -- "$path" 2>/dev/null) || return 1
     if [ -z "$entry" ]; then
       if [ -e "$root/$path" ] || [ -L "$root/$path" ]; then
-        printf '%s\n' "$path"
+        fm_code_currency_print_path "$path"
       fi
       continue
     fi
@@ -111,7 +115,7 @@ fm_code_currency_landed_worktree_drift() {
     case "$mode:$type" in
       100644:blob | 100755:blob)
         if [ ! -f "$root/$path" ] || [ -L "$root/$path" ]; then
-          printf '%s\n' "$path"
+          fm_code_currency_print_path "$path"
           continue
         fi
         actual=$(git -C "$root" hash-object --no-filters "$root/$path" 2>/dev/null) || return 1
@@ -120,33 +124,31 @@ fm_code_currency_landed_worktree_drift() {
         actual_exec=0
         [ ! -x "$root/$path" ] || actual_exec=1
         if [ "$actual" != "$oid" ] || [ "$actual_exec" -ne "$expected_exec" ]; then
-          printf '%s\n' "$path"
+          fm_code_currency_print_path "$path"
         fi
         ;;
       120000:blob)
         if [ ! -L "$root/$path" ]; then
-          printf '%s\n' "$path"
+          fm_code_currency_print_path "$path"
           continue
         fi
         actual=$(perl -e 'my $v = readlink shift; defined $v or exit 1; print $v' \
           "$root/$path" | git -C "$root" hash-object --stdin 2>/dev/null) || return 1
-        [ "$actual" = "$oid" ] || printf '%s\n' "$path"
+        [ "$actual" = "$oid" ] || fm_code_currency_print_path "$path"
         ;;
       160000:commit)
         if [ ! -d "$root/$path" ]; then
-          printf '%s\n' "$path"
+          fm_code_currency_print_path "$path"
           continue
         fi
         actual=$(git -C "$root/$path" rev-parse HEAD 2>/dev/null) || return 1
-        [ "$actual" = "$oid" ] || printf '%s\n' "$path"
+        [ "$actual" = "$oid" ] || fm_code_currency_print_path "$path"
         ;;
       *)
-        printf '%s\n' "$path"
+        fm_code_currency_print_path "$path"
         ;;
     esac
-  done <<EOF
-$landed
-EOF
+  done < <(git -C "$root" diff --name-only -z "HEAD...$base" -- 2>/dev/null)
 }
 
 fm_code_currency_head_worktree_drift() {
@@ -234,7 +236,7 @@ EOF
   index=0
   count=${#paths[@]}
   while [ "$index" -lt "$count" ]; do
-    [ "${drift[$index]}" -eq 0 ] || printf '%s\n' "${paths[$index]}"
+    [ "${drift[$index]}" -eq 0 ] || fm_code_currency_print_path "${paths[$index]}"
     index=$((index + 1))
   done
 }
@@ -247,7 +249,7 @@ fm_code_currency_index_hints() {
     case "$tag" in
       [a-z] | S)
         path=${entry#? }
-        printf '%s\n' "$path"
+        fm_code_currency_print_path "$path"
         ;;
     esac
   done < <(git -C "$root" ls-files -v -z 2>/dev/null)

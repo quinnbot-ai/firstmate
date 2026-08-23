@@ -304,6 +304,27 @@ test_untracked_landed_path_is_unproven() {
   pass "fm_code_currency_line: untracked landed paths make live code unproven"
 }
 
+test_non_ascii_untracked_landed_path_is_unproven() {
+  local repo out path landed_helper
+  repo=$(make_repo "$TMP_ROOT/non-ascii-untracked-landed")
+  path='bin/fm-café.sh'
+  land "$repo" "$path" "landed non-ASCII helper"
+  landed_helper=$(git -C "$repo" show "origin/main:$path")
+  hold_back "$repo" 1
+  mkdir -p "$repo/bin"
+  printf '%s\n' "$landed_helper" > "$repo/$path"
+
+  out=$(fm_code_currency_line "$repo" || true)
+  assert_contains "$out" "CODE_STALE: UNPROVEN live code" \
+    "an untracked non-ASCII landed helper was called inactive"
+  assert_contains "$out" "$path" \
+    "the unproven diagnostic did not name the non-ASCII landed path"
+  assert_not_contains "$out" "inactive here" \
+    "an untracked non-ASCII landed helper made an unproven inactivity claim"
+
+  pass "non-ASCII landed paths preserve live-code uncertainty"
+}
+
 test_index_hints_cannot_hide_landed_path_drift() {
   local repo out landed_helper diff_status
   repo=$(make_repo "$TMP_ROOT/index-hints")
@@ -473,6 +494,7 @@ test_guard_naming
 test_never_updates
 test_dirty_tracked_checkout_is_unproven
 test_untracked_landed_path_is_unproven
+test_non_ascii_untracked_landed_path_is_unproven
 test_index_hints_cannot_hide_landed_path_drift
 test_unrelated_index_hint_prevents_running_claim
 test_stat_cache_cannot_hide_tracked_runtime_drift

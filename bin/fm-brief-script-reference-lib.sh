@@ -42,6 +42,14 @@ sub clause_prefix {
   return $prefix;
 }
 
+sub is_directive_prefix {
+  my ($prefix) = @_;
+  my $ordering = qr/(?:please|first|initially|next|then|subsequently|afterwards?|finally|lastly|instead)/i;
+  my $word = qr/[A-Za-z][A-Za-z0-9'’_-]*/;
+  my $link = qr/(?:and|then|by|to|ahead\s+and)/i;
+  return $prefix =~ /^(?:$ordering\s+)*$word(?:\s+$link\s+$word)*$/i;
+}
+
 sub is_instruction {
   my ($text, $start, $in_fence) = @_;
   return 1 if $in_fence;
@@ -53,9 +61,7 @@ sub is_instruction {
   return 0 if $prefix =~ /\b(?:do\s+not|don['’]t|must\s+not|must\s+never|should\s+not|never|avoid)\b/i;
   return 1 if $prefix =~ /\b(?:must|shall|should|need(?:s)?\s+to|required\s+to|have\s+to)\b/i;
   return 1 if $prefix =~ /\b(?:make\s+sure\s+to|ensure\s+you)\b/i;
-  my $sequence = qr/(?:please|first|initially|next|then|subsequently|afterwards?|finally|lastly|instead)/i;
-  my $verb = qr/[A-Za-z][A-Za-z0-9'’_-]*/;
-  return 1 if $prefix =~ /^(?:$sequence\s+)*$verb(?:\s+(?:and|then)\s+$verb)*$/i;
+  return 1 if is_directive_prefix($prefix);
   return 0;
 }
 
