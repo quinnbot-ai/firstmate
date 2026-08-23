@@ -451,6 +451,56 @@ test_active_legacy_resolution_requires_pool_wide_owner_proof() {
   pass "active legacy records require the pool-wide ownership proof"
 }
 
+test_legacy_non_git_directory_is_not_active() {
+  local case_dir path
+  case_dir="$TMP_ROOT/legacy-non-git"
+  path="$case_dir/recycled-directory"
+  mkdir -p "$case_dir/state" "$path"
+  fm_write_meta "$case_dir/state/lane-a.meta" \
+    "window=firstmate:fm-lane-a" \
+    "worktree=$path" \
+    "project=$case_dir/project" \
+    "kind=ship"
+
+  if fm_worktree_record_active_resolve "$case_dir/state/lane-a.meta"; then
+    fail "legacy-non-git: an unrelated directory resolved as an active worktree"
+  fi
+  assert_contains "$FM_WORKTREE_RECORD_DETAIL" "not an inspectable Git worktree" \
+    "legacy-non-git: the refusal did not identify the unverifiable directory"
+  pass "legacy active resolution rejects non-Git directories"
+}
+
+test_parent_inventory_cycle_is_bounded() {
+  local case_dir home_a home_b rc
+  case_dir="$TMP_ROOT/parent-cycle"
+  home_a="$case_dir/a"
+  home_b="$case_dir/b"
+  mkdir -p "$home_a/state" "$home_b/state"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$home_b" \
+    > "$home_a/.fm-secondmate-parent"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$home_a" \
+    > "$home_b/.fm-secondmate-parent"
+
+  if python3 - "$ROOT" "$home_a/state" <<'PY'
+import subprocess
+import sys
+
+command = ['bash', '-c', '. "$1/bin/fm-worktree-owner-lib.sh"; fm_worktree_owner_state_inventory "$2"', '_', sys.argv[1], sys.argv[2]]
+try:
+    result = subprocess.run(command, timeout=2, check=False)
+except subprocess.TimeoutExpired:
+    raise SystemExit(124)
+raise SystemExit(0 if result.returncode != 0 else 1)
+PY
+  then
+    rc=0
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 0 ] || fail "parent-cycle: cyclic parent inventory did not fail promptly (status $rc)"
+  pass "parent inventory rejects multi-home cycles"
+}
+
 test_legacy_claimant_inventory_spans_linked_homes() {
   local case_dir mate out
   case_dir=$(make_home linked-home-claimants)
@@ -521,5 +571,7 @@ test_repair_never_touches_the_status_log
 test_ambiguous_legacy_claimants_require_an_explicit_owner
 test_declared_record_without_marker_remains_a_claimant
 test_active_legacy_resolution_requires_pool_wide_owner_proof
+test_legacy_non_git_directory_is_not_active
+test_parent_inventory_cycle_is_bounded
 test_legacy_claimant_inventory_spans_linked_homes
 test_legacy_endpoint_proof_supports_every_flat_backend

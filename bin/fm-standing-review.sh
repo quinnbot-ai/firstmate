@@ -447,15 +447,23 @@ class Latch:
             return
         except (OSError, ValueError) as exc:
             raise LatchError(f"cannot read review latch {self.path}: {exc}") from None
-        for line in text.splitlines():
+        for line_number, line in enumerate(text.splitlines(), start=1):
             parts = line.split("\t")
             if len(parts) != 3:
-                continue
+                raise LatchError(
+                    f"malformed review latch {self.path} at line {line_number}"
+                )
             stamp, kind, key = parts
             try:
                 when = int(stamp)
             except ValueError:
-                continue
+                raise LatchError(
+                    f"malformed review latch {self.path} at line {line_number}"
+                ) from None
+            if when < 0 or kind not in {"finding", "subject"} or not key:
+                raise LatchError(
+                    f"malformed review latch {self.path} at line {line_number}"
+                )
             if when > self.now:
                 when = self.now
                 self.dirty = True
@@ -463,7 +471,7 @@ class Latch:
                 continue
             if kind == "finding":
                 self.findings[key] = when
-            elif kind == "subject":
+            else:
                 self.subjects[key] = max(when, self.subjects.get(key, 0))
 
     def seen_finding(self, identity: str) -> bool:

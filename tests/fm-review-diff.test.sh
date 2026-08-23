@@ -236,7 +236,7 @@ set -eu
 if [ -n "${FM_REVIEW_BLOCK_ENTERED:-}" ] \
    && [ ! -e "$FM_REVIEW_BLOCK_ENTERED" ]; then
   for arg in "$@"; do
-    if [ "$arg" = refs/remotes/origin/HEAD ]; then
+    if [ "$arg" = 'refs/heads/fm/task-x1^{commit}' ]; then
       : > "$FM_REVIEW_BLOCK_ENTERED"
       while [ ! -e "${FM_REVIEW_BLOCK_RELEASE:?}" ]; do sleep 0.02; done
       break
@@ -293,6 +293,79 @@ SH
   pass "fm-review-diff snapshots commit identities under the transition guard"
 }
 
+test_network_fetch_releases_the_transition_guard() {
+  local case_dir fakebin real_git out review_pid transition_pid i pool_lock worktree_lock
+  case_dir=$(make_case network-outside-guard)
+  stale_and_pr_commits "$case_dir"
+  git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/pull/9/head"
+  write_task_meta "$case_dir" "pr=https://github.com/example/repo/pull/9"
+
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$fakebin"
+  real_git=$(command -v git)
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+set -eu
+for arg in "$@"; do
+  if [ "$arg" = fetch ] && [ ! -e "${FM_FETCH_ENTERED:?}" ]; then
+    : > "$FM_FETCH_ENTERED"
+    while [ ! -e "${FM_FETCH_RELEASE:?}" ]; do sleep 0.02; done
+    break
+  fi
+done
+exec "${FM_REAL_GIT:?}" "$@"
+SH
+  chmod +x "$fakebin/git"
+
+  out="$case_dir/review.out"
+  FM_FETCH_ENTERED="$case_dir/fetch-entered" \
+  FM_FETCH_RELEASE="$case_dir/fetch-release" \
+  FM_REAL_GIT="$real_git" PATH="$fakebin:$PATH" \
+    run_review_diff "$case_dir" task-x1 > "$out" 2> "$case_dir/review.err" &
+  review_pid=$!
+  i=0
+  while [ ! -e "$case_dir/fetch-entered" ] && [ "$i" -lt 100 ]; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  [ -e "$case_dir/fetch-entered" ] || fail "network-outside-guard: review did not reach the controlled fetch"
+
+  (
+    FM_HOME="$case_dir"
+    FM_STATE_OVERRIDE="$case_dir/state"
+    export FM_HOME FM_STATE_OVERRIDE
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-wake-lib.sh"
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-worktree-binding-lib.sh"
+    pool_lock=$(fm_worktree_pool_transition_lock_path "$case_dir/state" "$case_dir/project") || exit 1
+    worktree_lock=$(fm_worktree_transition_lock_path "$case_dir/state" "$case_dir/wt") || exit 1
+    fm_lock_acquire_wait "$pool_lock"
+    fm_lock_acquire_wait "$worktree_lock"
+    : > "$case_dir/transition-entered"
+    fm_lock_release "$worktree_lock"
+    fm_lock_release "$pool_lock"
+  ) &
+  transition_pid=$!
+  i=0
+  while [ ! -e "$case_dir/transition-entered" ] && [ "$i" -lt 50 ]; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  if [ ! -e "$case_dir/transition-entered" ]; then
+    : > "$case_dir/fetch-release"
+    wait "$review_pid" || true
+    wait "$transition_pid" || true
+    fail "network-outside-guard: fetch retained the ownership transition guard"
+  fi
+  : > "$case_dir/fetch-release"
+  wait "$review_pid" || fail "network-outside-guard: review failed: $(cat "$case_dir/review.err")"
+  wait "$transition_pid" || fail "network-outside-guard: transition failed during the network fetch"
+  assert_contains "$(cat "$out")" '+pr-fixed' \
+    "network-outside-guard: releasing the guard lost the snapshotted compare commit"
+  pass "fm-review-diff releases ownership guards before network fetches"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
@@ -301,3 +374,4 @@ test_unreachable_pr_head_falls_back_with_warning
 test_retired_pointer_refuses_replacement_lane_diff
 test_mismatched_binding_refuses_recycled_worktree_diff
 test_reassignment_waits_for_review_snapshot
+test_network_fetch_releases_the_transition_guard

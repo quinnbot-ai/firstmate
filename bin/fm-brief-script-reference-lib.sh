@@ -8,8 +8,9 @@
 # natural language to decide which mentions are executable.  The parser
 # recognizes bin/, ./bin/,
 # $FM_ROOT/bin, and ${FM_ROOT}/bin forms, then resolves every reference to the
-# task worktree's bin/ directory.  It never evaluates arbitrary brief text as
-# shell code.
+# task worktree's bin/ directory.  A helper basename spans from fm- through the
+# last .sh before a slash, whitespace, NUL, quote, or backtick delimiter.  It
+# never evaluates arbitrary brief text as shell code.
 
 fm_brief_helper_script_references() {  # <brief> -> "raw-reference<TAB>basename" lines
   perl - "$1" <<'PERL'
@@ -29,7 +30,7 @@ my $script = qr{
       /[^\s`'"]*/
     )?
     bin/
-    (fm-[A-Za-z0-9][A-Za-z0-9._-]*\.sh)
+    (fm-[^/\s\x00`'"]*\.sh)
   )
 }x;
 

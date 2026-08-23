@@ -133,7 +133,9 @@ fm_worktree_record_active_resolve() {  # <meta-file>
           return 1
         fi
         if ! fm_worktree_binding_git_dir "$FM_WORKTREE_RECORD_ACTIVE_PATH" >/dev/null 2>&1; then
-          return 0
+          FM_WORKTREE_RECORD_DETAIL="worktree binding unverifiable: $FM_WORKTREE_RECORD_ACTIVE_PATH is not an inspectable Git worktree"
+          FM_WORKTREE_RECORD_ACTIVE_PATH=
+          return 1
         fi
         FM_WORKTREE_RECORD_DETAIL=$read_detail
       fi

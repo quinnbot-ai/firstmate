@@ -47,6 +47,8 @@ case $- in *u*) _fm_classify_nounset=on ;; *) _fm_classify_nounset=off ;; esac
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$_FM_CLASSIFY_LIB_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$_FM_CLASSIFY_LIB_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-worktree-binding-lib.sh
 . "$_FM_CLASSIFY_LIB_DIR/fm-worktree-binding-lib.sh"
 # shellcheck source=bin/fm-worktree-owner-lib.sh
@@ -1294,17 +1296,27 @@ FM_WORKTREE_WRITE_TIMEOUT=${FM_WORKTREE_WRITE_TIMEOUT:-10}
 # worktree's own filesystem rather than descending into a nested network or container
 # mount, so a write that lands only under such a mount is one more negative outcome.
 crew_worktree_written_since() {  # <id> <state> <anchor-file>
-  local id=$1 state=$2 anchor=$3 meta wt kind name hit bound
-  local -a names=() prune=()
+  local id=$1 state=$2 anchor=$3 meta wt kind name hit bound result=1
+  local -a names=() prune=(
+    -name 'firstmate-worktree-pool-transition.lock*'
+    -o -name 'firstmate-worktree-transition-*.lock*'
+  )
   [ -n "$id" ] || return 1
   [ -f "$anchor" ] || return 1
   meta="$state/$id.meta"
-  fm_worktree_record_active_resolve "$meta" || return 1
+  fm_worktree_record_active_guard_acquire "$meta" || return 1
   wt=$FM_WORKTREE_RECORD_ACTIVE_PATH
-  [ -n "$wt" ] && [ -d "$wt" ] || return 1
+  if [ -z "$wt" ] || [ ! -d "$wt" ]; then
+    fm_worktree_record_active_guard_release
+    return 1
+  fi
   kind=$(grep '^kind=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-  [ "$kind" != secondmate ] || return 1
+  if [ "$kind" = secondmate ]; then
+    fm_worktree_record_active_guard_release
+    return 1
+  fi
   if [ -e "$wt/.fm-secondmate-home" ] || [ -L "$wt/.fm-secondmate-home" ]; then
+    fm_worktree_record_active_guard_release
     return 1
   fi
   read -r -a names <<< "$FM_WORKTREE_WRITE_PRUNE"
@@ -1321,7 +1333,9 @@ crew_worktree_written_since() {  # <id> <state> <anchor-file>
     hit=$(fm_run_timed "$bound" find "$wt" -xdev -maxdepth "$FM_WORKTREE_WRITE_MAXDEPTH" \
       -type f -newer "$anchor" -print -quit 2>/dev/null || true)
   fi
-  [ -n "$hit" ]
+  [ -z "$hit" ] || result=0
+  fm_worktree_record_active_guard_release
+  return "$result"
 }
 
 # 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is provably

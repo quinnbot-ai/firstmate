@@ -87,14 +87,22 @@ default_branch() {
   return 1
 }
 
-DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
-
 BRANCH="fm/$ID"
 if ! git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; then
   BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
   [ -n "$BRANCH" ] || { echo "error: branch fm/$ID does not exist and worktree $WT is detached" >&2; exit 1; }
   git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { echo "error: branch $BRANCH does not exist in $WT" >&2; exit 1; }
 fi
+LOCAL_COMPARE_OID=$(git -C "$WT" rev-parse --verify "refs/heads/$BRANCH^{commit}")
+PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
+PR_HEAD_RECORDED=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
+RECORDED_PR_OID=
+if [ -n "$PR_HEAD_RECORDED" ]; then
+  RECORDED_PR_OID=$(git -C "$WT" rev-parse --verify "$PR_HEAD_RECORDED^{commit}" 2>/dev/null || true)
+fi
+fm_worktree_record_active_guard_release
+
+DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
 
 pr_number_from_target() {
   local target=$1 n
@@ -115,18 +123,18 @@ pr_number_from_target() {
 
 fetch_pull_head() {
   local n=$1 resolved
-  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
+  git -C "$PROJ" remote get-url origin >/dev/null 2>&1 || return 1
   # Fetch into a private ref so a later base-branch fetch cannot clobber the
   # compare tip via FETCH_HEAD, and so we never review a stale local object.
-  git -C "$WT" fetch --quiet origin \
+  git -C "$PROJ" fetch --quiet origin \
     "+refs/pull/$n/head:refs/fm-review/pull/$n/head" >/dev/null 2>&1 || return 1
-  resolved=$(git -C "$WT" rev-parse --verify "refs/fm-review/pull/$n/head^{commit}" 2>/dev/null) || return 1
+  resolved=$(git -C "$PROJ" rev-parse --verify "refs/fm-review/pull/$n/head^{commit}" 2>/dev/null) || return 1
   [ -n "$resolved" ] || return 1
   printf '%s' "$resolved"
 }
 
 resolve_pr_head() {
-  local pr_url=$1 recorded_head=$2 n resolved
+  local pr_url=$1 recorded_oid=$2 n resolved
   n=$(pr_number_from_target "$pr_url") || true
   if [ -n "$n" ]; then
     if resolved=$(fetch_pull_head "$n"); then
@@ -136,20 +144,18 @@ resolve_pr_head() {
   fi
   # Offline / unreachable remote: recorded pr_head is better than the local
   # branch, but never preferred over a successful pull-head fetch above.
-  if [ -n "$recorded_head" ] \
-    && git -C "$WT" cat-file -e "$recorded_head^{commit}" 2>/dev/null; then
-    printf '%s' "$recorded_head"
+  if [ -n "$recorded_oid" ] \
+    && git -C "$PROJ" cat-file -e "$recorded_oid^{commit}" 2>/dev/null; then
+    printf '%s' "$recorded_oid"
     return 0
   fi
   return 1
 }
 
-PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
-PR_HEAD_RECORDED=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
-COMPARE_REF=$BRANCH
+COMPARE_OID=$LOCAL_COMPARE_OID
 if [ -n "$PR_URL" ]; then
-  if PR_HEAD=$(resolve_pr_head "$PR_URL" "$PR_HEAD_RECORDED"); then
-    COMPARE_REF=$PR_HEAD
+  if PR_HEAD=$(resolve_pr_head "$PR_URL" "$RECORDED_PR_OID"); then
+    COMPARE_OID=$PR_HEAD
   else
     echo "warning: PR head unavailable; diff may lag the open PR (using local branch $BRANCH)" >&2
   fi
@@ -158,17 +164,15 @@ fi
 if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   # Update the remote-tracking ref itself; a bare single-branch fetch can leave
   # origin/<default> stale on some Git versions and only refresh FETCH_HEAD.
-  git -C "$WT" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet
+  git -C "$PROJ" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet
   BASE="origin/$DEFAULT"
 else
   BASE="$DEFAULT"
 fi
 
-git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "error: base $BASE does not exist in $WT" >&2; exit 1; }
-git -C "$WT" rev-parse --verify --quiet "$COMPARE_REF^{commit}" >/dev/null || { echo "error: compare ref $COMPARE_REF does not resolve in $WT" >&2; exit 1; }
-BASE_OID=$(git -C "$WT" rev-parse --verify "$BASE^{commit}")
-COMPARE_OID=$(git -C "$WT" rev-parse --verify "$COMPARE_REF^{commit}")
-fm_worktree_record_active_guard_release
+git -C "$PROJ" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "error: base $BASE does not exist in $PROJ" >&2; exit 1; }
+git -C "$PROJ" cat-file -e "$COMPARE_OID^{commit}" 2>/dev/null || { echo "error: compare commit $COMPARE_OID does not resolve in $PROJ" >&2; exit 1; }
+BASE_OID=$(git -C "$PROJ" rev-parse --verify "$BASE^{commit}")
 
 echo "diff base: $BASE"
 if git -C "$PROJ" diff --quiet "$BASE_OID...$COMPARE_OID" --; then

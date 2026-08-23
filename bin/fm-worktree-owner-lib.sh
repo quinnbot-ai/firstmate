@@ -139,11 +139,15 @@ fm_worktree_owner_inventory_walk() {  # <home>
 }
 
 fm_worktree_owner_state_inventory() {  # <state-dir>
-  local state_real home parent marker parent_real
+  local state_real home parent marker parent_real seen=$'\n'
   state_real=$(fm_worktree_binding_state_resolve "$1" 2>/dev/null) || return 1
   home=${state_real%/state}
   [ "$home" != "$state_real" ] || return 1
   while :; do
+    case "$seen" in
+      *$'\n'"$home"$'\n'*) return 1 ;;
+    esac
+    seen="${seen}${home}"$'\n'
     marker="$home/.fm-secondmate-parent"
     if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
       break
@@ -152,7 +156,6 @@ fm_worktree_owner_state_inventory() {  # <state-dir>
     [ "$FM_SECONDMATE_PARENT_ROUTE" = local ] || break
     parent=$FM_SECONDMATE_PARENT_HOME
     parent_real=$(CDPATH='' cd -- "$parent" 2>/dev/null && pwd -P) || return 1
-    [ "$parent_real" != "$home" ] || return 1
     home=$parent_real
   done
   FM_WORKTREE_OWNER_INVENTORY_SEEN=$'\n'

@@ -381,11 +381,26 @@ test_crew_absorb_class_classifier() {
 # worktree. Every negative outcome must report "no evidence" so the caller keeps
 # its existing escalation schedule, and a supervisor-side git read (which touches
 # .git, never tracked files) must not be able to fake a positive.
+record_classify_worktree() {  # <state> <id> <worktree>
+  local state=$1 id=$2 wt=$3
+  mkdir -p "$wt"
+  git -C "$wt" rev-parse --git-dir >/dev/null 2>&1 || git init -q "$wt"
+  fm_write_meta "$state/$id.meta" \
+    "window=test:fm-$id" \
+    "kind=ship" \
+    "worktree=$wt" \
+    "project=$wt" \
+    "worktree_binding=fm-worktree-binding.v2"
+  fm_worktree_binding_write "$wt" "$state" "$id" \
+    || fail "$id: could not bind the classifier fixture worktree"
+}
+
 test_crew_worktree_written_since_classifier() {
   local dir state anchor wt home statedir_wt
   dir=$(make_case classify-worktree-writes); state="$dir/state"
   anchor="$state/anchor"; wt="$dir/wt"; home="$dir/mate-home"; statedir_wt="$dir/wt-with-state"
-  mkdir -p "$wt/src" "$wt/.git/objects"
+  mkdir -p "$wt/src"
+  git init -q "$wt"
   printf 'old\n' > "$wt/src/existing.c"
   set_mtime "$(( $(date +%s) - 300 ))" "$wt/src/existing.c"
   : > "$anchor"
@@ -400,7 +415,7 @@ test_crew_worktree_written_since_classifier() {
   ! crew_worktree_written_since b "$state" "$anchor" \
     || fail "a torn-down worktree reported write evidence"
   # Present, but nothing written since the anchor.
-  printf 'window=test:fm-c\nkind=ship\nworktree=%s\n' "$wt" > "$state/c.meta"
+  record_classify_worktree "$state" c "$wt"
   ! crew_worktree_written_since c "$state" "$anchor" \
     || fail "a quiet worktree reported write evidence"
   # A missing anchor cannot be compared against: no evidence.
@@ -437,8 +452,8 @@ test_crew_worktree_written_since_classifier() {
   # But an ordinary worktree that merely holds a directory named state is real
   # work: only the home is excluded, never a source directory of that name.
   mkdir -p "$statedir_wt/state"
+  record_classify_worktree "$state" d "$statedir_wt"
   printf 'machine\n' > "$statedir_wt/state/machine.go"
-  printf 'window=test:fm-d\nkind=ship\nworktree=%s\n' "$statedir_wt" > "$state/d.meta"
   crew_worktree_written_since d "$state" "$anchor" \
     || fail "a source directory named state was hidden from the write probe"
   pass "crew_worktree_written_since: real writes are evidence; no worktree, no anchor, quiet trees, .git churn and a mate's own home are not"
@@ -453,10 +468,11 @@ test_empty_write_prune_widens_the_probe() {
   local dir state anchor wt saved
   dir=$(make_case classify-empty-write-prune); state="$dir/state"
   anchor="$state/anchor"; wt="$dir/wt"
-  mkdir -p "$wt/src" "$wt/.git"
+  mkdir -p "$wt/src"
+  record_classify_worktree "$state" e "$wt"
+  find "$wt/.git" -exec touch -t 200001010000 {} +
   : > "$anchor"
   set_mtime "$(( $(date +%s) - 120 ))" "$anchor"
-  printf 'window=test:fm-e\nkind=ship\nworktree=%s\n' "$wt" > "$state/e.meta"
   saved=$FM_WORKTREE_WRITE_PRUNE
   FM_WORKTREE_WRITE_PRUNE=''
   # A quiet tree is still no evidence, so the caller's schedule is untouched.
@@ -488,10 +504,10 @@ test_empty_write_prune_from_the_environment_widens_the_probe() {
   local dir state anchor wt
   dir=$(make_case classify-empty-write-prune-env); state="$dir/state"
   anchor="$state/anchor"; wt="$dir/wt"
-  mkdir -p "$wt/.git/objects"
+  mkdir -p "$wt"
+  record_classify_worktree "$state" wenv "$wt"
   : > "$anchor"
   set_mtime "$(( $(date +%s) - 120 ))" "$anchor"
-  printf 'window=test:fm-wenv\nkind=ship\nworktree=%s\n' "$wt" > "$state/wenv.meta"
   # The one thing written since the anchor sits exactly where the DEFAULT list prunes.
   printf 'pack\n' > "$wt/.git/objects/fresh"
   env -u FM_WORKTREE_WRITE_PRUNE \
@@ -516,9 +532,9 @@ test_worktree_write_probe_is_wall_clock_bounded() {
   dir=$(make_case classify-write-probe-bound); state="$dir/state"
   anchor="$state/anchor"; wt="$dir/wt"; slowbin="$dir/slowbin"; fastbin="$dir/fastbin"
   mkdir -p "$wt/src" "$slowbin" "$fastbin"
+  record_classify_worktree "$state" slow "$wt"
   : > "$anchor"
   set_mtime "$(( $(date +%s) - 120 ))" "$anchor"
-  printf 'window=test:fm-slow\nkind=ship\nworktree=%s\n' "$wt" > "$state/slow.meta"
   # Both stand-ins report the same hit; only one of them takes longer than the bound
   # to do it, so the prompt one shows what a positive outcome looks like and the
   # bounded assertion below cannot pass merely because the fake failed.
@@ -547,6 +563,60 @@ SH
   [ "$elapsed" -lt 10 ] \
     || fail "the worktree write probe was not wall-clock bounded: one walk held the caller for ${elapsed}s"
   pass "the worktree write probe is wall-clock bounded, and hitting the bound reads as no write evidence"
+}
+
+test_worktree_write_probe_holds_the_transition_guard() {
+  local dir state anchor wt fakebin scan_pid transition_pid i pool_lock worktree_lock
+  dir=$(make_case classify-write-probe-guard); state="$dir/state"
+  anchor="$state/anchor"; wt="$dir/wt"; fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
+  record_classify_worktree "$state" guarded "$wt"
+  : > "$anchor"
+  set_mtime "$(( $(date +%s) - 120 ))" "$anchor"
+  cat > "$fakebin/find" <<'SH'
+#!/usr/bin/env bash
+set -u
+: > "${FM_SCAN_ENTERED:?}"
+while [ ! -e "${FM_SCAN_RELEASE:?}" ]; do sleep 0.02; done
+printf '%s\n' "$1/hit"
+SH
+  chmod +x "$fakebin/find"
+
+  FM_SCAN_ENTERED="$dir/scan-entered" FM_SCAN_RELEASE="$dir/scan-release" \
+    PATH="$fakebin:$PATH" \
+    bash -c '. "$1"; crew_worktree_written_since guarded "$2" "$3"' _ \
+      "$ROOT/bin/fm-classify-lib.sh" "$state" "$anchor" &
+  scan_pid=$!
+  i=0
+  while [ ! -e "$dir/scan-entered" ] && [ "$i" -lt 100 ]; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  [ -e "$dir/scan-entered" ] || fail "write-probe-guard: scan did not reach the controlled read"
+
+  (
+    FM_STATE_OVERRIDE="$state"
+    export FM_STATE_OVERRIDE
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-wake-lib.sh"
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-worktree-binding-lib.sh"
+    pool_lock=$(fm_worktree_pool_transition_lock_path "$state" "$wt") || exit 1
+    worktree_lock=$(fm_worktree_transition_lock_path "$state" "$wt") || exit 1
+    fm_lock_acquire_wait "$pool_lock"
+    fm_lock_acquire_wait "$worktree_lock"
+    : > "$dir/transition-entered"
+    fm_lock_release "$worktree_lock"
+    fm_lock_release "$pool_lock"
+  ) &
+  transition_pid=$!
+  sleep 0.2
+  [ ! -e "$dir/transition-entered" ] \
+    || fail "write-probe-guard: ownership transition crossed an in-progress scan"
+  : > "$dir/scan-release"
+  wait "$scan_pid" || fail "write-probe-guard: guarded scan did not report its controlled hit"
+  wait "$transition_pid" || fail "write-probe-guard: transition failed after the scan released its guard"
+  pass "worktree write classification holds ownership guards through its scan"
 }
 
 # signal_crew_provably_working: a no-verb "signal:" wake is benign ONLY when EVERY
@@ -1875,7 +1945,7 @@ test_wedge_escalation_deferred_while_worktree_is_written() {
   window="test:fm-writing"; wt="$dir/wt"
   mkdir -p "$wt/src"
   printf 'idle building output' > "$capture_file"
-  printf 'window=%s\nkind=ship\nworktree=%s\n' "$window" "$wt" > "$state/writing.meta"
+  record_classify_worktree "$state" writing "$wt"
   printf 'working: implementing\n' > "$state/writing.status"
   sig=$(seen_sig "$state/writing.status"); printf '%s' "$sig" > "$state/.seen-writing_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
@@ -1943,7 +2013,7 @@ test_write_deferral_resurfaces_on_the_bounded_cadence() {
   window="test:fm-churn"; wt="$dir/wt"
   mkdir -p "$wt/src"
   printf 'idle building output' > "$capture_file"
-  printf 'window=%s\nkind=ship\nworktree=%s\n' "$window" "$wt" > "$state/churn.meta"
+  record_classify_worktree "$state" churn "$wt"
   printf 'working: implementing\n' > "$state/churn.status"
   sig=$(seen_sig "$state/churn.status"); printf '%s' "$sig" > "$state/.seen-churn_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
@@ -2038,7 +2108,7 @@ test_timer_repair_drops_a_finished_write_deferral_chain() {
   window="test:fm-chain-repair"; wt="$dir/wt"
   mkdir -p "$wt/src"
   printf 'idle building output' > "$capture_file"
-  printf 'window=%s\nkind=ship\nworktree=%s\n' "$window" "$wt" > "$state/chain-repair.meta"
+  record_classify_worktree "$state" chain-repair "$wt"
   printf 'working: implementing\n' > "$state/chain-repair.status"
   sig=$(seen_sig "$state/chain-repair.status"); printf '%s' "$sig" > "$state/.seen-chain-repair_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
@@ -2620,6 +2690,7 @@ test_crew_worktree_written_since_classifier
 test_empty_write_prune_widens_the_probe
 test_empty_write_prune_from_the_environment_widens_the_probe
 test_worktree_write_probe_is_wall_clock_bounded
+test_worktree_write_probe_holds_the_transition_guard
 test_signal_crew_provably_working_classifier
 test_secondmate_status_signal_never_absorbed_classifier
 test_provably_working_signal_absorbed
