@@ -324,10 +324,27 @@ fm_code_currency_snapshot_matches() {
   [ "$current_head" = "$expected_head" ] && [ "$current_base" = "$expected_base" ]
 }
 
+fm_code_currency_changed_snapshot_line() {
+  local root=$1 base=$2 head_sha=$3 base_sha=$4 inspection=$5 current_head current_base current_behind current_head_sha current_base_sha
+  current_head=$(git -C "$root" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) || return 1
+  current_base=$(git -C "$root" rev-parse --verify "$base^{commit}" 2>/dev/null) || return 1
+  current_behind=$(git -C "$root" rev-list --count "$current_head..$current_base" 2>/dev/null) || return 1
+  case "$current_behind" in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+  current_head_sha=${current_head:0:7}
+  current_base_sha=${current_base:0:7}
+  if [ "$current_behind" -gt 0 ]; then
+    printf 'CODE_STALE: UNPROVEN live code: checked-out HEAD or %s changed during %s inspection from snapshot %s/%s. The current snapshot %s/%s is %s commit(s) behind; retry session-start status before relying on code currency.\n' \
+      "$base" "$inspection" "$head_sha" "$base_sha" "$current_head_sha" "$current_base_sha" "$current_behind"
+  else
+    printf 'CODE_DRIFT: UNPROVEN live code: checked-out HEAD or %s changed during %s inspection from snapshot %s/%s. The current snapshot %s/%s is not behind; retry session-start status before relying on code currency.\n' \
+      "$base" "$inspection" "$head_sha" "$base_sha" "$current_head_sha" "$current_base_sha"
+  fi
+}
+
 fm_code_currency_snapshot_changed_line() {
-  local base=$1 head_sha=$2 base_sha=$3
-  printf 'CODE_STALE: UNPROVEN live code: checked-out HEAD or %s changed during landed-versus-live inspection from snapshot %s/%s; retry session-start status before relying on code currency.\n' \
-    "$base" "$head_sha" "$base_sha"
+  fm_code_currency_changed_snapshot_line "$1" "$2" "$3" "$4" landed-versus-live
 }
 
 fm_code_currency_worktree_changed_line() {
@@ -343,9 +360,7 @@ fm_code_currency_inspection_failed_line() {
 }
 
 fm_code_currency_current_snapshot_changed_line() {
-  local base=$1 head_sha=$2 base_sha=$3
-  printf 'CODE_DRIFT: UNPROVEN live code: checked-out HEAD or %s changed during current-checkout inspection from snapshot %s/%s; retry session-start status before relying on code currency.\n' \
-    "$base" "$head_sha" "$base_sha"
+  fm_code_currency_changed_snapshot_line "$1" "$2" "$3" "$4" current-checkout
 }
 
 fm_code_currency_current_worktree_changed_line() {
@@ -385,9 +400,9 @@ fm_code_currency_line() {
       fi
     else
       if [ "$behind" -gt 0 ]; then
-        fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+        fm_code_currency_snapshot_changed_line "$root" "$base" "$head_sha" "$base_sha"
       else
-        fm_code_currency_current_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+        fm_code_currency_current_snapshot_changed_line "$root" "$base" "$head_sha" "$base_sha"
       fi
     fi
     return 0
@@ -401,9 +416,9 @@ fm_code_currency_line() {
       fi
     else
       if [ "$behind" -gt 0 ]; then
-        fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+        fm_code_currency_snapshot_changed_line "$root" "$base" "$head_sha" "$base_sha"
       else
-        fm_code_currency_current_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+        fm_code_currency_current_snapshot_changed_line "$root" "$base" "$head_sha" "$base_sha"
       fi
     fi
     return 0
@@ -417,9 +432,9 @@ fm_code_currency_line() {
       fi
     else
       if [ "$behind" -gt 0 ]; then
-        fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+        fm_code_currency_snapshot_changed_line "$root" "$base" "$head_sha" "$base_sha"
       else
-        fm_code_currency_current_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+        fm_code_currency_current_snapshot_changed_line "$root" "$base" "$head_sha" "$base_sha"
       fi
     fi
     return 0
@@ -428,9 +443,9 @@ fm_code_currency_line() {
   if [ -n "$head_drift" ]; then
     if ! fm_code_currency_snapshot_matches "$root" "$base" "$head_oid" "$base_oid"; then
       if [ "$behind" -gt 0 ]; then
-        fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+        fm_code_currency_snapshot_changed_line "$root" "$base" "$head_sha" "$base_sha"
       else
-        fm_code_currency_current_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+        fm_code_currency_current_snapshot_changed_line "$root" "$base" "$head_sha" "$base_sha"
       fi
       return 0
     fi
@@ -454,7 +469,7 @@ fm_code_currency_line() {
     0) ;;
     1)
       if ! fm_code_currency_snapshot_matches "$root" "$base" "$head_oid" "$base_oid"; then
-        fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+        fm_code_currency_snapshot_changed_line "$root" "$base" "$head_sha" "$base_sha"
         return 0
       fi
       printf 'CODE_STALE: UNPROVEN live code: the tracked index differs from checked-out HEAD (%s), which is %s commit(s) behind %s (%s) as last fetched. Installed code cannot be proven to match HEAD or the landed branch; reconcile the tracked checkout before relying on landed-versus-live status.\n' \
@@ -465,7 +480,7 @@ fm_code_currency_line() {
       if fm_code_currency_snapshot_matches "$root" "$base" "$head_oid" "$base_oid"; then
         fm_code_currency_inspection_failed_line "$base" "$head_sha" "$base_sha" "$behind"
       else
-        fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+        fm_code_currency_snapshot_changed_line "$root" "$base" "$head_sha" "$base_sha"
       fi
       return 0
       ;;
@@ -474,13 +489,13 @@ fm_code_currency_line() {
     if fm_code_currency_snapshot_matches "$root" "$base" "$head_oid" "$base_oid"; then
       fm_code_currency_inspection_failed_line "$base" "$head_sha" "$base_sha" "$behind"
     else
-      fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+      fm_code_currency_snapshot_changed_line "$root" "$base" "$head_sha" "$base_sha"
     fi
     return 0
   fi
   if [ -n "$landed_drift" ]; then
     if ! fm_code_currency_snapshot_matches "$root" "$base" "$head_oid" "$base_oid"; then
-      fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+      fm_code_currency_snapshot_changed_line "$root" "$base" "$head_sha" "$base_sha"
       return 0
     fi
     landed_drift_shown=$(printf '%s\n' "$landed_drift" | head -n 4 | paste -sd, - | sed 's/,/, /g')
@@ -492,13 +507,13 @@ fm_code_currency_line() {
     if fm_code_currency_snapshot_matches "$root" "$base" "$head_oid" "$base_oid"; then
       fm_code_currency_inspection_failed_line "$base" "$head_sha" "$base_sha" "$behind"
     else
-      fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+      fm_code_currency_snapshot_changed_line "$root" "$base" "$head_sha" "$base_sha"
     fi
     return 0
   fi
   if [ -n "$index_hints" ]; then
     if ! fm_code_currency_snapshot_matches "$root" "$base" "$head_oid" "$base_oid"; then
-      fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+      fm_code_currency_snapshot_changed_line "$root" "$base" "$head_sha" "$base_sha"
       return 0
     fi
     index_hints_shown=$(printf '%s\n' "$index_hints" | head -n 4 | paste -sd, - | sed 's/,/, /g')
@@ -510,7 +525,7 @@ fm_code_currency_line() {
     if fm_code_currency_snapshot_matches "$root" "$base" "$head_oid" "$base_oid"; then
       fm_code_currency_inspection_failed_line "$base" "$head_sha" "$base_sha" "$behind"
     else
-      fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+      fm_code_currency_snapshot_changed_line "$root" "$base" "$head_sha" "$base_sha"
     fi
     return 0
   }
@@ -519,7 +534,7 @@ fm_code_currency_line() {
   esac
   if [ "$ahead" -gt 0 ]; then
     if ! fm_code_currency_snapshot_matches "$root" "$base" "$head_oid" "$base_oid"; then
-      fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+      fm_code_currency_snapshot_changed_line "$root" "$base" "$head_sha" "$base_sha"
       return 0
     fi
     printf 'CODE_STALE: UNPROVEN live code: checked-out HEAD %s has %s commit(s) not in %s and is %s commit(s) behind %s (%s) as last fetched. The divergent checkout may independently contain landed behavior, so installed code cannot be classified as the landed changes being inactive.\n' \
@@ -531,7 +546,7 @@ fm_code_currency_line() {
     if fm_code_currency_snapshot_matches "$root" "$base" "$head_oid" "$base_oid"; then
       fm_code_currency_inspection_failed_line "$base" "$head_sha" "$base_sha" "$behind"
     else
-      fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+      fm_code_currency_snapshot_changed_line "$root" "$base" "$head_sha" "$base_sha"
     fi
     return 0
   fi
@@ -549,7 +564,7 @@ fm_code_currency_line() {
   fi
 
   if ! fm_code_currency_snapshot_matches "$root" "$base" "$head_oid" "$base_oid"; then
-    fm_code_currency_snapshot_changed_line "$base" "$head_sha" "$base_sha"
+    fm_code_currency_snapshot_changed_line "$root" "$base" "$head_sha" "$base_sha"
     return 0
   fi
   printf 'CODE_STALE: UNPROVEN live code: checked-out HEAD %s is at least %s commit(s) behind %s (%s) as last fetched%s. Tracked bytes matched HEAD during inspection, but the unlocked checkout can change before use, so installed code cannot be proven to exclude landed changes.\n' \

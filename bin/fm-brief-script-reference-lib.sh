@@ -68,7 +68,7 @@ sub is_post_path_instruction {
 
 sub is_directive_prefix {
   my ($prefix) = @_;
-  my $ordering = qr/(?:please|first|initially|next|then|subsequently|afterwards?|finally|lastly|instead)/i;
+  my $ordering = qr/(?:please|kindly|first|initially|next|then|subsequently|afterwards?|finally|lastly|instead)/i;
   my $word = qr/[A-Za-z][A-Za-z0-9'’_-]*/;
   my $link = qr/(?:and|then|by|to|ahead\s+and)/i;
   my $directed_subject = qr/(?:you|the\s+(?:agent|operator|worker))/i;

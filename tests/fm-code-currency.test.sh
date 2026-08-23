@@ -325,6 +325,59 @@ SH
   pass "current snapshot races remain checkout drift"
 }
 
+test_base_advance_during_current_inspection_uses_stale_diagnostic() {
+  local repo out real_git shim count_file current_head current_base
+  repo=$(make_repo "$TMP_ROOT/base-advance-during-current-inspection")
+  land "$repo" bin/fm-runtime.sh "current runtime"
+  printf 'local drift\n' > "$repo/bin/fm-runtime.sh"
+
+  real_git=$(command -v git)
+  shim="$TMP_ROOT/base-advance-during-current-inspection-bin"
+  count_file="$TMP_ROOT/base-advance-during-current-inspection.count"
+  mkdir -p "$shim"
+  cat > "$shim/git" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" hash-object --no-filters -- "*)
+    output=$("$FM_REAL_GIT" "$@")
+    status=$?
+    printf '%s\n' "$output"
+    [ "$status" -eq 0 ] || exit "$status"
+    count=0
+    [ ! -f "$FM_RACE_COUNT" ] || read -r count < "$FM_RACE_COUNT"
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$FM_RACE_COUNT"
+    if [ "$count" -eq 2 ]; then
+      parent=$("$FM_REAL_GIT" -C "$FM_RACE_REPO" rev-parse HEAD)
+      tree=$("$FM_REAL_GIT" -C "$FM_RACE_REPO" rev-parse 'HEAD^{tree}')
+      new_oid=$(printf '%s\n' "advance base only" | "$FM_REAL_GIT" -C "$FM_RACE_REPO" commit-tree "$tree" -p "$parent")
+      "$FM_REAL_GIT" -C "$FM_RACE_REPO" update-ref refs/remotes/origin/main "$new_oid"
+    fi
+    exit 0
+    ;;
+esac
+exec "$FM_REAL_GIT" "$@"
+SH
+  chmod +x "$shim/git"
+
+  out=$(PATH="$shim:$PATH" FM_REAL_GIT="$real_git" FM_RACE_REPO="$repo" \
+    FM_RACE_COUNT="$count_file" fm_code_currency_line "$repo" || true)
+  current_head=$(git -C "$repo" rev-parse HEAD)
+  current_base=$(git -C "$repo" rev-parse origin/main)
+  [ "$current_head" != "$current_base" ] \
+    || fail "fixture failed: origin/main did not advance beyond HEAD"
+  assert_contains "$out" "CODE_STALE: UNPROVEN live code" \
+    "a base-only advance during inspection retained the current-checkout diagnostic"
+  assert_contains "$out" "current snapshot" \
+    "the invalidated snapshot did not report its refreshed relation"
+  assert_contains "$out" "1 commit(s) behind" \
+    "the refreshed snapshot relation did not report the new branch gap"
+  assert_not_contains "$out" "CODE_DRIFT:" \
+    "a checkout made stale during inspection was mislabeled current drift"
+
+  pass "snapshot races route from the refreshed commit relation"
+}
+
 test_untracked_landed_path_is_unproven() {
   local repo out landed_helper
   repo=$(make_repo "$TMP_ROOT/untracked-landed")
@@ -812,6 +865,7 @@ test_guard_naming
 test_never_updates
 test_dirty_tracked_checkout_is_unproven
 test_current_snapshot_change_uses_drift_diagnostic
+test_base_advance_during_current_inspection_uses_stale_diagnostic
 test_untracked_landed_path_is_unproven
 test_non_ascii_untracked_landed_path_is_unproven
 test_index_hints_cannot_hide_landed_path_drift

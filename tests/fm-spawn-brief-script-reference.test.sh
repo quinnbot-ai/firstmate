@@ -551,6 +551,20 @@ test_ordered_imperative_reference_refuses() {
   pass "an ordered imperative helper reference refuses dispatch"
 }
 
+test_adverbial_imperative_reference_refuses() {
+  local id=brief-adverbial-a31 rec out status expected
+  rec=$(make_case adverbial-command "$id" 'Kindly run bin/fm-adverbial-missing.sh before editing.')
+  read_case "$rec"
+
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite an adverbial helper instruction"
+  expected="$POOL_DIR/bin/fm-adverbial-missing.sh"
+  assert_contains "$out" "$expected" "adverbial imperative did not resolve against the task worktree"
+  assert_absent "$HOME_DIR/state/$id.meta" "adverbial helper refusal published metadata"
+  pass "an adverbial imperative helper reference refuses dispatch"
+}
+
 test_linked_imperative_reference_refuses() {
   local id=brief-linked-a26 rec out status expected
   rec=$(make_case linked-command "$id" 'Start by running bin/fm-linked-missing.sh before editing.')
@@ -1052,6 +1066,7 @@ test_commissioned_subject_reference_refuses
 test_interrogative_request_reference_refuses
 test_unenumerated_imperative_reference_refuses
 test_ordered_imperative_reference_refuses
+test_adverbial_imperative_reference_refuses
 test_linked_imperative_reference_refuses
 test_noun_phrase_directive_reference_refuses
 test_colon_labeled_directive_reference_refuses
