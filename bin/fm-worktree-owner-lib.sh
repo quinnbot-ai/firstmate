@@ -80,12 +80,14 @@ if ! declare -F fm_secondmate_parent_record_parse >/dev/null 2>&1; then
 fi
 
 fm_worktree_owner_record_confirms() {  # <state-dir> <task-id> <worktree>
-  local state=${1-} id=${2-} worktree=${3-} state_real meta
+  local state=${1-} id=${2-} worktree=${3-} state_real meta active_real worktree_real
   state_real=$(fm_worktree_binding_state_resolve "$state" 2>/dev/null) || return 1
   meta="$state_real/$id.meta"
   [ -f "$meta" ] || return 1
   fm_worktree_record_resolve "$meta" || return 1
-  [ "$FM_WORKTREE_RECORD_ACTIVE_PATH" = "$worktree" ]
+  active_real=$(CDPATH='' cd -- "$FM_WORKTREE_RECORD_ACTIVE_PATH" 2>/dev/null && pwd -P) || return 1
+  worktree_real=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 1
+  [ "$active_real" = "$worktree_real" ]
 }
 
 fm_worktree_owner_endpoint_current_path() {  # <meta-file> <task-id>

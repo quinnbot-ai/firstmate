@@ -222,6 +222,35 @@ test_binding_distinguishes_same_task_id_across_homes() {
   pass "bindings distinguish equal task ids in different Firstmate homes"
 }
 
+test_binding_owner_accepts_physical_path_alias() {
+  local case_dir alias_root out
+  case_dir=$(make_home binding-path-alias)
+  alias_root="$case_dir/pool-alias"
+  ln -s "$case_dir" "$alias_root"
+  fm_write_meta "$case_dir/state/lane-a.meta" \
+    "window=firstmate:fm-lane-a" \
+    "endpoint_task_id=lane-a" \
+    "worktree=$alias_root/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  record_lane "$case_dir" lane-b
+  fm_worktree_binding_write "$case_dir/wt" "$case_dir/state" lane-b \
+    || fail "binding-path-alias: could not bind the physical copy to lane-b"
+
+  out=$(run_reconcile "$case_dir" --apply)
+
+  assert_contains "$out" "RETIRED: lane-a" \
+    "binding-path-alias: the aliased stale pointer was not retired"
+  assert_grep "worktree_retired=lane-b" "$case_dir/state/lane-a.meta" \
+    "binding-path-alias: retirement did not name the bound owner"
+  assert_no_grep "worktree_retired" "$case_dir/state/lane-b.meta" \
+    "binding-path-alias: the physical owner's record was retired"
+  fm_worktree_binding_matches "$case_dir/wt" "$case_dir/state" lane-b \
+    || fail "binding-path-alias: reconciliation changed the authoritative binding"
+  pass "reconcile identifies binding owners across physical path aliases"
+}
+
 # (r5) Reporting must be the default; a repair tool that mutates on a bare
 # invocation cannot be run to find out what it would do.
 test_default_run_changes_nothing() {
@@ -641,6 +670,7 @@ test_own_copy_is_not_reassigned
 test_branch_without_a_matching_record_is_unresolved
 test_binding_outranks_the_checked_out_branch
 test_binding_distinguishes_same_task_id_across_homes
+test_binding_owner_accepts_physical_path_alias
 test_default_run_changes_nothing
 test_last_metadata_value_is_authoritative
 test_dry_run_resolves_inside_the_transition_lock
