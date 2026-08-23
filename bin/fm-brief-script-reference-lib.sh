@@ -74,7 +74,7 @@ sub is_directive_prefix {
   my $directed_subject = qr/(?:you|the\s+(?:agent|operator|worker))/i;
   my $commission = qr/(?:i|we)\s+(?:ask|expect|need|require|want)\s+$directed_subject\s+to/i;
   my $request = qr/(?:can|could|would|will)\s+$directed_subject(?:\s+please)?/i;
-  my $declaration = qr/it\s+is\s+(?:critical|essential|imperative|mandatory|necessary|required)\s+that\s+$directed_subject/i;
+  my $declaration = qr/it\s+is\s+(?:$word\s+)+that\s+$directed_subject/i;
   my $directed_lead = qr/(?:$directed_subject\s+(?:are|will\s+be)\s+to|$commission|$request|$declaration)/i;
   my $assurance = qr/(?:(?:make|be)\s+(?:sure|certain)\s+to|ensure(?:\s+that)?(?:\s+you)?|remember\s+to)/i;
   my $directive_verb = qr/(?:apply|begin|call|check|complete|consult|deploy|execute|follow|inspect|invoke|launch|load|open|perform|read|reference|rerun|retry|review|run|source|start|use|validate|verify)/i;

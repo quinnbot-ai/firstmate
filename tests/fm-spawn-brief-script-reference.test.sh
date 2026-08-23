@@ -580,6 +580,23 @@ test_declarative_directive_reference_refuses() {
   pass "a declarative helper directive refuses dispatch"
 }
 
+test_unlisted_declarative_directive_reference_refuses() {
+  local id=brief-unlisted-declarative-a48 rec out status expected
+  rec=$(make_case unlisted-declarative-command "$id" \
+    'It is important that you run bin/fm-unlisted-declarative-missing.sh before editing.')
+  read_case "$rec"
+
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite an unlisted declarative helper instruction"
+  expected="$POOL_DIR/bin/fm-unlisted-declarative-missing.sh"
+  assert_contains "$out" "$expected" \
+    "unlisted declarative directive did not resolve against the task worktree"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "unlisted declarative helper refusal published metadata"
+  pass "a declarative helper directive does not depend on an adjective allowlist"
+}
+
 test_linked_imperative_reference_refuses() {
   local id=brief-linked-a26 rec out status expected
   rec=$(make_case linked-command "$id" 'Start by running bin/fm-linked-missing.sh before editing.')
@@ -1083,6 +1100,7 @@ test_unenumerated_imperative_reference_refuses
 test_ordered_imperative_reference_refuses
 test_adverbial_imperative_reference_refuses
 test_declarative_directive_reference_refuses
+test_unlisted_declarative_directive_reference_refuses
 test_linked_imperative_reference_refuses
 test_noun_phrase_directive_reference_refuses
 test_colon_labeled_directive_reference_refuses
