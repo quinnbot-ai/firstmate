@@ -626,9 +626,12 @@ validate_worktree_ownership() {
   # claimant's own record - which is what covers the collisions that already
   # existed when bindings arrived. bin/fm-worktree-owner-lib.sh owns that proof
   # and the conditions that keep it quiet; an unprovable copy resolves to nothing
-  # and falls through to the pre-existing behaviour below.
-  if fm_worktree_owner_resolve "$WT" "$STATE" \
-     && [ "$FM_WORKTREE_OWNER_TASK_ID" != "$ID" ]; then
+  # and must remain untouched.
+  if fm_worktree_owner_resolve "$WT" "$STATE"; then
+    if [ "$FM_WORKTREE_OWNER_TASK_ID" = "$ID" ]; then
+      reject_unwarranted_forget_worktree "the copy at $WT still belongs to task $ID" || return 1
+      return 0
+    fi
     owner_branch=${FM_WORKTREE_OWNER_BRANCH:-<unreadable>}
     if [ "$FORGET_WORKTREE" = 1 ]; then
       retire_recycled_worktree_record "$FM_WORKTREE_OWNER_TASK_ID" "$owner_branch" || return 1
@@ -643,21 +646,10 @@ validate_worktree_ownership() {
     return 1
   fi
 
-  if [ "$declared" != fm-worktree-binding.v1 ]; then
-    # A record that predates ownership bindings, over a copy whose owner could not
-    # be proven either way. Nothing here proves a reassignment, so behave exactly
-    # as before and let the dirty/landed-work checks below protect the copy.
-    reject_unwarranted_forget_worktree "the copy at $WT names no other owner" || return 1
-    return 0
-  fi
-  reject_unwarranted_forget_worktree "ownership of the copy at $WT is unverifiable rather than reassigned" || return 1
-  # This task DID publish an ownership binding, so a missing or malformed one is
-  # a real inspection failure. --force is the documented discard path, exactly as
-  # it is for the other "cannot inspect this copy" refusals below.
-  [ "$FORCE" != "--force" ] || return 0
-  echo "REFUSED: cannot verify that the isolated copy at $WT still belongs to task $ID." >&2
-  printf '%s\n' "$(fm_worktree_binding_detail)" >&2
-  echo "Restore the copy's ownership record, or get the captain's explicit OK to discard, then --force." >&2
+  reject_unwarranted_forget_worktree "ownership of the copy at $WT is unverifiable rather than a proven reassignment" || return 1
+  echo "REFUSED: cannot positively confirm that the isolated copy at $WT belongs to task $ID." >&2
+  printf '%s\n' "$FM_WORKTREE_OWNER_DETAIL" >&2
+  echo "--force authorizes discarding task $ID's proven work; it cannot authorize cleanup of an unowned copy." >&2
   return 1
 }
 

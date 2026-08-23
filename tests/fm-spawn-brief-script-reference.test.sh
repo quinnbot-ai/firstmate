@@ -238,6 +238,20 @@ test_second_person_imperative_reference_refuses() {
   pass "a second-person imperative helper reference refuses dispatch"
 }
 
+test_unenumerated_imperative_reference_refuses() {
+  local id=brief-unenumerated-a18 rec out status expected
+  rec=$(make_case unenumerated-command "$id" 'Launch bin/fm-launch-missing.sh before editing.')
+  read_case "$rec"
+
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite an absent helper in an affirmative directive"
+  expected="$POOL_DIR/bin/fm-launch-missing.sh"
+  assert_contains "$out" "$expected" "an unenumerated imperative did not resolve against the task worktree"
+  assert_absent "$HOME_DIR/state/$id.meta" "unenumerated helper refusal published metadata"
+  pass "an affirmative helper directive does not depend on an execution-verb allowlist"
+}
+
 test_negative_modal_reference_does_not_refuse() {
   local id=brief-negative-modal-a8 rec out status
   rec=$(make_case negative-modal "$id" 'You must never run bin/fm-negative-only.sh.')
@@ -388,6 +402,7 @@ test_modal_imperative_reference_refuses
 test_bare_modal_imperative_reference_refuses
 test_infinitive_imperative_reference_refuses
 test_second_person_imperative_reference_refuses
+test_unenumerated_imperative_reference_refuses
 test_negative_modal_reference_does_not_refuse
 test_mixed_negation_still_refuses_positive_instruction
 test_sentence_after_negation_still_refuses_positive_instruction

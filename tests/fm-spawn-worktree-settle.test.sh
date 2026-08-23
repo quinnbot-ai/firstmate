@@ -66,6 +66,14 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
+  cat > "$fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+if [ "${FM_FAKE_NO_SLEEP:-0}" = 1 ]; then
+  exit 0
+fi
+exec /bin/sleep "$@"
+SH
+  chmod +x "$fakebin/sleep"
   printf '%s\n' "$fakebin"
 }
 
@@ -108,6 +116,7 @@ run_settle_spawn() {
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_TREEHOUSE_PATH="$WT_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
+    FM_FAKE_NO_SLEEP="${FM_FAKE_NO_SLEEP:-0}" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
 }
@@ -153,7 +162,26 @@ test_already_settled_pane_costs_one_confirm_sleep() {
   pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
 }
 
+test_final_single_matching_read_is_not_accepted() {
+  local rec id out status
+  id=settle-final-single-z3
+  rec=$(make_settle_case settle-final-single "$id" 59)
+  read_settle_record "$rec"
+  FM_FAKE_NO_SLEEP=1
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  unset FM_FAKE_NO_SLEEP
+  expect_code 1 "$status" "one matching final poll must not establish a settled worktree"
+  assert_contains "$out" "did not enter leased worktree" \
+    "spawn did not report the unconfirmed worktree"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "spawn published metadata after only one matching final poll"
+  pass "natural poll exhaustion cannot substitute for two matching reads"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
+test_final_single_matching_read_is_not_accepted
 
 echo "# all fm-spawn-worktree-settle tests passed"

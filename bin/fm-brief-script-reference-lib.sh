@@ -5,10 +5,9 @@
 #
 # A brief can outlive the checkout it was written for.  This detects only helper
 # scripts the worker is directed to execute: any bin/fm-*.sh path in a fenced
-# code block, or one in an inline imperative clause using run, call, use,
-# invoke, execute, source, or start.  Plain descriptive mentions
-# deliberately do not block dispatch, because a false refusal is worse than an
-# advisory historical reference.  The parser recognizes bin/, ./bin/,
+# code block or an affirmative directive clause.  Explicitly negated,
+# conditional, and descriptive mentions remain advisory rather than blocking
+# dispatch.  The parser recognizes bin/, ./bin/,
 # $FM_ROOT/bin, and ${FM_ROOT}/bin forms, then resolves every reference to the
 # task worktree's bin/ directory.  It never evaluates arbitrary brief text as
 # shell code.
@@ -57,21 +56,16 @@ while (my $line = <$fh>) {
   }
 
   my $lead = qr/^\s*(?:[-*+]\s+|\d+[.)]\s+)?/;
-  my $verb = qr/(run|call|use|invoke|execute|source|start)/i;
-  my $modal = qr/(?:must|should|need\s+to|can|will)/i;
-  for my $clause (split /\s*(?:;|\b(?:but|first|then|next|finally|instead)\b|\band\b(?=\s+(?:(?:(?:do\s+not|don't|never)|$modal)\s+)?(?:run|call|use|invoke|execute|source|start)\b)|[.!?]+(?=\s|$))\s*/i, $line) {
-    while ($clause =~ /$verb\b/ig) {
-      my $command_start = $-[1];
-      my $prefix = substr($clause, 0, $command_start);
-      my $tail = substr($clause, $command_start);
-      next unless $tail =~ /$script/;
+  for my $clause (split /\s*(?:;|\b(?:and|but|first|then|next|finally|instead)\b|[.!?]+(?=\s|$))\s*/i, $line) {
+    while ($clause =~ /$script/g) {
+      my ($raw, $basename, $reference_start) = ($1, $2, $-[1]);
+      my $prefix = substr($clause, 0, $reference_start);
       $prefix =~ s/$lead//;
-      next if $prefix =~ /(?:\bnot\s+to|\bdo\s+not|\bdon't|\bnever)\s*$/i;
-      next if $prefix =~ /\b(?:if|when|whenever|whether)\s+you(?:\s+$modal)?\s*$/i;
-      next unless $prefix =~ /^\s*$/
-        || $prefix =~ /[:,]\s*$/
-        || $prefix =~ /\b(?:please|you|to|$modal)\s*$/i;
-      emit_scripts($tail);
+      next if $prefix =~ /\b(?:do\s+not|don't|never|not\s+to)\b/i;
+      next if $prefix =~ /^\s*(?:if|when|whenever|whether)\b[^,:]*$/i;
+      next if $prefix =~ /^\s*(?:the|a|an|this|that|these|those|it|he|she|they|we|i)\b/i;
+      next if $prefix =~ /^\s*(?:for\s+example|e\.g\.|historically|in\s+(?:older|previous)\s+releases?)\b/i;
+      print "$raw\t$basename\n";
     }
   }
 }

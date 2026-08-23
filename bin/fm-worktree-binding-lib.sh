@@ -169,7 +169,7 @@ fm_worktree_binding_is_absent() {  # <worktree>
     return 1
   }
   marker="$git_dir/firstmate-task-binding"
-  if [ ! -e "$marker" ]; then
+  if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
     return 0
   fi
   FM_WORKTREE_BINDING_DETAIL="worktree binding is present for $worktree"

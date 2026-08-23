@@ -2363,6 +2363,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # pane that is already settled by the first real read only costs the one existing
   # inter-poll sleep as confirmation, not a whole extra cycle on top.
   candidate=""
+  settled=0
   leased_wt_real=$(real_path_or_raw "$WT")
   for _ in $(seq 1 60); do
     p=$(spawn_current_path "$WT_TARGET" || true)
@@ -2371,6 +2372,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       if [ "$p_real" = "$leased_wt_real" ]; then
         if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
           WT="$p"
+          settled=1
           break
         fi
         candidate="$p_real"
@@ -2382,7 +2384,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     fi
     sleep 1
   done
-  if [ -z "$candidate" ] || [ "$candidate" != "$leased_wt_real" ]; then
+  if [ "$settled" -ne 1 ]; then
     echo "error: endpoint did not enter leased worktree $WT within 60s; inspect window $T" >&2
     exit 1
   fi

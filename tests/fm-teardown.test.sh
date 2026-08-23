@@ -49,12 +49,12 @@
 #   (z3) same collision with --forget-worktree                 -> pointer retired, copy untouched
 #   (z4) --forget-worktree while the copy is still this task's -> REFUSE (never a bypass)
 #   (z5) copy still bound to this task                         -> ALLOW  (no regression)
-#   (z6) binding declared in meta but missing from the copy    -> REFUSE, --force overrides
+#   (z6) binding declared in meta but ownership unproven       -> REFUSE, even under --force
 #   (z7) plain re-run over an already-retired pointer          -> ALLOW  (durably idempotent)
 #   (z8) --force with --forget-worktree on a reassigned copy   -> ALLOW  (other copy untouched)
 #   (z9)  reassigned copy with NO binding anywhere             -> REFUSE, names the owner
 #   (z10) same collision with --forget-worktree                -> pointer retired, copy untouched
-#   (z11) unbound copy on a branch this home does not record   -> no verdict (pre-existing behaviour)
+#   (z11) unbound copy on a branch this home does not record   -> REFUSE, even under --force
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -868,13 +868,15 @@ test_own_binding_tears_down_normally() {
 }
 
 # The copy published an ownership binding at spawn, and it has since vanished, so
-# ownership cannot be proven either way. That is an inspection failure, and takes
-# the same graduated path as every other "cannot inspect this copy" refusal.
-test_missing_binding_refuses_until_forced() {
+# ownership cannot be proven either way. That inspection failure stays closed even
+# when force authorizes discarding work that is positively owned by this task.
+test_missing_binding_refuses_even_under_force() {
   local case_dir rc
   case_dir=$(make_case binding-missing)
   write_meta "$case_dir" local-only ship
   declare_binding_in_meta "$case_dir"
+  log_treehouse_calls "$case_dir"
+  git -C "$case_dir/wt" checkout -q --detach
   wt_commit "$case_dir" "fix the thing"
   add_fork_with_pushed_branch "$case_dir"
 
@@ -885,7 +887,7 @@ test_missing_binding_refuses_until_forced() {
 
   expect_code 1 "$rc" "binding-missing: an unverifiable copy must refuse"
   assert_contains "$(cat "$case_dir/stderr")" "REFUSED" "binding-missing: refusal is loud"
-  assert_contains "$(cat "$case_dir/stderr")" "still belongs to task task-x1" \
+  assert_contains "$(cat "$case_dir/stderr")" "cannot positively confirm" \
     "binding-missing: the refusal says what could not be proven"
 
   set +e
@@ -893,8 +895,30 @@ test_missing_binding_refuses_until_forced() {
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "binding-missing: --force is the documented discard path"$'\n'"$(cat "$case_dir/stderr2")"
-  pass "a declared-but-missing ownership record refuses, and --force overrides it"
+  expect_code 1 "$rc" "binding-missing: --force cannot replace positive ownership proof"
+  assert_contains "$(cat "$case_dir/stderr2")" "cannot positively confirm" \
+    "binding-missing: forced refusal states the missing proof"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "binding-missing: forced refusal removed the task record"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "binding-missing: forced refusal returned the unproven copy"
+  pass "an unproven declared ownership record refuses even under --force"
+}
+
+test_dangling_binding_is_not_absent() {
+  local case_dir git_dir marker
+  case_dir=$(make_case dangling-binding)
+  git_dir=$(fm_worktree_binding_git_dir "$case_dir/wt") \
+    || fail "dangling-binding: could not resolve private Git directory"
+  marker="$git_dir/firstmate-task-binding"
+  ln -s "$case_dir/missing-binding-target" "$marker"
+
+  if fm_worktree_binding_is_absent "$case_dir/wt"; then
+    fail "dangling-binding: a dangling ownership marker was reported absent"
+  fi
+  assert_contains "$(fm_worktree_binding_detail)" "present" \
+    "dangling-binding: malformed marker was not diagnosed as present"
+  pass "a dangling ownership marker cannot be overwritten as absent"
 }
 
 # --- pre-binding collisions -------------------------------------------------
@@ -986,6 +1010,17 @@ test_unconfirmed_branch_is_not_a_reassignment() {
   git -C "$case_dir/wt" checkout -q -b fm/ghost-lane
   wt_commit "$case_dir" "this task's own work"
   add_fork_with_pushed_branch "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/force-stdout" 2> "$case_dir/force-stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "unbound-unconfirmed: --force must refuse without positive ownership proof"
+  assert_contains "$(cat "$case_dir/force-stderr")" "cannot positively confirm" \
+    "unbound-unconfirmed: forced refusal explains the missing ownership proof"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "unbound-unconfirmed: --force returned a copy with no proven owner"
 
   set +e
   run_teardown "$case_dir" --forget-worktree > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -3068,7 +3103,8 @@ test_unbound_recycled_slot_is_retirable
 test_unconfirmed_branch_is_not_a_reassignment
 test_retired_pointer_is_honoured_on_a_plain_rerun
 test_own_binding_tears_down_normally
-test_missing_binding_refuses_until_forced
+test_missing_binding_refuses_even_under_force
+test_dangling_binding_is_not_absent
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
