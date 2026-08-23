@@ -145,6 +145,10 @@ class SpecError(Exception):
     """The spec cannot be trusted to produce findings."""
 
 
+class LatchError(Exception):
+    """The durable suppression record cannot be trusted."""
+
+
 def cap(line: str, required: str = "") -> str:
     if len(line) <= LINE_CAP:
         return line
@@ -231,7 +235,7 @@ def positive_int(obj, key, default, where):
 
 def load_spec(path: Path) -> dict:
     try:
-        raw = json_loads_finite(path.read_text(encoding="utf-8"))
+        raw = json_loads_finite(read_regular_text(path))
     except FileNotFoundError:
         raise SpecError("spec file is missing") from None
     except (OSError, ValueError) as exc:
@@ -411,9 +415,11 @@ class Latch:
 
     def _load(self):
         try:
-            text = self.path.read_text(encoding="utf-8")
-        except (FileNotFoundError, OSError):
+            text = read_regular_text(self.path)
+        except FileNotFoundError:
             return
+        except (OSError, ValueError) as exc:
+            raise LatchError(f"cannot read review latch {self.path}: {exc}") from None
         for line in text.splitlines():
             parts = line.split("\t")
             if len(parts) != 3:
@@ -796,7 +802,11 @@ def main() -> int:
             sys.stderr.write(f"error: cannot record the review cadence: {exc}\n")
             return 1
 
-    latch = Latch(latch_path, retention, now)
+    try:
+        latch = Latch(latch_path, retention, now)
+    except LatchError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 1
     effective = spec or {
         "subject_root": Path("/"),
         "cooldown": cooldown,

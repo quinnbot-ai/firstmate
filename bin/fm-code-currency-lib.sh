@@ -169,7 +169,7 @@ fm_code_currency_index_hints() {
 # unprovable. Echo nothing (returning 1) for other clean states: not a git work
 # tree, nothing to compare against, already current, or ahead only.
 fm_code_currency_line() {
-  local root=$1 base behind head_sha base_sha guard guard_count shown more guard_text tracked_status landed_drift landed_drift_shown index_hints index_hints_shown
+  local root=$1 base behind ahead head_sha base_sha guard guard_count shown more guard_text tracked_status landed_drift landed_drift_shown index_hints index_hints_shown
   git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
   base=$(fm_code_currency_base_ref "$root") || return 1
   behind=$(git -C "$root" rev-list --count "HEAD..$base" 2>/dev/null) || return 1
@@ -207,6 +207,15 @@ fm_code_currency_line() {
     return 0
   fi
   [ "$behind" -gt 0 ] || return 1
+  ahead=$(git -C "$root" rev-list --count "$base..HEAD" 2>/dev/null) || return 1
+  case "$ahead" in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+  if [ "$ahead" -gt 0 ]; then
+    printf 'CODE_STALE: UNPROVEN live code: checked-out HEAD %s has %s commit(s) not in %s and is %s commit(s) behind %s (%s) as last fetched. The divergent checkout may independently contain landed behavior, so installed code cannot be classified as the landed changes being inactive.\n' \
+      "$head_sha" "$ahead" "$base" "$behind" "$base" "$base_sha"
+    return 0
+  fi
 
   guard=$(fm_code_currency_guard_files "$root" "$base")
   if [ -n "$guard" ]; then

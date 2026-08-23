@@ -683,6 +683,8 @@ SPAWN_WORKTREE_TRANSITION_LOCK=
 SPAWN_WORKTREE_TRANSITION_LOCK_HELD=0
 SPAWN_WORKTREE_POOL_TRANSITION_LOCK=
 SPAWN_WORKTREE_POOL_TRANSITION_LOCK_HELD=0
+SPAWN_FRESH_ENDPOINT_PENDING=0
+SPAWN_FRESH_WORKTREE_PENDING=0
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 RELAUNCH_REPLACEMENT_PENDING=0
@@ -708,6 +710,61 @@ parse_orca_worktree_result() {
   else
     ORCA_TERMINAL=
   fi
+}
+
+spawn_fresh_resources_rollback() {
+  local binding_cleared=0
+  [ "$SPAWN_FRESH_ENDPOINT_PENDING" = 1 ] \
+    || [ "$SPAWN_FRESH_WORKTREE_PENDING" = 1 ] \
+    || return 0
+  if [ -n "${BUSY_GEN:-}" ] && [ -n "${STATE_REAL:-}" ]; then
+    "$FM_ROOT/bin/fm-busy-event.sh" retire "$STATE_REAL" "$ID" \
+      --gen "$BUSY_GEN" >/dev/null 2>&1 \
+      || echo "warning: could not retire fresh busy generation after aborted spawn of $ID" >&2
+  fi
+  if [ "$SPAWN_FRESH_ENDPOINT_PENDING" = 1 ]; then
+    if fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "$W" 2>/dev/null; then
+      SPAWN_FRESH_ENDPOINT_PENDING=0
+    else
+      echo "warning: could not remove aborted spawn endpoint $T; retaining its worktree lease" >&2
+      return 1
+    fi
+  fi
+  [ "$SPAWN_FRESH_WORKTREE_PENDING" = 1 ] || return 0
+  if [ "$SPAWN_WORKTREE_POOL_TRANSITION_LOCK_HELD" != 1 ]; then
+    if [ "$SPAWN_WORKTREE_TRANSITION_LOCK_HELD" = 1 ]; then
+      fm_lock_release "$SPAWN_WORKTREE_TRANSITION_LOCK" || true
+      SPAWN_WORKTREE_TRANSITION_LOCK_HELD=0
+    fi
+    fm_lock_acquire_wait "$SPAWN_WORKTREE_POOL_TRANSITION_LOCK" || {
+      echo "warning: could not reacquire the pool transition lock after aborted spawn of $ID" >&2
+      return 1
+    }
+    SPAWN_WORKTREE_POOL_TRANSITION_LOCK_HELD=1
+  fi
+  if [ "$SPAWN_WORKTREE_TRANSITION_LOCK_HELD" != 1 ]; then
+    fm_lock_acquire_wait "$SPAWN_WORKTREE_TRANSITION_LOCK" || {
+      echo "warning: could not reacquire the worktree transition lock after aborted spawn of $ID" >&2
+      return 1
+    }
+    SPAWN_WORKTREE_TRANSITION_LOCK_HELD=1
+  fi
+  if fm_worktree_binding_matches "$WT" "$ID"; then
+    fm_worktree_binding_clear "$WT" "$ID" || {
+      echo "warning: could not clear the exact worktree binding after aborted spawn of $ID" >&2
+      return 1
+    }
+    binding_cleared=1
+  elif ! fm_worktree_binding_is_absent "$WT"; then
+    echo "warning: worktree ownership changed during aborted spawn of $ID; refusing to return $WT" >&2
+    return 1
+  fi
+  if ! ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) >/dev/null 2>&1; then
+    [ "$binding_cleared" -eq 0 ] || fm_worktree_binding_write "$WT" "$ID" || true
+    echo "warning: could not return aborted spawn worktree $WT" >&2
+    return 1
+  fi
+  SPAWN_FRESH_WORKTREE_PENDING=0
 }
 
 spawn_abort_cleanup() {
@@ -782,6 +839,7 @@ spawn_abort_cleanup() {
       fi
     fi
   fi
+  spawn_fresh_resources_rollback || true
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -2141,6 +2199,9 @@ fi
 # WT_TARGET to $T for them (and for any future backend) - the shared treehouse-get +
 # worktree-detection steps below must never reference an unbound WT_TARGET under set -u.
 : "${WT_TARGET:=$T}"
+if [ "$RELAUNCH" -eq 0 ] && [ "$BACKEND" != orca ]; then
+  SPAWN_FRESH_ENDPOINT_PENDING=1
+fi
 spawn_send_text_line() {  # <target> <text>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_text_line "$1" "$2" ;;
@@ -2306,6 +2367,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+  SPAWN_FRESH_WORKTREE_PENDING=1
 fi
 if [ "$KIND" != secondmate ]; then
   SPAWN_WORKTREE_TRANSITION_LOCK=$(fm_worktree_transition_lock_path "$STATE" "$WT") || {
@@ -2325,12 +2387,7 @@ fi
 # per-home contract - a sibling checkout's bin/ is never used as evidence.
 if ! fm_brief_refuse_missing_helper_scripts "$BRIEF_REAL" "$WT"; then
   if [ "$RELAUNCH" -eq 0 ] && [ "$BACKEND" != orca ]; then
-    fm_backend_kill "$BACKEND" "$T" "${ZELLIJ_TAB_ID:-}" "$W" 2>/dev/null || \
-      echo "warning: could not remove refused spawn endpoint $T" >&2
-    if [ "$KIND" != secondmate ]; then
-      ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) >/dev/null 2>&1 || \
-        echo "warning: could not return refused spawn worktree $WT" >&2
-    fi
+    spawn_fresh_resources_rollback || true
   fi
   exit 1
 fi
@@ -2797,6 +2854,10 @@ preserve_relaunch_meta() {
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
   fi
 } > "$SPAWN_META_PATH"
+if [ "$RELAUNCH" -eq 0 ]; then
+  SPAWN_FRESH_ENDPOINT_PENDING=0
+  SPAWN_FRESH_WORKTREE_PENDING=0
+fi
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_PUBLISH_STARTED=1
   mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"

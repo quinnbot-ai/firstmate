@@ -353,6 +353,28 @@ test_unrelated_index_hint_prevents_running_claim() {
   pass "index hints anywhere make checked-out runtime bytes unproven"
 }
 
+test_diverged_equivalent_landed_bytes_are_unproven() {
+  local repo out
+  repo=$(make_repo "$TMP_ROOT/diverged-equivalent")
+  mkdir -p "$repo/bin"
+  printf '%s\n' 'equivalent behavior' > "$repo/bin/fm-equivalent.sh"
+  git -C "$repo" add bin/fm-equivalent.sh
+  git -C "$repo" commit -q -m "implement behavior locally"
+  land_elsewhere "$repo" bin/fm-equivalent.sh "equivalent behavior"
+  git -C "$repo" fetch -q origin
+
+  out=$(fm_code_currency_line "$repo" || true)
+  assert_contains "$out" "UNPROVEN live code" \
+    "a divergent checkout with equivalent landed bytes was called inactive"
+  assert_contains "$out" "not in origin/main" \
+    "the diagnostic did not identify the divergent local history"
+  assert_not_contains "$out" "CODE_STALE: running code" \
+    "divergent equivalent bytes produced a running-code claim"
+  assert_not_contains "$out" "inactive here" \
+    "divergent equivalent bytes produced an inactivity claim"
+  pass "divergent equivalent landed bytes keep live-code status unproven"
+}
+
 # --- SESSION START: the line reaches the digest -----------------------------
 
 # The library is only useful if a session start actually prints it, and only
@@ -387,5 +409,6 @@ test_dirty_tracked_checkout_is_unproven
 test_untracked_landed_path_is_unproven
 test_index_hints_cannot_hide_landed_path_drift
 test_unrelated_index_hint_prevents_running_claim
+test_diverged_equivalent_landed_bytes_are_unproven
 test_ignored_landed_path_is_unproven
 test_bootstrap_line

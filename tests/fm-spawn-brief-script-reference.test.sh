@@ -86,6 +86,7 @@ run_spawn() {
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' FM_FAKE_PANE_PATH="$POOL_DIR" \
+    FM_BUSY_LOCK_STALE_SECS="${FM_TEST_BUSY_LOCK_STALE_SECS:-5}" \
     FM_FAKE_ENDPOINT="$HOME_DIR/state/$id.endpoint" \
     FM_FAKE_LEASE="$HOME_DIR/state/$id.lease" \
     PATH="$FAKEBIN_DIR:$PATH" \
@@ -194,6 +195,20 @@ test_infinitive_imperative_reference_refuses() {
   pass "an infinitive imperative helper reference refuses dispatch"
 }
 
+test_second_person_imperative_reference_refuses() {
+  local id=brief-second-person-a13 rec out status expected
+  rec=$(make_case second-person-command "$id" 'Ensure you run bin/fm-second-person-missing.sh before editing.')
+  read_case "$rec"
+
+  out=$(run_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite a second-person helper instruction"
+  expected="$POOL_DIR/bin/fm-second-person-missing.sh"
+  assert_contains "$out" "$expected" "second-person imperative did not resolve against the task worktree"
+  assert_absent "$HOME_DIR/state/$id.meta" "second-person helper refusal published metadata"
+  pass "a second-person imperative helper reference refuses dispatch"
+}
+
 test_negative_modal_reference_does_not_refuse() {
   local id=brief-negative-modal-a8 rec out status
   rec=$(make_case negative-modal "$id" 'You must never run bin/fm-negative-only.sh.')
@@ -266,6 +281,43 @@ test_pool_transition_lock_precedes_allocation() {
   pass "the pool transition lock covers allocation through binding publication"
 }
 
+test_prepublication_failure_rolls_back_fresh_resources() {
+  local id=brief-abort-a14 rec out status
+  rec=$(make_case prepublication-abort "$id" 'Proceed with the task.')
+  read_case "$rec"
+  printf 'claude\n' > "$HOME_DIR/config/crew-harness"
+  : > "$HOME_DIR/state/$id.busy-state.lock"
+  FM_TEST_BUSY_LOCK_STALE_SECS=9999
+
+  set +e
+  out=$(run_spawn "$id")
+  status=$?
+  set -e
+  unset FM_TEST_BUSY_LOCK_STALE_SECS
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite the blocked busy-state publication"
+  assert_contains "$out" "failed to arm the busy-state contract" \
+    "fixture did not fail after fresh ownership binding"
+  assert_absent "$HOME_DIR/state/$id.meta" "failed spawn published task metadata"
+  assert_absent "$HOME_DIR/state/$id.endpoint" "failed spawn leaked its endpoint"
+  assert_absent "$HOME_DIR/state/$id.lease" "failed spawn leaked its pooled lease"
+  fm_worktree_binding_is_absent "$POOL_DIR" \
+    || fail "failed spawn left an orphan worktree binding"
+  pass "a prepublication failure rolls back its exact fresh resources"
+}
+
+test_conditional_prose_reference_does_not_refuse() {
+  local id=brief-conditional-prose-a15 rec out status
+  rec=$(make_case conditional-prose "$id" \
+    'If you run bin/fm-conditional-example.sh in older releases, it prints a legacy report.')
+  read_case "$rec"
+
+  out=$(run_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "conditional prose should not block dispatch: $out"
+  assert_contains "$out" "spawned $id" "conditional prose did not reach worker dispatch"
+  pass "a conditional prose helper reference remains advisory"
+}
+
 test_prose_only_mention_does_not_refuse() {
   local id=brief-prose-a4 rec out status
   # shellcheck disable=SC2016 # The literal variable reference exercises the prose parser path.
@@ -286,10 +338,13 @@ test_unquoted_command_reference_refuses
 test_prefixed_imperative_reference_refuses
 test_modal_imperative_reference_refuses
 test_infinitive_imperative_reference_refuses
+test_second_person_imperative_reference_refuses
 test_negative_modal_reference_does_not_refuse
 test_mixed_negation_still_refuses_positive_instruction
 test_sentence_after_negation_still_refuses_positive_instruction
 test_prose_only_mention_does_not_refuse
 test_pool_transition_lock_precedes_allocation
+test_prepublication_failure_rolls_back_fresh_resources
+test_conditional_prose_reference_does_not_refuse
 
 echo "# all fm-spawn-brief-script-reference tests passed"

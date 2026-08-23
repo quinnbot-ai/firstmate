@@ -258,6 +258,63 @@ test_special_evidence_file_fails_without_blocking() {
   pass "special evidence files fail loudly without blocking"
 }
 
+test_special_control_files_fail_without_blocking() {
+  local home spec latch pid attempt out rc
+  home=$(make_home special-controls acme)
+  write_source "$home" '[{"venture":"acme","cost_30d":10,"commits_30d":0}]'
+  write_spec "$home" r '[{"field":"commits_30d","op":"eq","value":0}]' \
+    '["cost_30d","commits_30d"]'
+  spec="$home/config/standing-reviews/r.json"
+  rm "$spec"
+  mkfifo "$spec"
+
+  scan "$home" --id r > "$home/spec.out" 2> "$home/spec.err" &
+  pid=$!
+  attempt=0
+  while kill -0 "$pid" 2>/dev/null && [ "$attempt" -lt 100 ]; do
+    sleep 0.02
+    attempt=$((attempt + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" || true
+    fail "a special spec file blocked the standing review"
+  fi
+  wait "$pid"
+  rc=$?
+  expect_code 0 "$rc" "a special spec file failed without a structural wake: $(cat "$home/spec.err")"
+  out=$(cat "$home/spec.out")
+  assert_contains "$out" "spec-invalid" "a special spec file did not emit a structural finding"
+  assert_contains "$out" "not a regular file" "the special spec type was not diagnosed"
+
+  rm "$spec"
+  write_spec "$home" r '[{"field":"commits_30d","op":"eq","value":0}]' \
+    '["cost_30d","commits_30d"]'
+  rm -f "$home/state/r.standing-review-last"
+  latch="$home/state/r.standing-review-latch"
+  rm -f "$latch"
+  mkfifo "$latch"
+  scan "$home" --id r > "$home/latch.out" 2> "$home/latch.err" &
+  pid=$!
+  attempt=0
+  while kill -0 "$pid" 2>/dev/null && [ "$attempt" -lt 100 ]; do
+    sleep 0.02
+    attempt=$((attempt + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" || true
+    fail "a special latch file blocked the standing review"
+  fi
+  wait "$pid"
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a special latch file reported success"
+  [ ! -s "$home/latch.out" ] || fail "a review with an unreadable latch emitted a wake"
+  assert_contains "$(cat "$home/latch.err")" "not a regular file" \
+    "the special latch type was not diagnosed"
+  pass "special spec and latch files fail loudly without blocking"
+}
+
 test_json_equality_does_not_conflate_booleans_and_numbers() {
   local home out
   home=$(make_home typed-equality acme)
@@ -856,6 +913,7 @@ test_subject_with_no_work_location_is_rejected
 test_cadence_silences_the_sweep_between_reviews
 test_concurrent_scans_are_single_flight
 test_special_evidence_file_fails_without_blocking
+test_special_control_files_fail_without_blocking
 test_json_equality_does_not_conflate_booleans_and_numbers
 test_the_same_finding_does_not_wake_twice
 test_drifting_evidence_does_not_defeat_the_latch

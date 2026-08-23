@@ -58,12 +58,20 @@ while (my $line = <$fh>) {
 
   my $lead = qr/^\s*(?:[-*+]\s+|\d+[.)]\s+)?/;
   my $verb = qr/(run|call|use|invoke|execute|source|start)/i;
-  my $boundary = qr/(?:$lead|(?:\b(?:to|must|should|please)|[:,])\s+)/i;
+  my $boundary = qr{
+    (?:
+      $lead(?:please\s+)? |
+      \bto\s+ |
+      \byou(?:\s+(?:must|should|need\s+to|can|will))?\s+ |
+      [:,]\s+
+    )
+  }ix;
   for my $clause (split /\s*(?:;|\b(?:but|first|then|next|finally|instead)\b|\band\b(?=\s+(?:(?:do\s+not|don't|never)\s+)?(?:run|call|use|invoke|execute|source|start)\b)|[.!?]+(?=\s|$))\s*/i, $line) {
     while ($clause =~ /$boundary$verb\b/ig) {
       my $command_start = $-[1];
       my $prefix = substr($clause, 0, $command_start);
       next if $prefix =~ /(?:\bnot\s+to|\bdo\s+not|\bdon't|\bnever)\s*$/i;
+      next if $prefix =~ /\b(?:if|when|whenever|whether)\s+you(?:\s+(?:must|should|need\s+to|can|will))?\s*$/i;
       emit_scripts(substr($clause, $command_start));
     }
   }
