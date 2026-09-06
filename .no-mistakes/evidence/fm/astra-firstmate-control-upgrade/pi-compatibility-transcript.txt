@@ -1,0 +1,20 @@
+Installed importable Pi package: 0.85.1; production Calm extension unchanged between probes.
+c499f84: test_rendering_and_session_lifecycle
+
+not ok - Pi calm renderer and lifecycle contract failed: file:///private/var/folders/pj/3vh4dgp11qs_j186lws96lmw0000gn/T/fm-calm-pi-extension.5VNNeI/renderer/[eval1]:206
+    throw new Error(`${name} collapsed rendering changed while calm mode was off`);
+          ^
+
+Error: read collapsed rendering changed while calm mode was off
+    at file:///private/var/folders/pj/3vh4dgp11qs_j186lws96lmw0000gn/T/fm-calm-pi-extension.5VNNeI/renderer/[eval1]:206:11
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+
+Node.js v22.22.2
+
+exit=1
+HEAD: test_rendering_and_session_lifecycle + test_interactive_terminal_e2e
+ok - Pi calm centralizes transcript visibility, preserves execution/export data, keeps Pi's stock working row visible while no run is active, and persists its choice across session starts
+ok - Pi calm native E2E replaces the stock working row with a moving, resize-clamped working ship that freezes and resumes across two working periods in one Pi session, clears on abort, keeps captain turns visible, hides exact operational user rows without changing persistence, restores stock rendering Calm-off, survives restart, and preserves export plus Ctrl+O behavior
+
+
+exit=0
