@@ -1,0 +1,5 @@
+Executable regression check: record-free Codex semantic fallback
+base (ffd2c8992bc13ec1ce12655b4e49cbcd05e7a4d8): unknown codex-unverified
+target (79bb4cfc899f35943f04899428662242f7a40b3c): busy herdr-native
+target Herdr native idle: unknown codex-unverified
+target non-Herdr native busy: unknown codex-unverified
