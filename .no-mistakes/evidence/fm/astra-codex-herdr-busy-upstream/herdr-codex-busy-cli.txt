@@ -1,0 +1,13 @@
+fm-crew-state.sh feat-herdr-codex
+Fixture: active Herdr endpoint, unverified Codex lifecycle, no busy-state record.
+
+state: working · source: pane · harness busy (herdr-native)
+
+Native-idle safeguard - the same record-free fixture with Herdr agent_status=idle:
+
+state: unknown · source: pane · harness state unavailable (unknown codex-unverified)
+
+Regression contract, running the classifier with the identical record-free Herdr-busy fixture:
+
+base (ffd2c899): unknown codex-unverified
+target (80f5cce8): busy herdr-native
