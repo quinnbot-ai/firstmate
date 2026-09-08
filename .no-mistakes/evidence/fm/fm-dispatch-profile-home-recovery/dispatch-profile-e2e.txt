@@ -1,0 +1,10 @@
+_: line 11: BASH_SOURCE[0]: unbound variable
+_: line 11: /fixtures.sh: No such file or directory
+_: line 1781: local: can only be used in a function
+ok - fm-spawn: actual ship/scout launch commands deliver the worker role contract
+_: eval: line 1840: syntax error near unexpected token `}'
+_: eval: line 1840: `}'
+ok - a codex profile's Codex home is exported into that worker's launch and recorded
+ok - Astra always requires primary selection evidence
+ok - Astra receipts bind quota evidence to the selected Codex home
+# selected dispatch-profile behavior checks passed

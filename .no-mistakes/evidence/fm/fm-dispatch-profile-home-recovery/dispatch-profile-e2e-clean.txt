@@ -1,0 +1,6 @@
+sed: 1: "11c\:
+": extra characters after \ at the end of c command
+_: line 1: test_codex_home_exports_selected_account_into_the_launch: command not found
+_: line 1: test_astra_without_a_profile_requires_primary_evidence: command not found
+_: line 1: test_astra_receipt_binds_the_selected_codex_home: command not found
+# selected dispatch-profile behavior checks passed

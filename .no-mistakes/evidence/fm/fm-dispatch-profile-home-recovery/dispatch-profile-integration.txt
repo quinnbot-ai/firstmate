@@ -1,0 +1,56 @@
+# Home-specific worker dispatch
+spawn exit: 0
+warning: /private/var/folders/pj/3vh4dgp11qs_j186lws96lmw0000gn/T/fm-spawn-dispatch-profile.CTZPfi/e2e-home/home/data/e2e-selected-home/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+/private/var/folders/pj/3vh4dgp11qs_j186lws96lmw0000gn/T/fm-spawn-dispatch-profile.CTZPfi/e2e-home/fake/fakebin/timeout: line 3: exec: 1: not found
+/private/var/folders/pj/3vh4dgp11qs_j186lws96lmw0000gn/T/fm-spawn-dispatch-profile.CTZPfi/e2e-home/fake/fakebin/timeout: line 3: exec: 1: not found
+spawned e2e-selected-home harness=codex kind=ship mode=no-mistakes yolo=off window=firstmate:fm-e2e-selected-home worktree=/private/var/folders/pj/3vh4dgp11qs_j186lws96lmw0000gn/T/fm-spawn-dispatch-profile.CTZPfi/e2e-home/wt
+persisted task metadata:
+window=firstmate:fm-e2e-selected-home
+endpoint_task_id=e2e-selected-home
+worktree=/private/var/folders/pj/3vh4dgp11qs_j186lws96lmw0000gn/T/fm-spawn-dispatch-profile.CTZPfi/e2e-home/wt
+project=/private/var/folders/pj/3vh4dgp11qs_j186lws96lmw0000gn/T/fm-spawn-dispatch-profile.CTZPfi/e2e-home/project
+harness=codex
+kind=ship
+mode=no-mistakes
+yolo=off
+tasktmp=/tmp/fm-e2e-selected-home
+model=gpt-5
+effort=high
+codex_home=/private/var/folders/pj/3vh4dgp11qs_j186lws96lmw0000gn/T/fm-spawn-dispatch-profile.CTZPfi/e2e-home/nickespo07-codex-home
+spawn_gen=s1788895715.56614.3045
+captured worker command:
+CODEX_HOME='/private/var/folders/pj/3vh4dgp11qs_j186lws96lmw0000gn/T/fm-spawn-dispatch-profile.CTZPfi/e2e-home/nickespo07-codex-home' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI codex --model 'gpt-5' -c 'model_reasoning_effort="high"' --dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch '/private/var/folders/pj/3vh4dgp11qs_j186lws96lmw0000gn/T/fm-spawn-dispatch-profile.CTZPfi/e2e-home/home/state/e2e-selected-home.turn-ended'\"]" "$('/Users/nick/.no-mistakes/worktrees/a6c7b6710348/01M1WGCM4RW5WM4J42J0NY3D9Y/bin/fm-operational-input.sh' encode launch-brief < '/private/var/folders/pj/3vh4dgp11qs_j186lws96lmw0000gn/T/fm-spawn-dispatch-profile.CTZPfi/e2e-home/home/data/e2e-selected-home/launch-brief.md')"
+
+# Astra gate without primary quota receipt
+spawn exit: 1
+error: resolved dispatch profile requires a current --selection-receipt for codex/gpt-6-astra/high; refusing before endpoint, worktree, or backlog mutation
+metadata_exists=no launch_bytes=0
+
+# Same Astra dispatch with current receipt bound to selected Codex home
+spawn exit: 0
+warning: /private/var/folders/pj/3vh4dgp11qs_j186lws96lmw0000gn/T/fm-spawn-dispatch-profile.CTZPfi/e2e-home/home/data/e2e-astra-receipt/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+/private/var/folders/pj/3vh4dgp11qs_j186lws96lmw0000gn/T/fm-spawn-dispatch-profile.CTZPfi/e2e-home/fake/fakebin/timeout: line 3: exec: 1: not found
+/private/var/folders/pj/3vh4dgp11qs_j186lws96lmw0000gn/T/fm-spawn-dispatch-profile.CTZPfi/e2e-home/fake/fakebin/timeout: line 3: exec: 1: not found
+spawned e2e-astra-receipt harness=codex kind=ship mode=no-mistakes yolo=off window=firstmate:fm-e2e-astra-receipt worktree=/private/var/folders/pj/3vh4dgp11qs_j186lws96lmw0000gn/T/fm-spawn-dispatch-profile.CTZPfi/e2e-home/wt
+persisted receipt-bound metadata:
+window=firstmate:fm-e2e-astra-receipt
+endpoint_task_id=e2e-astra-receipt
+worktree=/private/var/folders/pj/3vh4dgp11qs_j186lws96lmw0000gn/T/fm-spawn-dispatch-profile.CTZPfi/e2e-home/wt
+project=/private/var/folders/pj/3vh4dgp11qs_j186lws96lmw0000gn/T/fm-spawn-dispatch-profile.CTZPfi/e2e-home/project
+harness=codex
+kind=ship
+mode=no-mistakes
+yolo=off
+tasktmp=/tmp/fm-e2e-astra-receipt
+model=gpt-6-astra
+effort=high
+codex_home=/private/var/folders/pj/3vh4dgp11qs_j186lws96lmw0000gn/T/fm-spawn-dispatch-profile.CTZPfi/e2e-home/nickespo07-codex-home
+selection_receipt=/private/var/folders/pj/3vh4dgp11qs_j186lws96lmw0000gn/T/fm-spawn-dispatch-profile.CTZPfi/e2e-home/e2e-matching-home.receipt.json
+selection_receipt_sha256=cf1b8b7ce969b2b6e1d3a2823aee5a9c3e04d63caf83cdbbb224c1d930aa184d
+selection_receipt_created_at=2026-09-08T19:28:36Z
+effective_worker_model=gpt-6-astra
+quota_evidence_source=quota-axi
+quota_snapshot_sha256=c7081912337019b7c04fea5bcea00e284ebba2f03ced854be0788987e6a3dffa
+spawn_gen=s1788895718.61629.7364
+captured worker command:
+CODEX_HOME='/private/var/folders/pj/3vh4dgp11qs_j186lws96lmw0000gn/T/fm-spawn-dispatch-profile.CTZPfi/e2e-home/nickespo07-codex-home' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI codex --model 'gpt-6-astra' -c 'model_reasoning_effort="high"' --dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch '/private/var/folders/pj/3vh4dgp11qs_j186lws96lmw0000gn/T/fm-spawn-dispatch-profile.CTZPfi/e2e-home/home/state/e2e-astra-receipt.turn-ended'\"]" "$('/Users/nick/.no-mistakes/worktrees/a6c7b6710348/01M1WGCM4RW5WM4J42J0NY3D9Y/bin/fm-operational-input.sh' encode launch-brief < '/private/var/folders/pj/3vh4dgp11qs_j186lws96lmw0000gn/T/fm-spawn-dispatch-profile.CTZPfi/e2e-home/home/data/e2e-astra-receipt/launch-brief.md')"

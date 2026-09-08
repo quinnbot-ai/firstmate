@@ -1,0 +1,4 @@
+ok - a codex profile's Codex home is exported into that worker's launch and recorded
+ok - Astra always requires primary selection evidence
+ok - Astra receipts bind quota evidence to the selected Codex home
+# selected dispatch-profile behavior checks passed
