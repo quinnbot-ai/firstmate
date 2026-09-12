@@ -2,6 +2,7 @@
 
 `bin/fm-test-run.sh` owns portable lane composition and execution.
 `bin/fm-test-isolation-proof.sh` owns the proven-isolated candidate set.
+The pending process-group lifetime decision for future parallel worker deadlines is in [fm-test-worker-lifetime-proposal.md](fm-test-worker-lifetime-proposal.md).
 
 ## Verification inputs
 
